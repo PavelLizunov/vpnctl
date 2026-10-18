@@ -1,45 +1,3 @@
-//! Xray-core — prebuilt static-binary kernel serving VLESS+Reality+xhttp.
-//!
-//! ## Why a separate Kernel (not sing-box)
-//!
-//! sing-box has no server-side xhttp inbound — sing-box-lx's xhttp/AWG
-//! additions are CLIENT-only (see plans/xray-xhttp.md §2). Xray-core
-//! (XTLS/Xray-core) is the only daemon that serves xhttp server-side.
-//! Different daemon ⇒ different Kernel, same split as amneziawg / caddy
-//! vs sing-box.
-//!
-//! ## Install — prebuilt GitHub-release static binary (NOT apt, NOT an
-//! on-node build)
-//!
-//! `XTLS/Xray-core/releases/download/<tag>/Xray-linux-<arch>.zip`. A
-//! single static binary (no CGO), small enough (~20 MB) that curl-on-node
-//! is fine — unlike caddy's Go build, there's no on-node-build
-//! RAM pressure to work around with a control-host cache. Installed to
-//! `/usr/local/bin/xray` + a hardened `xray.service` unit + config at
-//! `/usr/local/etc/xray/config.json`.
-//!
-//! [`XRAY_VERSION`] is an EXACT pin, not a floor — unlike sing-box/
-//! amneziawg's apt-channel "candidate ≥ floor" idiom, every fresh install
-//! here downloads the SAME pinned release asset, so the install gate
-//! compares for equality (reinstall on absent OR mismatched version, not
-//! "below a floor").
-//!
-//! ## Port
-//!
-//! 9443/TCP, standalone — NOT 443 (sing-box vless+reality owns it on
-//! every node that runs sing-box) and NOT 8443 (double-claimed on the
-//! `is` pilot: caddy/vless-ws TCP/8443 + sing-box tuic-v5 UDP/8443).
-//! See plans/xray-xhttp.md §6 (resolved: standalone port, option A).
-//!
-//! ## Kernel × Protocol orthogonality
-//!
-//! Adding this kernel touches ONLY this file, `crates/kernels/src/lib.rs`
-//! (`mod` + `pub use`), the companion `crates/protocols/src/vless_xhttp.rs`
-//! and its `lib.rs` entry, and one `register_kernel` line each in
-//! `daemon/src/app.rs::build_registry()` / `cli/src/registry.rs`. No edits
-//! to `core`, `ssh`, `crypto`, `inventory`, or `cli` beyond the
-//! registration line, per CLAUDE.md's Kernel × Protocol invariant.
-
 use async_trait::async_trait;
 use serde_json::json;
 use vpnctl_core::{
@@ -56,20 +14,8 @@ impl Xray {
     }
 }
 
-/// Pinned `XTLS/Xray-core` release tag — the download URL embeds this
-/// exact tag (NOT "latest"), so every fresh install is reproducible.
-/// Confirmed live against the GitHub releases API on 2026-06-30 (asset
-/// names `Xray-linux-64.zip` / `Xray-linux-arm64-v8a.zip`). Bump
-/// deliberately; re-verify asset names haven't changed before bumping.
 const XRAY_VERSION: &str = "v26.3.27";
 
-/// Pinned SHA-256 digests for the Xray release archives, per
-/// architecture. Verified against the official `.dgst` sidecar
-/// assets published alongside each release archive at
-/// `https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-{64,arm64-v8a}.zip.dgst`
-/// (fetched 2026-07-29; the `.dgst` files carry MD5/SHA1/SHA2-256/
-/// SHA2-512 — we pin SHA2-256). Bumping [`XRAY_VERSION`] REQUIRES
-/// re-fetching the new `.dgst` values from the same URL pattern.
 const XRAY_SHA256_LINUX_64: &str =
     "23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae";
 const XRAY_SHA256_LINUX_ARM64: &str =
@@ -81,27 +27,8 @@ const XRAY_CONFIG_PATH: &str = "/usr/local/etc/xray/config.json";
 const XRAY_RESTART_IF_ACTIVE: &str =
     "if systemctl is-active --quiet xray; then systemctl restart xray; fi";
 
-/// Staging path for the uploaded-but-not-yet-applied config. MUST end in
-/// `.json` — unlike sing-box/amneziawg's validators, Xray-core's `run
-/// -test` auto-detects the config FORMAT from the file extension (see
-/// `main/run.go`'s `getRegepxByFormat`), so a `config.json.new`-style
-/// staging name fails with "Failed to get format of ..." even though the
-/// content is valid JSON. Caught live on the `is` pilot 2026-06-30 — same
-/// bug class as the AWG2 `apply_config` fix (PR #74): a CLI tool that
-/// infers behavior from the path string, not just its content.
 const XRAY_CONFIG_STAGING_PATH: &str = "/usr/local/etc/xray/config.staging.json";
 
-/// Idempotent node-setup script run by [`Xray::ensure_installed`] on
-/// every deploy. Installs the pinned [`XRAY_VERSION`] release binary when
-/// ABSENT or at a DIFFERENT version (exact-pin equality, not a floor —
-/// see this module's doc comment), provisions a dedicated `xray` system
-/// user + config dir, and writes a hardened systemd unit (as a prebuilt-binary
-/// kernel with no apt-packaged unit to inherit from).
-///
-/// Built once via `LazyLock` so the version pin is interpolated exactly
-/// once and the composed script can be asserted directly in tests
-/// (`XRAY_SETUP_SCRIPT.as_str()`) without an SSH round-trip — same idiom
-/// as `sing_box::SING_BOX_SETUP_SCRIPT` / `amnezia_wg::AMNEZIAWG_SETUP_SCRIPT`.
 static XRAY_SETUP_SCRIPT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!(
         r#"
@@ -209,23 +136,6 @@ UNIT
     )
 });
 
-/// Validate-before-swap apply script: `xray run -test` rejects a
-/// malformed config BEFORE it touches the live file (Xray-core's `-test`
-/// flag — "Test config file only, without launching the server", verified
-/// against `main/run.go` source 2026-06-30); snapshot-swap-poll-rollback
-/// otherwise mirrors `sing_box_apply_script` / `amnezia_wg`'s
-/// `apply_config` byte-for-byte (CLAUDE.md staging-deploy lesson #3:
-/// `reload-or-restart` returning 0 does NOT mean the service stayed up).
-///
-/// Validates [`XRAY_CONFIG_STAGING_PATH`] (a `.json`-suffixed path), NOT
-/// `{config_path}.new` — see that constant's doc comment for why the
-/// extension matters to Xray-core's own format auto-detection. The `1>&2`
-/// on the test invocation matters too: Xray prints its actual failure
-/// reason ("Failed to start: ...") via `fmt.Println` to STDOUT, not
-/// stderr, so without the redirect a failed validation surfaces an empty
-/// `stderr=""` in the deploy's error payload — exactly what happened on
-/// the live `is` failure this fixes (the real reason was invisible until
-/// reproduced manually over SSH).
 fn xray_apply_script() -> String {
     format!(
         r#"
@@ -264,10 +174,6 @@ fn xray_apply_script() -> String {
     )
 }
 
-/// Idempotent, ufw-guarded shell snippet opening every `(transport, port)`
-/// in `ports`. Deliberately duplicated from `sing_box::firewall_open_script`
-/// rather than shared — this codebase prefers small duplication over
-/// cross-kernel coupling at this boundary.
 fn firewall_open_script(ports: &[(&str, u16)]) -> Option<String> {
     let uniq: std::collections::BTreeSet<(&str, u16)> = ports.iter().copied().collect();
     if uniq.is_empty() {
@@ -311,10 +217,6 @@ impl Kernel for Xray {
         users: &[User],
         protocols: &[&dyn Protocol],
     ) -> Result<Vec<u8>> {
-        // Locate the vless+xhttp protocol — this kernel serves nothing
-        // else. Registry::validate_server should have caught a mismatch
-        // earlier; this is the defense-in-depth layer (mirrors
-        // amnezia_wg::render_config).
         let proto = protocols
             .iter()
             .find(|p| p.id() == ProtocolId("vless+xhttp".to_string()))
@@ -325,10 +227,6 @@ impl Kernel for Xray {
             })?;
         let inbound = proto.server_inbound(ctx, users)?;
 
-        // Xray-core's top-level config shape differs from sing-box's:
-        // `log.loglevel` (not `log.level`), `outbounds[].protocol` (not
-        // `.type`) — verified against `infra/conf` 2026-06-30, NOT a
-        // copy-paste of the sing-box shape.
         let cfg = json!({
             "log": { "loglevel": "warning" },
             "inbounds": [inbound],
@@ -453,15 +351,11 @@ mod tests {
             .unwrap();
         let cfg: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
-        // Xray-core shape, NOT sing-box's (log.loglevel not log.level,
-        // outbounds[].protocol not .type).
         assert_eq!(cfg["log"]["loglevel"], "warning");
         assert_eq!(cfg["outbounds"][0]["protocol"], "freedom");
         assert_eq!(cfg["inbounds"][0]["protocol"], "vless");
         assert_eq!(cfg["inbounds"][0]["port"], 9443);
         assert_eq!(cfg["inbounds"][0]["streamSettings"]["network"], "xhttp");
-        // Kernel passes the protocol's envelope through untouched —
-        // single-inbound passthrough, no merging.
         assert_eq!(cfg["inbounds"].as_array().unwrap().len(), 1);
     }
 
@@ -494,7 +388,6 @@ mod tests {
     #[test]
     fn setup_script_verifies_sha256_before_unzip() {
         let s = XRAY_SETUP_SCRIPT.as_str();
-        // Both per-arch SHA-256 constants are embedded.
         assert!(
             s.contains(XRAY_SHA256_LINUX_64),
             "x86_64 SHA-256 must be pinned in the script: {s}"
@@ -503,7 +396,6 @@ mod tests {
             s.contains(XRAY_SHA256_LINUX_ARM64),
             "arm64 SHA-256 must be pinned in the script: {s}"
         );
-        // Verification uses sha256sum -c BEFORE unzip.
         assert!(
             s.contains("sha256sum -c -"),
             "must verify the archive digest via sha256sum -c: {s}"
@@ -516,7 +408,6 @@ mod tests {
             verify < unzip,
             "SHA-256 verification must happen BEFORE unzip/install: {s}"
         );
-        // The checksums are 64-char lowercase hex (valid SHA-256).
         for digest in [XRAY_SHA256_LINUX_64, XRAY_SHA256_LINUX_ARM64] {
             assert_eq!(digest.len(), 64, "SHA-256 must be 64 hex chars");
             assert!(
@@ -548,11 +439,6 @@ mod tests {
 
     #[test]
     fn apply_script_validates_a_json_suffixed_staging_path_not_dot_new() {
-        // Regression guard for the live `is` failure (2026-06-30): Xray-
-        // core's `run -test` infers config FORMAT from the file
-        // extension, so validating a `.new`-suffixed path fails with
-        // "Failed to get format of ..." even on valid JSON content. The
-        // staging path must end in `.json`.
         let s = xray_apply_script();
         assert!(
             s.contains("xray run -test -c /usr/local/etc/xray/config.staging.json"),
@@ -566,11 +452,6 @@ mod tests {
 
     #[test]
     fn apply_script_redirects_test_command_stdout_to_stderr() {
-        // Xray prints its real failure reason ("Failed to start: ...")
-        // via fmt.Println to STDOUT, not stderr — without `1>&2` on this
-        // exact command, a failed validation surfaces an empty stderr to
-        // the operator (exactly what happened on the live `is` failure
-        // this regression test pins).
         let s = xray_apply_script();
         assert!(
             s.contains("xray run -test -c /usr/local/etc/xray/config.staging.json 1>&2"),

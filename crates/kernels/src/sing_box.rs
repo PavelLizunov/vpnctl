@@ -25,23 +25,6 @@ use vpnctl_core::{
     Protocol, ProtocolId, RenderCtx, Result, SshTransport, User,
 };
 
-/// sing-box 1.13.x из официального APT-репо SagerNet.
-///
-/// **Optional features that need a newer sing-box than what's in the
-/// SagerNet stable APT channel:**
-///
-/// | Feature | Required | Activation |
-/// |---|---|---|
-/// | `experimental.clash_api` block | sing-box ≥ 1.10 | always rendered for live metadata |
-/// | `experimental.v2ray_api` block | build tag `with_v2ray_api` | always rendered for cumulative accounting |
-/// | Hysteria2 `realm` (NAT-traversal via rendezvous + STUN) | sing-box ≥ 1.14 | only when `hysteria2.realm.server_url` is set in `RenderCtx::secrets` |
-///
-/// On a stale node (1.13.x without the rendered key support), the
-/// `sing-box check -c …` step in `apply_config` rejects the config
-/// before `mv` swaps it in — so the deploy fails loud rather than
-/// silently dropping the directive. To unlock 1.14+, switch the APT
-/// repo from `*/*` to a channel that ships 1.14, or pull a release
-/// `.deb` from sing-box GitHub releases.
 #[derive(Debug, Default)]
 pub struct SingBox;
 
@@ -63,12 +46,7 @@ impl Kernel for SingBox {
             ProtocolId("tuic-v5".to_string()),
             ProtocolId("hysteria2".to_string()),
             ProtocolId("shadowsocks-2022".to_string()),
-            // AnyTLS — sing-box ≥ 1.12. ensure_installed pulls the
-            // SagerNet stable channel which currently ships 1.13.x;
-            // on a stale-version node `sing-box check` would reject
-            // an `anytls` inbound and apply_config fails loud.
             ProtocolId("anytls".to_string()),
-            // Trojan — in sing-box since v0.1, no version concern.
             ProtocolId("trojan".to_string()),
             ProtocolId("amneziawg2".to_string()),
             ProtocolId("amneziawg3".to_string()),
@@ -92,8 +70,6 @@ impl Kernel for SingBox {
         let helper_path = std::env::var_os("VPNCTL_STATS_HELPER_ARTIFACT")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_STATS_HELPER_ARTIFACT));
-        // Validate both local artifacts before changing the node. Packaging
-        // installs these atomically from the same vpnctl revision.
         let (sing_box, stats_helper, sb_digest, sh_digest) =
             tokio::task::spawn_blocking(move || {
                 let sb = std::fs::read(&sing_box_path)?;
@@ -106,13 +82,8 @@ impl Kernel for SingBox {
             .map_err(|e| CoreError::Transport(format!("spawn_blocking failed: {e}")))?
             .map_err(CoreError::Io)?;
 
-        // Idempotent base setup keeps the official package as the rollback
-        // source; the managed binary then adds with_v2ray_api and the helper.
         ssh.exec(SING_BOX_SETUP_SCRIPT.as_str()).await?;
 
-        // Content-aware idempotency: probe on-node binary checksums and status.
-        // If /usr/bin/sing-box and the live stats helper already match our target
-        // digests and the service is active, skip the 30+ MB transfer and reinstall.
         let check_cmd = "sha256sum /usr/bin/sing-box /usr/local/libexec/vpnctl/singbox-stats-helper 2>/dev/null; systemctl is-active --quiet sing-box 2>/dev/null && echo 'active' || true";
         if let Ok(output) = ssh.exec(check_cmd).await {
             if is_artifact_up_to_date(&output, &sb_digest, &sh_digest) {
@@ -133,8 +104,6 @@ impl Kernel for SingBox {
         }
         .await;
         if install_result.is_err() {
-            // The installer cleans its own paths once its shell starts. Cover
-            // partial uploads and transport failures before that point too.
             let _ = ssh.exec(&cleanup_script).await;
         }
         install_result
@@ -150,8 +119,6 @@ impl Kernel for SingBox {
         let mut endpoints = Vec::new();
         for p in protocols {
             let fragment = p.server_inbound(ctx, users)?;
-            // WireGuard is a bidirectional endpoint in native sing-box JSON,
-            // not an inbound. Dispatch by wire schema, not protocol identity.
             if fragment.get("type").and_then(serde_json::Value::as_str) == Some("wireguard") {
                 endpoints.push(fragment);
             } else {
@@ -176,18 +143,6 @@ impl Kernel for SingBox {
                 { "type": "direct", "tag": "direct" },
                 { "type": "block", "tag": "block" }
             ],
-            // Phase Track-3 prep: clash-api on loopback so the daemon
-            // can poll active connections + traffic counters in a
-            // future iteration. Bound to 127.0.0.1 (no external
-            // exposure); no secret needed because nothing on the node
-            // is allowed to bind 9090 except sing-box itself.
-            //
-            // No `external_ui` set — we don't need a clash dashboard.
-            // The future poller talks the JSON API directly.
-            //
-            // sing-box ≥ 1.10 accepts this top-level key; on older
-            // builds the `sing-box check` step would reject the
-            // config, so the deploy fails loudly on a stale node.
             "experimental": {
                 "clash_api": {
                     "external_controller": "127.0.0.1:9090"
@@ -202,7 +157,6 @@ impl Kernel for SingBox {
                 }
             }
         });
-        // Omit new fields entirely for legacy servers to preserve their bytes.
         if !endpoints.is_empty() {
             let endpoint_tags: Vec<&str> = endpoints
                 .iter()
@@ -216,13 +170,9 @@ impl Kernel for SingBox {
                         })
                 })
                 .collect::<Result<_>>()?;
-            // Userspace endpoints can map their tunnel address to host loopback.
-            // VPN peers must not reach node-local management or private services.
             let mut rules = vec![json!({
                 "inbound": endpoint_tags, "ip_is_private": true, "action": "reject"
             })];
-            // A node's own public address is not private, but services bound to
-            // it are still node-local. Reject it explicitly for VPN peers.
             if let Ok(address) = ctx.server.address.parse::<std::net::IpAddr>() {
                 let prefix = if address.is_ipv4() { 32 } else { 128 };
                 rules.push(json!({
@@ -242,32 +192,6 @@ impl Kernel for SingBox {
     }
 
     async fn apply_config(&self, ssh: &dyn SshTransport, config: &[u8]) -> Result<()> {
-        // ── PRE-APPLY DIFF GUARD (post-2026-05-19 incident) ───────
-        //
-        // Compare the LIVE /etc/sing-box/config.json with the new
-        // rendered one. If the new config REMOVES any user UUID
-        // from inbounds[*].users[*] AND the operator has not
-        // explicitly set VPNCTLD_ALLOW_USER_REMOVAL=1, REFUSE the
-        // deploy with the lost UUIDs spelled out.
-        //
-        // Why this exists: 2026-05-18 deploy on vps-de-01 silently
-        // dropped UUID `b25684c3-…` (the claude-chat-proxy service
-        // user that wasn't in vpnctld's inventory). Result: every
-        // outbound HTTPS request from .142 containers — including
-        // the entire claude-chat → api.anthropic.com path —
-        // started failing tcpdump-silent at Reality handshake.
-        // Pavel had to manually patch the live config back.
-        //
-        // The fix: vpnctld now reads the existing config before
-        // rewriting it. If reconciling inventory → live would lose
-        // any UUID, the operator sees a precise list with the
-        // remediation paths (add to inventory OR override).
-        //
-        // Guard runs ONLY when the file already exists (fresh-node
-        // first deploy has nothing to lose). Parse failures on
-        // the OLD config are non-fatal — we log + proceed (the
-        // file might be hand-edited into a non-standard shape;
-        // refusing forever would itself be a footgun).
         if let Ok(old_bytes) = ssh.read_file("/etc/sing-box/config.json").await {
             match user_uuid_diff(&old_bytes, config) {
                 Ok(removed) if !removed.is_empty() => {
@@ -295,17 +219,8 @@ impl Kernel for SingBox {
                         )));
                     }
                 }
-                Ok(_) => { /* no removals, proceed */ }
+                Ok(_) => {}
                 Err(e) => {
-                    // Defensive — old config is hand-edited / malformed.
-                    // We don't fail closed here because that'd brick
-                    // deploys forever on any node with a non-standard
-                    // /etc/sing-box/config.json. Operator's signal is
-                    // this stderr warn that journald captures into
-                    // `journalctl -u vpnctld`. (Can't use `tracing!`
-                    // — the kernels crate intentionally has zero
-                    // logging deps; daemon-side logging happens at
-                    // the handler layer.)
                     eprintln!(
                         "WARN vpnctl::kernels::sing_box: pre-apply diff guard could not \
                          parse old /etc/sing-box/config.json ({e}); skipping guard \
@@ -326,15 +241,6 @@ impl Kernel for SingBox {
         ctx: &RenderCtx<'_>,
         protocols: &[&dyn Protocol],
     ) -> Result<()> {
-        // Source of truth = each `Protocol::effective_listen_ports()` (the
-        // SAME data the cross-protocol port-conflict guard reads), so the
-        // firewall opens EXACTLY what sing-box binds — never a stale
-        // hardcoded list, and it grows automatically when a new protocol is
-        // enabled. `effective_*` (not the static `listen_ports`) so a
-        // per-server port override (e.g. vless.listen_port=8443 on a
-        // co-tenant host) opens the REAL port — the static default would
-        // open 443 that a co-owned caddy already holds and leave 8443
-        // firewalled (cdn incident 2026-08-05).
         let ports: Vec<(&str, u16)> = protocols
             .iter()
             .flat_map(|p| p.effective_listen_ports(ctx.secrets))

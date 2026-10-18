@@ -29,34 +29,15 @@ serde_json = { workspace = true }
 dirs = "5"
 comfy-table = "7"
 qrcode = { version = "0.14", default-features = false }
-# Track-1.2 (Pavel 2026-05-21) — `vpnctl geoip-update` subcommand.
-# Downloads DB-IP Lite (CC-BY 4.0, no signup) MMDB files, validates
-# them, atomic-renames into VPNCTLD_GEOIP_DIR. rustls features
-# (no openssl-sys / native-tls per workspace invariants).
-# Keep `default-features = false` and DO NOT add `http3` — that gates
-# reqwest's optional quinn/quinn-proto dep (RUSTSEC-2026-0185). We only
-# do plain HTTPS GETs, so quinn stays out of the compiled graph; the
-# lock still version-pins it (deactivated optional dep) at a patched rev.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 flate2 = "1"
-# Validate the downloaded .mmdb before atomic install. Same crate
-# the daemon uses (0.27 — RUSTSEC-2025-0132 clean).
 maxminddb = "0.27"
 futures-util = "0.3"
-# Audit B2 (2026-05-22) — `vpnctl admin hash-password` was documented
-# in `daemon/handlers/auth.rs` but unimplemented for 9 months. Same
-# argon2 features as the daemon (alloc + password-hash), no
-# std-only because we use the workspace-default profile here.
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash", "std"] }
-# RNG for argon2 salt generation. `rand_core::OsRng` is the
-# crypto-suitable default and is what argon2 expects via
-# `password_hash::SaltString::generate(&mut OsRng)`.
 rand_core = { version = "0.6", features = ["std", "getrandom"] }
 
 [dev-dependencies]
-# Temp inv.db for the `vpnctl sub` subscription-policy regression tests
-# (same crate + major version the inventory spec tests use).
 tempfile = "3"
 
 [lints]

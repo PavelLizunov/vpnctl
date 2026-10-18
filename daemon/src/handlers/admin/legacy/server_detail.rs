@@ -1,5 +1,3 @@
-//! Admin UI legacy handlers — server detail page and sub-tab sections.
-
 mod activity;
 mod config;
 mod config_protocols;

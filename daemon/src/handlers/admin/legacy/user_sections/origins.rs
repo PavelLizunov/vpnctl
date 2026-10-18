@@ -9,34 +9,6 @@ use crate::AppState;
 use crate::handlers::admin::helpers::{format_msk, format_msk_iso};
 use crate::i18n::{Locale, tr};
 
-// ════════════════════════════════════════════════════════════════════
-//  PR-User — informativeness cards for the user-detail page.
-//
-//  All seven cards reuse existing helpers (status_tile, sparkline_svg,
-//  window_picker_section, humanize_bytes, fmt_traffic_progress,
-//  format_msk_iso, ua_verdict) — no parallel styling. Bilingual via
-//  tr() / t(). The only card that touches process state outside one
-//  SQL query is user#1 (the online-now badge), and that read is
-//  in-memory only — it walks the already-populated `snapshot_cache`
-//  across the granted servers, never an extra DB round-trip or SSH.
-// ════════════════════════════════════════════════════════════════════
-
-/// user#1 — online-now presence badge. Walks `state.snapshot_cache`
-/// across every server in `server_ids` (in production the granted set
-/// joined with the full inventory; tests pass whatever they seeded),
-/// counting the live clash-api connections whose `(source_ip,
-/// source_port)` attribution resolves to `uid`. When the per-connection
-/// attribution map misses (NM-11: the sing-box log scrape window may
-/// have scrolled past a long-lived connection's accept line), we fall
-/// back to `users_for_source_ips` — the same sourceIP-to-user_id join
-/// the «Live connections» drill-down uses — over the unattributed
-/// source IPs only, so a covered user still lights up green.
-///
-/// 🟢 online → "N conns on {server(s)}". Offline → "last seen {Xh
-/// ago}" from `sub_access_aggregates_for_user.last_seen` (passed in as
-/// `last_seen` so we don't re-query). Cheap: in-memory map reads +, at
-/// most, one bounded `users_for_source_ips` query for the IPs the
-/// in-memory map couldn't resolve.
 pub(crate) async fn user_online_badge(
     state: &AppState,
     uid: &vpnctl_core::UserId,
@@ -44,16 +16,9 @@ pub(crate) async fn user_online_badge(
     last_seen: Option<DateTime<Utc>>,
     lang: Locale,
 ) -> Markup {
-    // Per-server live connection count attributed to this user, plus
-    // the set of (server, source_ip) pairs the in-memory attribution
-    // map could NOT resolve — candidates for the sourceIP fallback.
     let mut conns_per_server: BTreeMap<String, u32> = BTreeMap::new();
-    // Unresolved source IPs → the servers they appeared on (so the
-    // fallback can credit the right server when a join succeeds).
     let mut unresolved: HashMap<String, Vec<String>> = HashMap::new();
     for sid in server_ids {
-        // `get_live`: the 🟢 online badge must NOT light up from a
-        // snapshot the poller stopped refreshing (~2 intervals stale).
         let Some(snap) = state.snapshot_cache.get_live(sid) else {
             continue;
         };
@@ -62,12 +27,8 @@ pub(crate) async fn user_online_badge(
                 Some(u) if u == uid.0.as_str() => {
                     *conns_per_server.entry(sid.0.clone()).or_insert(0) += 1;
                 }
-                Some(_) => {
-                    // Attributed to a DIFFERENT user — never this one.
-                }
+                Some(_) => {}
                 None => {
-                    // No user on the wire (e.g. an unpatched node) —
-                    // defer to the sourceIP join below.
                     if !c.metadata.source_ip.is_empty() {
                         unresolved
                             .entry(c.metadata.source_ip.clone())
@@ -79,18 +40,11 @@ pub(crate) async fn user_online_badge(
         }
     }
 
-    // Fallback: resolve the unattributed source IPs via the same
-    // sub_access_log sourceIP → user_id join the drill-down uses. One
-    // bounded query over the distinct unresolved IPs (skipped entirely
-    // when the in-memory map already covered everything).
     if !unresolved.is_empty() {
         let ips: Vec<String> = unresolved.keys().cloned().collect();
         match state.inv.users_for_source_ips(&ips, 7).await {
             Ok(map) => {
                 for (ip, candidates) in &map {
-                    // The join returns (user, hits) ordered hits-DESC;
-                    // the top candidate is the most-likely owner. Credit
-                    // the user only when THEY are that top candidate.
                     let owner_is_user = candidates
                         .first()
                         .map(|(u, _)| u.0.as_str() == uid.0.as_str())
@@ -155,9 +109,6 @@ pub(crate) async fn user_online_badge(
     }
 }
 
-/// Compact «X ago» for the presence badge — whole-unit granularity
-/// (minutes / hours / days) is enough for «when was this user last
-/// active». Clamps a future timestamp (clock skew) to «just now».
 fn humanize_since(ts: DateTime<Utc>, lang: Locale) -> String {
     let secs = (Utc::now() - ts).num_seconds().max(0);
     if secs < 60 {
@@ -191,18 +142,6 @@ fn format_origin_ts(raw: &str) -> String {
     }
 }
 
-/// Classify a reserved / non-routable IP into a short human label so a
-/// NULL GeoIP country reads as «private/LAN» or «loopback» instead of
-/// the uninformative «(unknown)». For a self-hosted box, most of the
-/// «(unknown)» origin rows are the homelab's OWN LAN / loopback /
-/// CGNAT addresses hitting the /sub endpoint — labelling them makes
-/// the operator instantly see «that's my infra, not a shared URL».
-///
-/// Returns `None` for an ordinary routable public IP (where
-/// «(unknown)» genuinely means «GeoIP has no record») and for an
-/// unparseable string. Ranges: RFC1918 private, RFC6598 CGNAT
-/// (100.64/10), loopback, link-local (169.254/16, fe80::/10), ULA
-/// (fc00::/7), unspecified.
 pub(in crate::handlers::admin::legacy) fn classify_reserved_ip(ip: &str) -> Option<&'static str> {
     match ip.parse::<IpAddr>().ok()? {
         IpAddr::V4(v4) => {
@@ -212,7 +151,6 @@ pub(in crate::handlers::admin::legacy) fn classify_reserved_ip(ip: &str) -> Opti
             } else if v4.is_private() {
                 Some("private/LAN")
             } else if o[0] == 100 && (o[1] & 0xc0) == 0x40 {
-                // 100.64.0.0/10 — carrier-grade NAT (RFC6598).
                 Some("CGNAT")
             } else if v4.is_link_local() {
                 Some("link-local")
@@ -230,10 +168,8 @@ pub(in crate::handlers::admin::legacy) fn classify_reserved_ip(ip: &str) -> Opti
             } else {
                 let seg = v6.segments();
                 if (seg[0] & 0xfe00) == 0xfc00 {
-                    // fc00::/7 — unique local address (RFC4193).
                     Some("private/ULA")
                 } else if (seg[0] & 0xffc0) == 0xfe80 {
-                    // fe80::/10 — link-local.
                     Some("link-local")
                 } else {
                     None
@@ -243,11 +179,6 @@ pub(in crate::handlers::admin::legacy) fn classify_reserved_ip(ip: &str) -> Opti
     }
 }
 
-/// Fallback cell for a source IP whose GeoIP country/ASN came back
-/// NULL: render the reserved-range class when the IP is non-routable,
-/// else the generic `unknown` marker. Shared by the «Subscription
-/// origins · By IP» table and the «Source IPs» traffic section so both
-/// treat «(unknown)» identically.
 fn ip_geo_fallback(ip: &str, unknown: &str) -> Markup {
     match classify_reserved_ip(ip) {
         Some(cls) => html! { em style="color: var(--mute);" { (cls) } },
@@ -255,21 +186,9 @@ fn ip_geo_fallback(ip: &str, unknown: &str) -> Markup {
     }
 }
 
-/// Shared th/td inline styles for the origins tables (survived the R2
-/// removal of the legacy verdict section that used to sit above them).
 const ORIGINS_TH: &str = "padding: 6px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;";
 const ORIGINS_TD: &str = "padding: 5px 8px;";
 
-/// abuse-origins — "Subscription origins" section (anchor `#origins`).
-/// The actionable WHO-is-sharing view: three compact tables (by
-/// country / by ISP / by IP) + a rough device-count line, all over the
-/// 30-day non-egress `/sub` access window. Linked from the dashboard
-/// likely-shared card. Renders an empty-state when the user has no
-/// external (non-egress) fetches at all.
-///
-/// Pure render — every input is pre-fetched in `user_detail` (one
-/// grouped query each, no N+1). Bilingual via `tr`; timestamps via
-/// `format_origin_ts` → `format_msk_iso`.
 pub(crate) fn user_subscription_origins_section(
     by_country: &[vpnctl_inventory::SubOriginCountry],
     by_asn: &[vpnctl_inventory::SubOriginAsn],
@@ -278,14 +197,10 @@ pub(crate) fn user_subscription_origins_section(
     lang: Locale,
 ) -> Markup {
     let unknown = tr(lang, "(unknown)", "(неизвестно)");
-    // "No external fetches" is the union signal — if there are no
-    // non-egress rows, all three breakdowns are empty.
     let empty = by_country.is_empty() && by_asn.is_empty() && by_ip.is_empty();
 
     html! {
         div.ed-rule {}
-        // The anchor lives on the eyebrow so `#origins` lands the
-        // viewport at the section heading.
         div.ed-art-eyebrow id="origins" {
             (tr(lang, "Subscription origins", "Источники подписки"))
         }
@@ -306,18 +221,6 @@ pub(crate) fn user_subscription_origins_section(
                 ))
             }
 
-            // Device-count line — a sharing signal on its own.
-            // TT-5: the old estimate was max(device_class, UA, JA4).
-            // JA4 is ALWAYS 0 (no JA4-forwarding proxy is wired), so
-            // «· 0 TLS-fingerprints» was permanent dead noise that read
-            // as a broken feature — dropped. UA over-counts (every app
-            // version is a distinct string); device_class collapses that
-            // churn (4 Streisand builds → 1) but under-counts because
-            // the parser leaves the custom ninitux client NULL. So we
-            // lead with device_class when we have it (labelled honestly
-            // as «client families»), fall back to the raw UA count
-            // otherwise, and always show the raw UA count as the upper
-            // bound — never a single false-precision «≈N devices».
             @let has_families = device_fp.distinct_device_classes > 0;
             @let lead_n = if has_families { device_fp.distinct_device_classes } else { device_fp.distinct_uas };
             p style="font-family: var(--mono); font-size: 12px; color: var(--ink); margin: 0 0 16px;" {
@@ -337,7 +240,6 @@ pub(crate) fn user_subscription_origins_section(
                 }
             }
 
-            // ── By country ───────────────────────────────────────────
             div.ed-art-eyebrow style="margin-top: 4px;" {
                 (tr(lang, "By country", "По странам"))
             }
@@ -367,7 +269,6 @@ pub(crate) fn user_subscription_origins_section(
                 }
             }
 
-            // ── By ISP ───────────────────────────────────────────────
             div.ed-art-eyebrow {
                 (tr(lang, "By ISP", "По провайдерам"))
             }
@@ -402,7 +303,6 @@ pub(crate) fn user_subscription_origins_section(
                 }
             }
 
-            // ── By IP ────────────────────────────────────────────────
             div.ed-art-eyebrow {
                 (tr(lang, "By IP", "По IP"))
             }
@@ -444,30 +344,12 @@ pub(crate) fn user_subscription_origins_section(
     }
 }
 
-/// «Source IPs» — the source-IP counterpart to «Top destinations».
-/// Per-(user, source_ip) activity over the last 30 days from the
-/// persisted `vpn_user_source_ips` hit-counter (one hit per 5-min
-/// clash tick the user had a live connection from that IP), GeoIP-
-/// enriched (`geo`: ip → (country, asn)) and reserved-range-classified
-/// so a NULL GeoIP country reads as «private/LAN» not «(unknown)».
-///
-/// This is the «разбей трафик по IP внутри пользователя» view —
-/// grounded in ACTUAL VPN connections, not /sub URL fetches (which
-/// the «Subscription origins» tables cover). Activity-weighted (hits
-/// = ticks-alive) rather than byte-weighted, by deliberate design:
-/// per-IP byte deltas would need diff-engine state per (user, ip,
-/// conn) tuple (see migration 0034). Many distinct PUBLIC IPs or
-/// countries here is the strongest grounded sharing signal.
-///
-/// Pure render — `rows` and `geo` are pre-fetched in `user_detail`.
 pub(crate) fn user_source_ips_section(
     rows: &[vpnctl_inventory::VpnUserSourceIpRow],
     geo: &HashMap<String, (Option<String>, Option<String>)>,
     lang: Locale,
 ) -> Markup {
     let unknown = tr(lang, "(unknown)", "(неизвестно)");
-    // Distinct routable (public) IPs — the sharing-signal headline.
-    // Reserved/LAN/CGNAT addresses don't count toward «sharing».
     let distinct_public = rows
         .iter()
         .filter(|r| classify_reserved_ip(&r.source_ip).is_none())
@@ -537,25 +419,6 @@ pub(crate) fn user_source_ips_section(
     }
 }
 
-/// user#5 — lifecycle facts: created · last seen · last fetch · age.
-/// Phase Track-4 — UA fingerprint heuristic. Renders one row per
-/// distinct User-Agent that has hit this user's `/sub` URL in the
-/// last 24h, with a "likely roaming" / "likely shared URL" label.
-///
-/// Classifier (initial cut, intentionally conservative):
-///   * `distinct_slash16 >= 3` → `likely shared URL` (orange)
-///   * `distinct_ips >= 3 && distinct_slash16 <= 1` → `likely roaming`
-///     (one device hopping subnets within one ISP)
-///   * else → unlabeled (single-IP normal client)
-///
-/// On inventory error returns a small "(unavailable)" nudge instead
-/// of failing the whole page.
-///
-/// user#7 (PR-User) — additive geo + last-seen footer. `UaCluster`
-/// carries no per-row geo (the heuristic only needs IP/16 spread), so
-/// the country / ASN / last-seen columns are summarised once below the
-/// table from the user's 30-day `sub_access_aggregates_for_user`
-/// (passed in to avoid a re-query). The per-UA table is unchanged.
 pub(crate) async fn ua_clusters_section(
     state: &AppState,
     uid: &vpnctl_core::UserId,
@@ -624,11 +487,6 @@ pub(crate) async fn ua_clusters_section(
                 }
             }
         }
-        // user#7 — devices/UA geo + last-seen summary. Additive footer
-        // under the per-UA table: country / ASN spread + the user's most
-        // recent /sub fetch, all from the 30-day aggregates (no extra
-        // query). Gives the operator the «where from / how long ago»
-        // context the per-UA /16 spread can't.
         div style="display: flex; flex-wrap: wrap; gap: 28px; padding: 12px 0 0; font-family: var(--serif); font-size: 12px; color: var(--mute);" {
             span title=(tr(lang, "Distinct ISO country codes the subscription was fetched from over the last 30 days (GeoIP).", "Уникальных ISO-кодов стран, из которых тянули подписку за 30 дней (GeoIP).")) {
                 span.ed-mono style="color: var(--ink);" { (aggregates.distinct_countries) }
@@ -649,8 +507,6 @@ pub(crate) async fn ua_clusters_section(
     }
 }
 
-/// Verdict shape — pairs the operator-visible label with its CSS
-/// styling so the table cell stays consistent across rows.
 enum UaVerdict {
     LikelyShared,
     LikelyRoaming,

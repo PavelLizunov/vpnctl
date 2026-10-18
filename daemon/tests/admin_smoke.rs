@@ -1,5 +1,3 @@
-//! Admin UI integration smoke tests.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 #[path = "admin_smoke/common.rs"]

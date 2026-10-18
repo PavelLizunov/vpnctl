@@ -7,8 +7,6 @@ use super::render::server_detail_render;
 use super::types::{ServerDetailQuery, ServerTab};
 use crate::AppState;
 
-// Thin axum handlers — one per tab route in app.rs. Bare
-// `/admin/servers/{id}` (+ trailing slash) + `/status` both land here.
 pub(crate) async fn server_detail(
     headers: HeaderMap,
     State(state): State<AppState>,

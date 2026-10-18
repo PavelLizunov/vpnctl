@@ -1,34 +1,17 @@
 use super::render::{VLESSWS_SINGBOX_CONFIG, VLESSWS_UNIT};
 
-/// Pinned Go toolchain for the on-node `xcaddy` build. Bump in lockstep
-/// with [`CADDY_VERSION`] when Caddy needs a newer Go.
 pub(crate) const GO_VERSION: &str = "go1.26.4";
 
-/// Pinned SHA-256 of the official Go toolchain tarball downloaded by
-/// the on-node build fallback. Source: `https://go.dev/dl/` — each
-/// release publishes a `.sha256` sidecar (fetched 2026-07-29 from
-/// `https://dl.google.com/go/go1.26.4.linux-amd64.tar.gz.sha256`).
-/// Bumping [`GO_VERSION`] REQUIRES re-fetching the new digest.
 pub(crate) const GO_TARBALL_SHA256: &str =
     "1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f";
 
-/// Pinned Caddy release the plugin is compiled against. xcaddy's
-/// `build <version>` keeps the binary reproducible across nodes.
 pub(crate) const CADDY_VERSION: &str = "v2.11.4";
 
-/// Pinned `klzgrad/forwardproxy` commit (the `naive` branch tip at
-/// 2026-06 — `v0.0.0-20250118002110-d62c80d3dd2c`). Pinning the exact
-/// commit (not the moving `@naive` branch) makes the supply chain
-/// reproducible — a force-push to the branch can't change what we ship.
 pub(crate) const FORWARDPROXY_PIN: &str = "d62c80d3dd2c";
 
 pub(crate) const CADDY_RESTART_IF_ACTIVE: &str =
     "if systemctl is-active --quiet caddy; then systemctl restart caddy; fi";
 
-/// Minimal restart command for the caddy kernel. Restarts the managed
-/// `caddy-vlessws` backend unit FIRST if it exists/active/enabled (so caddy's
-/// `reverse_proxy` upstream is ready), then restarts `caddy`. On Naive-only
-/// deployments where the backend is absent, skips the backend without error.
 pub(crate) fn caddy_restart_command() -> String {
     format!(
         "if [ -f {sb_config} ] || systemctl is-active --quiet {vlessws_unit} 2>/dev/null || systemctl is-enabled --quiet {vlessws_unit} 2>/dev/null; then systemctl restart {vlessws_unit}; fi && systemctl restart caddy",
@@ -37,11 +20,6 @@ pub(crate) fn caddy_restart_command() -> String {
     )
 }
 
-/// Status probe command for the managed `caddy-vlessws` backend unit.
-/// Outputs:
-/// - `active` if the backend is managed and active
-/// - `inactive` if the backend is managed (config exists or unit enabled/active) but down
-/// - `absent` if the backend is not part of this deployment (Naive-only)
 pub(crate) fn caddy_vlessws_status_command() -> String {
     format!(
         "if [ -f {sb_config} ] || systemctl is-active --quiet {vlessws_unit} 2>/dev/null || systemctl is-enabled --quiet {vlessws_unit} 2>/dev/null; then systemctl is-active --quiet {vlessws_unit} 2>/dev/null && echo active || echo inactive; else echo absent; fi",
@@ -50,9 +28,6 @@ pub(crate) fn caddy_vlessws_status_command() -> String {
     )
 }
 
-/// The masquerade site served to unauthenticated probes. Constant
-/// (no per-deploy state), so it's provisioned once in `ensure_installed`
-/// rather than re-rendered every `apply_config`.
 pub(crate) const MASQUERADE_INDEX_HTML: &str = r#"<!doctype html>
 <html lang="en">
 <head>
@@ -80,60 +55,26 @@ pub(crate) const MASQUERADE_INDEX_HTML: &str = r#"<!doctype html>
 </html>
 "#;
 
-/// Path on the CONTROL node where a prebuilt **static** (CGO-free) amd64
-/// `caddy` (with the naive forwardproxy) is cached. When present,
-/// `ensure_installed` uploads it to the target node — seconds, with no
-/// Go toolchain / build swap / RAM pressure on the node. The SAME static
-/// binary runs on any Linux amd64 host (Go static binaries have no libc
-/// dependency), so one build serves the whole fleet. Populate it once
-/// (CI artifact or `scp` from any already-built node). Override the path
-/// via the `VPNCTL_CADDY_CACHE` env var.
 pub(crate) fn caddy_cache_path() -> std::path::PathBuf {
     std::env::var_os("VPNCTL_CADDY_CACHE")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(default_caddy_cache_path)
 }
 
-/// Default cache path, stamped with the Caddy + forwardproxy versions so
-/// a version bump invalidates the old cache (a stale binary would
-/// silently ship the wrong version). Pure (reads no env) → deterministic
-/// to test.
 pub(crate) fn default_caddy_cache_path() -> std::path::PathBuf {
     std::path::PathBuf::from(format!(
         "/var/lib/vpnctl/cache/caddy-{CADDY_VERSION}-{FORWARDPROXY_PIN}-amd64"
     ))
 }
 
-/// Classify the idempotency-probe stdout. Pure (testable) so an inverted
-/// branch can't slip through CI: the node is "ready" only when the probe
-/// printed exactly `present` (caddy on PATH AND the forward_proxy module
-/// compiled in).
 pub(crate) fn caddy_present(probe_stdout: &str) -> bool {
     probe_stdout.trim() == "present"
 }
 
-/// Decide whether the on-node caddy binary must be (re)installed from the
-/// control-node cache. Content-aware (sha256), NOT a bare presence check:
-/// an operator who replaces the cached binary with a patched build (same
-/// path, different bytes) MUST get it pushed on the next `vpnctl deploy`
-/// without first deleting the on-node binary by hand.
-///
-/// * `cache_sha` — lowercase hex sha256 of the cache binary's bytes
-///   (computed control-side; the same digest fed to `sha256sum -c`).
-/// * `node_sha_stdout` — raw stdout of `sha256sum <bin> | cut -d' ' -f1`
-///   on the node; EMPTY (binary absent) or any value `!= cache_sha`
-///   means reinstall.
-///
-/// Pure → unit-tested directly so an inverted branch can't slip past CI.
 pub(crate) fn caddy_needs_reinstall(cache_sha: &str, node_sha_stdout: &str) -> bool {
     node_sha_stdout.trim() != cache_sha
 }
 
-/// On-node build fallback (no cache present): install Go + xcaddy and
-/// build caddy with the naive forwardproxy. Heavy on a 1-vCPU/1-GB box
-/// (~10 min, RAM-tight) — hence the temporary build swapfile and
-/// `GOFLAGS=-p=1`. `CGO_ENABLED=0` makes the result the same portable
-/// static binary the cache path ships.
 pub(crate) fn caddy_build_script() -> String {
     format!(
         r#"
@@ -187,9 +128,6 @@ pub(crate) fn caddy_build_script() -> String {
     )
 }
 
-/// Provision the node runtime regardless of how the binary arrived:
-/// service user, masquerade web root + site, systemd unit, firewall.
-/// Idempotent — safe to re-run on every deploy.
 pub(crate) fn caddy_runtime_provision_script() -> String {
     format!(
         r#"

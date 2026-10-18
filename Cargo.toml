@@ -14,22 +14,11 @@ members = [
 ]
 
 [workspace.package]
-# Single source of truth for the product version. Every member inherits
-# it via `version.workspace = true` so the daemon, CLI and library crates
-# can never drift apart (previously each hardcoded its own version).
-# Bump intentionally per the release rule in README §Production health;
-# per-build provenance is the git SHA baked in at compile time via
-# `vpnctl_core::build_version()` (VPNCTL_BUILD_SHA, exported by
-# scripts/deploy.sh before cargo build) — NOT a SemVer change.
 version = "0.9.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 authors = ["slovn"]
 rust-version = "1.85"
-# Self-hosted homelab tool; never published to crates.io. Setting this
-# workspace-wide also lets cargo-deny's `allow-wildcard-paths` apply (it
-# only kicks in for non-public crates, because crates.io rejects path
-# deps in published packages).
 publish = false
 
 [workspace.dependencies]
@@ -39,8 +28,6 @@ serde-saphyr = { version = "1.1", default-features = false }
 thiserror = "2"
 async-trait = "0.1"
 
-# Centralized lint config — applied to every member via `[lints] workspace = true`.
-# Best practice as of Rust 1.74+, replaces per-crate `#![deny(...)]`.
 [workspace.lints.rust]
 unsafe_code = "forbid"
 unreachable_pub = "warn"
@@ -54,6 +41,5 @@ todo = "warn"
 dbg_macro = "deny"
 print_stdout = "allow"  # CLI legitimately prints to stdout
 print_stderr = "allow"
-# Pedantic but useful:
 clone_on_ref_ptr = "warn"
 needless_pass_by_value = "warn"

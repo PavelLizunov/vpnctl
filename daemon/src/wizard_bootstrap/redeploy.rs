@@ -18,18 +18,6 @@ mod autodeploy;
 pub use autodeploy::queue_servers_redeploy;
 pub use autodeploy::{AutodeployPhase, AutodeployStatus, autodeploy_status};
 
-/// Re-deploy an EXISTING server, streaming per-step progress over SSE
-/// (item-1, 2026-05-31). Unlike `run_bootstrap` (a NEW server: probe →
-/// fingerprint → push-key → register), the server already exists and
-/// already trusts the deploy key, so this runs only the tail:
-/// mint-missing-secrets → per-kernel `ensure_installed` → render
-/// (+ reserved-ports guard) → `apply_config`. It writes the SAME
-/// `server.deploy` audit row the synchronous handler did, AND — the
-/// reason this exists — it ends in `BootstrapEvent::Error` (not `Ok`)
-/// whenever ANY kernel's install/render/apply failed. The old
-/// synchronous handler pushed those failures into the audit payload but
-/// still returned a 303 redirect the operator read as success, so a
-/// sing-box that crash-looped (e.g. a missing cert) looked "deployed".
 pub fn run_redeploy(
     server: Server,
     inv: SqliteInventory,
@@ -41,17 +29,10 @@ pub fn run_redeploy(
         Some(guard) => {
             tokio::spawn(async move {
                 redeploy_pipeline(server, inv, registry, deploy_key_path, tx).await;
-                // Hold the per-server permit for the whole pipeline; drop
-                // here (also on panic/cancel via RAII) releases it.
                 drop(guard);
             });
         }
         None => {
-            // A deploy of this server is already in flight — refuse rather
-            // than render + restart the same node concurrently. The
-            // deploy-all pass surfaces this as a per-server ✗ line and
-            // moves on; a single-server SSE deploy shows it as the
-            // terminal error.
             let _ = tx.try_send(BootstrapEvent::Error {
                 phase: "deploy",
                 message: format!(
@@ -59,21 +40,11 @@ pub fn run_redeploy(
                     server.id.0
                 ),
             });
-            // tx drops → ReceiverStream completes after this one event.
         }
     }
     ReceiverStream::new(rx)
 }
 
-/// Re-deploy EVERY server in one streamed pass — the "Deploy all" button
-/// (2026-06-03). Run after adding a user / granting servers so the new
-/// UUID lands on every node (a grant only updates inv.db; the node's
-/// sing-box isn't touched until a deploy). Sequentially runs
-/// [`run_redeploy`] per server, flattening each server's events into
-/// this single stream as `Step`s (so one server's terminal Ok/Error
-/// isn't mistaken for the whole-run terminal), then emits ONE terminal
-/// `Ok` with a summary. Best-effort: a down node is reported as a `✗`
-/// line and the rest still deploy.
 pub fn run_deploy_all(
     servers: Vec<Server>,
     inv: SqliteInventory,
@@ -187,16 +158,9 @@ async fn deploy_all_pipeline(
             message: summary.clone(),
         })
         .await;
-    // Terminal event — Ok when every node deployed, Error when any
-    // failed. The frontend uses the terminal kind to decide the
-    // banner colour; per-server failures are ALSO surfaced as ✗
-    // lines above so the operator sees exactly which nodes need
-    // attention.
     let _ = tx.send(deploy_all_terminal(&failed, summary)).await;
 }
 
-/// Choose the terminal SSE event for a fleet deploy pass. Pure —
-/// tested in isolation below.
 pub(super) fn deploy_all_terminal(failed: &[String], summary: String) -> BootstrapEvent {
     if failed.is_empty() {
         BootstrapEvent::Ok {
@@ -211,10 +175,6 @@ pub(super) fn deploy_all_terminal(failed: &[String], summary: String) -> Bootstr
     }
 }
 
-/// Shared automatic dispatcher (including Boosty). Requests coalesce per
-/// server, with at most four passes and three five-second followup delays for
-/// contention, stale inputs, or a mutation during execution. Failure strings
-/// are sanitized; only canonical revision-checked audit means applied.
 pub(crate) async fn redeploy_servers_collect_errors(
     servers: Vec<Server>,
     inv: SqliteInventory,
@@ -245,8 +205,6 @@ async fn redeploy_pipeline(
         }};
     }
 
-    // Callers may have captured this server before the triggering mutation.
-    // Refresh under the deploy guard, before validating or minting secrets.
     let server = match inv.get_server(&server.id).await {
         Ok(Some(server)) => server,
         Ok(None) => fail!("deploy", "server was removed before deploy"),
@@ -258,14 +216,6 @@ async fn redeploy_pipeline(
     let mut total_config_bytes: usize = 0;
     let mut configs_applied: usize = 0;
 
-    // ── 0. Pre-flight: kernel/protocol compatibility ─────────────
-    // Same check the synchronous handler runs before anything else
-    // (admin.rs server_deploy). Without it, a protocol enabled on the
-    // server but supported by NO declared kernel is silently filtered
-    // out of every per-kernel render and the deploy still reports Ok —
-    // the operator would never learn it isn't being delivered.
-    // Secrets loaded BEFORE validation so the port-conflict guard sees
-    // per-server overrides (vless.listen_port) already set by the operator.
     let pre_secrets = match inv.list_server_secrets(&server.id).await {
         Ok(s) => s,
         Err(e) => fail!("validate", "cannot load server secrets: {e}"),
@@ -274,7 +224,6 @@ async fn redeploy_pipeline(
         fail!("validate", "config invalid before deploy: {e}");
     }
 
-    // ── 1. Mint any missing per-protocol secrets (idempotent) ─────
     send_step!("secrets", "minting any missing per-protocol secrets…");
     let (_, bootstrapped) = match bootstrap_server_secrets(&inv, &server, &registry).await {
         Ok((secrets, minted)) => {
@@ -299,8 +248,6 @@ async fn redeploy_pipeline(
         Ok(None) => fail!("deploy", "server was removed before deploy"),
         Err(e) => fail!("deploy", "cannot refresh server before deploy: {e}"),
     };
-    // Never render a different protocol/kernel set from the one bootstrapped.
-    // Concurrent toggles retain their pending state and can retry safely.
     if current_server.enabled_protocols != server.enabled_protocols
         || current_server.kernels != server.kernels
     {
@@ -328,10 +275,6 @@ async fn redeploy_pipeline(
         fail!("validate", "config changed before deploy: {e}");
     }
 
-    // ── 2. SSH skip-reason ────────────────────────────────────────
-    // Mirror the synchronous handler: these conditions write a distinct
-    // skipped-attempt audit row carrying `ssh_skip_reason`, then end in a
-    // terminal Error.
     let skip_reason: Option<&'static str> = if !deploy_key_path.exists() {
         Some(DEPLOY_KEY_ABSENT_MSG)
     } else if server.kernels.is_empty() {
@@ -394,18 +337,11 @@ async fn redeploy_pipeline(
         .await;
         fail!("deploy", "inventory changed while preparing deploy; retry");
     }
-    // uuid-uniqueness gate (HANDOFF §4.1) — fail CLOSED before any render or
-    // `systemctl restart`: never push a config where two rendered users share
-    // an effective VLESS uuid (sing-box would dedup them and brick one).
     if let Err(e) = inv.assert_no_uuid_collisions(&server.id).await {
         fail!("deploy", "{e}");
     }
     let ctx = RenderCtx::new(&server, &secrets);
 
-    // ── 3. Per-kernel install → render → apply ────────────────────
-    // Per-kernel isolation: a failed amneziawg install does NOT abort
-    // the sing-box restart (matches the synchronous handler). Each
-    // failure is collected; the terminal event reflects the aggregate.
     for kid in &server.kernels {
         let Some(kernel) = registry.kernel(kid) else {
             ssh_errors.push(format!("{}: kernel not registered", kid.0));
@@ -425,10 +361,6 @@ async fn redeploy_pipeline(
             .filter(|p| supported.contains(p))
             .filter_map(|p| registry.protocol(p))
             .collect();
-        // Render even an empty protocol set: skipping it would leave old
-        // listeners/credentials active after the last protocol was revoked.
-        // Kernels unable to render an empty set fail closed below, retaining
-        // pending state instead of declaring the old remote config applied.
         send_step!(
             "render",
             "{}: rendering config for {} protocol(s)…",
@@ -443,8 +375,6 @@ async fn redeploy_pipeline(
                 continue;
             }
         };
-        // Reserved-ports pre-apply guard (migration 0028) — refuse a
-        // config that would bind a co-tenant's port. sing-box only.
         if kid.0 == "sing-box" {
             match inv.get_reserved_ports(&server.id).await {
                 Ok(reserved) => {
@@ -473,16 +403,11 @@ async fn redeploy_pipeline(
         ssh_kernels_pushed.push(kid.0.clone());
         configs_applied += 1;
         send_step!("apply", "✓ {} — config applied, service active.", kid.0);
-        // Open the host firewall for the ports these protocols bind, so a
-        // fresh deploy is reachable without a manual `ufw allow`. Best-effort:
-        // a firewall failure (no ufw / cloud-firewall host) is surfaced but
-        // does NOT fail the deploy — the config is already live.
         if let Err(e) = kernel.open_firewall(&ssh, &ctx, &protocols).await {
             send_step!("apply", "⚠ {} — firewall step skipped: {e}", kid.0);
         }
     }
 
-    // ── 4. Audit (same shape + action as the synchronous handler) ──
     let audit_action = write_deploy_audit(
         &inv,
         &server,
@@ -497,7 +422,6 @@ async fn redeploy_pipeline(
     )
     .await;
 
-    // ── 5. Terminal event — Ok ONLY when every kernel succeeded ───
     if audit_action == "server.deploy" {
         let _ = tx
             .send(BootstrapEvent::Ok {

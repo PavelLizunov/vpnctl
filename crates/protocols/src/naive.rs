@@ -3,44 +3,6 @@ use percent_encoding::utf8_percent_encode;
 use serde_json::json;
 use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
 
-/// Naive — Chromium-fingerprint-mimicking proxy served by a **Caddy +
-/// forwardproxy** kernel (NOT sing-box). Unauthenticated visitors get a
-/// real masquerade website (HTTP 200); authenticated clients are
-/// proxied. This is the strongest active-probe resistance of any
-/// protocol in this crate: an active probe sees a genuine, serving web
-/// server — not a `400`, not a self-signed cert with no HTML behind it
-/// (cf. `Trojan`'s `Weak` tier), not bare QUIC.
-///
-/// # Kernel pairing
-///
-/// The wire format is "HTTP/2 CONNECT with naive padding over real-cert
-/// TLS, with a real-website fallback". sing-box's `naive` INBOUND cannot
-/// serve the fallback site (it `400`s every non-proxy request), so this
-/// Protocol is served by the [`Caddy`] kernel instead. Exactly like
-/// `WireGuard` ↔ `AmneziaWg`: `server_inbound` returns a STABLE JSON
-/// ENVELOPE (per-user auth list + domain/email), which the Caddy kernel
-/// deserialises and assembles into a Caddyfile.
-///
-/// [`Caddy`]: https://docs.rs/vpnctl-kernels
-///
-/// # Per-user secret
-///
-/// Reuses `User.tuic_password` as the HTTP Basic proxy password
-/// (username = `User.id`), exactly like Trojan / AnyTLS / Hysteria2.
-/// No migration needed — this preserves the kernel/protocol
-/// orthogonality invariant (touches only `protocols` + `kernels` + two
-/// registry lines). A dedicated `naive_password` column is a deliberate
-/// later phase (see docs/NAIVE_CADDY_PLAN.md §2).
-///
-/// # Server params (via [`RenderCtx::secrets`])
-///
-/// - `naive.domain` (REQUIRED) — the real domain whose Let's Encrypt
-///   cert Caddy's built-in ACME mints. The client connects HERE, never
-///   to the raw server IP, so the cert validates and the SNI is a real
-///   hostname.
-/// - `naive.acme_email` (optional) — ACME account contact email.
-///
-/// **Stateless**, like every other Protocol in this crate.
 #[derive(Debug, Default)]
 pub struct Naive;
 
@@ -50,17 +12,8 @@ impl Naive {
     }
 }
 
-/// Listen port. Public so the admin drift detector recognises the
-/// inbound on a probe. Caddy-naive wants 443 (indistinguishable from
-/// normal HTTPS), so a naive node MUST NOT also run a 443 sing-box
-/// protocol (VLESS+REALITY / Trojan). Operator policy for now — the
-/// cross-kernel port-conflict preflight that will enforce it is pending
-/// (see docs/NAIVE_CADDY_PLAN.md §3).
 pub const NAIVE_PORT: u16 = 443;
 
-/// `RenderCtx::require("naive.domain")` + reject empty/whitespace + reject [`DOMAIN_ILLEGAL`].
-/// Single source of truth for "a domain safe to put in naive artefacts",
-/// shared by `server_inbound`, `share_link` and `client_config`.
 fn checked_domain<'a>(ctx: &'a RenderCtx<'_>) -> Result<&'a str> {
     let domain = ctx.require("naive.domain")?;
     if domain.trim().is_empty() || domain.contains(DOMAIN_ILLEGAL) {
@@ -81,35 +34,13 @@ impl Protocol for Naive {
     }
 
     fn dpi_risk(&self) -> vpnctl_core::DpiRisk {
-        // Caddy `forwardproxy` with `probe_resistance` + `file_server`
-        // serves a REAL website (HTTP 200) to unauthenticated probes,
-        // while the Chromium-network-stack naive client makes proxied
-        // traffic byte-indistinguishable from a Chrome user browsing
-        // that site. No fixed wire signature, no self-signed tell.
         vpnctl_core::DpiRisk::Strong
     }
 
     fn server_secret_specs(&self) -> Vec<vpnctl_core::ServerSecretSpec> {
-        // `naive.domain` / `naive.acme_email` are operator-supplied
-        // server PARAMS (not random-mintable), so nothing to declare
-        // here; the per-user proxy password reuses `tuic_password`,
-        // already minted by every user-add path. Bootstrap therefore
-        // needs nothing naive-specific.
         Vec::new()
     }
 
-    /// STABLE ENVELOPE consumed by the `caddy` kernel — NOT a sing-box
-    /// inbound. Shape (the contract the kernel deserialises):
-    ///
-    /// ```json
-    /// { "domain": "cdn.example.com",
-    ///   "acme_email": "admin@example.com",
-    ///   "auth": [ { "username": "alice", "password": "…" }, … ] }
-    /// ```
-    ///
-    /// Users without a `tuic_password` are skipped (same policy as
-    /// Trojan/TUIC) so a half-provisioned user can't emit an empty
-    /// credential line into the Caddyfile.
     fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value> {
         let domain = checked_domain(ctx)?;
         let acme_email = ctx.or_default("naive.acme_email", "");
@@ -138,11 +69,6 @@ impl Protocol for Naive {
                 user.id.0
             ))
         })?;
-        // sing-box `naive` outbound. `server`/`server_name` are the
-        // DOMAIN (real LE cert), never the raw IP. `utls=chrome` shapes
-        // the ClientHello like a real Chrome; the native naive binary
-        // is byte-perfect on the H2 layer too, but the sing-box outbound
-        // is the single-stack default (see module header trade-off).
         Ok(json!({
             "type": "naive",
             "tag": "naive-out",
@@ -166,9 +92,6 @@ impl Protocol for Naive {
                 user.id.0
             ))
         })?;
-        // naive client URL form (klzgrad naive + many sing-box GUIs):
-        //   naive+https://<user>:<pass>@<domain>#<tag>
-        // Both user and pass sit in the userinfo segment.
         let user_enc = utf8_percent_encode(&user.id.0, USERINFO);
         let pw = utf8_percent_encode(raw_pw, USERINFO);
         let name = utf8_percent_encode(&user.id.0, FRAGMENT);
@@ -280,7 +203,6 @@ mod tests {
             .client_config(&ctx, &user("alice", Some("pw-a")))
             .unwrap();
         assert_eq!(cfg["type"], "naive");
-        // server is the DOMAIN, never the raw IP (real LE cert / SNI).
         assert_eq!(cfg["server"], "cdn.example.com");
         assert_ne!(cfg["server"], "203.0.113.9");
         assert_eq!(cfg["server_port"], 443);
@@ -323,8 +245,6 @@ mod tests {
         let link = Naive::new()
             .share_link(&ctx, &user("alice", Some("p@ss:w/d")))
             .unwrap();
-        // `@`, `:`, `/` in the userinfo segment must be percent-encoded
-        // so the authority parses correctly.
         assert!(link.contains("p%40ss%3Aw%2Fd"), "link: {link}");
     }
 
@@ -341,11 +261,6 @@ mod tests {
 
     #[test]
     fn client_artefacts_reject_newline_injection_domain() {
-        // A `naive.domain` carrying a newline + a forged `vless://` line
-        // must be REJECTED fail-closed, not interpolated raw — otherwise it
-        // would forge an extra line into the newline-joined
-        // `/api/v1/app/config` base64 blob and defeat the "naive can never
-        // break vless" guarantee. Both client-facing renderers guard it.
         let s = server();
         let mut sec = HashMap::new();
         sec.insert(

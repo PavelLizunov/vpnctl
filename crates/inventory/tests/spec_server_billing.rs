@@ -1,5 +1,3 @@
-//! Spec for server rental billing and renewal tracking.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use tempfile::TempDir;
@@ -79,11 +77,9 @@ async fn set_and_get_server_billing() {
     );
     assert_eq!(record.notes.as_deref(), Some("Contract #12345"));
 
-    // Check fetch
     let fetched = inv.get_server_billing(&s.id).await.unwrap().unwrap();
     assert_eq!(fetched, record);
 
-    // Audit row was written
     let audits = inv.recent_audit(10).await.unwrap();
     assert!(
         audits
@@ -112,7 +108,6 @@ async fn server_billing_cascade_on_delete() {
     inv.set_server_billing(&s.id, &input).await.unwrap();
     assert!(inv.get_server_billing(&s.id).await.unwrap().is_some());
 
-    // Delete server -> billing record should cascade delete
     inv.remove_server(&s.id).await.unwrap();
     let billing = inv.get_server_billing(&s.id).await.unwrap();
     assert!(
@@ -140,11 +135,9 @@ async fn advance_billing_cycle_advances_date_and_audits() {
     };
     inv.set_server_billing(&s.id, &input).await.unwrap();
 
-    // Advance 1 month from May 31 -> June 30
     let adv1 = inv.advance_server_billing_cycle(&s.id).await.unwrap();
     assert_eq!(adv1.due_date, "2026-06-30");
 
-    // Advance 1 month from June 30 -> July 30
     let adv2 = inv.advance_server_billing_cycle(&s.id).await.unwrap();
     assert_eq!(adv2.due_date, "2026-07-30");
 
@@ -210,7 +203,7 @@ async fn list_fleet_billing_orders_earliest_due_first() {
 #[test]
 fn test_date_helpers() {
     assert!(validate_due_date("2026-09-15").is_ok());
-    assert!(validate_due_date("2026-02-29").is_err()); // 2026 is not a leap year
+    assert!(validate_due_date("2026-02-29").is_err());
     assert!(validate_due_date("invalid").is_err());
 
     assert_eq!(
@@ -236,7 +229,6 @@ async fn server_billing_error_paths() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
 
-    // 1. Set billing on non-existent server
     let missing_sid = ServerId("non-existent".into());
     let valid_input = ServerBillingInput {
         due_date: "2026-10-15".into(),
@@ -251,7 +243,6 @@ async fn server_billing_error_paths() {
     let err_missing = inv.set_server_billing(&missing_sid, &valid_input).await;
     assert!(err_missing.is_err(), "cannot set billing on missing server");
 
-    // 2. Set billing with invalid date format
     let s = srv("s1", "transip");
     inv.add_server(&s).await.unwrap();
     let invalid_date_input = ServerBillingInput {
@@ -261,14 +252,12 @@ async fn server_billing_error_paths() {
     let err_date = inv.set_server_billing(&s.id, &invalid_date_input).await;
     assert!(err_date.is_err(), "cannot set billing with malformed date");
 
-    // 3. Advance billing on unconfigured server
     let err_adv_unconf = inv.advance_server_billing_cycle(&s.id).await;
     assert!(
         err_adv_unconf.is_err(),
         "cannot advance billing when unconfigured"
     );
 
-    // 4. Advance billing on non-existent server
     let err_adv_missing = inv.advance_server_billing_cycle(&missing_sid).await;
     assert!(
         err_adv_missing.is_err(),
@@ -296,7 +285,6 @@ async fn server_billing_initial_payments_and_advance_snapshot() {
 
     inv.set_server_billing(&s.id, &input).await.unwrap();
 
-    // Verify 3 payments were recorded
     let payments = inv.list_server_payments(&s.id).await.unwrap();
     assert_eq!(payments.len(), 3);
     assert_eq!(payments[0].amount_minor, 700);
@@ -306,7 +294,6 @@ async fn server_billing_initial_payments_and_advance_snapshot() {
     assert_eq!(count, 3);
     assert_eq!(spend, 2100);
 
-    // Advance 1 cycle -> advances due_date AND records 4th payment
     let advanced = inv.advance_server_billing_cycle(&s.id).await.unwrap();
     assert_eq!(advanced.due_date, "2026-11-10");
 
@@ -322,7 +309,6 @@ async fn server_spend_and_count_dynamically_converts_across_currency_switch() {
     let s = srv("s2", "hetzner");
     inv.add_server(&s).await.unwrap();
 
-    // Insert 1 EUR = 100 RUB rate (1 EUR = 100_000_000 micros)
     inv.upsert_currency_rate(&vpnctl_inventory::CurrencyRate {
         base_currency: "EUR".into(),
         target_currency: "RUB".into(),
@@ -336,7 +322,7 @@ async fn server_spend_and_count_dynamically_converts_across_currency_switch() {
     let input = ServerBillingInput {
         due_date: "2026-10-10".into(),
         billing_cycle: BillingCycle::Monthly,
-        amount_cents: 1000, // 10.00 EUR
+        amount_cents: 1000,
         currency: "EUR".into(),
         auto_renew: false,
         billing_url: None,
@@ -345,12 +331,10 @@ async fn server_spend_and_count_dynamically_converts_across_currency_switch() {
     };
     inv.set_server_billing(&s.id, &input).await.unwrap();
 
-    // Spend in EUR: 2 payments of 10.00 EUR = 2000 cents
     let (spend_eur, count_eur) = inv.server_spend_and_count(&s.id, "EUR").await.unwrap();
     assert_eq!(count_eur, 2);
     assert_eq!(spend_eur, 2000);
 
-    // Operator switches display currency to RUB: payments must not vanish!
     let (spend_rub, count_rub) = inv.server_spend_and_count(&s.id, "RUB").await.unwrap();
     assert_eq!(
         count_rub, 2,
@@ -366,7 +350,6 @@ async fn advance_auto_renew_servers_advances_due_servers() {
     let s = srv("s3", "aeza");
     inv.add_server(&s).await.unwrap();
 
-    // Set server due yesterday with auto_renew = true
     let input = ServerBillingInput {
         due_date: "2026-01-01".into(),
         billing_cycle: BillingCycle::Monthly,
@@ -407,7 +390,6 @@ async fn advance_server_billing_cycle_guarded_prevents_duplicate_billing() {
     };
     inv.set_server_billing(&s.id, &input).await.unwrap();
 
-    // First call matches expected_due ("2026-05-01") -> succeeds
     let first = inv
         .advance_server_billing_cycle_guarded(&s.id, "2026-05-01", true)
         .await
@@ -415,7 +397,6 @@ async fn advance_server_billing_cycle_guarded_prevents_duplicate_billing() {
     assert!(first.is_some());
     assert_eq!(first.unwrap().due_date, "2026-06-01");
 
-    // Second call with stale expected_due ("2026-05-01") -> returns None (CAS mismatch)
     let second = inv
         .advance_server_billing_cycle_guarded(&s.id, "2026-05-01", true)
         .await
@@ -425,7 +406,6 @@ async fn advance_server_billing_cycle_guarded_prevents_duplicate_billing() {
         "CAS mismatch must prevent duplicate advancement"
     );
 
-    // Payments count must be exactly 1
     let payments = inv.list_server_payments(&s.id).await.unwrap();
     assert_eq!(
         payments.len(),
@@ -433,7 +413,6 @@ async fn advance_server_billing_cycle_guarded_prevents_duplicate_billing() {
         "exactly one payment snapshot must be recorded"
     );
 
-    // Third call with require_auto_renew=true on server with auto_renew=false -> returns None
     let input_no_renew = ServerBillingInput {
         due_date: "2026-06-01".into(),
         billing_cycle: BillingCycle::Monthly,
@@ -463,7 +442,6 @@ async fn convert_amount_spot_does_not_inflate_with_markup() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
 
-    // Set up settings with 15% default markup (+1500 bps = 11500)
     let settings_input = vpnctl_inventory::CurrencySettingsInput {
         display_currency: Some("EUR".into()),
         default_markup_bps: Some(11500),
@@ -473,7 +451,6 @@ async fn convert_amount_spot_does_not_inflate_with_markup() {
     };
     inv.set_currency_settings(&settings_input).await.unwrap();
 
-    // Rate: 1 EUR = 100 RUB
     inv.upsert_currency_rate(&vpnctl_inventory::CurrencyRate {
         base_currency: "EUR".into(),
         target_currency: "RUB".into(),
@@ -484,7 +461,6 @@ async fn convert_amount_spot_does_not_inflate_with_markup() {
     .await
     .unwrap();
 
-    // 1000 RUB -> EUR at spot rate
     let spot = inv
         .convert_amount_spot(100_000, "RUB", "EUR")
         .await

@@ -39,10 +39,6 @@ pub(crate) async fn render_activity_tab(
     lang: Locale,
 ) -> Markup {
     html! {
-        // TT-2 — proxy-masked honesty banner. When a MATERIAL fraction
-        // of the 30d real-client fetches logged the front proxy's IP
-        // instead of the client's, the empty geo below is a config gap,
-        // not "no data" — say so, with the count/%/date-span + the fix.
         @let pm = &proxy_masked;
         @let masked_pct = pm.masked_rows.saturating_mul(100).checked_div(pm.window_rows).unwrap_or(0);
         @if pm.masked_rows > 0 && masked_pct >= 20 {
@@ -71,7 +67,6 @@ pub(crate) async fn render_activity_tab(
                 }
             }
         }
-        // v2 4c — four fact tiles + the geo-resolved fetch log.
         div.ed-status-strip.ed-status-strip--activity style="grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 16px 0;" {
             @let (verdict_txt, verdict_color, score_note) = match &sharing {
                 Some(sc) if sc.is_flagged() => (
@@ -87,12 +82,6 @@ pub(crate) async fn render_activity_tab(
                 None => (
                     crate::i18n::tr(lang, "no data", "нет данных"),
                     "var(--mute)",
-                    // Re-audit: the scorer only sees REAL-client rows
-                    // (sharing_signals gates on real_client_ip_predicate),
-                    // so a fully proxy-masked user is absent from it while
-                    // «sub fetches · 30d» (ungated) still shows N. Say
-                    // "no real-client fetches" so the note never
-                    // contradicts a nonzero fetch tile.
                     crate::i18n::tr(
                         lang,
                         "no real-client fetches in 30d",
@@ -152,10 +141,6 @@ pub(crate) async fn render_activity_tab(
                 "Каждое обращение к config-URL, обогащённое GeoIP на момент запроса. Локальный/VPN-диапазон обычно значит, что клиент обновлялся через собственный туннель.",
             )) { (icon("info")) }
         }
-        // TT-3 — the log is newest-first and UNBOUNDED (all rows, all
-        // sources), while the tiles above are a 30d, real-client-only
-        // slice. Say so, so «N client IPs» over a visibly-longer log
-        // reads as two intentionally-different views, not a bug.
         p style="font-family: var(--mono); font-size: 10px; color: var(--mute); margin: 4px 0 0;" {
             (crate::i18n::tr(
                 lang,
@@ -220,7 +205,6 @@ pub(crate) async fn render_activity_tab(
                 }
             }
         }
-        // v2 4c — «showing N of M» + newer/older paging + CSV export.
         @if log_total > 0 {
             @let uid_enc_log = path_segment_encode(&user.id.0);
             @let shown_from = log_page * LOG_PAGE_SIZE + 1;
@@ -247,17 +231,8 @@ pub(crate) async fn render_activity_tab(
                 }
             }
         }
-            // R2 2026-07-10: the legacy «Subscription access» stats+table
-            // and the standalone sharing-verdict paragraph duplicated the v2
-            // 4c tiles + geo-log above (same aggregates, second 25-row table).
-            // Origins / UA / source-IPs / sessions below carry the unique data.
 
 
-            // ── abuse-origins — "Subscription origins" (#origins) ────
-            // WHO is sharing: country / ISP / IP breakdown + a rough
-            // device-count line. Anchored so the dashboard likely-shared
-            // card links straight here. Sits below the verdict (the
-            // headline) and above the per-UA table (the /16 evidence).
             (user_subscription_origins_section(
                 origins_by_country,
                 origins_by_asn,
@@ -266,15 +241,9 @@ pub(crate) async fn render_activity_tab(
                 lang,
             ))
 
-            // ── UA fingerprint (Phase Track-4) + user#7 geo footer ───
             (ua_clusters_section(state, uid, access_aggregates, lang).await)
 
 
-            // ── Source IPs (2026-06-14) — «откуда» counterpart to the
-            // «куда» destinations table: per-client-IP activity grounded
-            // in real VPN connections, GeoIP-labelled + reserved-range
-            // classified (the «проработай (неизвестно)» + «разбей трафик
-            // по IP» deliverable). Pre-fetched above.
             (user_source_ips_section(source_ips, source_ip_geo, lang))
 
             (user_sessions_section(state, uid, lang).await)

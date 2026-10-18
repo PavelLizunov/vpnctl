@@ -1,11 +1,3 @@
-//! Synthetic AWG integration fixture, using the same public renderers as delivery.
-//!
-//! Run the already-built example with no arguments. Stdout contains only a JSON
-//! manifest naming a new 0700 temporary directory; its four artifacts are 0600.
-//! The caller owns/removes that directory after probing both versions. No live
-//! inventory is read. Keys below are PUBLIC RFC 7748 section 6.1 test vectors,
-//! not credentials: these fixtures must never be deployed or exposed to a network.
-
 use std::collections::HashMap;
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{self, Write};
@@ -18,15 +10,12 @@ use vpnctl_core::{
 use vpnctl_kernels::SingBox;
 use vpnctl_protocols::{AmneziaWg2, AmneziaWg3, render_amnezia_conf};
 
-// Alice = server, Bob = client; matching X25519 pairs from the public RFC.
 const SERVER_PRIVATE: &str = "dwdtCnMYpX08FsFyUbJmRd9ML4frwJkqsXf7pR25LCo=";
 const SERVER_PUBLIC: &str = "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=";
 const CLIENT_PRIVATE: &str = "XasIfmJKikt54X+Lg4AO5m87sSkmGLb9HC+LJ/+I4Os=";
 const CLIENT_PUBLIC: &str = "3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hbeGdNrfx+FG+IK08=";
 
 fn temporary_directory() -> io::Result<PathBuf> {
-    // Atomic creation (never reuse/follow an existing path), mode set at creation.
-    // Predictability is harmless: collisions are skipped, never opened.
     for attempt in 0..1000 {
         let path = std::env::temp_dir().join(format!(
             "vpnctl-awg-rendered-{}-{attempt}",
@@ -80,7 +69,6 @@ fn render(directory: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let mut secrets = HashMap::from([
             (format!("{id}.server_private_key"), SERVER_PRIVATE.into()),
             (format!("{id}.server_public_key"), SERVER_PUBLIC.into()),
-            // Public nonzero vectors also supply reproducible profile material.
             (format!("{id}.profile_seed"), CLIENT_PUBLIC.into()),
         ]);
         if version == 3 {
@@ -95,7 +83,6 @@ fn render(directory: &Path) -> Result<(), Box<dyn std::error::Error>> {
             Box::new(AmneziaWg3::new())
         };
         let ctx = RenderCtx::with_peers(&server, &secrets, &peers);
-        // No hand-built endpoint, port substitution, or changes to route guards.
         let server_json = SingBox::new().render_config(&ctx, &peers, &[protocol.as_ref()])?;
         let native_conf = render_amnezia_conf(version, &ctx, &peers[0])?;
         private_file(
@@ -134,7 +121,6 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(_) => {
-            // Renderer and IO errors may contain material or paths; never print them.
             println!("{{\"kind\":\"fixture\",\"pass\":false,\"failure\":\"fixture_failed\"}}");
             ExitCode::FAILURE
         }

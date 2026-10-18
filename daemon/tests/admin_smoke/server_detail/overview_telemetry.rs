@@ -14,21 +14,19 @@ async fn server_detail_shows_pending_banner_after_revoke_until_deploy() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
-    seed(&inv, 1, 1, &[(0, 0)]).await; // u0 granted s0
+    seed(&inv, 1, 1, &[(0, 0)]).await;
     inv.audit("admin", "server.deploy", Some("s0"), None)
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     let app = router(s);
 
-    // Deployed + no membership change since → no banner.
     let html = fetch_html(app.clone(), "/admin/servers/s0").await;
     assert!(
         !html.contains("pending-deploy-banner"),
         "freshly-deployed server must not show the pending banner"
     );
 
-    // Revoke u0 through the real handler → banner appears.
     app.clone()
         .oneshot(
             add_same_origin(
@@ -47,7 +45,6 @@ async fn server_detail_shows_pending_banner_after_revoke_until_deploy() {
         "revoke must raise the server-side pending-deploy banner"
     );
 
-    // A deploy AFTER the revoke clears it.
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     inv.audit("admin", "server.deploy", Some("s0"), None)
         .await
@@ -82,15 +79,13 @@ async fn admin_server_detail_unknown_id_returns_404() {
 async fn admin_server_detail_no_probe_shows_chunk4_empty_state() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    seed(&s.inv, 1, 0, &[]).await; // server s0 only
+    seed(&s.inv, 1, 0, &[]).await;
     let html = fetch_html(router(s), "/admin/servers/s0").await;
     assert!(html.contains("Live status"));
     assert!(
         html.contains("No probes yet"),
         "empty-state copy must mention 'No probes yet'"
     );
-    // Copy refreshed 2026-06-10: poller is LIVE at a 10-min cadence;
-    // blank = not probed yet / not a sing-box node.
     assert!(
         html.contains("every 10 min"),
         "must state the live poller cadence"
@@ -102,7 +97,6 @@ async fn admin_server_detail_with_probe_renders_kpis() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 0, &[]).await;
-    // Insert a probe row matching what node_probe would produce
     s.inv
         .record_node_health(
             &ServerId("s0".into()),
@@ -127,7 +121,6 @@ async fn admin_server_detail_with_probe_renders_kpis() {
     let app = router(s);
     let html = fetch_html(app.clone(), "/admin/servers/s0").await;
     let ru = fetch_html_with_cookie(app, "/admin/servers/s0", "vpnctl_lang=ru").await;
-    // Dense six-tile hero strip visible, with non-color warning semantics.
     assert!(html.contains("ed-status-strip"));
     assert!(html.contains("active"), "sing-box active visible");
     for (page, disk_label, memory_label, warning) in [
@@ -165,7 +158,6 @@ async fn admin_server_detail_with_probe_renders_kpis() {
             );
         }
     }
-    // No empty-state once we have data
     assert!(!html.contains("No probes yet"));
 }
 
@@ -203,24 +195,20 @@ async fn admin_server_detail_lists_all_users_with_grant_buttons() {
             .await
             .unwrap();
     }
-    // Grant alice but not bob.
     s.inv
         .grant(&UserId("alice".into()), &ServerId("sb".into()))
         .await
         .unwrap();
     let app = router(s);
     let html = fetch_html(app, "/admin/servers/sb/grants").await;
-    // Alice = granted → revoke form
     assert!(
         html.contains("/admin/servers/sb/grants/alice/revoke"),
         "granted user must have revoke form on server detail"
     );
-    // Bob = ungranted → grant form
     assert!(
         html.contains("/admin/servers/sb/grants/bob"),
         "ungranted user must have grant form on server detail"
     );
-    // Counter pin (1 of 2)
     assert!(html.contains("1 of 2"), "X of N counter missing");
 }
 
@@ -256,8 +244,6 @@ async fn server_detail_uptime_section_omitted_when_no_probes() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let html = std::str::from_utf8(&body).unwrap();
-    // The section's anchor id + eyebrow text are the canonical
-    // markers; both must be absent when there are no probes.
     assert!(
         !html.contains("id=\"uptime-section\""),
         "uptime section must NOT render for a server with zero node_health rows"
@@ -288,19 +274,17 @@ async fn server_detail_uptime_section_renders_with_probe_data() {
         })
         .await
         .unwrap();
-    // Seed 5 all-up probes. record_node_health uses ts=now so all
-    // will fall inside the 24h/7d/30d windows.
     for _ in 0..5 {
         st.inv
             .record_node_health(
                 &sid,
-                Some(true),  // sing_box_active
-                Some(true),  // fail2ban_active
-                Some(1024),  // disk_used_mib
-                Some(10240), // disk_total_mib
-                Some(500),   // mem_available_mib
-                Some(1024),  // mem_total_mib
-                Some(50),    // load_1min_x100
+                Some(true),
+                Some(true),
+                Some(1024),
+                Some(10240),
+                Some(500),
+                Some(1024),
+                Some(50),
                 Some("[\"tcp/443\",\"udp/8443\"]"),
                 Some(1024 * 1024),
                 None,
@@ -325,7 +309,6 @@ async fn server_detail_uptime_section_renders_with_probe_data() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let html = std::str::from_utf8(&body).unwrap();
-    // Section anchor + eyebrow must both appear.
     assert!(
         html.contains("id=\"uptime-section\""),
         "uptime section must render when probes exist"
@@ -334,20 +317,12 @@ async fn server_detail_uptime_section_renders_with_probe_data() {
         html.contains("Uptime · sing-box service"),
         "eyebrow copy must render (EN default)"
     );
-    // All three window labels must be present.
     for chip in &["last 24h", "last 7d", "last 30d"] {
         assert!(
             html.contains(chip),
             "chip label «{chip}» must render in uptime section"
         );
     }
-    // With 5 up probes + 0 down, all three chips MUST read 100%.
-    // We assert on the stable `data-uptime-pct="100"` attribute
-    // (review-agent NM-uptime catch) rather than scanning for the
-    // literal «100%» text — the admin page has 11+ unrelated
-    // `100%` substrings (CSS `width: 100%`, full-disk tile, etc.)
-    // and a regression where all three chips fell through to
-    // `None` could falsely pass an inline-text count.
     let pct_attr_count = html.matches("data-uptime-pct=\"100\"").count();
     assert_eq!(
         pct_attr_count,
@@ -356,7 +331,6 @@ async fn server_detail_uptime_section_renders_with_probe_data() {
          (found {pct_attr_count}); html len = {} bytes",
         html.len()
     );
-    // Probe count chip footer must mention «probes».
     assert!(
         html.contains("probes"),
         "chip footer must show «N probes» count"
@@ -406,21 +380,18 @@ async fn server_detail_info_cards_headlines_match_voice() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 0, &[]).await;
-    // ui-audit §4 — these cards now live across tabs: server#1/#2 on
-    // protocols, server#3/#4/#5 on activity, server#7 (audit) on the
-    // default status tab. Fetch each tab and pin its subset.
     let app = router(s);
     let proto = fetch_html(app.clone(), "/admin/servers/s0/protocols").await;
     let act = fetch_html(app.clone(), "/admin/servers/s0/activity").await;
     let status = fetch_html(app, "/admin/servers/s0").await;
     for (html, needle) in [
-        (&proto, "Drift detail · on-node UUIDs"), // server#1
-        (&proto, "Kernel rollup · sing-box"),     // server#2
-        (&act, "Top users · last 24h"),           // server#3
-        (&act, "Server traffic · "),              // server#4
-        (&act, "TCP / UDP split"),                // server#5
-        (&status, "drift-summary"),               // status keeps the drift verdict
-        (&act, "Audit timeline · this server"),   // server#7 (v2 3b: activity)
+        (&proto, "Drift detail · on-node UUIDs"),
+        (&proto, "Kernel rollup · sing-box"),
+        (&act, "Top users · last 24h"),
+        (&act, "Server traffic · "),
+        (&act, "TCP / UDP split"),
+        (&status, "drift-summary"),
+        (&act, "Audit timeline · this server"),
     ] {
         assert!(
             html.contains(needle),
@@ -441,13 +412,13 @@ async fn server_detail_info_cards_headlines_ru() {
         fetch_html_with_cookie(app.clone(), "/admin/servers/s0/activity", "vpnctl_lang=ru").await;
     let status = fetch_html_with_cookie(app, "/admin/servers/s0", "vpnctl_lang=ru").await;
     for (html, needle) in [
-        (&proto, "Детальный дрейф · UUID на ноде"), // server#1
-        (&proto, "Версии ядер · sing-box"),         // server#2
-        (&act, "Топ пользователей · за 24ч"),       // server#3
-        (&act, "Трафик сервера · "),                // server#4
-        (&act, "Разбивка TCP / UDP"),               // server#5
-        (&status, "drift-summary"),                 // status keeps the drift verdict
-        (&act, "Лента аудита · этот сервер"),       // server#7 (v2 3b: activity)
+        (&proto, "Детальный дрейф · UUID на ноде"),
+        (&proto, "Версии ядер · sing-box"),
+        (&act, "Топ пользователей · за 24ч"),
+        (&act, "Трафик сервера · "),
+        (&act, "Разбивка TCP / UDP"),
+        (&status, "drift-summary"),
+        (&act, "Лента аудита · этот сервер"),
     ] {
         assert!(
             html.contains(needle),
@@ -462,7 +433,6 @@ async fn server_detail_tabs_render_gate_and_mark_active() {
     let s = state(&dir).await;
     seed(&s.inv, 1, 0, &[]).await;
     let app = router(s);
-    // (path, active-slug, present-on-this-tab, absent-on-this-tab)
     let cases = [
         (
             "/admin/servers/s0/status",

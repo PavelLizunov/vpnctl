@@ -4,17 +4,6 @@ use sqlx::Row;
 use std::collections::HashMap;
 use vpnctl_core::ServerId;
 
-/// Sum per-interval deltas of cumulative NIC counters, `readings`
-/// oldest→newest as `(iface, rx, tx)` triples. Two discontinuity guards
-/// each count the new value itself as that interval's delta (a lower
-/// bound; the pre-discontinuity tail is unknowable): a reboot/reset (a
-/// reading LOWER than the previous — counter wrapped / NIC reset), and an
-/// interface change (`iface` differs from the previous reading — rename
-/// `eth0`→`ens18`, uplink failover; the two readings are DIFFERENT
-/// counters, so a plain subtraction would be garbage, and a higher new
-/// counter would otherwise inflate the total). Fewer than 2 readings ⇒
-/// `(0, 0)`. Pure + saturating, so it's spec-testable in isolation and
-/// can't overflow on a corrupt counter. Returns `(rx_total, tx_total)`.
 pub fn sum_nic_deltas(readings: &[(String, u64, u64)]) -> (u64, u64) {
     let mut rx = 0u64;
     let mut tx = 0u64;
@@ -127,27 +116,6 @@ fn row_to_service_quality_sample(
 }
 
 impl SqliteInventory {
-    // ──────────────────────────────────────────────────────────────────
-    // Phase H chunk 2 — node telemetry storage (node_probe sink)
-    //
-    // Same shape + lifecycle as `vpn_connection_stats`:
-    //   * Daemon poller calls `record_node_health(server_id, &Probe)`
-    //     once per tick per server (chunk 3).
-    //   * UI reads via `recent_node_health_for_server(id, since_hours)`.
-    //   * Retention purge mirrors the others.
-    //
-    // **Audit exemption** (same rationale as `record_vpn_stats`):
-    // probe writes happen at poller cadence × server count; audit
-    // log volume would drown human-driven mutations. The table IS the
-    // audit trail for telemetry. Documented exemption — not a silent
-    // drift from the "every mutation audited" invariant.
-    // ──────────────────────────────────────────────────────────────────
-
-    /// Persist one node probe. `listening_ports_json` is the JSON
-    /// serialization of the sorted `(proto, port)` set — caller
-    /// builds it from `daemon::node_probe::Probe::listening`. Always
-    /// stamps `ts` with daemon-side now; clash-api / probes don't
-    /// carry their own timestamp.
     #[allow(clippy::too_many_arguments)]
     pub async fn record_node_health(
         &self,
@@ -168,7 +136,6 @@ impl SqliteInventory {
         sing_box_nrestarts: Option<u64>,
     ) -> Result<()> {
         let sample_id = vpnctl_crypto::gen_uuid();
-        // SQLite has no BOOLEAN — map Option<bool> → Option<i64>.
         let sb = sing_box_active.map(i64::from);
         let f2b = fail2ban_active.map(i64::from);
         sqlx::query(
@@ -203,8 +170,6 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// Recent rows for one server in the look-back window, newest
-    /// first. UI reads this for the server-detail page (chunk 3).
     pub async fn recent_node_health_for_server(
         &self,
         server_id: &ServerId,
@@ -229,10 +194,6 @@ impl SqliteInventory {
         rows.into_iter().map(row_to_node_health).collect()
     }
 
-    /// Most recent single row for a server. Convenience for the
-    /// "current state" hero block on the server-detail page —
-    /// callers that only need the latest snapshot don't have to
-    /// pull a whole 24h Vec just to read the first element.
     pub async fn latest_node_health(&self, server_id: &ServerId) -> Result<Option<NodeHealthRow>> {
         let row_opt = sqlx::query(
             "SELECT sample_seq, sample_id, ts, server_id, sing_box_active, fail2ban_active,
@@ -252,8 +213,6 @@ impl SqliteInventory {
         row_opt.map(row_to_node_health).transpose()
     }
 
-    /// Map of `server_id -> most recent NodeHealthRow` for all servers with probe data.
-    /// Exactly 1 query using SQLite window functions, eliminating N+1 loops across the fleet.
     pub async fn latest_node_health_fleet(&self) -> Result<HashMap<ServerId, NodeHealthRow>> {
         let rows = sqlx::query(
             "WITH ranked AS (
@@ -285,26 +244,11 @@ impl SqliteInventory {
         Ok(out)
     }
 
-    /// Traffic accounting breakdown for one server over the window:
-    /// NIC ground-truth total (ALL protocols), the part attributed to
-    /// sing-box via clash-api, and the GAP between them (non-sing-box
-    /// protocols — naive/Caddy — plus protocol/OS
-    /// overhead). Backs the «Traffic accounting» section on the
-    /// server-detail page; the gap is THE signal the operator wants
-    /// (how much real traffic vpnctl currently can't see per-user).
-    ///
-    /// NIC total = sum of per-interval deltas of the cumulative
-    /// `node_health.nic_*` counters (reboot/reset-guarded via
-    /// [`sum_nic_deltas`]). Attributed = `SUM(upload+download)` over ALL
-    /// `vpn_connection_stats` rows (per-user + the server-wide remainder)
-    /// — clash-api's total view of sing-box traffic.
     pub async fn server_traffic_breakdown(
         &self,
         server_id: &ServerId,
         since_hours: u32,
     ) -> Result<TrafficBreakdown> {
-        // Cumulative NIC readings in the window, oldest→newest (need ≥2
-        // for a delta). Only rows that actually captured the counters.
         let nic_rows = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<String>)>(
             "SELECT nic_rx_bytes, nic_tx_bytes, nic_iface
              FROM node_health
@@ -318,9 +262,6 @@ impl SqliteInventory {
         .fetch_all(&self.pool)
         .await?;
         let nic_iface = nic_rows.last().and_then(|(_, _, i)| i.clone());
-        // Carry the iface into each reading so sum_nic_deltas can break
-        // continuity on an iface change (rename / failover) — diffing two
-        // different counters would otherwise inflate the total.
         let readings: Vec<(String, u64, u64)> = nic_rows
             .iter()
             .filter_map(|(rx, tx, ifc)| {
@@ -334,11 +275,6 @@ impl SqliteInventory {
         let (nic_rx_bytes, nic_tx_bytes) = sum_nic_deltas(&readings);
         let nic_total_bytes = nic_rx_bytes.saturating_add(nic_tx_bytes);
 
-        // Attributed (clash-api / sing-box) — sum of up+dn over ALL rows
-        // (per-user + the NULL server-wide remainder) in the window. These
-        // are DISJOINT by the clash poller's design (it emits per-user
-        // deltas plus a remainder = total − attributed), so summing both
-        // yields clash's true total view — not a double-count.
         let (attributed,): (i64,) = sqlx::query_as(
             "SELECT COALESCE(SUM(upload_bytes + download_bytes), 0)
              FROM vpn_connection_stats
@@ -356,37 +292,12 @@ impl SqliteInventory {
             nic_rx_bytes,
             nic_tx_bytes,
             attributed_bytes,
-            // Saturating: clash can briefly exceed NIC at window edges
-            // (sample boundaries don't align) — never show a negative gap.
             gap_bytes: nic_total_bytes.saturating_sub(attributed_bytes),
             nic_samples: readings.len(),
             nic_iface,
         })
     }
 
-    /// Phase H+ — uptime aggregation for the per-server detail page.
-    ///
-    /// Single SQL round-trip returns the rolling-window counts +
-    /// last-outage + last-probe timestamps over `window_hours`. The
-    /// UI builds three of these (24h, 7d, 30d) for one server with
-    /// effectively the cost of three indexed range scans against
-    /// `(server_id, ts)` — cheap even on the 632-row/day production
-    /// rate that the live `is` node generates today.
-    ///
-    /// Definitions:
-    ///   * "up" = `sing_box_active=1` — what users care about (the
-    ///     daemon serving VPN traffic).
-    ///   * "down" = `sing_box_active=0` — sing-box.service in any
-    ///     non-active state at probe time.
-    ///   * "unknown" = `sing_box_active IS NULL` — probe ran but
-    ///     couldn't decide (early-bootstrap row before sing-box was
-    ///     installed, or SSH probe partial-failure).
-    ///
-    /// `uptime_pct` excludes "unknown" from the denominator. A
-    /// freshly-added server whose only rows are unknown reports
-    /// `uptime_pct = None` rather than `0%`, which would be a wrong
-    /// alarm in the chip ("0% over 30d" looks dire — "no data"
-    /// is the honest answer).
     pub async fn uptime_for_server(
         &self,
         server_id: &ServerId,
@@ -409,10 +320,6 @@ impl SqliteInventory {
         .fetch_one(&self.pool)
         .await?;
 
-        // `COUNT(*)` is always non-null; `SUM(...)` returns NULL
-        // when there are zero rows. `try_get` with default-on-NULL
-        // semantics avoids panicking on the empty-window case
-        // (server brand-new, no probes in this window).
         let total: i64 = row.try_get("total").unwrap_or(0);
         let up: i64 = row.try_get("up_count").unwrap_or(0);
         let down: i64 = row.try_get("down_count").unwrap_or(0);
@@ -420,16 +327,12 @@ impl SqliteInventory {
         let last_outage_s: Option<String> = row.try_get("last_outage").ok();
         let last_probe_s: Option<String> = row.try_get("last_probe").ok();
 
-        // uptime% over decidable rows. None when no up+down rows.
         let uptime_pct: Option<u8> = if up + down > 0 {
-            // u8 fits 0..=100 even with i64 inputs since we clamp.
             Some(((up * 100) / (up + down)).clamp(0, 100) as u8)
         } else {
             None
         };
 
-        // Strings from SQLite come back ISO-8601 UTC (the column is
-        // written that way by the writer). Parse → DateTime<Utc>.
         let parse = |s: Option<String>| -> Option<DateTime<Utc>> {
             s.as_deref()
                 .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
@@ -448,8 +351,6 @@ impl SqliteInventory {
         })
     }
 
-    /// Drop rows older than `days`. Wired by chunk 3 into the
-    /// existing retention scheduler.
     pub async fn purge_node_health_older_than(&self, days: u32) -> Result<u64> {
         let res = sqlx::query(
             "DELETE FROM node_health
@@ -461,12 +362,6 @@ impl SqliteInventory {
         Ok(res.rows_affected())
     }
 
-    // ── Phase G admin_alerts ────────────────────────────────────────────
-
-    // ── Service-path quality samples ─────────────────────────────────
-
-    /// Persist one low-load TCP service-path poll batch. Telemetry rows are
-    /// their own audit trail, matching `node_health` and VPN stats.
     pub async fn record_service_quality_sample(
         &self,
         sample: &crate::quality::ServiceQualitySample,
@@ -474,9 +369,6 @@ impl SqliteInventory {
         self.record_quality_sample(sample, None).await
     }
 
-    /// Persist a completed poll with its exact service/control TCP population.
-    /// Sorting makes order irrelevant; vantage changes also start a new period.
-    /// Pre-provisioning rows remain raw evidence, never eligible service quality.
     pub async fn record_service_quality_sample_for_targets(
         &self,
         sample: &crate::quality::ServiceQualitySample,
@@ -514,8 +406,6 @@ impl SqliteInventory {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
-        // Serialize population selection with insertion: two concurrent writers
-        // cannot join an obsolete epoch. Only completed polls change periods.
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let provisioned: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM audit_log
@@ -582,8 +472,6 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// Raw retained evidence in chronological order, including legacy and
-    /// pre-provisioning rows. Use the provisioned variant for current quality.
     pub async fn service_quality_samples_for_server(
         &self,
         server_id: &ServerId,
@@ -608,8 +496,6 @@ impl SqliteInventory {
             .collect()
     }
 
-    /// Legacy raw-history aggregation. Its rows may have unknown populations;
-    /// use `provisioned_service_quality_for_server` for current service quality.
     pub async fn service_quality_for_server(
         &self,
         server_id: &ServerId,
@@ -626,9 +512,6 @@ impl SqliteInventory {
         ))
     }
 
-    /// Current identified population only. Legacy and pre-provisioning rows
-    /// remain available through `service_quality_samples_for_server`, but must
-    /// not feed readiness, current charts, or quality alerts.
     pub async fn provisioned_service_quality_samples_for_server(
         &self,
         server_id: &ServerId,
@@ -656,7 +539,6 @@ impl SqliteInventory {
             .collect()
     }
 
-    /// Rolling score from a single provisioned measurement period.
     pub async fn provisioned_service_quality_for_server(
         &self,
         server_id: &ServerId,
@@ -673,8 +555,6 @@ impl SqliteInventory {
         ))
     }
 
-    /// Canonical deploy is provisioning evidence, not external reachability.
-    /// Query failures propagate; absence is explicitly unknown, never healthy.
     pub async fn service_quality_measurement_for_server(
         &self,
         server_id: &ServerId,
@@ -782,7 +662,6 @@ mod quality_tests {
         })
         .await
         .unwrap();
-        // One captured clock and wide boundaries: no timing sleeps or races.
         let now = Utc::now();
         (dir, inv, now)
     }
@@ -829,7 +708,6 @@ mod quality_tests {
             0
         );
         deploy(&inv, now - chrono::Duration::hours(2), "server.deploy").await;
-        // Old samples are not retroactively attached after provisioning.
         inv.record_service_quality_sample_for_targets(
             &sample(now - chrono::Duration::hours(3), false),
             &target(443),
@@ -888,7 +766,6 @@ mod quality_tests {
         inv.record_service_quality_sample_for_targets(&failed, &target(443), &target(22))
             .await
             .unwrap();
-        // A→B→A at the same timestamp starts a third epoch, not a reunion of A.
         assert_eq!(
             inv.provisioned_service_quality_for_server(&sid, 24, 1)
                 .await
@@ -940,7 +817,6 @@ mod quality_tests {
                 .await
                 .is_err()
         );
-        // A failed insertion for a changed population must roll back its epoch.
         let mut invalid = sample(now, true);
         invalid.successes = 100;
         assert!(
@@ -1083,7 +959,6 @@ mod quality_tests {
                 .sample_count,
             0
         );
-        // Same timestamp as the previous incarnation; only its new audit ID matters.
         deploy(&inv, now, "server.deploy").await;
         inv.record_service_quality_sample_for_targets(
             &sample(now, false),

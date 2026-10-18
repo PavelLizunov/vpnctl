@@ -1,5 +1,3 @@
-//! Shared test fixtures and helpers for vpn_router_endpoint integration tests.
-
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -34,14 +32,6 @@ pub(crate) async fn seed_state(dir: &TempDir) -> AppState {
     reg.register_protocol(Box::new(VlessReality::new()))
         .unwrap();
 
-    // Two servers — confirms the handler iterates over multiple
-    // granted servers + builds one URI per server in deterministic
-    // order. Both carry the vless+reality secrets; one server (`stg`)
-    // is granted but has NO vless.public_key — should be skipped
-    // silently, not crash the whole response.
-    // Post-2026-05-20 rename: server IDs are ISO country codes.
-    // `country_display_name` in vpn_router.rs maps these to user-facing
-    // labels (de→Germany, is→Iceland). Tests use the new IDs end-to-end.
     for sid in ["de", "is"] {
         let server = Server {
             id: ServerId(sid.into()),
@@ -64,8 +54,6 @@ pub(crate) async fn seed_state(dir: &TempDir) -> AppState {
             .unwrap();
     }
 
-    // Server with NO vless secrets — should be silently skipped by the
-    // handler (no public_key → no URI rendered for this server).
     let bare_server = Server {
         id: ServerId("bare".into()),
         address: "bare.example.com".into(),
@@ -128,11 +116,6 @@ pub(crate) async fn get(
     (status, body.to_vec(), ct)
 }
 
-/// Helper: does `de` appear in the rendered subscription (raw base64
-/// / VPN-client UA path)? All inventory mutations MUST happen before
-/// calling this — the per-request access-log writer is a background
-/// task, and interleaving an audited inventory write after a fetch
-/// races it into a WAL read→write-upgrade SQLITE_BUSY.
 pub(crate) async fn de_in_subscription(app: axum::Router) -> bool {
     let (status, body, _ct) = get(
         app,
@@ -146,12 +129,6 @@ pub(crate) async fn de_in_subscription(app: axum::Router) -> bool {
     s.split('\n').any(|l| l.contains("@de.example.com"))
 }
 
-/// Seed a state where naive is a first-class citizen: SingBox+Caddy kernels
-/// and Vless+Naive protocols registered, a vless server `de`, a naive
-/// server `cdn` (Caddy kernel, `naive` enabled, `naive.domain` provisioned),
-/// and a user granted on BOTH. The user carries a `tuic_password` because
-/// the pre-Part-A naive `share_link` reads it (Part A swaps this to a
-/// dedicated `naive_password`; this test moves with that change).
 pub(crate) async fn seed_state_with_naive(dir: &TempDir) -> AppState {
     let inv = SqliteInventory::open(&dir.path().join("inv.db"))
         .await
@@ -163,7 +140,6 @@ pub(crate) async fn seed_state_with_naive(dir: &TempDir) -> AppState {
         .unwrap();
     reg.register_protocol(Box::new(Naive::new())).unwrap();
 
-    // vless server
     let de = Server {
         id: ServerId("de".into()),
         address: "de.example.com".into(),
@@ -184,7 +160,6 @@ pub(crate) async fn seed_state_with_naive(dir: &TempDir) -> AppState {
         .await
         .unwrap();
 
-    // naive server — Caddy kernel, naive protocol, ACME domain provisioned.
     let cdn = Server {
         id: ServerId("cdn".into()),
         address: "cdn.example.com".into(),
@@ -201,7 +176,6 @@ pub(crate) async fn seed_state_with_naive(dir: &TempDir) -> AppState {
     inv.set_server_secret(&cdn.id, "naive.domain", "cdn.example.com")
         .await
         .unwrap();
-    // Operator label → must surface in the rendered URI fragment.
     inv.set_server_display_name(&cdn.id, Some("Latvia"))
         .await
         .unwrap();
@@ -227,14 +201,10 @@ pub(crate) async fn seed_state_with_naive(dir: &TempDir) -> AppState {
     state
 }
 
-/// Decode the raw-base64 (VPN-client UA) subscription into its lines.
 pub(crate) async fn subscription_lines(app: axum::Router, device_id: &str) -> Vec<String> {
     subscription_lines_for_ua(app, device_id, "v2rayN/6.62").await
 }
 
-/// Like `subscription_lines` but with a caller-chosen UA, handling BOTH
-/// response shapes: a v2ray-family UA gets raw base64; the `VPNRouter` UA
-/// gets the JSON wrapper (`{"config":"<base64>"}`) — extract `config` first.
 pub(crate) async fn subscription_lines_for_ua(
     app: axum::Router,
     device_id: &str,
@@ -260,9 +230,6 @@ pub(crate) async fn subscription_lines_for_ua(
         .collect()
 }
 
-/// SingBox kernel + Vless & Hysteria2 protocols; a vless server `de` and a
-/// hysteria2 server `hy` with a Salamander obfs password provisioned. User
-/// granted on both, with a `tuic_password` (hy2's per-user auth secret).
 pub(crate) async fn seed_state_with_hy2(dir: &TempDir) -> AppState {
     seed_hy2_opts(dir, Some("HY2_TEST_PW"), true).await
 }
@@ -314,11 +281,9 @@ pub(crate) async fn seed_hy2_opts(
         usage_coefficient: 1.0,
     };
     inv.add_server(&hy).await.unwrap();
-    // Operator label → must surface in the rendered URI fragment.
     inv.set_server_display_name(&hy.id, Some("Latvia"))
         .await
         .unwrap();
-    // Salamander obfs minted (when requested) → share-link carries obfs params.
     if obfs {
         inv.set_server_secret(&hy.id, "hysteria2.obfs.password", "OBFSPW123")
             .await
@@ -346,9 +311,6 @@ pub(crate) async fn seed_hy2_opts(
     state
 }
 
-/// One physical node with BOTH naive and hysteria2 enabled — the co-location
-/// case the `pair=` tag exists for (so a client can carry UDP, which naive
-/// can't, over the HY2 on the same node).
 pub(crate) async fn seed_state_with_paired_node(dir: &TempDir) -> AppState {
     let inv = SqliteInventory::open(&dir.path().join("inv.db"))
         .await
@@ -383,7 +345,6 @@ pub(crate) async fn seed_state_with_paired_node(dir: &TempDir) -> AppState {
     inv.set_server_display_name(&cdn.id, Some("Latvia"))
         .await
         .unwrap();
-    // UDP pairing opt-in (UX-3) — without it no `pair=` tag is emitted.
     inv.set_server_udp_pair_enabled(&cdn.id, true)
         .await
         .unwrap();
@@ -419,7 +380,6 @@ pub(crate) async fn seed_state_with_awg(dir: &TempDir) -> AppState {
         .unwrap();
     reg.register_protocol(Box::new(WireGuard::new())).unwrap();
 
-    // vless server — proves vless stays first + intact.
     let de = Server {
         id: ServerId("de".into()),
         address: "de.example.com".into(),
@@ -440,7 +400,6 @@ pub(crate) async fn seed_state_with_awg(dir: &TempDir) -> AppState {
         .await
         .unwrap();
 
-    // amneziawg server — wireguard protocol + per-server obfs + server key.
     let aw = Server {
         id: ServerId("aw".into()),
         address: "203.0.113.50".into(),
@@ -507,7 +466,6 @@ pub(crate) async fn seed_state_with_xhttp(dir: &TempDir) -> AppState {
         .unwrap();
     reg.register_protocol(Box::new(VlessXhttp::new())).unwrap();
 
-    // vless+reality server (proves vless stays first).
     let de = Server {
         id: ServerId("de".into()),
         address: "de.example.com".into(),
@@ -528,7 +486,6 @@ pub(crate) async fn seed_state_with_xhttp(dir: &TempDir) -> AppState {
         .await
         .unwrap();
 
-    // xray server serving vless+xhttp (reuses the reality secrets + path).
     let xr = Server {
         id: ServerId("xr".into()),
         address: "203.0.113.60".into(),

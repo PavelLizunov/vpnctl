@@ -5,21 +5,6 @@ use maud::{Markup, html};
 
 use crate::http_util::path_segment_encode;
 
-/// Map a protocol id → set of (proto, port) we EXPECT it to be
-/// listening on. Single source of truth for the drift check —
-/// matches what each `Protocol::server_inbound` emits.
-/// Look up expected `(proto, port)` tuples for a given protocol via
-/// the registry. **Single source of truth** — each protocol owns its
-/// own port declaration (see `vpnctl_core::Protocol`), so adding a
-/// new protocol doesn't require touching this function. (Refactored
-/// 2026-05-16 per review-agent finding — previous hand-maintained
-/// map violated kernel/protocol orthogonality.)
-///
-/// `secrets` = this server's secret map: `effective_listen_ports`
-/// resolves runtime-configurable ports (vless.listen_port override),
-/// so the table shows the port the node ACTUALLY binds — not the
-/// compile-time default (cdn incident 2026-08-05: reality on 8443
-/// rendered as «no fixed port» while 443 stayed firewalled).
 pub(crate) fn expected_ports_for_protocol(
     registry: &vpnctl_core::Registry,
     pid: &vpnctl_core::ProtocolId,
@@ -35,54 +20,24 @@ pub(crate) fn expected_ports_for_protocol(
     }
 }
 
-/// One resolved orphan UUID for the server#1 drift-detail card: a
-/// UUID the node serves that no granted user accounts for. `name`
-/// is `Some(user_id)` when the orphan UUID DOES map to a known user
-/// (e.g. a user whose grant was revoked but whose UUID still lives in
-/// the node config) and `None` when it maps to nothing in inventory
-/// (a likely service account / hand-added UUID).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OrphanUuid {
     pub(crate) uuid: String,
-    /// Resolved inventory user id, if the UUID matches a known user.
     pub(crate) name: Option<String>,
 }
 
-/// Outcome of a `?drift=live` attempt. `Ok` carries the diff; `Err`
-/// carries a short, policy-safe reason string the card renders into
-/// its empty-state. The reason NEVER says «ssh to the box» — it says
-/// the config couldn't be read (node unreachable or deploy key).
 #[derive(Debug, Clone)]
 pub(super) enum DriftLiveResult {
-    /// Live read + parse succeeded — `orphans` are on-node UUIDs not
-    /// in inventory (resolved to a user name where possible).
     Ok { orphans: Vec<OrphanUuid> },
-    /// Live read failed (timeout, node down, key not authorised, parse
-    /// error). The card degrades to a policy-safe empty-state.
     Unavailable,
 }
 
-/// Pure diff for server#1 — given the set of UUIDs the NODE serves and
-/// the inventory `users` (whose `.uuid` already resolves
-/// COALESCE(client_uuid, users.uuid)), return the orphans: UUIDs on the
-/// node that are NOT in the inventory grant set. Each orphan is
-/// resolved to a user id when the UUID matches a known global user
-/// uuid (revoked-but-still-on-node case), else left unresolved.
-///
-/// Extracted as a free function so the test suite can pin the
-/// orphan-detection semantics directly without standing up SSH.
 pub(crate) fn compute_orphan_uuids(
     node_uuids: &BTreeSet<String>,
     granted_users: &[vpnctl_core::User],
     all_users: &[vpnctl_core::User],
 ) -> Vec<OrphanUuid> {
-    // Inventory UUID set for THIS server = the resolved uuid of every
-    // granted user. A node UUID present here is accounted-for.
     let inventory_uuids: BTreeSet<&str> = granted_users.iter().map(|u| u.uuid.as_str()).collect();
-    // Reverse map from any KNOWN user's global uuid → user id, so an
-    // orphan can still be named if it belongs to a user who simply
-    // lost their grant (the dangerous revoke case the operator most
-    // wants to see).
     let uuid_to_user: HashMap<&str, &str> = all_users
         .iter()
         .map(|u| (u.uuid.as_str(), u.id.0.as_str()))
@@ -98,18 +53,6 @@ pub(crate) fn compute_orphan_uuids(
         .collect()
 }
 
-/// server#1 — best-effort LIVE read of the node's sing-box config over
-/// SSH, with a hard ≤6s timeout. EVERY failure mode (transport error,
-/// node down, key not authorised, non-UTF-8, parse error, or the
-/// outer tokio timeout) collapses to `DriftLiveResult::Unavailable` so
-/// the caller can render a policy-safe empty-state — this function
-/// NEVER returns an error and NEVER panics.
-///
-/// `granted_users` is `users_for_server(sid)` (the inventory set for
-/// the diff — a node UUID present here is accounted-for). `all_users`
-/// is the full inventory user list (already loaded by the handler) so
-/// a revoked-but-on-node orphan can still be NAMED instead of showing
-/// as «unresolved».
 pub(super) async fn load_drift_live(
     server: &vpnctl_core::Server,
     granted_users: &[vpnctl_core::User],
@@ -120,17 +63,13 @@ pub(super) async fn load_drift_live(
     use vpnctl_core::SshTransport;
 
     let key_path = crate::app::deploy_key_path();
-    let transport = SubprocessSshTransport::new(server.address.clone(), server.ssh_user.clone(), key_path)
+    let transport =
+        SubprocessSshTransport::new(server.address.clone(), server.ssh_user.clone(), key_path)
             .port(server.ssh_port)
             .trusted_fingerprint(server.trusted_host_fingerprint.clone())
-        .with_jump(jump)
-            // Hard wall-clock cap — keep the armed path snappy even when the
-            // node is black-holed (the transport already sets ConnectTimeout=10
-            // + ServerAlive keepalives, but we want ≤6s end-to-end here).
+            .with_jump(jump)
             .timeout(std::time::Duration::from_secs(6));
 
-    // Outer guard belt-and-suspenders against a wedged child the
-    // transport's own timeout somehow misses — 7s leaves a 1s margin.
     let read = tokio::time::timeout(
         std::time::Duration::from_secs(7),
         transport.read_file("/etc/sing-box/config.json"),
@@ -158,24 +97,11 @@ pub(super) async fn load_drift_live(
         }
     };
 
-    // Parse the on-node UUIDs (pub helper; parse failure → empty set,
-    // which we treat as «no on-node users observed» rather than orphan
-    // noise). The diff is against the granted set; naming uses the full
-    // user list so a revoked user's lingering UUID is still labelled.
     let node_uuids = vpnctl_kernels::live_config_user_uuids(&bytes);
     let orphans = compute_orphan_uuids(&node_uuids, granted_users, all_users);
     DriftLiveResult::Ok { orphans }
 }
 
-/// server#1 — drift-detail card. Two modes:
-///
-/// * `armed == false` (default page load): renders a «[check live
-///   drift →]» link anchored to `?drift=live`. NO SSH happened.
-/// * `armed == true` (`?drift=live`): renders the orphan list from the
-///   best-effort live read, or a policy-safe empty-state on any
-///   failure. The empty-state copy NEVER instructs the operator to
-///   «ssh to the box» — per operator-action-policy it says the config
-///   couldn't be read (node unreachable or deploy key).
 pub(super) fn server_detail_drift_detail_section(
     server: &vpnctl_core::Server,
     drift_live: Option<&DriftLiveResult>,
@@ -195,8 +121,6 @@ pub(super) fn server_detail_drift_detail_section(
                 ))
             }
             @if !armed {
-                // Default fast path — link to arm the live read. No SSH
-                // was attempted on this render.
                 p style="font-family: var(--mono); font-size: 12px; margin: 8px 0;" {
                     a href=(format!("/admin/servers/{sid_enc}/protocols?drift=live#drift-detail"))
                       style="color: var(--ink); border-bottom: 1px dotted var(--ink); text-decoration: none;" {
@@ -251,7 +175,6 @@ pub(super) fn server_detail_drift_detail_section(
                         }
                     }
                     Some(DriftLiveResult::Ok { .. }) => {
-                        // Read succeeded, no orphans — clean state.
                         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--soft); margin-top: 6px;" {
                             (tr(
                                 lang,
@@ -261,8 +184,6 @@ pub(super) fn server_detail_drift_detail_section(
                         }
                     }
                     _ => {
-                        // Unavailable / None — policy-safe empty-state.
-                        // NO «ssh to the box» instruction.
                         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-top: 6px;" {
                             (tr(
                                 lang,
@@ -277,12 +198,6 @@ pub(super) fn server_detail_drift_detail_section(
     }
 }
 
-/// STATUS-tab drift glance (ui-audit §4): the declared-vs-observed
-/// verdict + drift counts, linking to the full grid + observed-socket
-/// list on the protocols tab. The list itself (100+ rows on xray
-/// nodes) stays off the status wall — that's the whole point of the tab
-/// split. Counts come from the same `missing`/`extra` the full section
-/// uses, so the two can never disagree.
 pub(super) fn server_detail_drift_summary(
     missing: &[(String, u16)],
     extra: &[(String, u16)],
@@ -340,17 +255,10 @@ pub(super) fn server_detail_drift_section(
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
-    // Design v2 3c — the declared × listening drift GRID: one row per
-    // declared protocol, its expected ports, and whether the latest
-    // probe saw each port open. Undeclared listeners follow, grouped
-    // by a small classifier instead of a 100-socket wall.
     let has_wg = server
         .enabled_protocols
         .iter()
         .any(|p| p.0.contains("wireguard") || p.0.contains("amnezia"));
-    // Group the undeclared listeners. Adopt/ignore actions are
-    // deliberately absent — the inventory doesn't model per-peer
-    // ports yet (NM-14); this table only keeps the wall readable.
     let mut wg_peers = 0usize;
     let mut caddy_internals: Vec<String> = Vec::new();
     let mut unclassified: Vec<String> = Vec::new();

@@ -9,8 +9,6 @@ use vpnctld::router;
 
 use crate::common::*;
 
-/// W5 pin: protocol enable no-op re-POST writes NO second audit row
-/// (NM-10) — the 4 toggle handlers audited unconditionally before.
 #[tokio::test]
 async fn protocol_enable_noop_repost_writes_no_audit_row() {
     let dir = TempDir::new().unwrap();
@@ -49,14 +47,6 @@ async fn protocol_enable_noop_repost_writes_no_audit_row() {
     assert_eq!(rows, 1, "no-op re-enable must not write a second row");
 }
 
-/// Pavel 2026-05-19: «не очень понимаю логику взаимодействия с
-/// server, если я включаю trojan, мне нужно жать deploy или он
-/// сразу при клики включается, по поводу kernel тот же вопрос».
-/// Both the Kernels and the Enabled-protocols sections MUST carry
-/// a loud (accent-bordered) banner explaining that toggles touch
-/// inventory only and a subsequent click of «deploy →» is needed
-/// to push the change to the live node. Anchor href to the deploy
-/// button so it works as a scroll-to-top link.
 #[tokio::test]
 async fn server_detail_kernels_and_protocols_banners_explain_deploy_step() {
     let dir = TempDir::new().unwrap();
@@ -89,14 +79,10 @@ async fn server_detail_kernels_and_protocols_banners_explain_deploy_step() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let html = std::str::from_utf8(&body).unwrap();
 
-    // Deploy button has an anchor id so the banner-links can target it.
     assert!(
         html.contains("id=\"deploy-button\""),
         "Deploy button container must have id=\"deploy-button\""
     );
-    // The banner phrase appears TWICE — once in Kernels, once in
-    // Enabled protocols (deliberately duplicated; operators jump
-    // straight to whichever section they're touching).
     let banner_marker = "toggle here = inventory only";
     let occurrences = html.matches(banner_marker).count();
     assert_eq!(
@@ -104,9 +90,6 @@ async fn server_detail_kernels_and_protocols_banners_explain_deploy_step() {
         "expected the «toggle = inventory only» banner in BOTH Kernels and Protocols sections; \
          got {occurrences}"
     );
-    // Each banner links back to the deploy button (#deploy-button
-    // anchor) so a one-click scroll takes the operator to the
-    // button without keyboard navigation.
     assert!(
         html.matches("href=\"#deploy-button\"").count() >= 2,
         "each banner must include a link to #deploy-button so click → scroll-to-top works"
@@ -135,8 +118,6 @@ async fn admin_server_detail_protocols_section_shows_every_registered_protocol()
     let app = router(s);
     let html = fetch_html(app, "/admin/servers/nowg/protocols").await;
     assert!(html.contains("Enabled protocols"), "section heading");
-    // Every registered protocol appears as a row (sing-box ships 6,
-    // amneziawg ships 1 — total 7 unique ids in the registry).
     for pid in [
         "vless+reality",
         "tuic-v5",
@@ -151,8 +132,6 @@ async fn admin_server_detail_protocols_section_shows_every_registered_protocol()
             "protocol row '{pid}' missing from server-detail"
         );
     }
-    // The currently-enabled one has a disable button + ✓ on marker.
-    // `+` in vless+reality gets URL-encoded to %2B in the form action.
     assert!(
         html.contains(r#"/admin/servers/nowg/protocols/vless%2Breality/disable"#),
         "enabled protocol must have a disable form (vless+reality URL-encoded)"
@@ -173,13 +152,10 @@ async fn admin_server_detail_protocols_section_shows_every_registered_protocol()
         enabled_row.contains(r#"icons.svg#check"></use></svg>on</span>"#),
         "enabled protocol must have the check icon and exact on label"
     );
-    // A compatible-but-not-yet-enabled one has an enable button.
     assert!(
         html.contains(r#"/admin/servers/nowg/protocols/hysteria2/enable"#),
         "compatible-disabled protocol must have an enable form"
     );
-    // Incompatible (wireguard under sing-box kernel) is greyed out
-    // with no toggle button — only the explainer copy.
     assert!(
         html.contains("not supported by kernel sing-box"),
         "incompatible explainer must appear next to wireguard"
@@ -202,7 +178,7 @@ async fn admin_server_enable_protocol_persists_and_audits() {
             ssh_port: 22,
             ssh_user: "root".into(),
             kernels: vec![KernelId("amneziawg".into())],
-            enabled_protocols: vec![], // start empty
+            enabled_protocols: vec![],
             trusted_host_fingerprint: None,
             hoster: "generic".into(),
             jump_via: None,
@@ -235,7 +211,6 @@ async fn admin_server_enable_protocol_persists_and_audits() {
             .contains(&ProtocolId("wireguard".into())),
         "wireguard must be persisted into enabled_protocols"
     );
-    // Audit row exists with the protocol name + newly_added flag.
     let audit = inv.recent_audit(5).await.unwrap();
     let row = audit
         .iter()
@@ -250,10 +225,6 @@ async fn admin_server_enable_protocol_persists_and_audits() {
     assert!(payload.contains("newly_added"));
 }
 
-/// Router-level coverage only: proves AWG2/AWG3 toggle wiring, independent
-/// mutations, auto-deploy dispatch, and no-op idempotency. The focused
-/// wizard-bootstrap unit test separately proves that redeploy refreshes the
-/// current server snapshot before minting protocol secrets.
 #[tokio::test]
 async fn admin_server_enable_awg2_and_awg3_dispatches_only_for_real_mutations() {
     let dir = TempDir::new().unwrap();

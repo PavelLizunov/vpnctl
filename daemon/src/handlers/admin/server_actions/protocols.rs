@@ -6,12 +6,6 @@ use super::super::legacy::spawn_user_servers_redeploy;
 use crate::AppState;
 use crate::http_util::path_segment_encode;
 
-/// `POST /admin/servers/{id}/protocols/{proto}/enable` — add a
-/// protocol to a server's `enabled_protocols`. Idempotent at SQL.
-/// Returns 404 if server doesn't exist, 400 if protocol id isn't
-/// registered with the daemon (no point persisting a string that
-/// nothing knows how to render). Audit row written. Always
-/// redirects back to the server-detail page.
 pub(crate) async fn server_enable_protocol(
     State(state): State<AppState>,
     Path((server_id_str, protocol_id_str)): Path<(String, String)>,
@@ -19,7 +13,6 @@ pub(crate) async fn server_enable_protocol(
     let sid = vpnctl_core::ServerId(server_id_str.clone());
     let pid = vpnctl_core::ProtocolId(protocol_id_str.clone());
 
-    // Existence check (404 if no server).
     let server = match state.inv.get_server(&sid).await {
         Ok(Some(s)) => s,
         Ok(None) => {
@@ -27,8 +20,6 @@ pub(crate) async fn server_enable_protocol(
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
-    // Reject unregistered protocol id — persisting a typo would
-    // silently no-op every render+deploy from now on.
     if state.registry.protocol(&pid).is_none() {
         let known: Vec<String> = state
             .registry
@@ -47,9 +38,6 @@ pub(crate) async fn server_enable_protocol(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
 
-    // NM-10 contract (audit 2026-06-10): a no-op re-POST (inserted == 0)
-    // writes NO audit row — unconditional writes polluted the timeline
-    // and the `newly_added` flag inside is honest-but-buried.
     if inserted == 1 {
         if let Err(e) = state
             .inv
@@ -71,8 +59,6 @@ pub(crate) async fn server_enable_protocol(
                 "audit write failed for server.protocol.enable"
             );
         }
-        // Auto-deploy — the protocol change must land on the node;
-        // without this the rendered config diverges from inventory.
         spawn_user_servers_redeploy(
             &state,
             vec![server],
@@ -88,9 +74,6 @@ pub(crate) async fn server_enable_protocol(
     .into_response()
 }
 
-/// `POST /admin/servers/{id}/protocols/{proto}/disable` — remove a
-/// protocol from a server's `enabled_protocols`. Idempotent. Same
-/// 404/audit/redirect posture as `server_enable_protocol`.
 pub(crate) async fn server_disable_protocol(
     State(state): State<AppState>,
     Path((server_id_str, protocol_id_str)): Path<(String, String)>,
@@ -111,9 +94,6 @@ pub(crate) async fn server_disable_protocol(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
 
-    // NM-10 contract (audit 2026-06-10): a no-op re-POST (removed == 0)
-    // writes NO audit row — unconditional writes polluted the timeline
-    // and the `was_present` flag inside is honest-but-buried.
     if removed == 1 {
         if let Err(e) = state
             .inv
@@ -150,12 +130,6 @@ pub(crate) async fn server_disable_protocol(
     .into_response()
 }
 
-/// `POST /admin/servers/{sid}/protocols/{pid}/hide` — flip
-/// `server_protocols.hidden = 1` for (sid, pid). Render path
-/// (sub.rs + vpn_router.rs) immediately stops emitting this
-/// protocol for any user's next subscription pull. Existing
-/// cached client URIs keep working (the live sing-box inbound is
-/// untouched).
 pub(crate) async fn server_protocol_hide(
     State(state): State<AppState>,
     Path((server_id_str, protocol_id_str)): Path<(String, String)>,
@@ -173,9 +147,6 @@ pub(crate) async fn server_protocol_hide(
     }
 }
 
-/// `POST /admin/servers/{sid}/protocols/{pid}/unhide` — flip
-/// `server_protocols.hidden = 0` for (sid, pid). Render path
-/// resumes emitting this protocol on next subscription pull.
 pub(crate) async fn server_protocol_unhide(
     State(state): State<AppState>,
     Path((server_id_str, protocol_id_str)): Path<(String, String)>,

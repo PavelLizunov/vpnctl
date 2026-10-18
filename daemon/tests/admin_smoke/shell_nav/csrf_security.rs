@@ -9,24 +9,6 @@ use vpnctld::router;
 
 use crate::common::*;
 
-/// Anti-fingerprint regression (caught by pre-monitoring vuln scan
-/// 2026-05-20): the auth / CSRF / security-headers middleware was
-/// applied via `.layer()` instead of `.route_layer()`, which in
-/// axum's contract wraps the router's default 404 fallback too. Any
-/// unrelated path on the daemon (e.g. `/etc/passwd`, `/`, `/.env`,
-/// `/wp-login.php`) returned `401 WWW-Authenticate: Basic realm=
-/// "vpnctl admin"` for GETs and `403 vpnctl admin: csrf …` for
-/// POSTs, plus the admin-only CSP / X-Frame-Options / Permissions-
-/// Policy headers on EVERY 404 — all distinctive backend
-/// fingerprints. Fix swapped `.layer` → `.route_layer` so the
-/// middleware applies only to matched admin routes.
-///
-/// This test pins the no-leak invariant. Note: the test runs
-/// without `VPNCTLD_ADMIN_PASSWORD` set, so the auth layer is
-/// skipped entirely — what we're really pinning here is that
-/// CSRF + security-headers ALSO use `route_layer` (the only ones
-/// that fire without the env var). The auth-layer no-leak is
-/// covered by the live-verify in the same commit.
 #[tokio::test]
 async fn admin_unmatched_paths_do_not_leak_admin_fingerprint() {
     let dir = TempDir::new().unwrap();
@@ -40,8 +22,6 @@ async fn admin_unmatched_paths_do_not_leak_admin_fingerprint() {
         "/wp-login.php",
         "/api/v2/something",
     ] {
-        // GET: must not carry the admin-tree CSP / X-Frame-Options /
-        // Permissions-Policy headers — those are distinctive.
         let req = Request::builder().uri(path).body(Body::empty()).unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         let headers = resp.headers().clone();
@@ -64,10 +44,6 @@ async fn admin_unmatched_paths_do_not_leak_admin_fingerprint() {
             "GET {path} leaks 'vpnctl admin' in body: {s}"
         );
 
-        // POST: same — CSRF middleware should NOT fire on unmatched
-        // paths. Pre-fix, POST returned 403 with body
-        // "vpnctl admin: csrf — Origin (or Referer) must match Host"
-        // + dump of Host/Origin/Referer headers.
         let req = Request::builder()
             .uri(path)
             .method("POST")
@@ -87,9 +63,6 @@ async fn admin_unmatched_paths_do_not_leak_admin_fingerprint() {
         );
     }
 
-    // Positive control: an actual admin path STILL produces admin-shaped
-    // responses (the fix must not break the legitimate path). Without
-    // auth env var, /admin renders the page directly (200 + CSP header).
     let req = Request::builder()
         .uri("/admin")
         .body(Body::empty())
@@ -102,11 +75,6 @@ async fn admin_unmatched_paths_do_not_leak_admin_fingerprint() {
     );
 }
 
-/// Security audit 2026-05-18 — admin responses must carry CSP +
-/// X-Content-Type-Options + X-Frame-Options + Referrer-Policy +
-/// Permissions-Policy headers. Defense-in-depth against XSS,
-/// MIME-sniff, clickjacking, referrer leakage. CSP must NOT have
-/// `unsafe-inline` for script-src (style-src does, intentional).
 #[tokio::test]
 async fn admin_responses_carry_security_headers() {
     let dir = TempDir::new().unwrap();
@@ -121,7 +89,6 @@ async fn admin_responses_carry_security_headers() {
         .await
         .unwrap();
     let headers = resp.headers();
-    // CSP
     let csp = headers
         .get("content-security-policy")
         .expect("CSP must be set on /admin/* responses")
@@ -143,7 +110,6 @@ async fn admin_responses_carry_security_headers() {
         csp.contains("object-src 'none'"),
         "object-src must be 'none' — legacy plugin/PDF defense: {csp}"
     );
-    // Companion headers
     assert_eq!(
         headers
             .get("x-content-type-options")
@@ -156,12 +122,6 @@ async fn admin_responses_carry_security_headers() {
     );
     assert_eq!(
         headers.get("referrer-policy").map(|v| v.to_str().unwrap()),
-        // `same-origin` (NOT `no-referrer`): the strict version
-        // bricked the CSRF middleware in prod 2026-05-19 by
-        // stripping Referer from same-origin POSTs that browsers
-        // send with `Origin: null`. `same-origin` keeps the no-
-        // external-leakage guarantee while preserving the
-        // Origin-→-Referer fallback inside our own admin tree.
         Some("same-origin")
     );
     let perm = headers
@@ -177,31 +137,10 @@ async fn admin_responses_carry_security_headers() {
     );
 }
 
-/// Post-2026-05-18 rule (Pavel: «не должен просить меня сделать
-/// что-то вручную на серверах»). No 4xx/5xx response body, no
-/// admin HTML deck-copy, and no UI hint may instruct the operator
-/// to manually `ssh root@…` + edit `authorized_keys`. Daemon
-/// either auto-handles, surfaces a button, or — in the genuinely
-/// impossible case (banned, can't reach) — explicitly says «use
-/// hoster console».
-///
-/// This test exercises the THREE known operator-facing output
-/// paths that historically held those instructions:
-///   1. `classify_ssh_failure` (called by test-send 502)
-///   2. `/admin/settings` Deploy SSH key section (rendered HTML)
-///   3. `server.fail2ban.banned_self` alert payload
-/// and asserts none contain the forbidden phrasing. Future regressions
-/// (a new error message or alert payload that asks for manual SSH)
-/// would have to add that pattern to one of these surfaces; this
-/// test would catch it.
 #[tokio::test]
 async fn no_operator_facing_output_asks_for_manual_ssh_edit() {
     use vpnctld::alert_sink::classify_ssh_failure;
 
-    // (1) classify_ssh_failure permission-denied branch — the most
-    // common SSH failure mode operator hits. MUST surface the «push
-    // deploy key» button, MUST NOT include the literal
-    // `echo … >> ~/.ssh/authorized_keys` command.
     let msg = classify_ssh_failure(
         "ssh transport error: ssh root@1.2.3.4:22 exit=Some(255) \
          stderr=root@1.2.3.4: Permission denied (publickey,password).",
@@ -215,13 +154,6 @@ async fn no_operator_facing_output_asks_for_manual_ssh_edit() {
         "classify_ssh_failure SHOULD point at the «push deploy key» button: {msg}"
     );
 
-    // (2) /admin/settings rendered HTML. In test env the daemon's
-    // deploy pubkey file at /var/lib/vpnctl/.ssh/id_ed25519.pub
-    // doesn't exist, so the @match hits the Err arm («Public key
-    // file unreadable») — the «push deploy key» button copy lives
-    // in the Ok arm. We can't easily inject a fake pubkey because
-    // the path is a `const &str`. So we assert the NEGATIVE (no
-    // forbidden pattern), which holds in BOTH arms.
     let dir = TempDir::new().unwrap();
     let app = router(state(&dir).await);
     let resp = app
@@ -240,13 +172,6 @@ async fn no_operator_facing_output_asks_for_manual_ssh_edit() {
         !html.contains("echo '<paste>' >> ~/.ssh/authorized_keys"),
         "Deploy SSH key section MUST NOT contain the manual echo …>> instruction"
     );
-    // (3) /admin/alerts deck — neither the empty-state nor the
-    // alerts-table sections should embed an «ssh into the node»
-    // hint. The fail2ban banned-self ALERT PAYLOAD (in node_probe_
-    // poller.rs) was rewritten to point at hoster console — not
-    // ask for SSH; we don't render it from `/admin/alerts` deck
-    // directly, but we DO assert the alerts page's static copy
-    // doesn't carry the old manual-ssh phrasing.
     let resp = app
         .oneshot(
             Request::builder()
@@ -264,24 +189,6 @@ async fn no_operator_facing_output_asks_for_manual_ssh_edit() {
     );
 }
 
-// ────────────────────────────────────────────────────────────────────────
-//  Phase Hardening — CSRF middleware (handlers/csrf.rs)
-//
-//  Caught by retroactive review-agent (review #2) AND security-review
-//  (security #1) on 2026-05-14: the regenerate handler had no
-//  Origin/Referer check, so any cross-origin form-POST visited by an
-//  authenticated operator's browser would silently rotate a victim
-//  user's sub_token.
-//
-//  The middleware now sits OUTSIDE basic-auth on /admin/* and rejects
-//  state-mutating requests whose Origin (or Referer fallback) does not
-//  match the Host header.
-// ────────────────────────────────────────────────────────────────────────
-
-/// State-mutating POST WITHOUT an Origin (and WITHOUT a Referer) is
-/// the classic "form auto-submitted from evil.example.com" scenario —
-/// some browsers omit Origin on form-POST. Must 403 with the unified
-/// `vpnctl admin:` error prefix.
 #[tokio::test]
 async fn admin_csrf_post_without_origin_is_403() {
     let dir = TempDir::new().unwrap();
@@ -289,7 +196,6 @@ async fn admin_csrf_post_without_origin_is_403() {
 
     let resp = app
         .oneshot(
-            // Deliberately NO Host, NO Origin, NO Referer.
             Request::builder()
                 .method("POST")
                 .uri("/admin/tweak/theme")
@@ -312,16 +218,11 @@ async fn admin_csrf_post_without_origin_is_403() {
     );
 }
 
-/// State-mutating POST WITH an Origin pointing at a different host
-/// than the request's Host header — the cross-origin attack surface.
-/// Must 403, must NOT mutate state.
 #[tokio::test]
 async fn admin_csrf_post_with_mismatched_origin_is_403() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 0, 1, &[]).await;
-    // Snapshot the token; if CSRF protection works the regenerate
-    // request below MUST NOT change it.
     let before = s
         .inv
         .get_user(&UserId("u0".into()))
@@ -363,10 +264,6 @@ async fn admin_csrf_post_with_mismatched_origin_is_403() {
     );
 }
 
-/// GET requests pass through the CSRF middleware unchanged — they are
-/// not state-mutating per RFC 9110 and the admin tree's GET handlers
-/// are read-only. A test rig that hits /admin/ without ANY headers
-/// should still see the page.
 #[tokio::test]
 async fn admin_csrf_get_passes_through_without_origin() {
     let dir = TempDir::new().unwrap();
@@ -388,9 +285,6 @@ async fn admin_csrf_get_passes_through_without_origin() {
     );
 }
 
-/// Falling back from Origin to Referer: when the browser omits Origin
-/// (older clients on simple form-POSTs) but sends a Referer pointing
-/// at the same host, the middleware must accept the request.
 #[tokio::test]
 async fn admin_csrf_referer_fallback_when_origin_absent() {
     let dir = TempDir::new().unwrap();
@@ -402,7 +296,6 @@ async fn admin_csrf_referer_fallback_when_origin_absent() {
                 .method("POST")
                 .uri("/admin/tweak/theme")
                 .header("host", "test.example")
-                // NO Origin — Referer fallback should kick in.
                 .header("referer", "http://test.example/admin/")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from("value=foxed"))
@@ -417,12 +310,6 @@ async fn admin_csrf_referer_fallback_when_origin_absent() {
     );
 }
 
-/// Regression for the 2026-05-19 broken-admin bug: when the browser
-/// sends `Origin: null` (opaque-origin context — sandboxed iframe,
-/// privacy extension, file:// open), the Referer fallback MUST work
-/// because that's the only remaining signal. Pre-fix:
-/// Referrer-Policy was `no-referrer` which stripped Referer from
-/// every same-origin POST → CSRF middleware bricked admin UI.
 #[tokio::test]
 async fn admin_csrf_referer_fallback_when_origin_is_literal_null() {
     let dir = TempDir::new().unwrap();
@@ -434,8 +321,6 @@ async fn admin_csrf_referer_fallback_when_origin_is_literal_null() {
                 .method("POST")
                 .uri("/admin/tweak/theme")
                 .header("host", "test.example")
-                // `Origin: null` is what privacy-mode browsers actually
-                // send for opaque-origin documents (per the Fetch spec).
                 .header("origin", "null")
                 .header("referer", "http://test.example/admin/users")
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -452,11 +337,6 @@ async fn admin_csrf_referer_fallback_when_origin_is_literal_null() {
     );
 }
 
-/// Regression for the 2026-05-19 Pavel-debugged-via-journalctl pain:
-/// when CSRF rejects, the response body MUST include the actual
-/// Host + Origin + Referer values + a likely-cause hint, so the
-/// operator can self-diagnose without shell access (per CLAUDE.md
-/// Operator-action policy).
 #[tokio::test]
 async fn admin_csrf_403_body_shows_host_origin_referer_and_cause() {
     let dir = TempDir::new().unwrap();
@@ -468,8 +348,6 @@ async fn admin_csrf_403_body_shows_host_origin_referer_and_cause() {
                 .method("POST")
                 .uri("/admin/tweak/theme")
                 .header("host", "real.example")
-                // `Origin: null` (opaque origin), no Referer — exact
-                // shape Pavel saw in the prod logs 2026-05-19.
                 .header("origin", "null")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from("value=foxed"))
@@ -481,8 +359,6 @@ async fn admin_csrf_403_body_shows_host_origin_referer_and_cause() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = std::str::from_utf8(&body).unwrap();
 
-    // Body lists the three header values verbatim — operator can
-    // see exactly what mismatched.
     assert!(
         text.contains("Host:    real.example"),
         "Host missing from body: {text}"
@@ -495,20 +371,12 @@ async fn admin_csrf_403_body_shows_host_origin_referer_and_cause() {
         text.contains("Referer: (absent)"),
         "Referer state missing: {text}"
     );
-    // Likely-cause hint for the `Origin: null` shape — points operator
-    // at the opaque-origin diagnosis instead of leaving them guessing.
     assert!(
         text.contains("opaque origin"),
         "must explain the `Origin: null` case in plain English: {text}"
     );
 }
 
-/// Regression: the 2026-05-18 security audit shipped
-/// `Referrer-Policy: no-referrer` which stripped Referer from every
-/// outbound request — including our own same-origin form POSTs. Pinned
-/// at `same-origin` so the CSRF middleware's Referer fallback survives.
-/// A regression to `no-referrer` would re-brick admin UI for any
-/// browser sending `Origin: null`.
 #[tokio::test]
 async fn admin_referrer_policy_header_is_same_origin_not_no_referrer() {
     let dir = TempDir::new().unwrap();
@@ -537,8 +405,6 @@ async fn admin_referrer_policy_header_is_same_origin_not_no_referrer() {
 async fn admin_audit_timeline_summary_never_leaks_secret_fields() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    // Simulate a payload that contains BOTH whitelisted keys AND
-    // hypothetical secret fields the summary must NOT render.
     s.inv
         .audit(
             "admin",
@@ -547,7 +413,6 @@ async fn admin_audit_timeline_summary_never_leaks_secret_fields() {
             Some(&serde_json::json!({
                 "uuid": "aaa-bbb",
                 "wg_keypair_provenance": "server-generated",
-                // Hypothetical leak vectors — MUST NOT appear in summary
                 "tuic_password": "PW_SECRET_LEAK_CHECK",
                 "wireguard_private": "PRIV_SECRET_LEAK_CHECK",
                 "sub_token": "TOKEN_SECRET_LEAK_CHECK",
@@ -557,9 +422,7 @@ async fn admin_audit_timeline_summary_never_leaks_secret_fields() {
         .unwrap();
     let app = router(s);
     let html = fetch_html(app, "/admin/audit").await;
-    // Whitelisted key visible
     assert!(html.contains("wg_keypair_provenance=server-generated"));
-    // Secrets MUST NOT leak via the summary rendering path
     for leak in [
         "PW_SECRET_LEAK_CHECK",
         "PRIV_SECRET_LEAK_CHECK",
@@ -572,23 +435,12 @@ async fn admin_audit_timeline_summary_never_leaks_secret_fields() {
     }
 }
 
-// ── B2 — operator-facing copy must not instruct terminal use ─────────
-//
-// Operator-action policy: the admin UI is web-only, so no rendered page
-// may tell the operator to run a shell command. Every needle below is a
-// command shape that used to appear in error bodies, tooltips, SSE
-// payloads; each was replaced with a web action or neutral guidance.
-// Disaster recovery is deliberately excluded: after the daemon host is
-// lost there is no Web UI, so its runbook must retain exact commands.
 #[tokio::test]
 async fn admin_pages_contain_no_shell_command_instructions() {
     let dir = TempDir::new().unwrap();
     let st = state(&dir).await;
-    // Seed a server + granted user so the detail pages render their
-    // guidance copy (not just the empty state).
     seed(&st.inv, 1, 1, &[(0, 0)]).await;
 
-    // The everyday operator surfaces.
     let pages = [
         "/admin/",
         "/admin/servers",
@@ -630,8 +482,6 @@ async fn admin_pages_contain_no_shell_command_instructions() {
         }
     }
 
-    // Disaster recovery is the only terminal exception because the Web UI
-    // may be gone. Keep the rest of the Backups page under the same guard.
     let backups = fetch_html(app, "/admin/settings/backups").await;
     for command in [
         "age -d -i /path/to/vpnctl-backup-key.age",

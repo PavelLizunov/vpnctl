@@ -13,24 +13,6 @@ use crate::ssh_subprocess::SubprocessSshTransport;
 use vpnctl_core::{Registry, Server};
 use vpnctl_inventory::SqliteInventory;
 
-/// Update the kernel BINARIES on an EXISTING server, streaming per-step
-/// progress over SSE — the "Update kernels" button (update-kernels PR2).
-///
-/// Unlike [`run_redeploy`], this NEVER renders or applies a config: it
-/// runs only each declared kernel's `ensure_installed` (apt upgrade +
-/// service install/restart of the package), bracketed by a `status()`
-/// version probe so the operator sees `before → after`. Because it does
-/// NOT call `render_config`/`apply_config`, it never enters the DG-1
-/// UUID-removal guard path — which is the whole point: a node whose
-/// inventory has drifted (users removed in inv.db but still live on the
-/// node) can have its kernel binary upgraded WITHOUT the deploy guard
-/// refusing to push a user-shrinking config. This is intentional and the
-/// node's running config is left exactly as-is.
-///
-/// Shares the SAME per-server [`DeployGuard`] as the deploy paths so an
-/// update can't race a deploy (or another update) restarting the same
-/// node. Writes a DISTINCT `kernel.update` audit row (kept separate from
-/// `server.deploy` so the timeline distinguishes the two actions).
 pub fn run_update_kernels(
     server: Server,
     inv: SqliteInventory,
@@ -42,14 +24,10 @@ pub fn run_update_kernels(
         Some(guard) => {
             tokio::spawn(async move {
                 update_kernels_pipeline(server, inv, registry, deploy_key_path, tx).await;
-                // Hold the per-server permit for the whole pipeline; drop
-                // here (also on panic/cancel via RAII) releases it.
                 drop(guard);
             });
         }
         None => {
-            // A deploy OR update of this server is already in flight —
-            // refuse rather than restart the same node concurrently.
             let _ = tx.try_send(BootstrapEvent::Error {
                 phase: "update",
                 message: format!(
@@ -57,16 +35,11 @@ pub fn run_update_kernels(
                     server.id.0
                 ),
             });
-            // tx drops → ReceiverStream completes after this one event.
         }
     }
     ReceiverStream::new(rx)
 }
 
-/// Update kernel binaries on EVERY server in one streamed pass — the
-/// "Update all kernels" button. Copies [`run_deploy_all`]'s structure
-/// verbatim but drives [`run_update_kernels`] per server. Best-effort:
-/// a down node is reported as a `✗` line and the rest still update.
 pub fn run_update_kernels_all(
     servers: Vec<Server>,
     inv: SqliteInventory,
@@ -180,8 +153,6 @@ async fn update_kernels_all_pipeline(
             message: summary,
         })
         .await;
-    // Terminal Ok — best-effort across the fleet; per-server failures are
-    // surfaced as ✗ lines above. The frontend reloads /admin/servers.
     let _ = tx
         .send(BootstrapEvent::Ok {
             server_id: "all".into(),
@@ -213,13 +184,10 @@ async fn update_kernels_pipeline(
 
     let redirect = format!("/admin/servers/{}", path_segment_encode(&server.id.0));
     let mut ssh_errors: Vec<String> = Vec::new();
-    // Parallel per-kernel records for the `kernel.update` audit payload.
     let mut kernels_touched: Vec<String> = Vec::new();
     let mut versions_before: Vec<serde_json::Value> = Vec::new();
     let mut versions_after: Vec<serde_json::Value> = Vec::new();
 
-    // ── SSH preconditions — same skip-reasons as redeploy, MINUS the
-    // secret-minting (no config is rendered here, so no secrets needed).
     let skip_reason: Option<&'static str> = if !deploy_key_path.exists() {
         Some(DEPLOY_KEY_ABSENT_MSG)
     } else if server.kernels.is_empty() {
@@ -246,13 +214,6 @@ async fn update_kernels_pipeline(
     .trusted_fingerprint(server.trusted_host_fingerprint.clone())
     .with_jump(jump);
 
-    // ── Per-kernel: probe version → ensure_installed → probe again. ──
-    // NO render_config, NO apply_config, NO reserved-ports guard, NO
-    // DG-1 path — only the binary is touched, the running config is left
-    // exactly as-is (the whole point: safe on inventory-drift nodes).
-    // Per-kernel isolation identical to redeploy_pipeline: a failure is
-    // collected and we `continue`, so one kernel's failure doesn't abort
-    // the others.
     for kid in &server.kernels {
         let Some(kernel) = registry.kernel(kid) else {
             ssh_errors.push(format!("{}: kernel not registered", kid.0));
@@ -288,8 +249,6 @@ async fn update_kernels_pipeline(
         versions_after.push(serde_json::json!(after));
     }
 
-    // ── Audit — DISTINCT `kernel.update` action (kept separate from
-    // `server.deploy` so the timeline distinguishes them). ────────────
     write_update_kernels_audit(
         &inv,
         &server,
@@ -301,7 +260,6 @@ async fn update_kernels_pipeline(
     )
     .await;
 
-    // ── Terminal event — Ok ONLY when every kernel succeeded. ─────────
     if ssh_errors.is_empty() {
         let _ = tx
             .send(BootstrapEvent::Ok {

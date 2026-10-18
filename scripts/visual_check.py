@@ -106,11 +106,6 @@ async def shoot(
             if headers:
                 await cdp_call(ws, 5, "Network.setExtraHTTPHeaders", {"headers": headers})
             if extra_cookie:
-                # Chrome ≥ ~130 silently strips `Cookie` out of
-                # setExtraHTTPHeaders (caught 2026-07-10: theme/lang
-                # cookie shots rendered the defaults on Chrome 150).
-                # Set a real cookie via CDP instead — same wire bytes
-                # for the server, honest cookie jar for the browser.
                 name, _, value = extra_cookie.partition("=")
                 await cdp_call(
                     ws,
@@ -132,8 +127,6 @@ async def shoot(
             )
             await cdp_call(ws, 7, "Page.navigate", {"url": url})
             await wait_event(ws, "Page.loadEventFired")
-            # Tiny settle for fonts (the admin shell pulls Newsreader +
-            # IBM Plex from Google Fonts — first paint can race the swap).
             await asyncio.sleep(0.4)
             res = await cdp_call(
                 ws,
@@ -146,10 +139,6 @@ async def shoot(
                 f.write(data)
             print(f"ok {out_path} {len(data)} bytes")
     finally:
-        # Reset the persistent tab so the next caller starts clean.
-        # The real cookie set above persists in the profile — delete it
-        # too, or the NEXT cookie-less shot silently inherits this
-        # theme/lang (caught 2026-07-10: RU leaked into an ink-theme shot).
         try:
             async with websockets.connect(ws_url) as ws:
                 if extra_cookie:

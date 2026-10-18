@@ -64,8 +64,6 @@ async fn setup_mihomo_env(dir: &TempDir) -> (vpnctld::AppState, String, SqliteIn
         ssh_port: 22,
         ssh_user: "root".into(),
         kernels: vec![KernelId("sing-box".into())],
-        // Unsupported TUIC sorts before VLESS deliberately: Mihomo must
-        // still choose this server's usable VLESS outbound as chain entry.
         enabled_protocols: vec![
             ProtocolId("tuic-v5".into()),
             ProtocolId("vless+reality".into()),
@@ -176,7 +174,6 @@ async fn happy_vless_hysteria2_and_chain() {
     let proxies = val["proxies"].as_array().expect("proxies array");
     assert!(!proxies.is_empty(), "proxies must not be empty");
 
-    // VLESS proxy mapping assertion
     let vless = proxies
         .iter()
         .find(|p| p["type"] == "vless" && p["server"] == "198.51.100.10")
@@ -199,7 +196,6 @@ async fn happy_vless_hysteria2_and_chain() {
     );
     assert_eq!(vless["packet-encoding"], "xudp");
 
-    // Hysteria2 proxy mapping assertion
     let hy2 = proxies
         .iter()
         .find(|p| p["type"] == "hysteria2" && p["server"] == "198.51.100.10")
@@ -212,7 +208,6 @@ async fn happy_vless_hysteria2_and_chain() {
     assert!(hy2["alpn"].is_array());
     assert_eq!(hy2["skip-cert-verify"], true);
 
-    // Chained VLESS target proxy assertion (srv-target chained via srv-entry)
     let entry_proxy = proxies
         .iter()
         .find(|p| p["server"] == "198.51.100.20")
@@ -228,7 +223,6 @@ async fn happy_vless_hysteria2_and_chain() {
         "chained target must specify dialer-proxy naming direct upstream"
     );
 
-    // proxy-groups assertion
     let groups = val["proxy-groups"].as_array().expect("proxy-groups array");
     let vpn_group = groups
         .iter()
@@ -242,7 +236,6 @@ async fn happy_vless_hysteria2_and_chain() {
         "VPN group must contain entry proxy name"
     );
 
-    // rules assertion
     let rules = val["rules"].as_array().expect("rules array");
     assert!(
         rules.iter().any(|r| r == "MATCH,VPN"),
@@ -321,7 +314,6 @@ async fn public_alias_content_type_and_ua_override() {
         let _: Value = serde_saphyr::from_str(yaml_str)
             .expect("explicit format=mihomo body must parse as Mihomo YAML regardless of UA");
 
-        // Also assert that Mihomo-like UA does not matter on the public route /api/v1/sub/{token} without query
         let dir_pub_ua = TempDir::new().unwrap();
         let (state_pub_ua, token_pub_ua, _) = setup_mihomo_env(&dir_pub_ua).await;
         let uri_pub_no_query = format!("/api/v1/sub/{token_pub_ua}");
@@ -392,7 +384,6 @@ async fn chain_same_server_address_entry_and_target() {
 
 #[tokio::test]
 async fn chain_missing_self_and_nested_fail_closed() {
-    // 1. Missing upstream
     {
         let dir = TempDir::new().unwrap();
         let inv = SqliteInventory::open(&dir.path().join("inv.db"))
@@ -481,7 +472,6 @@ async fn chain_missing_self_and_nested_fail_closed() {
         );
     }
 
-    // 2. Self upstream
     {
         let dir = TempDir::new().unwrap();
         let inv = SqliteInventory::open(&dir.path().join("inv.db"))
@@ -532,7 +522,6 @@ async fn chain_missing_self_and_nested_fail_closed() {
         );
     }
 
-    // 3. Nested upstream
     {
         let dir = TempDir::new().unwrap();
         let inv = SqliteInventory::open(&dir.path().join("inv.db"))
@@ -738,7 +727,6 @@ async fn visibility_and_unsupported_filtering() {
 
 #[tokio::test]
 async fn disabled_no_grant_user_and_unknown_token() {
-    // 1. Unknown token keeps the shared 404 response on the public route.
     {
         let dir = TempDir::new().unwrap();
         let (state, _, _) = setup_mihomo_env(&dir).await;
@@ -749,7 +737,6 @@ async fn disabled_no_grant_user_and_unknown_token() {
         assert_eq!(headers.get("x-frame-options").unwrap(), "DENY");
     }
 
-    // 2. Invalid selectors keep the shared byte-exact 400 response.
     {
         let dir = TempDir::new().unwrap();
         let (state, token, _) = setup_mihomo_env(&dir).await;
@@ -759,7 +746,6 @@ async fn disabled_no_grant_user_and_unknown_token() {
         assert_eq!(body, b"invalid format selector\n");
     }
 
-    // 3. Disabled user gets valid YAML with empty proxies and VPN group selecting DIRECT
     {
         let dir = TempDir::new().unwrap();
         let inv = SqliteInventory::open(&dir.path().join("inv.db"))
@@ -833,7 +819,6 @@ async fn disabled_no_grant_user_and_unknown_token() {
         assert!(rules.iter().any(|r| r == "MATCH,VPN"));
     }
 
-    // 4. User with no grants gets valid YAML with empty proxies and VPN group selecting DIRECT
     {
         let dir = TempDir::new().unwrap();
         let inv = SqliteInventory::open(&dir.path().join("inv.db"))

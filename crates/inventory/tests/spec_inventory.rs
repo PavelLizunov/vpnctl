@@ -1,6 +1,3 @@
-//! Integration spec for `SqliteInventory`. Tests numbered after rules
-//! 1-15 in the test-writer brief; written from the spec only.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::HashSet;
@@ -45,13 +42,12 @@ fn user(id: &str) -> User {
         tuic_password: Some(format!("tuic-{id}")),
         wireguard_pubkey: None,
         wireguard_private: None,
-        sub_token: None, // inventory generates
+        sub_token: None,
         vpn_router_device_id: None,
         disabled: false,
     }
 }
 
-// Rule 1: open creates the file and is idempotent.
 #[tokio::test]
 async fn open_creates_file_and_is_idempotent() {
     let dir = TempDir::new().unwrap();
@@ -68,7 +64,6 @@ async fn open_creates_file_and_is_idempotent() {
     inv2.close().await;
 }
 
-// Rule 2: WAL is enabled — sidecar `<db>-wal` appears after a write.
 #[tokio::test]
 async fn wal_journal_mode_is_enabled() {
     let dir = TempDir::new().unwrap();
@@ -84,9 +79,6 @@ async fn wal_journal_mode_is_enabled() {
     inv.close().await;
 }
 
-// Rule 3: FK enforcement is ON. With FKs off, granting a non-existent
-// (user, server) pair would silently insert. So a pre-condition violation
-// must error.
 #[tokio::test]
 async fn foreign_keys_are_enforced() {
     let dir = TempDir::new().unwrap();
@@ -97,8 +89,6 @@ async fn foreign_keys_are_enforced() {
     assert!(res.is_err(), "FK enforcement is OFF");
 }
 
-// Rule 4: add_server is atomic. A duplicate protocol (PK violation in
-// server_protocols) must roll back the parent server insert.
 #[tokio::test]
 async fn add_server_is_atomic_on_protocol_failure() {
     let dir = TempDir::new().unwrap();
@@ -116,7 +106,6 @@ async fn add_server_is_atomic_on_protocol_failure() {
     assert!(got.is_none(), "server row leaked: {got:?}");
 }
 
-// Rule 5: duplicate add_server -> AlreadyExists("server <id>").
 #[tokio::test]
 async fn add_server_duplicate_returns_already_exists() {
     let dir = TempDir::new().unwrap();
@@ -131,7 +120,6 @@ async fn add_server_duplicate_returns_already_exists() {
     }
 }
 
-// Rule 6: duplicate add_user -> AlreadyExists("user <id>").
 #[tokio::test]
 async fn add_user_duplicate_returns_already_exists() {
     let dir = TempDir::new().unwrap();
@@ -146,7 +134,6 @@ async fn add_user_duplicate_returns_already_exists() {
     }
 }
 
-// Rule 7: get_server(missing) -> Ok(None).
 #[tokio::test]
 async fn get_server_missing_returns_none() {
     let dir = TempDir::new().unwrap();
@@ -155,7 +142,6 @@ async fn get_server_missing_returns_none() {
     assert!(got.is_none(), "missing id must be Ok(None), got {got:?}");
 }
 
-// Rule 8: enabled_protocols round-trips (set equality).
 #[tokio::test]
 async fn enabled_protocols_round_trip() {
     let dir = TempDir::new().unwrap();
@@ -179,7 +165,6 @@ async fn enabled_protocols_round_trip() {
     assert_eq!(got.enabled_protocols.len(), s.enabled_protocols.len());
 }
 
-// Rule 9: update_trusted_fingerprint is observable through get_server.
 #[tokio::test]
 async fn update_trusted_fingerprint_is_observable() {
     let dir = TempDir::new().unwrap();
@@ -190,8 +175,6 @@ async fn update_trusted_fingerprint_is_observable() {
     let before = inv.get_server(&id).await.unwrap().unwrap();
     assert!(before.trusted_host_fingerprint.is_none());
 
-    // 43-char unpadded base64 — what `russh::keys::PublicKey::fingerprint`
-    // actually returns. SqliteInventory enforces this shape.
     let fp = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     inv.update_trusted_fingerprint(&id, fp).await.unwrap();
 
@@ -203,7 +186,6 @@ async fn update_trusted_fingerprint_is_observable() {
     );
 }
 
-// Rule 10: set_server_secret is upsert (overwrites, no duplicate row).
 #[tokio::test]
 async fn set_server_secret_is_upsert() {
     let dir = TempDir::new().unwrap();
@@ -228,7 +210,6 @@ async fn set_server_secret_is_upsert() {
     assert_eq!(all.len(), 1, "duplicate row leaked: {all:?}");
 }
 
-// Rule 11: FK CASCADE — removing a user removes its grants.
 #[tokio::test]
 async fn remove_user_cascades_to_grants() {
     let dir = TempDir::new().unwrap();
@@ -249,7 +230,6 @@ async fn remove_user_cascades_to_grants() {
     assert_eq!(ids, vec!["u2"], "u1 grant did not cascade");
 }
 
-// Rule 12: removing a server cleans server_protocols, server_secrets, grants.
 #[tokio::test]
 async fn remove_server_cascades_to_dependents() {
     let dir = TempDir::new().unwrap();
@@ -279,14 +259,11 @@ async fn remove_server_cascades_to_dependents() {
         "grants did not CASCADE"
     );
 
-    // Re-adding the same id with the same protocols would PK-violate
-    // server_protocols if the old rows leaked.
     inv.add_server(&server("s"))
         .await
         .expect("server_protocols must also CASCADE");
 }
 
-// Rule 13: grant is idempotent.
 #[tokio::test]
 async fn grant_is_idempotent() {
     let dir = TempDir::new().unwrap();
@@ -306,7 +283,6 @@ async fn grant_is_idempotent() {
     assert_eq!(users.len(), 1, "duplicate grant row: {users:?}");
 }
 
-// Rule 14: audit accepts None/Some payload; recent_audit DESC by id, limit clips.
 #[tokio::test]
 async fn audit_recent_order_limit_payload() {
     let dir = TempDir::new().unwrap();
@@ -338,7 +314,6 @@ async fn audit_recent_order_limit_payload() {
     assert!(third.target.is_none(), "None target must be NULL");
 }
 
-// Rule 15: AuditEntry.ts is RFC3339-parseable UTC.
 #[tokio::test]
 async fn audit_ts_is_rfc3339_utc() {
     let dir = TempDir::new().unwrap();
@@ -352,21 +327,12 @@ async fn audit_ts_is_rfc3339_utc() {
         .expect("ts must be RFC3339")
         .with_timezone(&chrono::Utc);
     assert_eq!(parsed, row.ts);
-    // `DateTime<Utc>::offset()` returns the `Utc` singleton, whose Display
-    // is the literal "UTC" — not "+00:00". Format-print the offset to
-    // verify it's actually zero.
     assert_eq!(
         row.ts.format("%:z").to_string(),
         "+00:00",
         "ts not UTC: {s}"
     );
 }
-
-// ── Server-generated WireGuard keypair round-trip (review-agent
-//    finding on wg-keygen commit: each layer was tested in isolation
-//    but the gen→insert→select→render chain was not. A binding-order
-//    bug in INSERT (e.g. swapping wireguard_private with sub_token)
-//    would survive every unit test and only surface in production).
 
 #[tokio::test]
 async fn wireguard_private_roundtrips_through_inventory_verbatim() {
@@ -386,8 +352,6 @@ async fn wireguard_private_roundtrips_through_inventory_verbatim() {
     };
     inv.add_user(&u).await.unwrap();
 
-    // 1. get_user must return the SAME secret bytes (no
-    //    truncation, no re-encoding, no column swap).
     let got = inv
         .get_user(&UserId("alice".into()))
         .await
@@ -396,14 +360,10 @@ async fn wireguard_private_roundtrips_through_inventory_verbatim() {
     assert_eq!(got.wireguard_pubkey.as_deref(), Some(pub_b64.as_str()));
     assert_eq!(got.wireguard_private.as_deref(), Some(priv_b64.as_str()));
 
-    // 2. list_users must also return them verbatim.
     let listed = inv.list_users().await.unwrap();
     let found = listed.iter().find(|x| x.id.0 == "alice").expect("listed");
     assert_eq!(found.wireguard_private.as_deref(), Some(priv_b64.as_str()));
 
-    // 3. find_user_by_sub_token must also (this is the /sub/<token>
-    //    hot path — if the secret didn't survive THIS query, the
-    //    one-tap-import UX would silently break).
     let token = got.sub_token.as_deref().expect("sub_token populated");
     let by_token = inv
         .find_user_by_sub_token(token)

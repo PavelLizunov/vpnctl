@@ -1,5 +1,3 @@
-//! Jump host resolution and validation helper.
-
 use vpnctl_core::{PinnedJumpRoute, Server, ServerId};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -20,7 +18,6 @@ pub enum JumpResolverError {
     InvalidFingerprint(ServerId),
 }
 
-/// Resolve a target's optional one-hop route, requiring canonical pins for both hosts.
 pub fn resolve_jump_host(
     target: &Server,
     jump_record: Option<&Server>,

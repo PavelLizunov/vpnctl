@@ -1,5 +1,3 @@
-//! Admin UI legacy handlers — user sections facade over thematic submodules.
-
 mod origins;
 mod sessions;
 mod share_links;

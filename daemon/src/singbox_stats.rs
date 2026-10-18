@@ -1,9 +1,3 @@
-//! Node-side cumulative sing-box V2Ray Stats helper client.
-//!
-//! The gRPC listener and helper stay on the managed VPN node. vpnctld reaches
-//! them through the existing pinned SSH transport and receives one bounded JSON
-//! document; upstream counters are never reset by the read.
-
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
@@ -72,7 +66,6 @@ fn parse_output(raw: &str) -> Result<CumulativeSnapshot, StatsError> {
     })
 }
 
-// async-trait 0.1.89 adds #[must_use] to the already must-use boxed Future.
 #[allow(clippy::double_must_use)]
 #[async_trait]
 pub(crate) trait StatsClient: Send + Sync {

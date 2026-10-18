@@ -1,12 +1,6 @@
 use vpnctl_core::Server;
 use vpnctl_inventory::SqliteInventory;
 
-/// Write the DISTINCT `kernel.update` audit row for an SSE kernel-update
-/// pass. Kept separate from `server.deploy` (NM-13 dot-convention naming)
-/// so the audit timeline distinguishes a binary-only kernel upgrade from
-/// a full config re-deploy. Payload: the kernels touched, their
-/// before/after versions, any ssh errors, and `via:\"sse\"`. Audit failure
-/// is non-fatal (logged) — the update already happened.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn write_update_kernels_audit(
     inv: &SqliteInventory,
@@ -61,15 +55,6 @@ pub(crate) fn deploy_audit_action(
     }
 }
 
-/// Write the deploy-attempt audit row for an SSE re-deploy. Only a
-/// fully successful pass that applied at least one config uses the canonical
-/// `server.deploy` action consumed by pending-deploy detection. Same
-/// payload shape as the synchronous `server_deploy` handler
-/// (`bootstrapped`, `kernels`, `protocols`, `ssh_kernels_pushed`,
-/// `ssh_errors`, `ssh_config_bytes_total`, `ssh_skip_reason`) plus
-/// `via:\"sse\"`. Shared between the skip-reason early-exit and the
-/// normal completion so both paths leave an identical timeline entry.
-/// Audit failure is non-fatal (logged) — the deploy already happened.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn write_deploy_audit(
     inv: &SqliteInventory,

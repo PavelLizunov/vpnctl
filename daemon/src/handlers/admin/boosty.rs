@@ -1,11 +1,3 @@
-//! Boosty subscription bridge admin handlers (`/admin/boosty`): the
-//! bridge status page, settings save, manual sync, and the
-//! link / unlink / disable actions. Links Boosty subscribers to vpnctl
-//! users and reconciles VPN access with subscription state (see
-//! `vpnctl-boosty-bridge`).
-//!
-//! Extracted from `legacy.rs` as part of the admin submodules refactor.
-
 use crate::handlers::admin::icons::icon;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
@@ -19,16 +11,6 @@ use super::helpers::{
 use crate::AppState;
 use crate::http_util::{form_field, path_segment_encode};
 
-// ────────────────────────────────────────────────────────────────────────
-// Boosty subscription bridge (/admin/boosty)
-//
-// Links Boosty subscribers to vpnctl users and reconciles VPN access with
-// subscription state (see `vpnctl-boosty-bridge`). The poller auto-enables
-// active subscribers; lapses are surfaced here for the operator to disable
-// with a button (or auto-disabled when `auto_disable_lapsed` is on).
-// ────────────────────────────────────────────────────────────────────────
-
-/// Mask a credential to `••••<last4>` — never render secrets verbatim.
 fn boosty_mask_secret(secret: Option<&str>) -> String {
     match secret {
         None => "(unset)".to_string(),
@@ -51,12 +33,6 @@ fn boosty_time(ts: Option<i64>) -> String {
         .unwrap_or_else(|| "—".into())
 }
 
-/// `GET /admin/boosty` — bridge status, settings form, and the actionable
-/// link/disable surfaces, rendered from the LAST APPLIED sync report
-/// (stored by the poller / «sync now» / CLI `--apply`). Deliberately NO
-/// live sync on a GET: admin GETs must not mutate state (csrf.rs
-/// contract), and a live pass would rotate the Boosty refresh token and
-/// race the poller (spurious invalid_grant).
 pub(crate) async fn boosty_page(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -79,7 +55,6 @@ pub(crate) async fn boosty_page(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
-    // Users not yet linked → candidates for the link dropdown.
     let linked_ids: std::collections::HashSet<&str> =
         links.iter().map(|(u, _)| u.0.as_str()).collect();
     let unlinked_users: Vec<&str> = users
@@ -87,16 +62,9 @@ pub(crate) async fn boosty_page(
         .map(|u| u.id.0.as_str())
         .filter(|id| !linked_ids.contains(id))
         .collect();
-    // Subscriber ids already linked — used to drop them from the stored
-    // report's "new subscribers to link" list at render time. The report
-    // is a snapshot of the last sync; after the operator links someone the
-    // redirect must show them gone WITHOUT waiting for the next sync (else
-    // the just-linked row lingers and reads as "nothing happened").
     let linked_sub_ids: std::collections::HashSet<i64> =
         links.iter().map(|(_, sid)| *sid).collect();
 
-    // Last applied sync report (best-effort: absent/unparseable → None —
-    // the page degrades to settings + links, never 500s on report drift).
     let last_report: Option<(vpnctl_boosty_bridge::SyncReport, String)> =
         match state.inv.boosty_last_report().await {
             Ok(Some((json, ts))) => serde_json::from_str(&json).ok().map(|r| (r, ts)),
@@ -152,7 +120,6 @@ pub(crate) async fn boosty_page(
                 "The poller reconciles vpnctl access with Boosty subscription state on its own interval: active subscribers get their VPN user enabled, lapses are surfaced here to disable (or auto-disabled). This page renders the LAST APPLIED sync — a GET never triggers a live pass (it would rotate the refresh token and race the poller).",
                 "Поллер сам сверяет доступ vpnctl со статусом подписки Boosty по своему интервалу: активным подписчикам включается VPN-юзер, отвалившиеся всплывают здесь для отключения (или отключаются авто). Страница показывает ПОСЛЕДНИЙ применённый синк — GET не запускает живой проход (он бы ротировал refresh-токен и гонялся с поллером).",
             )) { (icon("info")) }
-            // Live enabled/disabled pill.
             span.ed-stat style=(if settings.enabled { "color: var(--green);" } else { "color: var(--mute);" }) {
                 @if settings.enabled {
                     (icon("circle"))
@@ -181,7 +148,6 @@ pub(crate) async fn boosty_page(
                 "Связь подписчиков Boosty с VPN-пользователями; доступ следует за подпиской."))
         }
 
-        // ── Sync-health callouts (only when the last report carries them).
         @if let Some(r) = report {
             @if !r.suppressed_disables.is_empty() {
                 div style="border: 1px solid var(--red); border-left-width: 3px; background: color-mix(in oklab, var(--red) 8%, var(--paper)); padding: 8px 12px; margin: 12px 0; font-family: var(--serif); font-size: 12px; line-height: 1.5;" {
@@ -201,7 +167,6 @@ pub(crate) async fn boosty_page(
             }
         }
 
-        // ── Status strip — the runtime facts at a glance ─────────
         div.ed-status-strip style="grid-template-columns: repeat(4, minmax(0, 1fr));" {
             div.ed-status-tile {
                 div.ed-status-tile__k { (tr(lang, "bridge", "мост")) }
@@ -243,7 +208,6 @@ pub(crate) async fn boosty_page(
             }
         }
 
-        // ── Revenue summary — MRR, cumulative payments, active payers ──
         @if let Some(r) = report {
             @let income = r.income_summary();
             div.ed-status-strip style="grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 14px;" {
@@ -281,7 +245,6 @@ pub(crate) async fn boosty_page(
             }
         }
 
-        // ── Paid-only note: free followers the gate excluded ────
         @if let Some(r) = report {
             @if r.excluded_unpaid > 0 {
                 p style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin: 10px 0 0;" {
@@ -293,7 +256,6 @@ pub(crate) async fn boosty_page(
             }
         }
 
-        // ── Actionable: new subscribers to link ─────────────────
         @if let Some(r) = report {
             @let new_to_link: Vec<&vpnctl_boosty_bridge::NewSubscriberInfo> = r
                 .new_subscribers
@@ -346,7 +308,6 @@ pub(crate) async fn boosty_page(
                 }
             }
 
-            // ── Lapsed, awaiting confirm to disable ─────────────
             @if !r.lapsed_pending.is_empty() {
                 div.ed-rule {}
                 div.ed-art-eyebrow {
@@ -410,7 +371,6 @@ pub(crate) async fn boosty_page(
             }
         }
 
-        // ── Linked users ────────────────────────────────────────
         div.ed-rule {}
         div.ed-art-eyebrow { (tr(lang, "Linked users", "Привязанные пользователи")) }
         @if links.is_empty() {
@@ -447,7 +407,6 @@ pub(crate) async fn boosty_page(
             }
         }
 
-        // ── Subscriber roster snapshot ─────────────────────────
         @if let Some(r) = report {
             @if !r.subscribers.is_empty() {
                 div.ed-rule {}
@@ -509,7 +468,6 @@ pub(crate) async fn boosty_page(
             }
         }
 
-        // ── Durable Boosty event timeline ───────────────────────
         div.ed-rule {}
         div.ed-art-eyebrow {
             (tr(lang, "Boosty events · latest 50", "События Boosty · последние 50"))
@@ -543,7 +501,6 @@ pub(crate) async fn boosty_page(
             }
         }
 
-        // ── Bridge settings ─────────────────────────────────────
         div.ed-rule {}
         div.ed-art-eyebrow {
             (tr(lang, "Bridge settings", "Настройки моста")) " "
@@ -554,7 +511,6 @@ pub(crate) async fn boosty_page(
             )) { (icon("info")) }
         }
 
-        // ── 1-Click Quick Connect Bookmarklet Card ───────────────
         div.ed-card style="margin: 10px 0 16px; border: 1px solid color-mix(in oklab, var(--accent) 50%, var(--rule)); background: color-mix(in oklab, var(--accent) 4%, var(--paper)); padding: 16px 20px; border-radius: 4px;" {
             div.ed-card__hd {
                 (tr(lang, "1-Click Quick Connect (No DevTools / F12)", "Быстрое подключение в 1 клик (без F12 и консоли)"))
@@ -580,7 +536,6 @@ pub(crate) async fn boosty_page(
             }
         }
 
-        // Help modal for clicking the bookmarklet button directly on the admin page
         div id="bookmarklet-help-modal" style="display: none; position: fixed; inset: 0; z-index: 10000; background: rgba(0,0,0,0.65); backdrop-filter: blur(2px); align-items: center; justify-content: center; padding: 16px;" {
             div style="background: var(--paper); border: 1px solid var(--rule); border-radius: 8px; max-width: 520px; width: 100%; padding: 22px 24px; box-shadow: 0 20px 40px rgba(0,0,0,0.3); font-family: var(--serif); line-height: 1.5; color: var(--ink);" {
                 div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px;" {
@@ -627,7 +582,6 @@ pub(crate) async fn boosty_page(
             }
         }
 
-        // Import success banner (shown when loaded with #quick_connect=...)
         div id="quick-connect-banner" style="display: none; border: 1px solid var(--green); border-left-width: 4px; background: color-mix(in oklab, var(--green) 10%, var(--paper)); padding: 14px 18px; margin: 12px 0 16px; font-family: var(--serif); font-size: 13px; line-height: 1.5;" {
             div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 14px;" {
                 div {
@@ -646,7 +600,6 @@ pub(crate) async fn boosty_page(
         }
 
         form id="boosty-settings-form" method="post" action="/admin/boosty/settings" {
-            // Main automation policy controls (always visible)
             div style="display: flex; flex-wrap: wrap; gap: 18px; align-items: center; margin: 14px 0 16px; padding: 10px 14px; background: var(--paper-2); border: 1px solid var(--rule); border-radius: 4px;" {
                 label style="display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12px; color: var(--ink);" {
                     input id="boosty_enabled" type="checkbox" name="enabled" checked[settings.enabled];
@@ -665,7 +618,6 @@ pub(crate) async fn boosty_page(
                 }
             }
 
-            // Fallback: Manual settings hidden inside a spoiler details element
             details.ed-spoiler style="margin-top: 14px; border: 1px solid var(--rule); border-radius: 4px; padding: 12px 16px; background: var(--paper-2);" {
                 summary style="cursor: pointer; font-family: var(--mono); font-size: 12px; color: var(--mute); font-weight: 600; user-select: none;" {
                     (tr(lang, "⚙️ Fallback: Manual settings & technical parameters", "⚙️ Резервный способ — ручная настройка и параметры"))
@@ -736,9 +688,6 @@ pub(crate) async fn boosty_page(
     Ok(render_page(&state, "boosty", &theme, &accent, lang, body).await)
 }
 
-/// `POST /admin/boosty/settings` — save bridge config. Blank secret inputs
-/// leave the stored value untouched (so the masked display never wipes a
-/// credential). Audited WITHOUT secret values.
 pub(crate) async fn boosty_settings_save(State(state): State<AppState>, body: String) -> Response {
     let mut s = match state.inv.get_boosty_settings().await {
         Ok(s) => s,
@@ -753,8 +702,6 @@ pub(crate) async fn boosty_settings_save(State(state): State<AppState>, body: St
             Some(b.to_string())
         };
     }
-    // Secrets: only overwrite when a non-blank value is supplied (a blank
-    // input keeps the stored value, so the masked display can't wipe it).
     if let Some(t) = form_field(&body, "access_token")
         && !t.trim().is_empty()
     {
@@ -773,14 +720,11 @@ pub(crate) async fn boosty_settings_save(State(state): State<AppState>, body: St
     if let Some(i) = form_field(&body, "poll_interval_secs").and_then(|v| v.parse::<u64>().ok())
         && i > 0
     {
-        // The HTML min=60 is client-side only — clamp server-side too so a
-        // hand-crafted POST can't turn the poller into a tight loop.
         s.poll_interval_secs = i.max(60);
     }
     if let Some(days) = form_field(&body, "grace_days").and_then(|v| v.parse::<u16>().ok()) {
         s.grace_days = days.min(365);
     }
-    // Checkboxes: present only when checked.
     s.enabled = form_field(&body, "enabled").is_some();
     s.auto_disable_lapsed = form_field(&body, "auto_disable_lapsed").is_some();
     s.auto_create_users = form_field(&body, "auto_create_users").is_some();
@@ -819,7 +763,6 @@ pub(crate) async fn boosty_settings_save(State(state): State<AppState>, body: St
     Redirect::to("/admin/boosty").into_response()
 }
 
-/// Shared helper to execute a Boosty sync and background-deploy flipped users.
 async fn run_boosty_sync_and_deploy(
     state: &AppState,
     auto_disable_lapsed: bool,
@@ -871,15 +814,11 @@ async fn run_boosty_sync_and_deploy(
     }
 }
 
-/// `POST /admin/boosty/sync` — run one reconcile now (auto-enable active,
-/// surface lapses). Redirects back; the report is logged.
 pub(crate) async fn boosty_sync_now(State(state): State<AppState>) -> Response {
     let settings = match state.inv.get_boosty_settings().await {
         Ok(s) => s,
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
-    // A disabled bridge must not apply flips or deploy nodes — «sync now»
-    // is a manual tick of the ENABLED bridge, not a bypass of the switch.
     if !settings.enabled {
         return bad_request("boosty bridge is disabled — enable it in the settings first");
     }
@@ -891,7 +830,6 @@ pub(crate) async fn boosty_sync_now(State(state): State<AppState>) -> Response {
     Redirect::to("/admin/boosty").into_response()
 }
 
-/// `POST /admin/boosty/link` — link a subscriber to a user.
 pub(crate) async fn boosty_link(State(state): State<AppState>, body: String) -> Response {
     let user = form_field(&body, "user").unwrap_or_default();
     if user.is_empty() {
@@ -909,7 +847,6 @@ pub(crate) async fn boosty_link(State(state): State<AppState>, body: String) -> 
         Ok(None) => return user_not_found(&user),
         Err(e) => return internal_error(anyhow::Error::new(e)),
     }
-    // Audit-on-actual-mutation: a same-pair re-link is a no-op.
     let changed = match state.inv.link_boosty_subscriber(&uid, subscriber_id).await {
         Ok(b) => b,
         Err(e) => return bad_request(&e.to_string()),
@@ -930,12 +867,10 @@ pub(crate) async fn boosty_link(State(state): State<AppState>, body: String) -> 
     Redirect::to("/admin/boosty").into_response()
 }
 
-/// `POST /admin/boosty/unlink/{user}` — remove a user's Boosty link.
 pub(crate) async fn boosty_unlink(
     State(state): State<AppState>,
     Path(user): Path<String>,
 ) -> Response {
-    // Audit-on-actual-mutation: unlinking an unlinked user is a no-op.
     let changed = match state
         .inv
         .unlink_boosty_subscriber(&vpnctl_core::UserId(user.clone()))
@@ -955,16 +890,11 @@ pub(crate) async fn boosty_unlink(
     Redirect::to("/admin/boosty").into_response()
 }
 
-/// `POST /admin/boosty/disable/{user}` — disable a lapsed subscriber's
-/// user (soft-mute; the "confirm disable" button), then re-deploy the
-/// user's servers so the node-side access is actually cut.
 pub(crate) async fn boosty_disable(
     State(state): State<AppState>,
     Path(user): Path<String>,
 ) -> Response {
     let uid = vpnctl_core::UserId(user.clone());
-    // Same error mapping as user_set_disabled_inner: unknown user → 404,
-    // DB failure → 500 (a 400 would blame the operator's request).
     let changed = match state.inv.set_user_disabled(&uid, true).await {
         Ok(b) => b,
         Err(vpnctl_inventory::SqliteInventoryError::Invalid(msg))
@@ -974,8 +904,6 @@ pub(crate) async fn boosty_disable(
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
-    // Audit-on-actual-mutation (NM-10): a double-submit of the confirm
-    // button writes nothing and deploys nothing.
     if changed {
         if let Err(e) = state
             .inv

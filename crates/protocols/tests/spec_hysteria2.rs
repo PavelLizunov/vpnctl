@@ -1,8 +1,4 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-//! Independent spec tests for `vpnctl_protocols::Hysteria2`.
-//!
-//! These tests are written from the spec only (no peeking at the impl).
-//! If a test fails, the implementation is wrong — do NOT weaken the test.
 
 use std::collections::HashMap;
 
@@ -11,8 +7,6 @@ use vpnctl_core::{
     DpiRisk, KernelId, Protocol, ProtocolId, RenderCtx, Server, ServerId, User, UserId,
 };
 use vpnctl_protocols::Hysteria2;
-
-// ── helpers ─────────────────────────────────────────────────────────────
 
 fn srv() -> Server {
     Server {
@@ -46,15 +40,11 @@ fn ctx_with<'a>(server: &'a Server, secrets: &'a HashMap<String, String>) -> Ren
     RenderCtx::new(server, secrets)
 }
 
-// ── H1: id() ────────────────────────────────────────────────────────────
-
 #[test]
 fn h1_protocol_id_is_hysteria2() {
     let p = Hysteria2::new();
     assert_eq!(p.id(), ProtocolId("hysteria2".to_string()));
 }
-
-// ── H2: server_inbound ──────────────────────────────────────────────────
 
 #[test]
 fn h2_server_inbound_top_level_type_is_hysteria2() {
@@ -96,7 +86,7 @@ fn h2_server_inbound_tls_alpn_contains_h3() {
 #[test]
 fn h2_server_inbound_uses_default_cert_paths() {
     let s = srv();
-    let secrets = HashMap::new(); // tuic.cert_path / tuic.key_path absent
+    let secrets = HashMap::new();
     let ctx = ctx_with(&s, &secrets);
     let users = [user("alice", Some("pw1"))];
     let v = Hysteria2::new().server_inbound(&ctx, &users).unwrap();
@@ -172,8 +162,6 @@ fn h2_server_inbound_skips_users_without_tuic_password() {
     assert!(!names.contains(&"nopw"), "got names: {names:?}");
 }
 
-// ── H3: client_config ───────────────────────────────────────────────────
-
 #[test]
 fn h3_client_config_basic_fields() {
     let s = srv();
@@ -222,8 +210,6 @@ fn h3_client_config_tls_insecure_and_alpn() {
     );
 }
 
-// ── H4: share_link ──────────────────────────────────────────────────────
-
 #[test]
 fn h4_share_link_starts_with_hysteria2_scheme() {
     let s = srv();
@@ -236,15 +222,12 @@ fn h4_share_link_starts_with_hysteria2_scheme() {
 
 #[test]
 fn h4_share_link_password_segment_percent_encodes_colon_and_at() {
-    // Password "ab:cd@ef" — both `:` and `@` are structural in userinfo and
-    // MUST be percent-encoded inside the password segment.
     let s = srv();
     let secrets = HashMap::new();
     let ctx = ctx_with(&s, &secrets);
     let u = user("alice", Some("ab:cd@ef"));
     let link = Hysteria2::new().share_link(&ctx, &u).unwrap();
 
-    // password sits between "//" and "@<host>" — extract that prefix.
     let after_scheme = link
         .strip_prefix("hysteria2://")
         .expect("link must start with hysteria2://");
@@ -261,7 +244,6 @@ fn h4_share_link_password_segment_percent_encodes_colon_and_at() {
         userinfo.contains("%40"),
         "raw '@' must be percent-encoded in password; userinfo = {userinfo:?}",
     );
-    // And the literal characters must NOT survive in the userinfo segment.
     assert!(
         !userinfo.contains('@'),
         "raw '@' leaked into userinfo: {userinfo:?}",
@@ -270,7 +252,6 @@ fn h4_share_link_password_segment_percent_encodes_colon_and_at() {
 
 #[test]
 fn h4_share_link_fragment_percent_encodes_space_and_hash() {
-    // user.id "alice cool#1" — space → %20, '#' → %23 in fragment.
     let s = srv();
     let secrets = HashMap::new();
     let ctx = ctx_with(&s, &secrets);
@@ -302,11 +283,6 @@ fn h4_share_link_fragment_percent_encodes_space_and_hash() {
 
 #[test]
 fn h4_share_link_contains_insecure_and_sni_query_params() {
-    // Spec evolved per review-agent: official Hysteria2 URI scheme
-    // (https://hysteria.network/docs/developers/URI-Scheme/) lists
-    // `sni`, `obfs`, `obfs-password`, `pinSHA256`, `insecure` — NO
-    // `alpn`. ALPN is negotiated at TLS handshake regardless. Stricter
-    // parsers reject unknown URI params.
     let s = srv();
     let secrets = HashMap::new();
     let ctx = ctx_with(&s, &secrets);
@@ -328,9 +304,6 @@ fn h4_share_link_contains_insecure_and_sni_query_params() {
 
 #[test]
 fn h4_share_link_user_without_password_returns_error() {
-    // Per review-agent: silent `unwrap_or_default()` was producing
-    // `hysteria2://@host/...` which clients accept syntactically but
-    // can't authenticate. Refuse to mint such links explicitly.
     let s = srv();
     let secrets = HashMap::new();
     let ctx = ctx_with(&s, &secrets);
@@ -341,18 +314,6 @@ fn h4_share_link_user_without_password_returns_error() {
         "expected Err for user without tuic_password, got {res:?}",
     );
 }
-
-// ── H7: Hysteria Realm (NAT-traversal) — optional realm block in inbound
-//
-// Activation rule (per impl docstring):
-//   * `hysteria2.realm.server_url` set → realm block emitted with all
-//     four keys; `realm_id` defaults to server.id, `token` to "",
-//     `stun_servers` to [] (empty list = sing-box default pool).
-//   * Absent → no realm key in JSON (back-compat: existing nodes
-//     deployed before Realm support was added MUST not regress).
-//
-// `listen` and `listen_port` are kept regardless — sing-box accepts
-// concurrent direct + realm transports.
 
 #[test]
 fn h7_no_realm_secrets_means_no_realm_key_in_inbound() {
@@ -365,7 +326,6 @@ fn h7_no_realm_secrets_means_no_realm_key_in_inbound() {
         v.get("realm").is_none(),
         "no realm secrets ⇒ no realm key (back-compat); got {v}"
     );
-    // Direct-listen path must still be intact.
     assert_eq!(v.get("listen_port").and_then(Value::as_u64), Some(8444));
 }
 
@@ -386,7 +346,6 @@ fn h7_realm_emitted_when_server_url_present_with_defaults() {
         realm.get("server_url").and_then(Value::as_str),
         Some("https://realm.example.com")
     );
-    // Defaults: realm_id = server.id, token = "", stun_servers = [].
     assert_eq!(
         realm.get("realm_id").and_then(Value::as_str),
         Some("node-1"),
@@ -402,7 +361,6 @@ fn h7_realm_emitted_when_server_url_present_with_defaults() {
         Some(&vec![]),
         "stun_servers must default to empty array (sing-box uses its default pool)"
     );
-    // Direct-listen path still present — concurrent transport.
     assert_eq!(v.get("listen_port").and_then(Value::as_u64), Some(8444));
 }
 
@@ -439,7 +397,6 @@ fn h7_stun_servers_csv_is_parsed_into_json_array() {
         "hysteria2.realm.server_url".into(),
         "https://r.example".into(),
     );
-    // Whitespace + trailing comma must not produce empty entries.
     secrets.insert(
         "hysteria2.realm.stun_servers".into(),
         " stun.example.com:3478 , stun.cloudflare.com:3478 , ".into(),
@@ -456,10 +413,6 @@ fn h7_stun_servers_csv_is_parsed_into_json_array() {
     );
 }
 
-/// Empty / whitespace-only `server_url` MUST NOT activate the realm
-/// block — otherwise sing-box rejects the config only at deploy-time
-/// during `sing-box check`. We catch it at config-render. (Review-agent
-/// finding on cd61838^..492fdeb burst.)
 #[test]
 fn h7_empty_server_url_does_not_activate_realm() {
     for empty in ["", "   ", "\t\n"] {
@@ -476,14 +429,6 @@ fn h7_empty_server_url_does_not_activate_realm() {
         );
     }
 }
-
-// ── H8: Salamander obfs (anti-DPI XOR scrambling) ───────────────────────
-//
-// Activation rule: emit the `obfs` block on BOTH server_inbound and
-// client_config IFF `hysteria2.obfs.password` is set (and non-empty
-// after trim). Type is hardcoded to `salamander` (only kind sing-box
-// + upstream Hysteria 2 ship). Share-link encodes via the official
-// `obfs=salamander&obfs-password=<pct-encoded>` query parameters.
 
 #[test]
 fn h8_no_obfs_secret_means_no_obfs_key_anywhere() {
@@ -547,7 +492,6 @@ fn h8_client_config_mirrors_server_obfs_password() {
 fn h8_share_link_obfs_query_format() {
     let s = srv();
     let mut secrets = HashMap::new();
-    // Include a `+` and a space to verify percent-encoding (USERINFO set).
     secrets.insert("hysteria2.obfs.password".into(), "salt+pepper sea".into());
     let ctx = ctx_with(&s, &secrets);
     let link = Hysteria2::new()
@@ -557,12 +501,10 @@ fn h8_share_link_obfs_query_format() {
         link.contains("&obfs=salamander&obfs-password="),
         "official URI scheme requires &obfs=salamander&obfs-password=; got: {link}"
     );
-    // Spec: `obfs-password` (with hyphen), NOT `obfsParam` or `obfs_password`.
     assert!(
         !link.contains("obfsParam") && !link.contains("obfs_password"),
         "wrong query parameter name: {link}"
     );
-    // Percent-encoding: space → %20 (NOT `+` per USERINFO set), `+` → %2B.
     assert!(
         link.contains("salt%2Bpepper%20sea"),
         "obfs-password must be percent-encoded with USERINFO charset; got: {link}"
@@ -588,8 +530,6 @@ fn h8_empty_obfs_password_does_not_activate_obfs() {
 
 #[test]
 fn h8_realm_and_obfs_can_coexist() {
-    // The two anti-censorship layers compose: Realm (anti-IP-block)
-    // + Salamander (anti-DPI-fingerprint). Must produce both blocks.
     let s = srv();
     let mut secrets = HashMap::new();
     secrets.insert(
@@ -610,13 +550,6 @@ fn h8_realm_and_obfs_can_coexist() {
         "obfs block must coexist with realm"
     );
 }
-
-// ── H9: DPI risk tier honesty ───────────────────────────────────────────
-//
-// The tier stays Weak (legacy servers can lack the Salamander secret —
-// minting is deploy-triggered with no fleet backfill), but the operator
-// tooltip must describe that CONDITIONAL state, not claim there is simply
-// no obfuscation. Pins the conservative tier AND the honest copy.
 
 #[test]
 fn h9_dpi_risk_stays_weak_but_tooltip_explains_conditional_obfs() {

@@ -7,58 +7,31 @@ use crate::sqlite::{
     SqliteInventory, SqliteInventoryError,
 };
 
-// ── Constants ───────────────────────────────────────────────────────────
-
-/// Markup basis-point value representing 1.0 (no markup).
 const IDENTITY_MARKUP_BPS: i64 = 10_000;
 
-/// Number of implicit decimals in `rate_micros` (10^6).
 const RATE_SCALE: i64 = 1_000_000;
 
-/// Number of implicit decimals in `markup_bps` (10^4).
 const MARKUP_SCALE: i64 = 10_000;
 
-// ── Conversion math (pure, no DB) ───────────────────────────────────────
-
-/// Convert `source_minor` (integer minor-units of `source_currency`) to
-/// `target_currency` using the given rate and markup.
-///
-/// Formula:
-///   target_minor = source_minor × rate_micros / RATE_SCALE × markup_bps / MARKUP_SCALE
-///
-/// When source == target, `rate_micros` should be `RATE_SCALE` (1.0) and
-/// `markup_bps` should be `IDENTITY_MARKUP_BPS` (1.0) — same-currency
-/// conversions never apply a fee.
-///
-/// Uses `i128` intermediates to avoid overflow on large amounts.
-///
-/// Returns `None` for zero `rate_micros` or zero `markup_bps` (defensive).
 pub fn convert_minor(source_minor: i64, rate_micros: i64, markup_bps: i64) -> Option<i64> {
     if rate_micros <= 0 || markup_bps <= 0 {
         return None;
     }
     let wide = source_minor as i128 * rate_micros as i128 * markup_bps as i128;
-    // Rounding: add half the divisor for banker's rounding.
     let divisor = RATE_SCALE as i128 * MARKUP_SCALE as i128;
     let rounded = (wide + divisor / 2) / divisor;
     Some(rounded as i64)
 }
 
-/// Normalise a billing cycle's `amount_cents` to a monthly equivalent.
-/// Uses integer arithmetic with rounding.
 pub fn monthly_equivalent(amount_minor: i64, cycle: BillingCycle) -> i64 {
     let months = cycle.months() as i64;
     if months <= 1 {
         return amount_minor;
     }
-    // Round to nearest: (amount + months/2) / months
     (amount_minor + months / 2) / months
 }
 
-// ── Currency rates CRUD ─────────────────────────────────────────────────
-
 impl SqliteInventory {
-    /// Upsert a single exchange rate.
     pub async fn upsert_currency_rate(&self, rate: &CurrencyRate) -> Result<()> {
         if rate.rate_micros <= 0 {
             return Err(SqliteInventoryError::Invalid(
@@ -83,7 +56,6 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// Bulk-upsert exchange rates in a single transaction.
     pub async fn upsert_currency_rates(&self, rates: &[CurrencyRate]) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         for rate in rates {
@@ -113,7 +85,6 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// Get all stored exchange rates.
     pub async fn list_currency_rates(&self) -> Result<Vec<CurrencyRate>> {
         let rows = sqlx::query(
             "SELECT base_currency, target_currency, rate_micros, source, fetched_at
@@ -136,10 +107,7 @@ impl SqliteInventory {
         Ok(out)
     }
 
-    /// Get the rate for a specific currency pair.  Checks rate overrides
-    /// in `currency_settings` first, then falls back to `currency_rates`.
     pub async fn get_rate(&self, base: &str, target: &str) -> Result<Option<CurrencyRate>> {
-        // 1. Check rate overrides in settings.
         let settings = self.get_currency_settings().await?;
         let override_key = format!("{base}/{target}");
         if let Some(&micros) = settings.rate_overrides.get(&override_key) {
@@ -152,7 +120,6 @@ impl SqliteInventory {
             }));
         }
 
-        // 2. Fall back to direct rates table.
         let row = sqlx::query(
             "SELECT base_currency, target_currency, rate_micros, source, fetched_at
              FROM currency_rates
@@ -173,7 +140,6 @@ impl SqliteInventory {
             }));
         }
 
-        // 3. Inverse rate (target -> base).
         let inv_key = format!("{target}/{base}");
         let inv_rate = if let Some(&micros) = settings.rate_overrides.get(&inv_key) {
             Some(micros)
@@ -202,7 +168,6 @@ impl SqliteInventory {
             }
         }
 
-        // 4. Triangulation via intermediate base (where X -> base and X -> target exist).
         let common: Option<(i64, i64)> = sqlx::query_as(
             "SELECT r1.rate_micros, r2.rate_micros
              FROM currency_rates r1
@@ -233,7 +198,6 @@ impl SqliteInventory {
         Ok(None)
     }
 
-    /// Delete a rate for a specific currency pair.
     pub async fn delete_currency_rate(&self, base: &str, target: &str) -> Result<bool> {
         let res = sqlx::query(
             "DELETE FROM currency_rates WHERE base_currency = ?1 AND target_currency = ?2",
@@ -245,9 +209,6 @@ impl SqliteInventory {
         Ok(res.rows_affected() > 0)
     }
 
-    // ── Currency settings ───────────────────────────────────────────────
-
-    /// Read the operator's currency display preferences.
     pub async fn get_currency_settings(&self) -> Result<CurrencySettings> {
         let row = sqlx::query(
             "SELECT display_currency, default_markup_bps, markup_overrides_json,
@@ -286,15 +247,12 @@ impl SqliteInventory {
         })
     }
 
-    /// Update operator currency settings.  Only non-`None` fields in the
-    /// input are applied (patch semantics).  Writes an audit row.
     pub async fn set_currency_settings(
         &self,
         input: &CurrencySettingsInput,
     ) -> Result<CurrencySettings> {
         let mut tx = self.pool.begin().await?;
 
-        // Read current.
         let current = {
             let row = sqlx::query(
                 "SELECT display_currency, default_markup_bps, markup_overrides_json,
@@ -376,7 +334,6 @@ impl SqliteInventory {
         .execute(&mut *tx)
         .await?;
 
-        // Audit (no secrets).
         sqlx::query(
             "INSERT INTO audit_log (actor, action, target, payload)
              VALUES ('admin', 'currency.settings.set', NULL, ?1)",
@@ -403,8 +360,6 @@ impl SqliteInventory {
         })
     }
 
-    // ── Currency conversion engine ──────────────────────────────────────
-
     async fn convert_amount_with_markup(
         &self,
         amount_minor: i64,
@@ -412,7 +367,6 @@ impl SqliteInventory {
         target_currency: &str,
         markup_bps: i64,
     ) -> Result<Option<ConversionResult>> {
-        // Same currency → identity, no markup.
         if source_currency == target_currency {
             return Ok(Some(ConversionResult {
                 amount_minor,
@@ -423,7 +377,6 @@ impl SqliteInventory {
             }));
         }
 
-        // Zero amount → trivial.
         if amount_minor == 0 {
             return Ok(Some(ConversionResult {
                 amount_minor: 0,
@@ -434,7 +387,6 @@ impl SqliteInventory {
             }));
         }
 
-        // Look up rate.
         let rate = match self.get_rate(source_currency, target_currency).await? {
             Some(r) => r,
             None => return Ok(None),
@@ -453,11 +405,6 @@ impl SqliteInventory {
         }
     }
 
-    /// Convert an amount from one currency to another using the operator's
-    /// current settings (rate overrides, markup).
-    ///
-    /// Returns `Ok(None)` when no rate is available for the pair.  Returns
-    /// identity conversion (1:1, no markup) when source == target.
     pub async fn convert_amount(
         &self,
         amount_minor: i64,
@@ -474,9 +421,6 @@ impl SqliteInventory {
             .await
     }
 
-    /// Convert an amount at spot market rate without applying the operator's
-    /// expense fee markup. Used for incoming revenue (e.g. Boosty MRR) so that
-    /// payment processor markups do not artificially inflate revenue.
     pub async fn convert_amount_spot(
         &self,
         amount_minor: i64,
@@ -492,13 +436,6 @@ impl SqliteInventory {
         .await
     }
 
-    // ── Payment history ─────────────────────────────────────────────────
-
-    /// Record a payment for a server.  Automatically snapshots the
-    /// converted value at the current exchange rate + markup.
-    ///
-    /// Also advances the server's billing due date by one cycle (the
-    /// "+1 cycle" operation).
     pub async fn record_server_payment(
         &self,
         sid: &ServerId,
@@ -510,7 +447,6 @@ impl SqliteInventory {
             ));
         }
 
-        // Snapshot the conversion at current rates.
         let settings = self.get_currency_settings().await?;
         let conversion = self
             .convert_amount(
@@ -522,7 +458,6 @@ impl SqliteInventory {
 
         let mut tx = self.pool.begin().await?;
 
-        // Verify server exists.
         let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM servers WHERE id = ?1")
             .bind(&sid.0)
             .fetch_optional(&mut *tx)
@@ -591,7 +526,6 @@ impl SqliteInventory {
             notes: row.try_get("notes")?,
         };
 
-        // Audit.
         sqlx::query(
             "INSERT INTO audit_log (actor, action, target, payload)
              VALUES ('admin', 'server.payment.record', ?1, ?2)",
@@ -614,7 +548,6 @@ impl SqliteInventory {
         Ok(payment)
     }
 
-    /// List all payments for a server, newest first.
     pub async fn list_server_payments(&self, sid: &ServerId) -> Result<Vec<ServerPayment>> {
         let rows = sqlx::query(
             "SELECT id, server_id, paid_at, amount_minor, currency, cycle,
@@ -647,11 +580,6 @@ impl SqliteInventory {
         Ok(out)
     }
 
-    /// Historical total spend and payment count for one server in the display currency.
-    ///
-    /// Uses recorded conversion snapshots when `display_currency` matches, and dynamically
-    /// converts original amounts when the operator views historical spend in an alternative
-    /// display currency (so past payments never vanish upon currency switch).
     pub async fn server_spend_and_count(
         &self,
         sid: &ServerId,
@@ -688,27 +616,15 @@ impl SqliteInventory {
         Ok((total_spend, count))
     }
 
-    /// Historical total spend for one server in the display currency.
     pub async fn server_total_spend(&self, sid: &ServerId, display_currency: &str) -> Result<i64> {
         let (spend, _) = self.server_spend_and_count(sid, display_currency).await?;
         Ok(spend)
     }
 
-    // ── Fleet billing summary ───────────────────────────────────────────
-
-    /// Compute a unified fleet billing summary with all amounts converted
-    /// to the operator's display currency.
-    ///
-    /// **Total Spend** = sum of historical `server_payments.converted_minor`
-    /// (immutable snapshots — never re-converted).
-    ///
-    /// **Monthly Burn** = each server's `server_billing.amount_cents`
-    /// normalised to monthly, then converted at current rates + markup.
     pub async fn get_fleet_billing_summary(&self) -> Result<FleetBillingSummary> {
         let settings = self.get_currency_settings().await?;
         let display = &settings.display_currency;
 
-        // Per-server billing + total spend.
         let rows = sqlx::query(
             "SELECT s.id, s.display_name,
                     b.amount_cents, b.currency, b.billing_cycle,
@@ -742,7 +658,6 @@ impl SqliteInventory {
             let pcount: i64 = r.try_get("payment_count")?;
             total_spend = total_spend.saturating_add(spend);
 
-            // Billing may not be configured for every server.
             let amount_cents: Option<i64> = r.try_get("amount_cents")?;
             let currency: Option<String> = r.try_get("currency")?;
             let cycle_str: Option<String> = r.try_get("billing_cycle")?;
@@ -766,7 +681,6 @@ impl SqliteInventory {
 
             let monthly_src = monthly_equivalent(src_amount, cycle);
 
-            // Convert to display currency.
             let converted = self
                 .convert_amount(monthly_src, &src_currency, display)
                 .await?;
@@ -820,17 +734,14 @@ mod tests {
 
     #[test]
     fn convert_minor_identity() {
-        // 100 EUR → 100 EUR (1:1, no markup).
         let result = convert_minor(10000, RATE_SCALE, IDENTITY_MARKUP_BPS);
         assert_eq!(result, Some(10000));
     }
 
     #[test]
     fn convert_minor_with_rate_and_markup() {
-        // 10.00 EUR (1000 cents) × rate 89.5 (89_500_000 micros) × 1.07 markup.
-        // Expected: 1000 × 89.5 × 1.07 = 95_765.0 → 95765 minor units.
-        let rate = 89_500_000i64; // 89.5
-        let markup = 10_700i64; // 1.07
+        let rate = 89_500_000i64;
+        let markup = 10_700i64;
         let result = convert_minor(1000, rate, markup);
         assert_eq!(result, Some(95765));
     }
@@ -858,30 +769,24 @@ mod tests {
 
     #[test]
     fn monthly_equivalent_annual() {
-        // 12000 / 12 = 1000.
         assert_eq!(monthly_equivalent(12000, BillingCycle::Annual), 1000);
     }
 
     #[test]
     fn monthly_equivalent_quarterly() {
-        // 3000 / 3 = 1000.
         assert_eq!(monthly_equivalent(3000, BillingCycle::Quarterly), 1000);
     }
 
     #[test]
     fn monthly_equivalent_rounding() {
-        // (1000 + 6) / 12 = 83 (integer half-up rounding).
         assert_eq!(monthly_equivalent(1000, BillingCycle::Annual), 83);
-        // (1100 + 6) / 12 = 92.
         assert_eq!(monthly_equivalent(1100, BillingCycle::Annual), 92);
     }
 
     #[test]
     fn convert_large_amount_no_overflow() {
-        // 1_000_000_00 cents (1M EUR) × rate 89.5 × 1.07 — must not overflow.
         let result = convert_minor(100_000_000, 89_500_000, 10_700);
         assert!(result.is_some());
-        // 100_000_000 × 89.5 × 1.07 = 9_576_500_000
         assert_eq!(result, Some(9_576_500_000));
     }
 }

@@ -1,11 +1,3 @@
-//! Spec for `SqliteInventory::ack_all_unacked_alerts` — the «ack all
-//! (N)» bulk-clear used by the operator-facing /admin/alerts feed.
-//! Written from spec only — impl NOT consulted.
-//!
-//! Critical contract: rows that are ALREADY acked must keep their
-//! ORIGINAL `acked_at` timestamp — the bulk-ack must not overwrite
-//! history with `now`.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use tempfile::TempDir;
@@ -33,8 +25,6 @@ fn srv(id: &str) -> Server {
     }
 }
 
-/// Seed N fresh-unacked rows of distinct `kind` values on `s1`.
-/// Returns their ids in insertion order.
 async fn seed_unacked(inv: &SqliteInventory, n: usize) -> Vec<i64> {
     let mut ids = Vec::with_capacity(n);
     for i in 0..n {
@@ -54,7 +44,6 @@ async fn seed_unacked(inv: &SqliteInventory, n: usize) -> Vec<i64> {
     ids
 }
 
-// 1. Empty case — Ok(0), no mutation.
 #[tokio::test]
 async fn ack_all_on_empty_table_returns_zero_and_leaves_table_empty() {
     let dir = TempDir::new().unwrap();
@@ -72,7 +61,6 @@ async fn ack_all_on_empty_table_returns_zero_and_leaves_table_empty() {
     );
 }
 
-// 2. All-unacked case — 5 rows → Ok(5), all acked.
 #[tokio::test]
 async fn ack_all_with_five_unacked_returns_five_and_acks_every_row() {
     let dir = TempDir::new().unwrap();
@@ -99,7 +87,6 @@ async fn ack_all_with_five_unacked_returns_five_and_acks_every_row() {
             row.acked_at
         );
     }
-    // Sanity: ids round-trip.
     let mut got: Vec<i64> = history.iter().map(|r| r.id).collect();
     got.sort();
     let mut want = ids.clone();
@@ -107,17 +94,12 @@ async fn ack_all_with_five_unacked_returns_five_and_acks_every_row() {
     assert_eq!(got, want, "id set must round-trip");
 }
 
-// 3. Mixed case — 3 unacked + 2 already-acked. Bulk ack must affect
-//    only the 3 unacked; the 2 already-acked rows MUST keep their
-//    ORIGINAL `acked_at` value, NOT get overwritten with `now`.
 #[tokio::test]
 async fn ack_all_preserves_existing_ack_timestamps_on_already_acked_rows() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_server(&srv("s1")).await.unwrap();
 
-    // Two rows we ack right now — these are the «historical» rows
-    // whose timestamps must NOT be overwritten by the bulk ack.
     let pre_acked = seed_unacked(&inv, 2).await;
     for id in &pre_acked {
         assert!(
@@ -126,8 +108,6 @@ async fn ack_all_preserves_existing_ack_timestamps_on_already_acked_rows() {
         );
     }
 
-    // Snapshot the originals' acked_at values immediately after they
-    // were acked.
     let originals: Vec<(i64, chrono::DateTime<chrono::Utc>)> = inv
         .recent_alerts(100, true)
         .await
@@ -138,11 +118,8 @@ async fn ack_all_preserves_existing_ack_timestamps_on_already_acked_rows() {
         .collect();
     assert_eq!(originals.len(), 2, "must have captured both pre-acked ts");
 
-    // Sleep long enough that strftime('%Y-%m-%dT%H:%M:%fZ','now')
-    // would advance — millis resolution, so 50ms is plenty.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    // Add the 3 fresh-unacked rows on top.
     let unacked = seed_unacked(&inv, 3).await;
     assert_eq!(
         inv.unacked_alert_count().await.unwrap(),
@@ -150,7 +127,6 @@ async fn ack_all_preserves_existing_ack_timestamps_on_already_acked_rows() {
         "sanity: exactly 3 unacked at this point"
     );
 
-    // The bulk ack.
     let n = inv.ack_all_unacked_alerts().await.unwrap();
     assert_eq!(
         n, 3,
@@ -158,8 +134,6 @@ async fn ack_all_preserves_existing_ack_timestamps_on_already_acked_rows() {
     );
 
     let after = inv.recent_alerts(100, true).await.unwrap();
-    // The 2 originals must still carry their captured timestamps —
-    // identity-equal, NOT just within some tolerance of `now`.
     for (orig_id, orig_ts) in &originals {
         let row = after
             .iter()
@@ -175,8 +149,6 @@ async fn ack_all_preserves_existing_ack_timestamps_on_already_acked_rows() {
              already-acked rows"
         );
     }
-    // The 3 freshly-acked rows now have an acked_at >= the originals'
-    // (sanity that the bulk ack actually wrote them).
     for new_id in &unacked {
         let row = after
             .iter()
@@ -194,7 +166,6 @@ async fn ack_all_preserves_existing_ack_timestamps_on_already_acked_rows() {
     }
 }
 
-// 4. Idempotency — first call returns N, second returns exactly 0.
 #[tokio::test]
 async fn ack_all_is_idempotent_second_call_returns_exactly_zero() {
     let dir = TempDir::new().unwrap();
@@ -214,7 +185,6 @@ async fn ack_all_is_idempotent_second_call_returns_exactly_zero() {
     );
 }
 
-// 5. After bulk ack, `unacked_alert_count()` returns 0.
 #[tokio::test]
 async fn ack_all_drains_unacked_count_to_zero() {
     let dir = TempDir::new().unwrap();

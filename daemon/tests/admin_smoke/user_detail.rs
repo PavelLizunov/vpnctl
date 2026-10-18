@@ -1,5 +1,3 @@
-//! User detail integration smoke tests: overview, routes, subscription, share links, WireGuard, traffic, activity, access, origins, presence.
-
 #[path = "user_detail/access_origins_presence.rs"]
 mod access_origins_presence;
 #[path = "user_detail/amneziawg.rs"]

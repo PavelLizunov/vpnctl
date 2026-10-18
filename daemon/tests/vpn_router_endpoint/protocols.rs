@@ -1,6 +1,3 @@
-//! Protocol-specific delivery, multi-protocol ordering, UA gating, and pairing tests
-//! for vpn_router_endpoint.
-
 use std::sync::Arc;
 
 use tempfile::TempDir;
@@ -18,9 +15,6 @@ use super::common::{
     subscription_lines, subscription_lines_for_ua,
 };
 
-/// A naive-granted user gets the naive URI — and it lands STRICTLY AFTER
-/// every vless line (two-pass render). The userinfo carries the user id +
-/// credential and the host is the ACME domain.
 #[tokio::test]
 async fn vpn_router_naive_uri_appended_after_all_vless() {
     let dir = TempDir::new().unwrap();
@@ -41,17 +35,14 @@ async fn vpn_router_naive_uri_appended_after_all_vless() {
         naive.contains("tester-1:NAIVE_TEST_PW@cdn.example.com"),
         "naive userinfo + ACME host: {naive}"
     );
-    // Fragment carries the operator's server label, like the vless lines.
     assert!(
         naive.ends_with("#Latvia%20NAIVE%20~tester-1"),
         "naive fragment must carry the server display label: {naive}"
     );
-    // naive-only node (no co-located HY2) → no pairing tag.
     assert!(
         !naive.contains("pair="),
         "a naive-only node must not carry a pair param: {naive}"
     );
-    // The naive line never precedes a vless line — guards the two-pass order.
     let first_naive = lines
         .iter()
         .position(|l| l.starts_with("naive+https://"))
@@ -66,14 +57,10 @@ async fn vpn_router_naive_uri_appended_after_all_vless() {
     );
 }
 
-/// Kill-switch: hiding naive on the server (NM-10) drops it from the
-/// subscription on the very next request — and the vless lines are
-/// untouched. This is the instant, redeploy-free abort path.
 #[tokio::test]
 async fn vpn_router_hidden_naive_excluded_vless_intact() {
     let dir = TempDir::new().unwrap();
     let state = seed_state_with_naive(&dir).await;
-    // All mutations BEFORE the fetch (access-log writer race, see above).
     state
         .inv
         .set_server_protocol_hidden(&ServerId("cdn".into()), &ProtocolId("naive".into()), true)
@@ -91,14 +78,10 @@ async fn vpn_router_hidden_naive_excluded_vless_intact() {
     );
 }
 
-/// Opt-in by grant: a user NOT granted on the naive server gets a
-/// vless-only blob — byte-identical to the pre-Part-B output. Proves naive
-/// cannot break vless for the fleet default (un-opted users).
 #[tokio::test]
 async fn vpn_router_user_without_naive_grant_gets_no_naive() {
     let dir = TempDir::new().unwrap();
     let state = seed_state_with_naive(&dir).await;
-    // Revoke the naive grant BEFORE the fetch → user granted only on de.
     state
         .inv
         .revoke(&UserId("tester-1".into()), &ServerId("cdn".into()))
@@ -106,10 +89,6 @@ async fn vpn_router_user_without_naive_grant_gets_no_naive() {
         .unwrap();
     let lines = subscription_lines(router(state), NAIVE_DEVICE_ID).await;
 
-    // Byte-integrity: EXACTLY the de vless line, unchanged shape (uuid,
-    // host:port, fragment). Proves the naive append path didn't perturb a
-    // single byte of the vless output for an un-opted user — the operator's
-    // hard requirement.
     assert_eq!(lines.len(), 1, "exactly the de vless line: {lines:?}");
     assert!(
         !lines[0].starts_with("naive+https://"),
@@ -127,14 +106,10 @@ async fn vpn_router_user_without_naive_grant_gets_no_naive() {
     );
 }
 
-/// A user granted ONLY on the naive server (no vless grant) gets a
-/// single-line naive-only blob — `make_config_blob` doesn't choke on the
-/// vless-empty case and naive renders standalone.
 #[tokio::test]
 async fn vpn_router_naive_only_user_gets_naive_line() {
     let dir = TempDir::new().unwrap();
     let state = seed_state_with_naive(&dir).await;
-    // Revoke the vless grant → user granted only on cdn (naive).
     state
         .inv
         .revoke(&UserId("tester-1".into()), &ServerId("de".into()))
@@ -149,15 +124,10 @@ async fn vpn_router_naive_only_user_gets_naive_line() {
     );
 }
 
-/// Injection defence end-to-end: a `naive.domain` carrying a newline +
-/// forged `vless://` line is REJECTED by the share_link guard → the naive
-/// render errors → the handler logs + serves vless-only. The forged line
-/// NEVER reaches the blob, and the legitimate vless line is untouched.
 #[tokio::test]
 async fn vpn_router_malformed_naive_domain_no_injection_vless_intact() {
     let dir = TempDir::new().unwrap();
     let state = seed_state_with_naive(&dir).await;
-    // Overwrite the cdn domain with an injection payload BEFORE the fetch.
     state
         .inv
         .set_server_secret(
@@ -177,7 +147,6 @@ async fn vpn_router_malformed_naive_domain_no_injection_vless_intact() {
         !lines.iter().any(|l| l.starts_with("naive+https://")),
         "the rejected naive server emits no link: {lines:?}"
     );
-    // The legitimate de vless line is served unchanged.
     assert_eq!(lines.len(), 1, "vless-only after naive rejected: {lines:?}");
     assert!(
         lines[0].contains("@de.example.com:443"),
@@ -185,9 +154,6 @@ async fn vpn_router_malformed_naive_domain_no_injection_vless_intact() {
     );
 }
 
-/// hysteria2 renders AFTER vless, in the official `hysteria2://` URI form,
-/// and carries the Salamander obfs params when the server secret is minted
-/// (this is what makes it DPI-resistant — the whole point of the protocol).
 #[tokio::test]
 async fn vpn_router_hysteria2_uri_appended_after_vless_with_obfs() {
     let dir = TempDir::new().unwrap();
@@ -208,21 +174,16 @@ async fn vpn_router_hysteria2_uri_appended_after_vless_with_obfs() {
         hy2.contains("obfs=salamander") && hy2.contains("obfs-password="),
         "Salamander obfs params present (DPI-resistant): {hy2}"
     );
-    // Fragment carries the operator's server label "{display} HY2 ~{client}"
-    // (ninitux house style, like the vless lines) — NOT the bare username.
     assert!(
         hy2.ends_with("#Latvia%20HY2%20~tester-1"),
         "fragment must carry the server display label, not the username: {hy2}"
     );
-    // HY2-only node (no co-located naive) → no pairing tag.
     assert!(
         !hy2.contains("pair="),
         "an HY2-only node must not carry a pair param: {hy2}"
     );
 }
 
-/// Kill-switch parity with naive: hiding hysteria2 (NM-10) drops it from the
-/// subscription on the next request, vless untouched.
 #[tokio::test]
 async fn vpn_router_hidden_hysteria2_excluded_vless_intact() {
     let dir = TempDir::new().unwrap();
@@ -248,10 +209,6 @@ async fn vpn_router_hidden_hysteria2_excluded_vless_intact() {
     );
 }
 
-/// hysteria2's per-user auth is `tuic_password`; a user without one is
-/// SKIPPED (share_link errs → failure-isolated) and their vless stays
-/// byte-intact. This is the fleet-default case (most migrated users have no
-/// tuic_password) — proves an extra protocol can't break their vless.
 #[tokio::test]
 async fn vpn_router_hysteria2_without_tuic_password_skipped_vless_intact() {
     let dir = TempDir::new().unwrap();
@@ -272,9 +229,6 @@ async fn vpn_router_hysteria2_without_tuic_password_skipped_vless_intact() {
     );
 }
 
-/// `require_secret = None`: hysteria2 renders even with NO obfs secret — a
-/// bare `hysteria2://` (no `obfs=` params). Pins that the hy2 path does NOT
-/// gate on a server secret the way naive gates on `naive.domain`.
 #[tokio::test]
 async fn vpn_router_hysteria2_without_obfs_secret_emits_bare_uri() {
     let dir = TempDir::new().unwrap();
@@ -294,10 +248,6 @@ async fn vpn_router_hysteria2_without_obfs_secret_emits_bare_uri() {
     );
 }
 
-/// Multi-extra ordering: a user granted vless + naive + hysteria2 gets the
-/// blob partitioned as [vless.., naive+https.., hysteria2://] — vless first
-/// (byte-stable), then the extras in EXTRA_PROTOCOLS declaration order. Pins
-/// the order against a future reorder of that const.
 #[tokio::test]
 async fn vpn_router_vless_then_naive_then_hysteria2_order() {
     let dir = TempDir::new().unwrap();
@@ -370,8 +320,6 @@ async fn vpn_router_vless_then_naive_then_hysteria2_order() {
         lines[2].starts_with("hysteria2://"),
         "hysteria2 third: {lines:?}"
     );
-    // No display_name on cdn/hy → fragment falls back to the uppercased
-    // non-ISO id ("CDN" / "HY"), still in the ninitux house style.
     assert!(
         lines[1].ends_with("#CDN%20NAIVE%20~tester-1"),
         "naive fallback label: {}",
@@ -384,9 +332,6 @@ async fn vpn_router_vless_then_naive_then_hysteria2_order() {
     );
 }
 
-/// A malicious/sloppy server `display_name` (newline + `#`) must NOT forge an
-/// extra line into the newline-joined base64 blob nor a second fragment — the
-/// whole label is `NINITUX_QUOTE`-encoded before it reaches the URI.
 #[tokio::test]
 async fn vpn_router_extra_protocol_label_injection_is_neutralized() {
     let dir = TempDir::new().unwrap();
@@ -398,8 +343,6 @@ async fn vpn_router_extra_protocol_label_injection_is_neutralized() {
         .unwrap();
     let lines = subscription_lines(router(state), HY2_DEVICE_ID).await;
 
-    // Exactly de-vless + hy2 — the embedded newline did NOT split into a 3rd
-    // blob line (it'd be a forged URI line if left raw).
     assert_eq!(lines.len(), 2, "no forged blob line: {lines:?}");
     let hy2 = lines
         .iter()
@@ -411,8 +354,6 @@ async fn vpn_router_extra_protocol_label_injection_is_neutralized() {
     );
 }
 
-/// A node with BOTH naive + HY2 stamps both share-links with the SAME
-/// `pair=<server id>` in the query (before the fragment).
 #[tokio::test]
 async fn vpn_router_colocated_naive_and_hy2_share_a_pair_param() {
     let dir = TempDir::new().unwrap();
@@ -427,11 +368,9 @@ async fn vpn_router_colocated_naive_and_hy2_share_a_pair_param() {
         .find(|l| l.starts_with("hysteria2://"))
         .expect("hy2 line");
 
-    // naive had no query → "?pair="; hy2 already had a query → "&pair=".
     assert!(naive.contains("?pair=cdn#"), "naive pair in query: {naive}");
     assert!(hy2.contains("&pair=cdn#"), "hy2 pair in query: {hy2}");
 
-    // Identical pair value on both.
     let pair_of = |u: &str| {
         u.split("pair=")
             .nth(1)
@@ -445,21 +384,17 @@ async fn vpn_router_colocated_naive_and_hy2_share_a_pair_param() {
         "naive & hy2 of one node must share the pair"
     );
 
-    // pair lives in the query (before '#'), not the fragment.
     assert!(
         naive.find("pair=").unwrap() < naive.find('#').unwrap(),
         "pair must precede the fragment: {naive}"
     );
 }
 
-/// Different nodes get DIFFERENT pair values (each its own server id) — the
-/// "разные узлы → разный pair" half of the contract.
 #[tokio::test]
 async fn vpn_router_two_paired_nodes_get_distinct_pair_values() {
     let dir = TempDir::new().unwrap();
-    let state = seed_state_with_paired_node(&dir).await; // node "cdn" (naive+hy2)
+    let state = seed_state_with_paired_node(&dir).await;
 
-    // A SECOND co-located node "nl2".
     let nl2 = Server {
         id: ServerId("nl2".into()),
         address: "1.2.3.4".into(),
@@ -495,20 +430,16 @@ async fn vpn_router_two_paired_nodes_get_distinct_pair_values() {
             .iter()
             .any(|l| l.starts_with(scheme) && l.contains(pair))
     };
-    // cdn's pair=cdn on both, nl2's pair=nl2 on both — distinct per node.
     assert!(has("naive+https://", "pair=cdn#"), "cdn naive: {lines:?}");
     assert!(has("hysteria2://", "pair=cdn#"), "cdn hy2: {lines:?}");
     assert!(has("naive+https://", "pair=nl2#"), "nl2 naive: {lines:?}");
     assert!(has("hysteria2://", "pair=nl2#"), "nl2 hy2: {lines:?}");
 }
 
-/// The pairing tag is an OPT-IN (UX-3): a node with BOTH naive+HY2 but the
-/// `udp_pair_enabled` flag OFF emits NO `pair=` on either link — both still
-/// render, just unpaired.
 #[tokio::test]
 async fn vpn_router_paired_node_without_optin_has_no_pair() {
     let dir = TempDir::new().unwrap();
-    let state = seed_state_with_paired_node(&dir).await; // cdn: opt-in ON by default
+    let state = seed_state_with_paired_node(&dir).await;
     state
         .inv
         .set_server_udp_pair_enabled(&ServerId("cdn".into()), false)
@@ -529,9 +460,6 @@ async fn vpn_router_paired_node_without_optin_has_no_pair() {
     );
 }
 
-/// An amneziawg-granted user gets the `awg://` URI — AFTER every vless,
-/// carrying the server key (userinfo), the per-peer `/32` (octet 2 for the
-/// sole peer, from `with_peers`), the minted obfs, and `s3=s4=0` (1.x).
 #[tokio::test]
 async fn vpn_router_awg_uri_appended_after_vless() {
     let dir = TempDir::new().unwrap();
@@ -543,12 +471,10 @@ async fn vpn_router_awg_uri_appended_after_vless() {
     let awg = lines.last().unwrap();
     assert!(awg.starts_with("awg://"), "awg must be last: {lines:?}");
     assert!(awg.contains("@203.0.113.50:51820"), "awg host:port: {awg}");
-    // Required fields the client's parser hard-requires.
     assert!(
         awg.contains("private_key=") && awg.contains("address=10.66.0.2/32"),
         "awg must carry private_key + the per-peer /32 (octet 2): {awg}"
     );
-    // Obfs come straight from the minted server secrets.
     assert!(
         awg.contains("jc=7") && awg.contains("s1=30") && awg.contains("h1=1111111111"),
         "awg obfs must mirror the server secrets: {awg}"
@@ -572,8 +498,6 @@ async fn vpn_router_awg_uri_appended_after_vless() {
     );
 }
 
-/// Kill-switch: hiding `wireguard` on the server (NM-10) drops `awg://`
-/// from the subscription on the next request; vless stays intact.
 #[tokio::test]
 async fn vpn_router_hidden_wireguard_excludes_awg_vless_intact() {
     let dir = TempDir::new().unwrap();
@@ -599,8 +523,6 @@ async fn vpn_router_hidden_wireguard_excludes_awg_vless_intact() {
     );
 }
 
-/// Opt-in by grant: a user not granted the amneziawg server gets a
-/// vless-only blob — awg:// cannot break vless for un-opted users.
 #[tokio::test]
 async fn vpn_router_user_without_awg_grant_gets_no_awg() {
     let dir = TempDir::new().unwrap();
@@ -622,14 +544,6 @@ async fn vpn_router_user_without_awg_grant_gets_no_awg() {
     );
 }
 
-/// REGRESSION GUARD for the awg:// octet ↔ server `awg0.conf` match.
-/// The subscription octet = `2 + position in the FULL users_for_server list`
-/// (ORDER BY id), counting granted users WITHOUT a wireguard_pubkey — because
-/// the kernel's `awg0.conf` [Peer] octet enumerates the SAME full list,
-/// skipping pubkey-less users from OUTPUT but NOT from the index. A
-/// pubkey-less user sorting before the awg user therefore shifts the octet to
-/// `.3`. If anyone "fixes" one side to skip pubkey-less peers, the two octets
-/// diverge and the tunnel routes to the wrong /32 — this test fails first.
 #[tokio::test]
 async fn vpn_router_awg_octet_counts_pubkeyless_granted_peers() {
     let dir = TempDir::new().unwrap();
@@ -669,8 +583,6 @@ async fn vpn_router_awg_octet_counts_pubkeyless_granted_peers() {
     ] {
         inv.set_server_secret(&aw.id, k, v).await.unwrap();
     }
-    // Pubkey-less granted user with a LOWER id ("aaa-novg" < "tester-1") →
-    // sorts first in users_for_server, shifting tester-1's octet to .3.
     let novg = User {
         id: UserId("aaa-novg".into()),
         uuid: "00000000-0000-0000-0000-000000000000".into(),
@@ -712,12 +624,6 @@ async fn vpn_router_awg_octet_counts_pubkeyless_granted_peers() {
     );
 }
 
-/// UA-gate: awg:// is delivered ONLY to the custom VPNRouter client (the
-/// only consumer that parses the scheme). A generic v2ray-family client —
-/// even with wireguard visible AND the user holding WG keys — gets a blob
-/// with NO awg:// line, so advertising wireguard can't break a v2ray/clash
-/// parser fleet-wide. The VPNRouter UA (covered by the tests above) DOES
-/// receive it.
 #[tokio::test]
 async fn vpn_router_awg_ua_gated_out_for_generic_client() {
     let dir = TempDir::new().unwrap();
@@ -733,8 +639,6 @@ async fn vpn_router_awg_ua_gated_out_for_generic_client() {
     );
 }
 
-/// VPNRouter gets the `vless://…type=xhttp` line (after vless), carrying the
-/// reality pbk/sid + the xhttp path.
 #[tokio::test]
 async fn vpn_router_xhttp_delivered_to_vpnrouter_after_vless() {
     let dir = TempDir::new().unwrap();
@@ -757,7 +661,6 @@ async fn vpn_router_xhttp_delivered_to_vpnrouter_after_vless() {
         xhttp.contains("pbk=PUB_xr") && xhttp.contains("sid=abcdef12"),
         "xhttp reuses the reality pbk/sid: {xhttp}"
     );
-    // Lands after every vless+reality line.
     let first_x = lines.iter().position(|l| l.contains("type=xhttp")).unwrap();
     let last_reality = lines
         .iter()
@@ -769,8 +672,6 @@ async fn vpn_router_xhttp_delivered_to_vpnrouter_after_vless() {
     );
 }
 
-/// A generic client (v2ray) must NOT get the xhttp line (UA-gated), but keeps
-/// its vless+reality.
 #[tokio::test]
 async fn vpn_router_xhttp_ua_gated_out_for_generic_client() {
     let dir = TempDir::new().unwrap();

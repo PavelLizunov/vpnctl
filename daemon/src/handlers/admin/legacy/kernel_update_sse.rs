@@ -3,22 +3,6 @@ use crate::handlers::admin::helpers::{error_resp, internal_error, not_found};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-/// `GET /admin/servers/{id}/update-kernels/sse` — EventSource endpoint
-/// that UPGRADES the kernel binaries on an existing server (update-kernels
-/// PR2). For each declared kernel it streams `status → install → done`
-/// running ONLY `ensure_installed` (apt upgrade + service restart) — it
-/// never renders or applies a config, so it works on inventory-drift nodes
-/// without entering the DG-1 UUID-removal guard. The heavy lifting is
-/// `wizard_bootstrap::run_update_kernels`, which ends in an `error` event
-/// when any kernel step failed.
-///
-/// EventSource can only issue GET, so this state-changing request can't
-/// ride the POST-only Origin CSRF middleware. Guard explicitly: reject a
-/// browser `Sec-Fetch-Site: cross-site` / non-same-origin (a `<img>`/
-/// prefetch CSRF attempt). Absent header = non-browser tooling (curl)
-/// which carries no ambient admin cookie to forge with, so it's allowed —
-/// same posture as the deploy + geoip SSE endpoints, plus basic-auth on
-/// the whole tree.
 pub(crate) async fn server_update_kernels_sse(
     axum::extract::Path(server_id): axum::extract::Path<String>,
     headers: HeaderMap,
@@ -29,7 +13,6 @@ pub(crate) async fn server_update_kernels_sse(
     use std::pin::Pin;
     use tokio_stream::StreamExt;
 
-    // Same-origin guard for the state-changing GET.
     if let Some(sfs) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
         if sfs != "same-origin" && sfs != "none" {
             return error_resp(
@@ -80,13 +63,6 @@ pub(crate) async fn server_update_kernels_sse(
         .into_response()
 }
 
-/// `GET /admin/servers/update-kernels-all/sse` — EventSource that upgrades
-/// the kernel binaries on EVERY server in one streamed pass (the "Update
-/// all kernels" button). Same Sec-Fetch-Site same-origin guard + basic-
-/// auth as the single-server SSE update. Best-effort across the fleet —
-/// heavy lifting in `wizard_bootstrap::run_update_kernels_all`. The
-/// 3-segment path avoids the `{id}` clash — same trick as
-/// `deploy-all/sse`.
 pub(crate) async fn servers_update_kernels_all_sse(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -143,14 +119,3 @@ pub(crate) async fn servers_update_kernels_all_sse(
         .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
         .into_response()
 }
-
-// ────────────────────────────────────────────────────────────────────────
-//  Phase 3c — Settings GeoIP «update now» SSE button.
-//
-//  Streams the live output of `vpnctl geoip-update` as named SSE
-//  events. Auth-gated by the basic-auth middleware (same as every
-//  other /admin route). One audit row per fire — provenance only,
-//  no payload (the subprocess output is in journalctl).
-//
-//  See `crate::geoip_update_runner` for the subprocess pattern.
-// ────────────────────────────────────────────────────────────────────────

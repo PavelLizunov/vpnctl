@@ -28,10 +28,6 @@ pub(crate) fn render_delivery_tab(
     lang: Locale,
 ) -> Markup {
     html! {
-        // v2 4a — compact subscription recap on top of Delivery: the
-        // one artefact the operator actually hands out, plus the legacy
-        // fallback. The QR itself lives on Overview (linked) — the mock
-        // duplicates it here; we link instead of double-rendering.
         div.ed-inbar {
             span.ed-inbar__label { (crate::i18n::tr(lang, "subscription", "подписка")) }
             @match (ninitux_url_str, sub_url_str) {
@@ -143,34 +139,7 @@ pub(crate) fn render_delivery_tab(
                             }
                         }
 
-                        // Distribution panel — one column per client app.
-                        // Same secret material, several wire formats:
-                        //   * Flow A — sing-box JSON via /sub/<token> URL
-                        //   * Flow B — wireguard:// (official WG app, Hiddify)
-                        //   * Flow C — vpn://    (AmneziaVPN)
-                        //
-                        // Plus a .conf-file download per WG-capable server
-                        // as a universal fallback (drag-drop into ANY WG
-                        // client incl AmneziaVPN's "File with settings"
-                        // button).
-                        //
-                        // Pre-2026-05-17 (commit `799e28b`) Flow B claimed
-                        // to cover BOTH AmneziaVPN and the WG app, but the
-                        // `wireguard://?conf=` format AmneziaVPN rejects
-                        // with ErrorCode 900 («нет контейнеров») — Amnezia
-                        // expects its own `vpn://<base64(qCompress(json))>`
-                        // deep-link. Split into B + C; honest labels.
-                        //
-                        // Grid uses `auto-fit minmax(340px, 1fr)` so the
-                        // column count adapts to viewport (3 cols; wraps
-                        // to 2x2 on narrower viewports).
                         div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; margin-top: 24px; padding-top: 16px; border-top: 1px dotted var(--rule);" {
-                            // Flow A — sing-box / Hiddify subscription URL.
-                            // The QR renders the same sub_url shown in the
-                            // Subscription block at the top of the page;
-                            // duplicated here on purpose so the operator
-                            // copies the WG-via-Hiddify link from the same
-                            // distribution panel as the WG-native link.
                             div {
                                 div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
                                     (crate::i18n::tr(lang, "Flow A — Hiddify / Sing-box", "Поток A — Hiddify / Sing-box"))
@@ -206,11 +175,6 @@ pub(crate) fn render_delivery_tab(
                                     }
                                 }
                             }
-                            // Flow B — official WireGuard app + Hiddify.
-                            // The `wireguard://?conf=<base64>` link works
-                            // in the official WG mobile/desktop apps and
-                            // in Hiddify, NOT in AmneziaVPN (separate Flow
-                            // C below covers that).
                             div {
                                 div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
                                     (crate::i18n::tr(lang, "Flow B — official WireGuard app / Hiddify", "Поток B — официальное WireGuard / Hiddify"))
@@ -235,11 +199,6 @@ pub(crate) fn render_delivery_tab(
                                             ))
                                         }
                                     } @else if wg_capable_granted.is_empty() {
-                                        // Case B — granted servers exist but
-                                        // NONE declare wireguard. Most
-                                        // common case for bash-imported
-                                        // users (vps-is-01 et al. run
-                                        // VLESS/TUIC/Hy2, not WG).
                                         p style="font-family: var(--serif); font-size: 12px; line-height: 1.55; color: var(--ink); margin: 0 0 8px;" {
                                             b { (crate::i18n::tr(
                                                 lang,
@@ -305,12 +264,6 @@ pub(crate) fn render_delivery_tab(
                                             }
                                         }
                                     } @else {
-                                        // Case C — at least one granted
-                                        // server DOES declare wireguard but
-                                        // share_link failed (most likely:
-                                        // missing wireguard.server_public_key
-                                        // secret). Existing journalctl
-                                        // pointer remains the right action.
                                         p style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; margin: 0;" {
                                             (crate::i18n::tr(lang, "Granted servers ", "Выданные серверы "))
                                             @for (i, sid) in wg_capable_granted.iter().enumerate() {
@@ -329,11 +282,6 @@ pub(crate) fn render_delivery_tab(
                                         }
                                     }
                                 } @else {
-                                    // R2 2026-07-10: one explainer per flow
-                                    // + per-server QRs behind <details> —
-                                    // 4 servers × 3 flows used to unroll
-                                    // into a 12-QR wall with the same
-                                    // paragraph repeated under each.
                                     p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 0 0 8px;" {
                                         (crate::i18n::tr(
                                             lang,
@@ -371,12 +319,6 @@ pub(crate) fn render_delivery_tab(
                                     }
                                 }
                             }
-                            // Flow C — AmneziaVPN-native deep link.
-                            // Same secret material as Flow B but wrapped
-                            // in AmneziaVPN's `vpn://<base64(qCompress(json))>`
-                            // container format. Without this card,
-                            // AmneziaVPN rejects the Flow B link with
-                            // ErrorCode 900 («нет контейнеров»).
                             div {
                                 div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
                                     (crate::i18n::tr(lang, "Flow C — AmneziaVPN", "Поток C — AmneziaVPN"))
@@ -467,15 +409,6 @@ pub(crate) fn render_delivery_tab(
                                     }
                                 }
                             }
-                            // Flow F — AmneziaWG `awg://` link for the
-                            // operator's sing-box-lx-based client app. Carries
-                            // the per-server obfs (s1/s2/h1-h4 minted by
-                            // bootstrap) + the server-generated client key, so
-                            // it's a one-tap import. Only renders when at least
-                            // one granted server runs the amneziawg kernel
-                            // (obfs minted ⇒ a link was produced). Letter F:
-                            // A=sub, B=wireguard://, C=AmneziaVPN vpn://,
-                            // F=AmneziaWG awg://.
                             @if !awg_links.is_empty() {
                                 div {
                                     div style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 8px;" {
@@ -513,8 +446,6 @@ pub(crate) fn render_delivery_tab(
                     }
                 }
                 (Some(pub_b64), None) => {
-                    // Public-only imports need an explicit, warned rotation;
-                    // a GET must never silently replace the device-owned pair.
                     div style="padding: 12px 0;" {
                         div style="font-family: var(--mono); font-size: 12px; line-height: 1.7;" {
                             div { span style="color: var(--mute);" { "pubkey  " } (pub_b64) }
@@ -536,10 +467,6 @@ pub(crate) fn render_delivery_tab(
                     }
                 }
                 (None, _) => {
-                    // Should be impossible for users created via the web
-                    // form (always auto-gens both). Falls through for
-                    // legacy users imported pre-2026-05-16 — show a
-                    // self-heal button.
                     div style="padding: 12px 0;" {
                         p style="font-family: var(--serif); font-style: italic; color: var(--mute);" {
                             (crate::i18n::tr(
@@ -561,18 +488,8 @@ pub(crate) fn render_delivery_tab(
                 }
             }
 
-            // Server access (Phase C-3.3) — full server inventory with a
-            // per-row grant/revoke form. Granted rows show "✓ access ·
-            // [revoke]"; ungranted rows show "[grant]". One POST per
-            // click, server returns 303 to this same detail page so the
-            // operator sees the post-mutation state immediately.
 
 
-            // Per-protocol share-links — only meaningful for granted servers.
-            // ponytail: collapsed <details> — the Flow cards above already deliver
-            // every link with a QR; this raw server×protocol dump (up to ~32 lines)
-            // is the copy-all / debug view, not prime-scroll content. Content stays
-            // in the DOM (just collapsed), so copy-contract + smoke tests still see it.
             @if !servers.is_empty() {
                 details style="margin-top: 24px;" {
                     summary style="cursor: pointer;" {

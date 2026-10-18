@@ -1,28 +1,3 @@
-//! `vpnctl render <server> [--kernel <kernel>]` — render the kernel config for a server
-//! and print it to stdout WITHOUT SSH'ing anywhere.
-//!
-//! Closes the methodology TODO from `docs/PROTOCOL_TESTING.md` layer 5:
-//! "until we ship `vpnctl render-server-config`, hand-construct the
-//! JSON and unit-test the equivalence." This command IS that helper.
-//!
-//! Use cases:
-//!   - Reviewing what a `vpnctl deploy <server>` WOULD push, without
-//!     actually SSH'ing (offline confidence-check)
-//!   - Live-staging tests — pipe through `sing-box check` on the node
-//!     to fast-loop config drafts without re-implementing the render
-//!     in Python
-//!   - Diffing: render twice with different secrets, diff the outputs
-//!
-//! Output: kernel-native format (JSON for sing-box, INI for
-//! AmneziaWG). Goes to stdout — pipe to file, less, or another
-//! tool. Metadata (kernel headers) goes to stderr so stdout is
-//! raw config-compatible.
-//!
-//! Exit codes:
-//!   * 0 — rendered successfully
-//!   * non-zero (via `anyhow`) — server unknown, secrets missing,
-//!     protocol mismatch with kernel, ambiguous multi-kernel without selector, etc.
-
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -64,13 +39,8 @@ pub(crate) async fn render_server_configs<W1: Write, W2: Write>(
         .await?
         .ok_or_else(|| anyhow::anyhow!("server not in inventory: {}", sid.0))?;
 
-    // Secrets loaded BEFORE validation so the port-conflict guard sees
-    // per-server overrides (vless.listen_port) — same order `deploy` uses.
     let secrets = inv.list_server_secrets(sid).await?;
 
-    // Same protocol-vs-kernel validation `deploy` does pre-SSH — fail
-    // here too so operators don't get a surprise from `sing-box check`
-    // on the rendered output.
     reg.validate_server(&server_row, &secrets)?;
 
     let target_kid: KernelId = match kernel_filter {
@@ -134,8 +104,6 @@ pub(crate) async fn render_server_configs<W1: Write, W2: Write>(
         .collect::<anyhow::Result<_>>()?;
 
     if protocols.is_empty() {
-        // Kernel declared but no protocols for it — still print a
-        // header so the operator notices the dead kernel.
         writeln!(
             stderr,
             "# === kernel: {target_kid} (no enabled_protocols this kernel can render — skipped) ==="
@@ -166,7 +134,6 @@ mod tests {
         let inv = SqliteInventory::open(&db_path).await.unwrap();
         let reg = registry::build().unwrap();
 
-        // Single kernel server: sing-box only
         let s_single = Server {
             id: ServerId("s-single".into()),
             address: "203.0.113.5".into(),
@@ -184,7 +151,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Multi-kernel server: sing-box + amneziawg
         let s_multi = Server {
             id: ServerId("s-multi".into()),
             address: "203.0.113.6".into(),
@@ -205,7 +171,6 @@ mod tests {
             .await
             .unwrap();
 
-        // User alice granted to both servers
         inv.add_user(&vpnctl_core::User {
             id: UserId("alice".into()),
             uuid: "00000000-0000-0000-0000-000000000001".into(),
@@ -243,12 +208,10 @@ mod tests {
         let stdout_str = String::from_utf8(stdout_buf).expect("stdout must be UTF-8");
         let stderr_str = String::from_utf8(stderr_buf).expect("stderr must be UTF-8");
 
-        // stdout is raw JSON config without stderr headers
         assert!(!stdout_str.contains("# === kernel: sing-box ==="));
         let _json: serde_json::Value = serde_json::from_str(&stdout_str)
             .expect("vpnctl render stdout must be valid JSON raw config");
 
-        // stderr contains metadata header
         assert!(stderr_str.contains("# === kernel: sing-box ==="));
     }
 
@@ -306,13 +269,11 @@ mod tests {
         let stdout_str = String::from_utf8(stdout_buf).expect("stdout must be UTF-8");
         let stderr_str = String::from_utf8(stderr_buf).expect("stderr must be UTF-8");
 
-        // stdout is raw JSON config for sing-box, not contaminated by amneziawg or headers
         assert!(!stdout_str.contains("# ==="));
         assert!(!stdout_str.contains("[Interface]"));
         let _json: serde_json::Value = serde_json::from_str(&stdout_str)
             .expect("vpnctl render stdout must be valid JSON raw config");
 
-        // stderr has sing-box header, NOT amneziawg header
         assert!(stderr_str.contains("# === kernel: sing-box ==="));
         assert!(!stderr_str.contains("# === kernel: amneziawg ==="));
     }
@@ -339,12 +300,10 @@ mod tests {
         let stdout_str = String::from_utf8(stdout_buf).expect("stdout must be UTF-8");
         let stderr_str = String::from_utf8(stderr_buf).expect("stderr must be UTF-8");
 
-        // stdout is raw INI config for AmneziaWG
         assert!(!stdout_str.contains("# ==="));
         assert!(stdout_str.contains("[Interface]"));
         assert!(stdout_str.contains("PrivateKey"));
 
-        // stderr has amneziawg header, NOT sing-box header
         assert!(stderr_str.contains("# === kernel: amneziawg ==="));
         assert!(!stderr_str.contains("# === kernel: sing-box ==="));
     }
@@ -378,7 +337,7 @@ mod tests {
     #[tokio::test]
     async fn render_invalid_selector_not_on_server_fails() {
         let (_dir, inv, reg) = setup_test_inventory().await;
-        let sid = ServerId("s-single".into()); // only has sing-box
+        let sid = ServerId("s-single".into());
 
         let mut stdout_buf = Vec::new();
         let mut stderr_buf = Vec::new();

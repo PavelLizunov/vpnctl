@@ -1,6 +1,3 @@
-//! Stateless AmneziaWG 2.0 / 3.1 endpoints and dedicated client downloads.
-//! These are fork-only WireGuard endpoints, never stock sing-box outbounds.
-
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -119,9 +116,6 @@ fn secret_specs(version: Version) -> Vec<ServerSecretSpec> {
     specs
 }
 
-// STANDARD enforces canonical padding and rejects nonzero trailing bits. Never
-// include the input (including public keys) in errors or interpolate it in INI
-// before this check. Persisted key/profile material must be nonzero.
 fn decode_32(value: &str, nonzero: bool) -> Result<[u8; 32]> {
     if value.len() != 44 {
         return Err(render_error(
@@ -141,16 +135,11 @@ fn decode_32(value: &str, nonzero: bool) -> Result<[u8; 32]> {
     Ok(bytes)
 }
 
-// (JSON name, .conf name, value). All values are derived here, never copied
-// from arbitrary inventory strings. Both endpoints and downloads share this.
 fn parameters(
     version: Version,
     ctx: &RenderCtx<'_>,
 ) -> Result<Vec<(&'static str, &'static str, Value)>> {
     let seed = decode_32(ctx.require(version.profile_seed)?, true)?;
-    // 16..47 gives nonzero padding, enough space for the 3.1 nonce, and
-    // guarantees S1 + 148 != S2 + 92 (the padding difference is at most 31).
-    // Equal S values avoid packet-type ambiguity with 3.1 random trailers.
     let padding = |index: usize| 16 + seed[if version.number == 3 { 3 } else { index }] % 32;
     let mut fields = vec![
         ("jc", "Jc", json!(3 + seed[0] % 6)),
@@ -161,8 +150,6 @@ fn parameters(
         ("s3", "S3", json!(padding(5))),
         ("s4", "S4", json!(padding(6))),
     ];
-    // Each H range lies wholly within its own positive uint32 quarter.
-    // Leave ample headroom for the inclusive 256-value range at each start.
     for ((key, ini), (base, chunk)) in [("h1", "H1"), ("h2", "H2"), ("h3", "H3"), ("h4", "H4")]
         .into_iter()
         .zip(
@@ -178,8 +165,6 @@ fn parameters(
     if version.number == 3 {
         let key = decode_32(ctx.require(HEADER_KEY)?, true)?;
         let hex: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
-        // Vendored device/uapi.go accepts these four fields, but has no
-        // rekey_after_time handler. UintRange::FromString accepts "0-32".
         fields.extend([
             ("header_protection_key", "HeaderProtectionKey", json!(hex)),
             ("random_trailers", "RandomTrailers", json!(true)),
@@ -216,7 +201,6 @@ fn validate_peers(users: &[User]) -> Result<()> {
         if user.disabled {
             continue;
         }
-        // Keyless grants are not provisioned peers; present malformed keys still fail.
         let Some(public) = user.wireguard_pubkey.as_deref() else {
             continue;
         };
@@ -263,7 +247,6 @@ fn server_endpoint(version: Version, ctx: &RenderCtx<'_>, users: &[User]) -> Res
     validate_peers(users)?;
     let mut peers = Vec::new();
     for user in users.iter().filter(|user| !user.disabled) {
-        // Keyless grants are not provisioned peers; present malformed keys still fail.
         let Some(public) = user.wireguard_pubkey.as_deref() else {
             continue;
         };
@@ -276,8 +259,6 @@ fn server_endpoint(version: Version, ctx: &RenderCtx<'_>, users: &[User]) -> Res
         "type": "wireguard",
         "tag": format!("awg{}-in", version.number),
         "system": false,
-        // The endpoint rewrites destinations within this prefix to loopback.
-        // Only the server address is local, not the whole allocation pool.
         "address": peer_cidrs(version, 1),
         "listen_port": version.port,
         "private_key": private,
@@ -323,8 +304,6 @@ fn client_material<'a>(
         )
     })?;
     decode_32(private, true)?;
-    // Refuse exports for an incompletely provisioned server, even though
-    // the private half must never be included in a client artifact.
     decode_32(ctx.require(version.private_key)?, true)?;
     let server_public = ctx.require(version.public_key)?;
     decode_32(server_public, true)?;
@@ -348,7 +327,6 @@ fn client_endpoint(version: Version, ctx: &RenderCtx<'_>, user: &User) -> Result
             "address": ctx.server.address,
             "port": version.port,
             "public_key": server_public,
-            // Route native IPv6 into the tunnel even if the server has no IPv6 egress.
             "allowed_ips": ["0.0.0.0/0", "::/0"],
             "persistent_keepalive_interval": 25,
         }],
@@ -359,11 +337,6 @@ fn client_endpoint(version: Version, ctx: &RenderCtx<'_>, user: &User) -> Result
     Ok(endpoint)
 }
 
-/// Render a ready-to-import AmneziaWG client file. `version` is exactly 2
-/// (AmneziaWG 2.0) or 3 (AmneziaWG 3.1); other values fail, never downgrade.
-/// Requires enabled, collision-free grants in `ctx.peers`, both client keys,
-/// and the version-specific persisted server public key and profile material.
-/// This dedicated download is not a stock WireGuard/sing-box share link.
 pub fn render_amnezia_conf(version: u8, ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
     let version = match version {
         2 => V2,
@@ -383,8 +356,6 @@ pub fn render_amnezia_conf(version: u8, ctx: &RenderCtx<'_>, user: &User) -> Res
          [Interface]\nPrivateKey = {private}\nAddress = {address}\nDNS = 1.1.1.1\nMTU = 1280\n"
     );
     for (key, name, value) in parameters(version, ctx)? {
-        // amneziawg-tools parses native .conf keys as base64 and booleans
-        // as on/off, unlike sing-box JSON / the device UAPI's hex/true.
         let value = if key == "header_protection_key" {
             STANDARD.encode(decode_32(ctx.require(HEADER_KEY)?, true)?)
         } else {
@@ -404,11 +375,6 @@ pub fn render_amnezia_conf(version: u8, ctx: &RenderCtx<'_>, user: &User) -> Res
     Ok(conf)
 }
 
-/// Generate an `awg://` share-link URI for AmneziaWG 2.0.
-///
-/// Formats the operator's standard schema with AmneziaWG 2.0 parameters.
-/// Requires server-generated WireGuard keypair for the user, valid grant,
-/// and complete AmneziaWG 2.0 server secrets.
 pub fn awg2_share_link(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
     let (private, server_public, addresses) = client_material(V2, ctx, user)?;
     let address = addresses
@@ -450,13 +416,6 @@ pub fn awg2_share_link(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
     ))
 }
 
-/// Generate an `awg3://` share-link URI for AmneziaWG 3.0/3.1.
-///
-/// Formats the operator's standard schema with AmneziaWG 3.1 parameters,
-/// including HeaderProtectionKey, ContentPaddingAddition, RandomTrailers,
-/// and DisableCookies.
-/// Requires server-generated WireGuard keypair for the user, valid grant,
-/// and complete AmneziaWG 3.0 server secrets.
 pub fn awg3_share_link(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
     let (private, server_public, addresses) = client_material(V3, ctx, user)?;
     let address = addresses

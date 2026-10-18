@@ -9,8 +9,6 @@ use crate::sqlite::models::{
     Result, SqliteInventoryError, VpnCumulativeTick, VpnStatsDelta, VpnStatsRow,
 };
 
-// Owned row argument is what `.into_iter().map(...)` over `Vec<SqliteRow>`
-// gives us; taking by reference would force a `.collect()` round-trip.
 #[allow(clippy::needless_pass_by_value)]
 fn row_to_vpn_stats(r: sqlx::sqlite::SqliteRow) -> Result<VpnStatsRow> {
     let ts_s: String = r.try_get("ts")?;
@@ -53,10 +51,6 @@ fn stored_counter(row: &sqlx::sqlite::SqliteRow, field: &str) -> Result<u64> {
         .map_err(|_| SqliteInventoryError::Invalid(format!("negative {field} baseline")))
 }
 
-/// Reconcile small sampling skew between inbound and per-user atomics. User
-/// bytes are emitted immediately. New inbound excess waits one complete tick
-/// before becoming unattributed, so a user counter loaded later in the same
-/// Stats response can consume it on the next observation without double-count.
 fn reconciled_remainder(
     server: u64,
     users: u64,
@@ -74,9 +68,6 @@ fn reconciled_remainder(
 
     let mut new = server;
     let mut old = prior_pending;
-    // Previously emitted user-ahead bytes are repaid by newly observed server
-    // bytes. Current user growth then consumes old pending first: that is the
-    // delayed counterpart most likely to have produced it.
     let unpaid_ahead = consume(&mut new, &mut old, prior_ahead);
     let users_ahead = consume(&mut old, &mut new, users);
     (old, new, unpaid_ahead.saturating_add(users_ahead))
@@ -144,42 +135,6 @@ async fn persist_stats_rows(
 }
 
 impl SqliteInventory {
-    // ──────────────────────────────────────────────────────────────────
-    // Track-3 chunk 2 — VPN connection stats (clash-api poller sink)
-    //
-    // The poller in `daemon::clash_poller` (separate iter / chunk) calls
-    // `record_vpn_stats(server_id, deltas)` once per tick. The read
-    // surfaces — `recent_vpn_stats_for_user` and
-    // `recent_vpn_stats_for_server` — power chunk 3's UI on
-    // `/admin/users/<id>` and `/admin/servers/<id>`.
-    //
-    // Server-wide rows are persisted under `user_id = NULL` so the
-    // server-detail page can render bandwidth-vs-time without joining
-    // across every per-user row.
-    //
-    // All deltas for one tick land in a single transaction so a poller
-    // crash mid-write doesn't yield a half-attributed snapshot.
-    //
-    // **Audit-log exemption.** The "every inventory mutation gets one
-    // audit_log row" invariant from CLAUDE.md is INTENTIONALLY waived
-    // for `vpn_connection_stats`. Rationale: at homelab scale (5
-    // servers × 60s tick × 24h × 30d = ~216K poller writes per month
-    // before user multiplication), per-tick audit rows would dwarf
-    // every other audit entry by 4 orders of magnitude and bury the
-    // human-driven mutations the timeline is designed to surface. The
-    // table itself IS the audit trail for poller activity (timestamps
-    // + per-server + per-user breakdown); a chunk-3 retrospective on
-    // /admin/audit can join in a derived "vpn-stats activity" entry
-    // if operators ever need it. (Reviewed by independent review-agent
-    // on cd61838^..492fdeb burst; documented exemption rather than
-    // letting the invariant erode silently.)
-    // ──────────────────────────────────────────────────────────────────
-
-    /// Persist one tick's deltas. Empty `deltas` is a no-op (the
-    /// poller may decide a quiet node doesn't deserve a row).
-    /// Timestamp is `now` on the daemon, NOT pulled from the snapshot
-    /// — clash-api doesn't carry a snapshot timestamp, and the
-    /// daemon's clock is the only source we trust on the read side.
     pub async fn record_vpn_stats(
         &self,
         server_id: &ServerId,
@@ -194,12 +149,6 @@ impl SqliteInventory {
         Ok(())
     }
 
-    /// Persist one cumulative sing-box accounting observation.
-    ///
-    /// Server and per-user baselines advance in the same transaction as the
-    /// derived raw rows and hourly rollup. The first server observation only
-    /// seeds baselines; later observations survive daemon restarts and treat a
-    /// lower counter as a sing-box restart from zero.
     pub async fn record_vpn_cumulative_stats(
         &self,
         server_id: &ServerId,
@@ -404,9 +353,6 @@ impl SqliteInventory {
         Ok(u64::try_from(deltas.len()).unwrap_or(u64::MAX))
     }
 
-    /// Recent per-user rows across ALL servers in the look-back
-    /// window. Newest-first. The UI joins these by server_id to
-    /// render a per-server breakdown if needed.
     pub async fn recent_vpn_stats_for_user(
         &self,
         user_id: &UserId,
@@ -426,10 +372,6 @@ impl SqliteInventory {
         rows.into_iter().map(row_to_vpn_stats).collect()
     }
 
-    /// Recent server-wide + per-user rows for one server in the
-    /// look-back window. Newest-first. The server-detail UI uses
-    /// the `user_id IS NULL` rows for the bandwidth sparkline and
-    /// the rest for the per-user breakdown.
     pub async fn recent_vpn_stats_for_server(
         &self,
         server_id: &ServerId,
@@ -449,10 +391,6 @@ impl SqliteInventory {
         rows.into_iter().map(row_to_vpn_stats).collect()
     }
 
-    /// Fleet-wide stats for the dashboard's multi-window traffic chart.
-    ///
-    /// Reads the ingest-time hourly rollup, then lets SQLite collapse
-    /// hours to the chart's selected bucket size.
     pub async fn recent_vpn_stats_fleet(
         &self,
         since_hours: u32,

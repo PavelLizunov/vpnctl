@@ -40,9 +40,6 @@ pub(crate) async fn run(
         .trusted_fingerprint(server.trusted_host_fingerprint.clone())
         .with_jump(jump);
 
-    // Multi-kernel: query each declared kernel's status and emit a
-    // block per kernel. The JSON variant returns an array of statuses
-    // (instead of a single object) so machine consumers can iterate.
     let mut all_statuses = Vec::with_capacity(kernels.len());
     for k in &kernels {
         let st = k.status(&ssh).await?;

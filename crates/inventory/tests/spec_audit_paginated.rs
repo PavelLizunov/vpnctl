@@ -1,6 +1,3 @@
-//! Spec for `SqliteInventory::recent_audit_paginated` — impl NOT
-//! consulted. Rules 1-8 from the test-writer brief.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::PathBuf;
@@ -18,7 +15,6 @@ async fn open(dir: &TempDir) -> SqliteInventory {
     SqliteInventory::open(&db_path(dir)).await.expect("open")
 }
 
-/// 5-row corpus. Insertion order = id order; last inserted is newest.
 async fn seed_mixed(inv: &SqliteInventory) {
     inv.audit("admin", "server.deploy", Some("srv-1"), None)
         .await
@@ -42,7 +38,6 @@ async fn seed_mixed(inv: &SqliteInventory) {
         .unwrap();
 }
 
-// Rule 1: no filters + limit > rows → all rows, newest-first (id DESC).
 #[tokio::test]
 async fn no_filters_returns_all_rows_newest_first() {
     let dir = TempDir::new().unwrap();
@@ -74,7 +69,6 @@ async fn no_filters_returns_all_rows_newest_first() {
     }
 }
 
-// Rule 2: limit + offset slice; limit beyond count is not an error.
 #[tokio::test]
 async fn limit_and_offset_slice_window() {
     let dir = TempDir::new().unwrap();
@@ -105,7 +99,6 @@ async fn limit_and_offset_slice_window() {
     assert!(past.is_empty(), "rule 2: offset past end → empty Vec");
 }
 
-// Rule 3: actor_filter is EXACT — "admin-bot" MUST NOT match "admin".
 #[tokio::test]
 async fn actor_filter_is_exact_match_not_like() {
     let dir = TempDir::new().unwrap();
@@ -130,7 +123,6 @@ async fn actor_filter_is_exact_match_not_like() {
     }
 }
 
-// Rule 4: action_prefix matches LIKE 'prefix%' only.
 #[tokio::test]
 async fn action_prefix_matches_only_starting_with_prefix() {
     let dir = TempDir::new().unwrap();
@@ -155,7 +147,6 @@ async fn action_prefix_matches_only_starting_with_prefix() {
     );
 }
 
-// Rule 5: combined filters AND together — both predicates must hold.
 #[tokio::test]
 async fn combined_filters_intersect() {
     let dir = TempDir::new().unwrap();
@@ -187,7 +178,6 @@ async fn combined_filters_intersect() {
     }
 }
 
-// Rule 6: action_prefix=Some("") is degenerate-but-legal → matches all.
 #[tokio::test]
 async fn empty_action_prefix_matches_all_rows() {
     let dir = TempDir::new().unwrap();
@@ -206,7 +196,6 @@ async fn empty_action_prefix_matches_all_rows() {
     );
 }
 
-// Rule 7: empty table + any filter combo → Ok(vec![]).
 #[tokio::test]
 async fn empty_table_with_filters_returns_empty_ok() {
     let dir = TempDir::new().unwrap();
@@ -233,7 +222,6 @@ async fn empty_table_with_filters_returns_empty_ok() {
     }
 }
 
-// Rule 8: limit=0 → Ok(vec![]) even when rows exist.
 #[tokio::test]
 async fn limit_zero_returns_empty_vec() {
     let dir = TempDir::new().unwrap();
@@ -251,9 +239,6 @@ async fn limit_zero_returns_empty_vec() {
     );
 }
 
-// Rule 9 (2026-07-10): `action_exclude` drops EXACT-match rows from
-// both the page and the matched count — backs the audit page's «hide
-// snapshots» chip. Other filters still apply on top.
 #[tokio::test]
 async fn action_exclude_drops_exact_action_from_rows_and_counts() {
     let dir = TempDir::new().unwrap();
@@ -281,7 +266,6 @@ async fn action_exclude_drops_exact_action_from_rows_and_counts() {
     assert_eq!(total, 4, "total stays unfiltered");
     assert_eq!(matched, 1, "matched honours the exclusion");
 
-    // Exclusion is EXACT — a prefix-sibling action must survive.
     inv.audit("admin", "backup.snapshot.prune", None, None)
         .await
         .unwrap();

@@ -1,9 +1,4 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-//! Independent spec tests for `vpnctl_protocols::Shadowsocks2022`.
-//!
-//! Written from the spec ONLY (no peeking at the impl). If a test fails,
-//! the implementation is wrong (or the spec is ambiguous) — DO NOT weaken
-//! the test to make it pass.
 
 use std::collections::HashMap;
 
@@ -12,8 +7,6 @@ use vpnctl_core::{
     CoreError, KernelId, Protocol, ProtocolId, RenderCtx, Server, ServerId, User, UserId,
 };
 use vpnctl_protocols::{SS_2022_PORT, Shadowsocks2022};
-
-// ── helpers ─────────────────────────────────────────────────────────────
 
 fn srv() -> Server {
     Server {
@@ -47,9 +40,6 @@ fn ctx_with<'a>(server: &'a Server, secrets: &'a HashMap<String, String>) -> Ren
     RenderCtx::new(server, secrets)
 }
 
-/// Default-method PSK (32 bytes for AES-128 base64 → 24 chars; we use a
-/// fixed string — the protocol code does NOT validate PSK length, only
-/// reads it from secrets).
 const PSK: &str = "Test1234567890abcdef0123";
 
 fn secrets_with_psk() -> HashMap<String, String> {
@@ -57,8 +47,6 @@ fn secrets_with_psk() -> HashMap<String, String> {
     m.insert("ss2022.psk".to_string(), PSK.to_string());
     m
 }
-
-// ── id ─────────────────────────────────────────────────────────────────
 
 #[test]
 fn ss_id_is_shadowsocks_2022() {
@@ -70,8 +58,6 @@ fn ss_id_is_shadowsocks_2022() {
 fn ss_port_constant_is_8388() {
     assert_eq!(SS_2022_PORT, 8388_u16);
 }
-
-// ── server_inbound ─────────────────────────────────────────────────────
 
 #[test]
 fn ss_server_inbound_default_method() {
@@ -94,8 +80,6 @@ fn ss_server_inbound_default_method() {
         Some("2022-blake3-aes-128-gcm")
     );
     assert_eq!(v.get("password").and_then(Value::as_str), Some(PSK));
-    // v0.4 single-user mode: the inbound's `password` field IS the PSK,
-    // so there must be NO `users` array.
     assert!(
         v.get("users").is_none(),
         "v0.4 single-user mode: no `users` array; got {v}"
@@ -122,9 +106,6 @@ fn ss_server_inbound_method_override_via_secret() {
 
 #[test]
 fn ss_server_inbound_users_argument_is_ignored() {
-    // v0.4 single-user mode: passing zero, one, or many users must
-    // produce IDENTICAL JSON (the inbound's password is the PSK, and
-    // there is no users array).
     let s = srv();
     let secrets = secrets_with_psk();
     let ctx = ctx_with(&s, &secrets);
@@ -141,7 +122,7 @@ fn ss_server_inbound_users_argument_is_ignored() {
 #[test]
 fn ss_server_inbound_missing_psk_returns_missing_secret() {
     let s = srv();
-    let secrets = HashMap::new(); // no ss2022.psk
+    let secrets = HashMap::new();
     let ctx = ctx_with(&s, &secrets);
     let err = Shadowsocks2022::new()
         .server_inbound(&ctx, &[user("alice")])
@@ -154,8 +135,6 @@ fn ss_server_inbound_missing_psk_returns_missing_secret() {
         other => panic!("expected MissingSecret {{ key: ss2022.psk }}, got {other:?}"),
     }
 }
-
-// ── client_config ──────────────────────────────────────────────────────
 
 #[test]
 fn ss_client_config_basic_fields() {
@@ -181,8 +160,6 @@ fn ss_client_config_basic_fields() {
 
 #[test]
 fn ss_client_config_method_and_password_match_inbound() {
-    // The override must propagate identically to inbound + outbound —
-    // otherwise client cannot connect.
     let s = srv();
     let mut secrets = secrets_with_psk();
     secrets.insert(
@@ -221,8 +198,6 @@ fn ss_client_config_missing_psk_returns_missing_secret() {
 
 #[test]
 fn ss_client_config_user_argument_is_ignored() {
-    // Single-user mode: outbound must be identical regardless of which
-    // User struct is passed (different id, different uuid).
     let s = srv();
     let secrets = secrets_with_psk();
     let ctx = ctx_with(&s, &secrets);
@@ -234,13 +209,10 @@ fn ss_client_config_user_argument_is_ignored() {
     assert_eq!(v1, v2, "client_config must ignore the User argument");
 }
 
-// ── invalid method ─────────────────────────────────────────────────────
-
 #[test]
 fn ss_invalid_method_rejected_by_server_inbound() {
     let s = srv();
     let mut secrets = secrets_with_psk();
-    // Pre-2022 cipher — must be refused.
     secrets.insert("ss2022.method".into(), "aes-128-gcm".to_string());
     let ctx = ctx_with(&s, &secrets);
     let err = Shadowsocks2022::new()
@@ -300,8 +272,6 @@ fn ss_all_three_valid_methods_accepted() {
     }
 }
 
-// ── share_link (SIP002) ────────────────────────────────────────────────
-
 #[test]
 fn ss_share_link_missing_psk_returns_missing_secret() {
     let s = srv();
@@ -325,33 +295,23 @@ fn ss_share_link_format_scheme_host_port_and_required_slash() {
         .share_link(&ctx, &user("alice"))
         .unwrap();
 
-    // scheme
     assert!(
         link.starts_with("ss://"),
         "must start with ss:// scheme; got {link}"
     );
-    // host + port
     assert!(
         link.contains("@203.0.113.7:8388"),
         "must contain @<host>:<port>; got {link}"
     );
-    // SIP002 mandates the "/" between port and "#" — strict parsers
-    // reject share links without it.
     assert!(
         link.contains("203.0.113.7:8388/#"),
         "SIP002 requires `/` between port and `#`; got {link}"
     );
-    // fragment must exist (it carries the tag = user.id).
     assert!(link.contains('#'), "must contain a fragment; got {link}");
 }
 
 #[test]
 fn ss_share_link_userinfo_is_plain_method_colon_password_not_base64() {
-    // SIP002: for AEAD-2022 ciphers the userinfo is NOT base64-encoded;
-    // it is the literal `method:password` (with percent-encoding for
-    // structural chars). We encode our PSK with base64-friendly chars
-    // so the test is unambiguous: literal substring must appear, base64
-    // of the same payload must NOT.
     let s = srv();
     let secrets = secrets_with_psk();
     let ctx = ctx_with(&s, &secrets);
@@ -363,7 +323,6 @@ fn ss_share_link_userinfo_is_plain_method_colon_password_not_base64() {
     let at_idx = after_scheme.rfind('@').expect("'@' between userinfo+host");
     let userinfo = &after_scheme[..at_idx];
 
-    // Must contain a single literal ':' between method and password.
     let (method_part, pw_part) = userinfo
         .split_once(':')
         .expect("userinfo must be method:password (literal ':')");
@@ -379,9 +338,6 @@ fn ss_share_link_userinfo_is_plain_method_colon_password_not_base64() {
 
 #[test]
 fn ss_share_link_special_chars_in_psk_are_percent_encoded() {
-    // Operator can rotate to any PSK string. If it contains '@' or '/'
-    // or '#' or ':', SIP002 says the userinfo segment must percent-
-    // encode them — otherwise the parser splits in the wrong place.
     let s = srv();
     let mut secrets = HashMap::new();
     secrets.insert("ss2022.psk".into(), "p@ss/wo#rd:1".to_string());
@@ -394,7 +350,6 @@ fn ss_share_link_special_chars_in_psk_are_percent_encoded() {
     let at_idx = after_scheme.rfind('@').expect("'@' separator");
     let userinfo = &after_scheme[..at_idx];
 
-    // Method then ONE literal ':' separator then encoded password.
     let pw_part = userinfo
         .strip_prefix("2022-blake3-aes-128-gcm:")
         .expect("expected method then ':' then password; got {userinfo}");
@@ -410,12 +365,9 @@ fn ss_share_link_special_chars_in_psk_are_percent_encoded() {
         "'/' must be %3A; pw={pw_part}"
     );
 
-    // Raw chars must NOT survive in the password segment — otherwise
-    // the URL parser splits on them.
     assert!(!pw_part.contains('@'), "raw '@' leaked: {pw_part}");
     assert!(!pw_part.contains('/'), "raw '/' leaked: {pw_part}");
     assert!(!pw_part.contains('#'), "raw '#' leaked: {pw_part}");
-    // After the method's ':' there must be no further raw ':'.
     assert!(
         !pw_part.contains(':'),
         "raw ':' leaked into password: {pw_part}"
@@ -424,8 +376,6 @@ fn ss_share_link_special_chars_in_psk_are_percent_encoded() {
 
 #[test]
 fn ss_share_link_tag_is_user_id_percent_encoded() {
-    // user.id "alice cool#1" — fragment-significant chars: '#' must be
-    // %23, space must be %20.
     let s = srv();
     let secrets = secrets_with_psk();
     let ctx = ctx_with(&s, &secrets);

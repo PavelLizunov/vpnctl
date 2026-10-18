@@ -1,10 +1,3 @@
-//! Compile/spec tests for the SSH privilege contract.
-//!
-//! These tests intentionally use only public APIs. A connected
-//! `RusshTransport` requires a live SSH server, so command routing is specified
-//! with a recording `SshTransport`; the public POSIX quoting helper pins the
-//! exact wrapper expected from non-root Russh transports.
-
 #![allow(clippy::expect_used)]
 
 use std::sync::Mutex;

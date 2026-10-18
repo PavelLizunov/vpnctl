@@ -4,11 +4,7 @@ use serde::Serialize;
 #[derive(Serialize)]
 pub(crate) struct Health {
     status: &'static str,
-    /// Stable SemVer contract — machine-readable, safe to grep/parse.
     version: &'static str,
-    /// Build provenance `<semver>+<short-git-sha>` (or `+unknown`), so the
-    /// deployed commit is identifiable without breaking scripts that parse
-    /// `version`. Same stamp as the admin footer and `vpnctl --version`.
     build: &'static str,
 }
 

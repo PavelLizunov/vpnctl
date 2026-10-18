@@ -165,11 +165,6 @@ pub(crate) async fn run(
             wireguard_pubkey,
             gen_wireguard,
         } => {
-            // Validate shape if provided so an obvious typo doesn't
-            // sit in inventory until a `vpnctl deploy` tries to render
-            // a wg config and fails (much later, much harder to
-            // diagnose). **Reused from `vpnctl_protocols::wireguard`**
-            // for a single source of truth (review-agent finding).
             if let Some(ref pk) = wireguard_pubkey
                 && !vpnctl_protocols::is_valid_wg_pubkey(pk)
             {
@@ -178,9 +173,6 @@ pub(crate) async fn run(
                     pk.len()
                 );
             }
-            // Either operator-provided pubkey, or server-generated
-            // keypair, or neither. clap's `conflicts_with` already
-            // rejects both-at-once at parse time.
             let (wg_pub, wg_priv) = if gen_wireguard {
                 let (priv_b64, pub_b64) = gen_wireguard_keypair();
                 (Some(pub_b64), Some(priv_b64))
@@ -193,11 +185,8 @@ pub(crate) async fn run(
                 tuic_password: Some(tuic_password.unwrap_or(gen_password(TUIC_PASSWORD_BYTES)?)),
                 wireguard_pubkey: wg_pub,
                 wireguard_private: wg_priv,
-                // None → inventory generates one. Don't pre-gen here so the
-                // generation lives in one place (`SqliteInventory::add_user`).
                 sub_token: None,
                 vpn_router_device_id: Some(gen_vpn_router_device_id()?),
-                // Migration 0026 default — CLI-created users start enabled.
                 disabled: false,
             };
             inv.add_user(&user).await?;
@@ -208,8 +197,6 @@ pub(crate) async fn run(
                 Some(&json!({
                     "uuid": user.uuid,
                     "wg_pubkey_set": user.wireguard_pubkey.is_some(),
-                    // pin which provenance the pubkey had — the value
-                    // itself stays only in the row, not the audit log.
                     "wg_keypair_provenance": if gen_wireguard { "server-generated" }
                         else if user.wireguard_pubkey.is_some() { "operator-provided" }
                         else { "absent" },
@@ -226,15 +213,6 @@ pub(crate) async fn run(
                     println!("  wireguard_pubkey : {wpk}");
                 }
                 if let Some(wpriv) = &u.wireguard_private {
-                    // Emitted to STDERR (not stdout) so:
-                    //   * scripts redirecting `> log.txt` don't capture
-                    //     the private into a plaintext file,
-                    //   * `vpnctl user add ... --output json | jq` keeps
-                    //     working without the secret poisoning the json
-                    //     stream (json on stdout, advisory on stderr),
-                    //   * terminal scrollback still shows it for the
-                    //     operator to copy in the moment.
-                    // (Review-agent finding on the wg-keygen commit.)
                     eprintln!("  wireguard_private: {wpriv}");
                     eprintln!("  ^^ secret material — only emitted now and via /sub/<token>");
                 }

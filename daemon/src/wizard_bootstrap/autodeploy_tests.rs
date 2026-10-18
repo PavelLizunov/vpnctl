@@ -51,7 +51,6 @@ async fn mutations_during_apply_coalesce_and_servers_are_independent() {
     assert!(duplicate.is_none());
     let (third, duplicate) = coordinator.request("a".into());
     assert!(duplicate.is_none());
-    // A different node finishes while a is held at a deterministic barrier.
     let (other, other_worker) = coordinator.request("b".into());
     other_worker
         .unwrap()
@@ -88,7 +87,7 @@ async fn retirement_cannot_lose_request_or_erase_successor() {
         successor.is_some(),
         "request after retirement owns successor"
     );
-    drop(worker); // old cleanup cannot overwrite the successor's status
+    drop(worker);
     assert_eq!(
         coordinator.status("retire").unwrap().phase,
         AutodeployPhase::Queued

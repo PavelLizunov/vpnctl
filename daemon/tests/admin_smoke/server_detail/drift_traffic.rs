@@ -15,7 +15,6 @@ use crate::common::*;
 async fn admin_server_detail_highlights_drift_between_declared_and_observed() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    // Server declares vless+reality + tuic-v5 in inventory
     s.inv
         .add_server(&Server {
             id: ServerId("driftnode".into()),
@@ -34,8 +33,6 @@ async fn admin_server_detail_highlights_drift_between_declared_and_observed() {
         })
         .await
         .unwrap();
-    // But the probe sees vless (tcp/443) AND an EXTRA hysteria2 (udp/8444),
-    // and NO tuic (no udp/8443). Two drifts: missing tuic, extra hy2.
     s.inv
         .record_node_health(
             &ServerId("driftnode".into()),
@@ -58,8 +55,6 @@ async fn admin_server_detail_highlights_drift_between_declared_and_observed() {
         .unwrap();
 
     let html = fetch_html(router(s), "/admin/servers/driftnode/protocols").await;
-    // v2 3c grid: the silent tuic port renders the warm flag + the
-    // declared-but-NOT-listening line names it.
     let row = html
         .split("<tr ")
         .find(|row| {
@@ -96,8 +91,6 @@ async fn admin_server_detail_highlights_drift_between_declared_and_observed() {
         html.contains("udp/8443"),
         "missing tuic udp/8443 must be listed"
     );
-    // The extra hysteria2 socket lands in the grouped undeclared table
-    // (unclassified group names raw ports).
     assert!(
         html.contains("Listening but undeclared"),
         "undeclared group table must render"
@@ -106,7 +99,6 @@ async fn admin_server_detail_highlights_drift_between_declared_and_observed() {
         html.contains("udp/8444"),
         "extra hysteria2 udp/8444 must be listed in a group"
     );
-    // SSH port 22 must NOT be flagged as "extra" (always-listening).
     let undeclared = html.split("Listening but undeclared").nth(1).unwrap_or("");
     assert!(
         !undeclared.contains("tcp/22"),
@@ -116,10 +108,6 @@ async fn admin_server_detail_highlights_drift_between_declared_and_observed() {
 
 #[tokio::test]
 async fn phase4b_server_detail_renders_live_activity_section_when_no_samples() {
-    // Pavel: even before the poller has sampled, the section must
-    // render (with empty-state «active now: 0», «last poll: never»)
-    // so the page structure is predictable. NM-11 caveat copy
-    // present.
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     s.inv
@@ -189,9 +177,6 @@ async fn phase4c_server_detail_renders_empty_state_when_no_snapshot() {
 
 #[tokio::test]
 async fn phase4c_server_detail_renders_top_destinations_and_sources_from_snapshot() {
-    // Manually inject a snapshot into the cache so we don't need a
-    // real clash-api running. Pin: top destinations + top sources +
-    // network breakdown tiles + correlation column header.
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     s.inv
@@ -222,9 +207,6 @@ async fn phase4c_server_detail_renders_top_destinations_and_sources_from_snapsho
         })
         .await
         .unwrap();
-    // brat fetched subscription from 9.9.9.9 → correlation
-    // should surface that user_id when 9.9.9.9 appears as
-    // sourceIP in the live snapshot.
     s.inv
         .log_sub_access(&UserId("brat".into()), "9.9.9.9", None, 200, 100)
         .await
@@ -270,25 +252,20 @@ async fn phase4c_server_detail_renders_top_destinations_and_sources_from_snapsho
 
     let html = fetch_html(router(s), "/admin/servers/active/activity").await;
     assert!(html.contains("Live connections"));
-    // Top destinations must include youtube.com (preferred over IP).
     assert!(
         html.contains("youtube.com:443"),
         "top destinations must render host:port preferring DNS name"
     );
-    // Top sources must include the real client IP.
     assert!(
         html.contains("9.9.9.9"),
         "top sources must render the real source IP"
     );
-    // Correlation should resolve `9.9.9.9` → `brat`.
     assert!(
         html.contains("href=\"/admin/users/brat\""),
         "source-IP-to-user correlation must surface brat as the likely owner of 9.9.9.9"
     );
-    // Network breakdown tiles (TCP 1 / UDP 1).
     assert!(html.contains(">tcp<") || html.contains("tcp"));
     assert!(html.contains("udp"));
-    // NM-11 caveat copy
     assert!(
         html.contains("NM-11"),
         "section must surface NM-11 explainer"
@@ -297,11 +274,6 @@ async fn phase4c_server_detail_renders_top_destinations_and_sources_from_snapsho
 
 #[tokio::test]
 async fn phase4d_server_detail_log_attribution_wins_over_sub_access_correlation() {
-    // Setup: clash snapshot has source IP 31.135.234.102 with no
-    // sub_access row (so Phase 4c correlation returns nothing).
-    // Phase 4d attribution map says 31.135.234.102 → main-brat.
-    // The «top sources» row must surface main-brat (exact match,
-    // tagged «log») not «—».
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     s.inv
@@ -332,8 +304,6 @@ async fn phase4d_server_detail_log_attribution_wins_over_sub_access_correlation(
         })
         .await
         .unwrap();
-    // NO sub_access_log row — so Phase 4c fallback would NOT
-    // find a match. Only Phase 4d log attribution can.
 
     let snap = Snapshot {
         upload_total: 1000,
@@ -357,8 +327,6 @@ async fn phase4d_server_detail_log_attribution_wins_over_sub_access_correlation(
     s.snapshot_cache.store(ServerId("phase4d-srv".into()), snap);
 
     let html = fetch_html(router(s), "/admin/servers/phase4d-srv/activity").await;
-    // Exact match link to main-brat — now sourced from metadata.user
-    // (the patched sing-box clash-api), not the removed log-scrape map.
     assert!(
         html.contains("href=\"/admin/users/main-brat\""),
         "metadata.user attribution must link the source IP to main-brat"
@@ -367,8 +335,6 @@ async fn phase4d_server_detail_log_attribution_wins_over_sub_access_correlation(
 
 #[tokio::test]
 async fn phase4d_server_detail_falls_back_to_sub_access_when_no_log_attribution() {
-    // Symmetric case — log attribution empty, sub_access has a
-    // match → falls back, tagged «sub».
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     s.inv
@@ -399,8 +365,6 @@ async fn phase4d_server_detail_falls_back_to_sub_access_when_no_log_attribution(
         })
         .await
         .unwrap();
-    // sub_access_log entry — Phase 4c sub_access correlation
-    // hit for 5.5.5.5.
     s.inv
         .log_sub_access(&UserId("falluser".into()), "5.5.5.5", None, 200, 100)
         .await
@@ -425,16 +389,13 @@ async fn phase4d_server_detail_falls_back_to_sub_access_when_no_log_attribution(
             },
         }],
     };
-    // EMPTY attribution map — Phase 4d had nothing for this IP.
     s.snapshot_cache.store(ServerId("phase4d-fb".into()), snap);
 
     let html = fetch_html(router(s), "/admin/servers/phase4d-fb/activity").await;
-    // Must link to falluser via sub_access fallback.
     assert!(
         html.contains("href=\"/admin/users/falluser\""),
         "sub_access fallback must link the source IP to falluser when log attribution is empty"
     );
-    // Tagged «sub» (not «log»).
     assert!(
         html.contains(">sub<"),
         "tag «sub» must indicate fallback-via-sub_access"
@@ -447,9 +408,6 @@ async fn phase4d_server_detail_falls_back_to_sub_access_when_no_log_attribution(
 
 #[tokio::test]
 async fn phase4d_server_detail_renders_dash_when_neither_log_nor_sub_has_attribution() {
-    // Pin the «both layers empty» path: no log attribution, no
-    // sub_access correlation hits → the «likely user» cell must
-    // render «—» with NO `<a href="/admin/users/...">` link.
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     s.inv
@@ -467,8 +425,6 @@ async fn phase4d_server_detail_renders_dash_when_neither_log_nor_sub_has_attribu
         })
         .await
         .unwrap();
-    // NO users added → users_for_source_ips returns no matches
-    // for any IP, and we pass an empty attribution map.
 
     let snap = Snapshot {
         upload_total: 100,
@@ -493,22 +449,16 @@ async fn phase4d_server_detail_renders_dash_when_neither_log_nor_sub_has_attribu
         .store(ServerId("phase4d-none".into()), snap);
 
     let html = fetch_html(router(s), "/admin/servers/phase4d-none/activity").await;
-    // Source IP must render in the top-sources row.
     assert!(
         html.contains("203.0.113.99"),
         "the unattributed source IP must still render in the table"
     );
-    // NO link to any user-detail for this orphan IP. We use a
-    // targeted check: extract the slice around the source IP cell
-    // and assert it doesn't carry a user-detail link.
     let pos = html.find("203.0.113.99").expect("source IP must render");
-    // The cell + the next ~400 chars cover the «likely user» cell.
     let window = &html[pos..pos.saturating_add(800)];
     assert!(
         !window.contains("href=\"/admin/users/"),
         "orphan source IP must NOT link to any user-detail; window: …{window}…"
     );
-    // The «—» glyph appears as the cell content.
     assert!(
         window.contains("—"),
         "«likely user» cell must render «—» for orphan IP, got window: …{window}…"
@@ -535,7 +485,6 @@ async fn server_detail_renders_traffic_gap_section() {
         })
         .await
         .unwrap();
-    // Two NIC readings → rx Δ5 GB, tx 0 → nic_total ≈ 5 GB.
     for rx in [1_000_000_000u64, 6_000_000_000u64] {
         st.inv
             .record_node_health(
@@ -558,7 +507,6 @@ async fn server_detail_renders_traffic_gap_section() {
             .await
             .unwrap();
     }
-    // Clash attributes ~1 GB → the gap is ~4 GB of unseen traffic.
     st.inv
         .record_vpn_stats(
             &sid,
@@ -584,28 +532,21 @@ async fn server_detail_renders_traffic_gap_section() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let html = std::str::from_utf8(&body).unwrap();
-    // Section + the three tiles render (NIC ground-truth vs attributed vs gap).
     assert!(html.contains("Traffic accounting"), "gap section eyebrow");
     assert!(html.contains("NIC total"), "NIC total tile");
     assert!(html.contains("GAP (unattributed)"), "gap tile");
     assert!(html.contains("ens18"), "interface name shown");
-    // With 2 samples it must NOT show the empty-state.
     assert!(
         !html.contains("No NIC ground-truth yet"),
         "should render real numbers, not the empty-state"
     );
 }
 
-/// server#1 — DEFAULT page load (no ?drift=live) renders the
-/// «check live drift →» link and does NOT attempt any SSH. We can't
-/// directly assert «no SSH» from the integration boundary, but the
-/// node address is bogus (10.0.0.0) and the page MUST still return 200
-/// fast — a default load that tried SSH would block on ConnectTimeout.
 #[tokio::test]
 async fn server_detail_drift_detail_default_shows_check_link_no_ssh() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    seed(&s.inv, 1, 0, &[]).await; // server s0
+    seed(&s.inv, 1, 0, &[]).await;
     let html = fetch_html(router(s), "/admin/servers/s0/protocols").await;
     assert!(
         html.contains("Drift detail · on-node UUIDs"),
@@ -631,22 +572,16 @@ async fn server_detail_drift_detail_default_shows_check_link_no_ssh() {
         html.contains("?drift=live#drift-detail"),
         "the link must arm the ?drift=live opt-in"
     );
-    // No live-read result copy on the default path.
     assert!(
         !html.contains("orphan uuids on node"),
         "default load must NOT render live-read results"
     );
 }
 
-/// server#1 — ?drift=live against an unreachable node (bogus address)
-/// renders the POLICY-SAFE empty-state and NEVER 500s. The empty-state
-/// copy must NOT instruct the operator to «ssh» the box.
 #[tokio::test]
 async fn server_detail_drift_live_failure_renders_policy_safe_empty_state() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    // Address 192.0.2.1 is TEST-NET-1 (RFC 5737) — guaranteed
-    // unroutable, so the live read fails fast under the ≤6s timeout.
     s.inv
         .add_server(&Server {
             id: ServerId("blackhole".into()),
@@ -663,7 +598,6 @@ async fn server_detail_drift_live_failure_renders_policy_safe_empty_state() {
         .await
         .unwrap();
     let html = fetch_html(router(s), "/admin/servers/blackhole/protocols?drift=live").await;
-    // 200 (fetch_html asserts) + the policy-safe empty-state.
     assert!(
         html.contains("Couldn't read the live config"),
         "armed live-read failure must render the policy-safe empty-state"
@@ -672,11 +606,6 @@ async fn server_detail_drift_live_failure_renders_policy_safe_empty_state() {
         html.contains("node unreachable or deploy key"),
         "empty-state must name the real cause (unreachable / deploy key)"
     );
-    // Operator-action-policy: the DRIFT-DETAIL card's empty-state must
-    // NEVER tell the operator to ssh the box. Scope the check to that
-    // section (the page-wide Deploy button legitimately mentions an
-    // automated «SSH into the node» it performs for the operator — a
-    // different, allowed string).
     let drift_section = html
         .split("Drift detail · on-node UUIDs")
         .nth(1)
@@ -693,8 +622,6 @@ async fn server_detail_drift_live_failure_renders_policy_safe_empty_state() {
     );
 }
 
-/// server#3 — top-users card carries the NM-11 empty-state when no
-/// per-user traffic is attributed (the prod reality).
 #[tokio::test]
 async fn server_detail_top_users_renders_nm11_empty_state() {
     let dir = TempDir::new().unwrap();
@@ -711,13 +638,11 @@ async fn server_detail_top_users_renders_nm11_empty_state() {
     );
 }
 
-/// server#3 — when per-user rows DO exist they render with a drill-in
-/// link to the user-detail page (and the NM-11 empty-state is gone).
 #[tokio::test]
 async fn server_detail_top_users_lists_users_with_links_when_present() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    seed(&s.inv, 1, 1, &[(0, 0)]).await; // s0, u0 granted
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
     s.inv
         .record_vpn_stats(
             &ServerId("s0".into()),
@@ -735,7 +660,6 @@ async fn server_detail_top_users_lists_users_with_links_when_present() {
         html.contains(r#"href="/admin/users/u0""#),
         "top-users row must link to the user-detail page"
     );
-    // Section present; the NM-11 empty-state must NOT show with data.
     let top_section = html.split("Top users · last 24h").nth(1).unwrap_or("");
     let next_section = top_section.split("TCP / UDP split").next().unwrap_or("");
     assert!(
@@ -744,8 +668,6 @@ async fn server_detail_top_users_lists_users_with_links_when_present() {
     );
 }
 
-/// server#4 — per-server traffic sparkline renders with the window
-/// picker scoped to /admin/servers/{id} and the ↑↓ totals tiles.
 #[tokio::test]
 async fn server_detail_traffic_section_renders_sparkline_and_window_picker() {
     let dir = TempDir::new().unwrap();
@@ -755,7 +677,7 @@ async fn server_detail_traffic_section_renders_sparkline_and_window_picker() {
         .record_vpn_stats(
             &ServerId("s0".into()),
             &[VpnStatsDelta {
-                user_id: None, // server-wide row
+                user_id: None,
                 upload_bytes: 10_000_000,
                 download_bytes: 40_000_000,
                 active_connections: 12,
@@ -789,12 +711,10 @@ async fn server_detail_traffic_section_renders_sparkline_and_window_picker() {
             "{label}: server traffic tile must carry its own direction icon and exact label"
         );
     }
-    // Window picker links scoped to THIS server.
     assert!(
         html.contains("/admin/servers/s0/activity?vpn_window=7d"),
         "window picker must be scoped to /admin/servers/s0"
     );
-    // An <svg> sparkline rendered for the populated window.
     let traffic = html.split("Server traffic · ").nth(1).unwrap_or("");
     assert!(
         traffic.contains("<svg"),
@@ -802,13 +722,11 @@ async fn server_detail_traffic_section_renders_sparkline_and_window_picker() {
     );
 }
 
-/// server#4 — empty window renders the no-traffic empty-state, not a
-/// broken/blank chart.
 #[tokio::test]
 async fn server_detail_traffic_section_empty_state_when_no_stats() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    seed(&s.inv, 1, 0, &[]).await; // no vpn stats recorded
+    seed(&s.inv, 1, 0, &[]).await;
     let html = fetch_html(router(s), "/admin/servers/s0/activity").await;
     assert!(
         html.contains("No traffic recorded in this window yet"),
@@ -816,8 +734,6 @@ async fn server_detail_traffic_section_empty_state_when_no_stats() {
     );
 }
 
-/// server#5 — TCP/UDP split renders from the live snapshot with the
-/// «no per-protocol tag» caption + tiles.
 #[tokio::test]
 async fn server_detail_network_split_renders_from_snapshot() {
     let dir = TempDir::new().unwrap();
@@ -871,12 +787,11 @@ async fn server_detail_network_split_renders_from_snapshot() {
     );
 }
 
-/// server#5 — empty-state when no snapshot exists for the server.
 #[tokio::test]
 async fn server_detail_network_split_empty_state_when_no_snapshot() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    seed(&s.inv, 1, 0, &[]).await; // no snapshot cached
+    seed(&s.inv, 1, 0, &[]).await;
     let html = fetch_html(router(s), "/admin/servers/s0/activity").await;
     assert!(
         html.contains("TCP / UDP split"),
@@ -888,14 +803,11 @@ async fn server_detail_network_split_empty_state_when_no_snapshot() {
     );
 }
 
-/// server#7 — server-scoped audit timeline renders rows that reference
-/// this server (deploy/grant/etc), reusing the .ed-time component.
 #[tokio::test]
 async fn server_detail_audit_timeline_renders_server_scoped_rows() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 0, &[]).await;
-    // An audit row targeting this server.
     s.inv
         .audit("admin", "server.deploy", Some("s0"), None)
         .await
@@ -915,12 +827,11 @@ async fn server_detail_audit_timeline_renders_server_scoped_rows() {
     );
 }
 
-/// server#7 — empty-state when no audit row references the server.
 #[tokio::test]
 async fn server_detail_audit_timeline_empty_state() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    seed(&s.inv, 1, 0, &[]).await; // seed writes no audit rows
+    seed(&s.inv, 1, 0, &[]).await;
     let html = fetch_html(router(s), "/admin/servers/s0/activity").await;
     assert!(
         html.contains("No audit rows reference this server yet"),

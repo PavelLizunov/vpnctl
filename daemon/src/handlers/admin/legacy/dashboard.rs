@@ -1,5 +1,3 @@
-//! Admin UI dashboard handlers and components.
-
 mod abuse;
 mod fleet;
 mod render;

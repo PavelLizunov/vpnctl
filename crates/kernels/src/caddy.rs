@@ -1,50 +1,3 @@
-//! Caddy + `forwardproxy@naive` — the kernel that serves the [`Naive`]
-//! protocol with a **real masquerade website**.
-//!
-//! [`Naive`]: vpnctl_protocols::Naive
-//!
-//! # Why a separate Kernel (not sing-box)
-//!
-//! sing-box HAS a `naive` inbound, but it `400`s every non-proxy
-//! request — an active probe sees a bare error, a dead giveaway. The
-//! only way to serve a genuine cover website (HTTP 200) to probes while
-//! tunnelling authenticated clients is Caddy's `forwardproxy` fork with
-//! `probe_resistance` + `file_server`. Different daemon ⇒ different
-//! Kernel. This is the same split as WireGuard (wire format) ↔
-//! AmneziaWg (daemon).
-//!
-//! # Trait-impedance fix (same shape as `amnezia_wg`)
-//!
-//! sing-box renders JSON; Caddy renders a Caddyfile (text). The
-//! [`Naive`] protocol's `server_inbound` returns a STABLE JSON ENVELOPE
-//! (`{ domain, acme_email, auth: [{username, password}] }`); this kernel
-//! deserialises it and assembles the Caddyfile. The protocol never
-//! knows it's Caddy; the kernel never hard-codes per-user secrets.
-//!
-//! # Install (built from source via xcaddy)
-//!
-//! The stock `caddy` apt package has NO forwardproxy. `ensure_installed`
-//! installs Go (pinned [`GO_VERSION`]) and `xcaddy build`s Caddy
-//! ([`CADDY_VERSION`]) with `klzgrad/forwardproxy` (pinned
-//! [`FORWARDPROXY_PIN`]). On a ≤1 GB box the Go build is RAM-heavy, so
-//! the script adds a temporary 1 GB swapfile and removes it after.
-//! Idempotent: skips the whole build if `caddy list-modules` already
-//! reports `forward_proxy`.
-//!
-//! # ACME
-//!
-//! Caddy's BUILT-IN ACME mints the Let's Encrypt cert for the domain —
-//! this kernel needs no cert plumbing of its own (closing the "vpnctl
-//! has no ACME" gap). Prerequisites that vpnctl CANNOT do (operator's
-//! job): a DNS A record `<domain> → <node-ip>` and open TCP 80+443.
-//!
-//! # Port
-//!
-//! Caddy binds 80+443. A naive node therefore MUST NOT also run a
-//! 443-TCP sing-box protocol (VLESS+REALITY / Trojan). This is operator
-//! policy for now — the cross-kernel port-conflict preflight that would
-//! enforce it is still pending (docs/NAIVE_CADDY_PLAN.md §3).
-
 mod builder;
 mod render;
 #[cfg(test)]
@@ -98,11 +51,6 @@ impl Kernel for Caddy {
     }
 
     async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()> {
-        // FAST PATH: a prebuilt static (CGO-free) amd64 caddy cached on
-        // the CONTROL node — upload it (seconds; no Go/swap/RAM pressure
-        // on the target). The same binary runs on any amd64 node.
-        // SLOW FALLBACK: build on the node via xcaddy (~10 min) when no
-        // cache is present (e.g. a CLI deploy from a host without it).
         let cache = caddy_cache_path();
         let cache_read = tokio::task::spawn_blocking({
             let cache = cache.clone();
@@ -118,24 +66,11 @@ impl Kernel for Caddy {
 
         let binary_changed = match cache_read {
             Ok((bytes, digest)) => {
-                // Content-aware idempotency: SHA256 the cache bytes up front
-                // (the same digest fed to `sha256sum -c` on the transfer) and
-                // probe the on-node binary's sha (empty when absent). Reinstall
-                // when the on-node binary is absent OR its sha differs from the
-                // cache sha, so an operator who refreshes the cached binary
-                // (same path, patched bytes) gets it pushed WITHOUT first
-                // deleting the on-node copy by hand. A bare presence check
-                // would skip the refresh.
                 let node_sha = ssh
                     .exec("sha256sum /usr/local/bin/caddy 2>/dev/null | cut -d' ' -f1")
                     .await?;
                 let needs_reinstall = caddy_needs_reinstall(&digest, &node_sha);
                 if needs_reinstall {
-                    // Integrity-verify on the node before installing it as a
-                    // root systemd service: upload the cache bytes to .new,
-                    // `sha256sum -c` the control-side digest there, then atomic
-                    // mv. `set -eu` aborts the deploy on a corrupted/truncated
-                    // upload.
                     ssh.upload("/usr/local/bin/caddy.new", &bytes).await?;
                     ssh.exec(&format!(
                         "set -eu\n\
@@ -148,10 +83,6 @@ impl Kernel for Caddy {
                 }
                 needs_reinstall
             }
-            // No cache → build on the node, gated on a presence probe (caddy
-            // on PATH AND forward_proxy compiled in). A cache path that's SET
-            // but unreadable (bad VPNCTL_CADDY_CACHE, wrong perms, a dir)
-            // fails loudly rather than silently triggering a 10-min build.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let present = ssh
                     .exec(
@@ -169,8 +100,6 @@ impl Kernel for Caddy {
             Err(e) => return Err(CoreError::Io(e)),
         };
 
-        // Provision the runtime (user, masquerade site, systemd unit,
-        // firewall) regardless of how the binary arrived. Idempotent.
         ssh.exec(&caddy_runtime_provision_script()).await?;
         if binary_changed {
             ssh.exec(CADDY_RESTART_IF_ACTIVE).await?;
@@ -184,11 +113,6 @@ impl Kernel for Caddy {
         users: &[User],
         protocols: &[&dyn Protocol],
     ) -> Result<Vec<u8>> {
-        // The caddy kernel serves naive OR vless-ws — EXACTLY ONE per node.
-        // Both manage the LE cert and bind the front port, and this kernel
-        // renders one Caddyfile shape (not a merged one). vless-ws renders a
-        // multi-file BUNDLE (Caddyfile + loopback sing-box); naive a single
-        // Caddyfile.
         let vlessws = protocols
             .iter()
             .find(|p| p.id() == ProtocolId("vless-ws".to_string()));
@@ -196,11 +120,6 @@ impl Kernel for Caddy {
             .iter()
             .any(|p| p.id() == ProtocolId("naive".to_string()));
         if let Some(vlessws) = vlessws {
-            // Refuse a node that enables BOTH rather than silently dropping
-            // naive's config (which would break live naive clients). The
-            // operator must disable one on the server. (The fleet never does
-            // both — cdn=naive, de/is/nl=vless-ws — so this is a guard, not
-            // a limitation hit in practice.)
             if naive_present {
                 return Err(CoreError::Render(
                     "caddy kernel: a server has BOTH `naive` and `vless-ws` enabled, but the \
@@ -212,9 +131,6 @@ impl Kernel for Caddy {
             return render_vlessws_bundle(ctx, users, *vlessws);
         }
 
-        // Locate the naive protocol. Registry::validate_server should have
-        // caught a mismatch; this is the defense-in-depth layer (mirrors
-        // amnezia_wg).
         let naive = protocols
             .iter()
             .find(|p| p.id() == ProtocolId("naive".to_string()))
@@ -228,10 +144,6 @@ impl Kernel for Caddy {
     }
 
     async fn apply_config(&self, ssh: &dyn SshTransport, config: &[u8]) -> Result<()> {
-        // The caddy kernel emits TWO artefact shapes: a vless-ws multi-file
-        // BUNDLE (starts with the `====FILE: ` delimiter) or a single naive
-        // Caddyfile. Dispatch on the discriminator so the naive path stays
-        // byte-for-byte unchanged.
         if config.starts_with(BUNDLE_DELIMITER.as_bytes()) {
             ssh.upload("/etc/caddy/.vlessws-bundle.new", config).await?;
             ssh.exec(&vlessws_apply_script()).await?;

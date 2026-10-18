@@ -6,10 +6,6 @@ use crate::handlers::admin::legacy::server_detail::status_tile;
 use crate::handlers::admin::legacy::user_sections::VpnSparklineWindow;
 use crate::http_util::path_segment_encode;
 
-/// Compact "how long ago" string for the last-probe column. Buckets to
-/// seconds / minutes / hours / days — the operator wants "is this
-/// stale?" at a glance, not millisecond precision. Negative durations
-/// (clock skew between probe write + render) clamp to «just now».
 pub(in crate::handlers::admin::legacy) fn humanize_age(
     d: chrono::Duration,
     lang: crate::i18n::Locale,
@@ -81,8 +77,6 @@ pub(in crate::handlers::admin::legacy) fn dashboard_live_activity_from_rows(
         }
     }
 
-    // A fresh in-memory snapshot is more authoritative than the persisted
-    // aggregate. Missing/stale cache entries fall back to the latest row.
     for (server_id, count) in active_conns {
         if let (Some(activity), Some(count)) = (by_server.get_mut(server_id), count) {
             activity.active_now = u32::try_from(*count).unwrap_or(u32::MAX);
@@ -100,14 +94,6 @@ pub(in crate::handlers::admin::legacy) fn dashboard_live_activity_from_rows(
         .collect()
 }
 
-/// Phase 4b — dashboard «VPN activity» tile. Sums the already-loaded
-/// chart buckets per server and shows total bytes, active conns now,
-/// and the per-server breakdown.
-/// Renders even when the poller has zero data so the operator
-/// sees the structure (instead of guessing whether the section
-/// would EVER appear). Empty-state copy points at the NM-11
-/// upstream limit so the operator knows why per-user attribution
-/// is zero today.
 pub(in crate::handlers::admin::legacy) fn dashboard_vpn_activity(
     rows: &[(vpnctl_core::ServerId, vpnctl_inventory::ServerLiveActivity)],
     window: VpnSparklineWindow,
@@ -141,10 +127,6 @@ pub(in crate::handlers::admin::legacy) fn dashboard_vpn_activity(
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
                 (tr(
                     lang,
-                    // Refreshed (audit 2026-06-10): per-user numbers DO
-                    // exist now — the sing-box access-log scraper
-                    // attributes traffic per user; only the clash-api
-                    // path stays blocked upstream (NM-11).
                     "Server-wide totals from each node's clash-api (sing-box 5-minute tick). Per-user numbers come from the access-log scraper on each user's page (clash-api itself omits the User field upstream — NM-11).",
                     "Сервер-агрегатные показатели из clash-api каждой ноды (тик sing-box 5 минут). Per-user цифры считает скрейпер access-логов — смотри страницу юзера (сам clash-api не передаёт поле User — NM-11).",
                 ))
@@ -179,7 +161,6 @@ pub(in crate::handlers::admin::legacy) fn dashboard_vpn_activity(
                         (status_tile(&dn_label, &humanize_bytes(total_dn), "var(--ink)"))
                     }
                 }
-                // Per-server breakdown — compact mono table.
                 table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px;" {
                     thead {
                         tr style="border-bottom: 1px solid var(--ink);" {
@@ -214,9 +195,6 @@ pub(in crate::handlers::admin::legacy) fn dashboard_vpn_activity(
     }
 }
 
-/// Render the "heavy users · <window>" section on the dashboard.
-/// Sorted DESC by total bytes (upload + download). Empty list →
-/// explanatory empty-state explaining the polling prerequisite.
 pub(in crate::handlers::admin::legacy) fn dashboard_heavy_users(
     rows: &[vpnctl_inventory::HeavyUser],
     window: VpnSparklineWindow,
@@ -310,22 +288,6 @@ pub(in crate::handlers::admin::legacy) fn dashboard_heavy_users(
     }
 }
 
-/// Inline-SVG sparkline. Pure SSR — width/height pinned, no JS,
-/// stroke uses `var(--acc)` so the accent toggle in the Tweaks panel
-/// recolours every chart on the page consistently.
-/// The sparkline renderer. (The unlabelled legacy wrapper
-/// `sparkline_svg` was deleted in R2 once its last caller learned to
-/// pass an explicit axis + caption.)
-///
-/// * `y_max = Some(cap)` pins the y-axis — **percent series pass 100**
-///   so a flat 28 % disk line sits at 28 % of the box height instead of
-///   gluing to the top edge and reading as "maxed out" (design review
-///   2026-07-10). `None` auto-scales to the window max (byte/MiB
-///   series, where only the shape matters).
-/// * `label_max = false` drops the in-SVG "max N" corner text for
-///   callers that render their own max caption under the chart —
-///   previously both rendered and disagreed by one (SVG truncated,
-///   caption rounded: «max 51» inside, «max 52%» below).
 pub(in crate::handlers::admin::legacy) fn sparkline_svg_scaled(
     values: &[f64],
     width: u32,
@@ -354,14 +316,11 @@ pub(in crate::handlers::admin::legacy) fn sparkline_svg_scaled(
         .enumerate()
         .map(|(i, v)| {
             let x = 2.0 + (i as f64) * stride;
-            // min(1.0) guards a >cap outlier (e.g. % rounding artifacts)
-            // from drawing outside the box.
             let y = 2.0 + h - (v / scale).min(1.0) * h;
             format!("{x:.1},{y:.1}")
         })
         .collect::<Vec<_>>()
         .join(" ");
-    // Filled area under the curve — same points + close-down to baseline.
     let area_points = format!(
         "2,{baseline} {points} {last_x:.1},{baseline}",
         baseline = height as f64 - 2.0,
@@ -374,9 +333,6 @@ pub(in crate::handlers::admin::legacy) fn sparkline_svg_scaled(
             polygon points=(area_points) fill="var(--acc)" opacity="0.10" {}
             polyline points=(points) fill="none" stroke="var(--acc)" stroke-width="1.5" {}
             @if label_max {
-                // Right-side max-value label so operator can read the
-                // peak. Rounded (not truncated) so it always agrees
-                // with any {:.0}-formatted caption of the same series.
                 text x=(width - 4) y="14"
                      text-anchor="end"
                      style="font-family: var(--mono); font-size: 10px; fill: var(--mute);" {

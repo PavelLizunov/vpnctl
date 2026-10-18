@@ -13,11 +13,6 @@ pub(crate) fn server_detail_protocols_section(
     use crate::i18n::{K, t, tr};
     let enabled: HashSet<&vpnctl_core::ProtocolId> = server.enabled_protocols.iter().collect();
     let all_protocols = registry.protocol_ids();
-    // Multi-kernel: protocol is "compatible" if ANY of the server's
-    // declared kernels supports it. Annotation below tells the operator
-    // WHICH kernel handles it (resolves "wireguard runs on amneziawg,
-    // tuic on sing-box" disambiguation that matters once a node has
-    // multiple kernels).
     let kernel_supports_map: Vec<(vpnctl_core::KernelId, HashSet<vpnctl_core::ProtocolId>)> =
         server
             .kernels
@@ -35,12 +30,6 @@ pub(crate) fn server_detail_protocols_section(
     let sid_enc = path_segment_encode(&server.id.0);
     html! {
         div.ed-rule {}
-        // NM-12 follow-up (Pavel 2026-05-20: «каждый раз когда я
-        // жму disable меня выкидывает в верх страницы»): all 4
-        // visibility-toggle handlers below this row redirect to
-        // `/admin/servers/{id}/protocols#enabled-protocols`. The browser
-        // honours the fragment and scrolls the operator back to
-        // THIS section instead of resetting to the page top.
         div.ed-art-eyebrow id="enabled-protocols" { (t(lang, K::EyebrowEnabledProtocols)) }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 8px;" {
             (tr(
@@ -49,10 +38,6 @@ pub(crate) fn server_detail_protocols_section(
                 "Что крутится на этой ноде. Протоколы — это wire-форматы; их ядра (одно или больше) выбираются выше в секции Ядра.",
             ))
         }
-        // Same deploy-required rule as the Kernels note above. Kept as
-        // a marker for operators who scroll straight here, but R2
-        // compressed it to one line — two identical banner paragraphs
-        // on one screen read as a copy-paste bug.
         div style="padding: 6px 12px; margin: 0 0 12px; background: var(--paper); border-left: 3px solid var(--accent); font-family: var(--serif); font-size: 12px; line-height: 1.5;" {
             b style="color: var(--accent); font-family: var(--mono); letter-spacing: 0.1em; text-transform: uppercase; font-size: 11px;" {
                 (icon("triangle-alert")) (tr(lang, "toggle here = inventory only", "тогл здесь = только инвентарь"))
@@ -68,28 +53,10 @@ pub(crate) fn server_detail_protocols_section(
             @for pid in &all_protocols {
                 @let is_on = enabled.contains(pid);
                 @let compatible = kernel_supports.contains(pid);
-                // Migration 0018 / NM-10: per-(server, protocol)
-                // hidden flag. Only meaningful for `is_on=true` rows
-                // (hidden state on an off-protocol is silently
-                // ignored by the render path). Defaults to false
-                // when the bulk-loader didn't return a row for this
-                // pid (e.g. add_protocol invariant on enabled but
-                // schema-missing row).
                 @let is_hidden = hidden_map.get(pid).copied().unwrap_or(false);
-                // NM-12: DPI / active-probing resilience tier. Read
-                // straight from the protocol impl in the registry —
-                // none of the inventory mutations carry this; it's
-                // compile-time static. Missing protocol (impossible
-                // in production, registry seeds itself in main()) →
-                // None → no chip rendered.
                 @let risk = registry.protocol(pid).map(|p| p.dpi_risk());
                 @let pid_is_weak = matches!(risk, Some(vpnctl_core::DpiRisk::Weak));
                 li style="display: flex; align-items: baseline; gap: 12px; padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
-                    // Weak protocols get font-size 11px (vs 12px for
-                    // Moderate/Strong) — Pavel 2026-05-20: «можешь
-                    // даже шрифт меньше сделать у них». Visual
-                    // de-emphasis without removing the row, so the
-                    // operator can still see + toggle it.
                     span style=(format!(
                         "flex: 1; color: {}; font-size: {};",
                         if compatible { "var(--ink)" } else { "var(--mute)" },
@@ -98,14 +65,6 @@ pub(crate) fn server_detail_protocols_section(
                         (pid.0)
                         @if let Some(r) = risk {
                             " "
-                            // DPI-risk chip: green/grey/red, sits
-                            // alongside the protocol id so the
-                            // operator's eye catches it. Colour
-                            // helpers on `DpiRisk` are the single
-                            // source of truth — adding a future tier
-                            // (or recolouring the palette) is one
-                            // edit in core/src/lib.rs. Tooltip carries
-                            // the per-tier explainer string.
                             span title=(r.tooltip())
                                  style=(format!(
                                      "font-family: var(--mono); font-size: 10px; padding: 1px 6px; border: 1px solid {}; color: {}; letter-spacing: 0.04em;",

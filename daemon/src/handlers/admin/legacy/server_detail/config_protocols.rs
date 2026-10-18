@@ -4,13 +4,6 @@ use crate::http_util::path_segment_encode;
 use maud::{Markup, html};
 use std::collections::HashMap;
 
-/// Naive (Caddy + forwardproxy) per-server config. The operator sets
-/// `naive.domain` + `naive.acme_email` (server_secrets) that the caddy
-/// kernel renders into the Caddyfile and Caddy's built-in ACME uses to
-/// mint the Let's Encrypt cert. Rendered ONLY when the `naive` protocol
-/// is enabled on this server (empty markup otherwise). Carries the
-/// prerequisite reminder vpnctl CANNOT satisfy for the operator: a DNS
-/// A-record pointing here + open TCP 80/443.
 pub(crate) fn server_detail_naive_config_section(
     server: &vpnctl_core::Server,
     server_secrets: &HashMap<String, String>,
@@ -69,13 +62,6 @@ pub(crate) fn server_detail_naive_config_section(
     }
 }
 
-/// vless-ws (Caddy + reverse_proxy) per-server config. The operator sets
-/// `vlessws.domain` + `vlessws.acme_email` + `vlessws.listen_port`
-/// (server_secrets); the secret ws path (`vlessws.path`) is auto-minted at
-/// deploy, so there's no field for it. Rendered ONLY when the `vless-ws`
-/// protocol is enabled on this server. Carries the prerequisite reminder
-/// vpnctl CANNOT satisfy: a DNS A-record pointing here + open TCP 80 (ACME)
-/// and the front port.
 pub(crate) fn server_detail_vlessws_config_section(
     server: &vpnctl_core::Server,
     server_secrets: &HashMap<String, String>,
@@ -98,7 +84,6 @@ pub(crate) fn server_detail_vlessws_config_section(
         .get("vlessws.listen_port")
         .map(String::as_str)
         .unwrap_or("");
-    // Whether the secret ws path has been minted yet (deploy mints it).
     let path_minted = server_secrets.contains_key("vlessws.path");
     html! {
         div.ed-rule {}
@@ -153,14 +138,6 @@ pub(crate) fn server_detail_vlessws_config_section(
     }
 }
 
-/// VLESS+REALITY per-server listen port (`vless.listen_port`). Default 443
-/// is the gold-standard cover; on a co-tenant host where something else
-/// owns 443 (naive/caddy here, legacy 3x-ui elsewhere) the operator moves
-/// reality to an alt port. Rendered ONLY when `vless+reality` is enabled.
-/// The value is load-bearing for the firewall step, the port-conflict guard
-/// and the drift table above (`effective_listen_ports`), so it gets the
-/// same web surface as `vlessws.listen_port` — "web is the ONLY operator
-/// surface" (PR #139 review finding 7).
 pub(crate) fn server_detail_reality_config_section(
     server: &vpnctl_core::Server,
     server_secrets: &HashMap<String, String>,
@@ -208,12 +185,6 @@ pub(crate) fn server_detail_reality_config_section(
     }
 }
 
-/// Display-name section on the server-detail page (migration 0029).
-/// `current` is the operator-set `servers.display_name` (None = unset).
-/// Lets the operator pin the friendly `{Country}` label end users see in
-/// their client's server list — blank clears it back to the built-in
-/// ISO-code→country map, then the uppercased id. Web equivalent of an
-/// otherwise-unsettable field (there's no CLI for it yet).
 pub(crate) fn server_detail_display_name_section(
     server: &vpnctl_core::Server,
     current: Option<&str>,
@@ -221,8 +192,6 @@ pub(crate) fn server_detail_display_name_section(
 ) -> Markup {
     use crate::i18n::tr;
     let sid_enc = path_segment_encode(&server.id.0);
-    // What the label resolves to RIGHT NOW (custom → country-map → UPPER),
-    // so the operator sees the effective value, not just the override.
     let effective = server_display_label(&server.id.0, current);
     html! {
         div.ed-rule {}
@@ -261,7 +230,6 @@ pub(crate) fn server_detail_display_name_section(
     }
 }
 
-/// Server billing section on the server-detail page (migration 0057).
 pub(crate) fn server_detail_billing_section(
     server: &vpnctl_core::Server,
     current: Option<&vpnctl_inventory::ServerBilling>,
@@ -428,13 +396,6 @@ pub(crate) fn server_detail_billing_section(
     }
 }
 
-/// Auto-suppress section on the server-detail page (migration 0030).
-/// Per-server opt-in to drop this server from the subscription render
-/// while it's unreachable: the health monitor sets `suppressed_at` once
-/// it crosses the `server.unreachable` threshold (≈30 min of failed
-/// probes), and clears it on the first successful probe. Separate from
-/// the manual hide (NM-10) so a suppress cycle preserves the operator's
-/// per-protocol visibility. Shows the live state + a toggle.
 pub(crate) fn server_detail_auto_suppress_section(
     server: &vpnctl_core::Server,
     opt_in: bool,
@@ -488,11 +449,6 @@ pub(crate) fn server_detail_auto_suppress_section(
     }
 }
 
-/// naive↔HY2 UDP-pairing opt-in on the server-detail page (migration 0031,
-/// UX-3). Takes effect only when this server exposes BOTH naive and
-/// hysteria2 — the render then stamps both share-links with `pair=<server
-/// id>`. Always rendered (discoverable); the copy explains the both-protocols
-/// requirement. Single-server only by construction (the tag is the id).
 pub(crate) fn server_detail_udp_pair_section(
     server: &vpnctl_core::Server,
     enabled: bool,
@@ -538,12 +494,6 @@ pub(crate) fn server_detail_udp_pair_section(
     }
 }
 
-/// Reserved-ports section on the server-detail page (migration 0028).
-/// Renders ALWAYS (even when the list is empty) so the operator has
-/// a discoverable place to add port pins for a newly-detected co-
-/// tenant service without having to remember the CLI invocation. The
-/// list semantics are: any port here will be REFUSED by the sing-
-/// box pre-apply guard, fail-closed.
 pub(crate) fn server_detail_reserved_ports_section(
     server: &vpnctl_core::Server,
     reserved: &[u16],

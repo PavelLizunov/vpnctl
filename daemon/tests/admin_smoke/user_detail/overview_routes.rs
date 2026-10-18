@@ -9,8 +9,6 @@ use vpnctld::router;
 
 use crate::common::*;
 
-/// Unknown user id must produce a 404 with the id echoed in the body
-/// (helpful for the operator) but NOT mask-leaked beyond plain text.
 #[tokio::test]
 async fn admin_user_detail_unknown_id_returns_404() {
     let dir = TempDir::new().unwrap();
@@ -33,37 +31,20 @@ async fn admin_user_detail_unknown_id_returns_404() {
     );
 }
 
-/// The user-detail "pending deploy" banner (multiviruss incident) now
-/// carries an in-view one-click deploy button so the operator doesn't
-/// have to bounce to /admin/servers. R2 2026-07-10: the button targets
-/// the PER-USER pending SSE endpoint — the old fleet deploy-all
-/// redeployed every server in the inventory when a single node was
-/// pending (operator report). `data-reload-self` reloads THIS page on
-/// done so the banner re-computes/clears.
 #[tokio::test]
 async fn admin_user_detail_pending_banner_has_inline_deploy_all_button() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    // u0 granted s0+s1, NO server.deploy after → pending-deploy banner.
     seed(&s.inv, 2, 1, &[(0, 0), (0, 1)]).await;
-    // The banner keys off the user's latest audit mutation vs each
-    // server's last deploy. The low-level `seed()` helper doesn't write
-    // audit rows (the real add_user/grant handlers do — that's why
-    // satta_blud's banner showed in prod), so stamp a user.grant row to
-    // mirror the real flow. With no server.deploy on s0/s1, both are
-    // pending → banner renders.
     s.inv
         .audit("admin", "user.grant", Some("u0"), None)
         .await
         .unwrap();
     let html = fetch_html(router(s), "/admin/users/u0").await;
-    // Banner is present.
     assert!(
         html.contains("Config not yet deployed to") || html.contains("ещё не задеплоен"),
         "pending-deploy banner must render when grants aren't deployed"
     );
-    // In-view deploy button wired to the per-user pending SSE endpoint
-    // — NOT the fleet-wide deploy-all.
     assert!(
         html.contains(r#"data-sse-url="/admin/users/u0/deploy-pending/sse""#),
         "in-view deploy button must target the per-user pending SSE endpoint"
@@ -72,7 +53,6 @@ async fn admin_user_detail_pending_banner_has_inline_deploy_all_button() {
         !html.contains(r#"data-sse-url="/admin/servers/deploy-all/sse""#),
         "user page must NOT wire the fleet-wide deploy-all any more"
     );
-    // Label carries the pending count (both seeded servers pending).
     assert!(
         html.contains("deploy pending "),
         "button label must say 'deploy pending (N)'"
@@ -87,22 +67,11 @@ async fn admin_user_detail_pending_banner_has_inline_deploy_all_button() {
     );
 }
 
-// ════════════════════════════════════════════════════════════════════
-//  ui-audit Phase 2 — user_detail split into 5 sub-route tabs
-//  (overview / delivery / access / activity / traffic). Each tab renders
-//  ONLY its own sections; bare /admin/users/{id} == overview.
-// ════════════════════════════════════════════════════════════════════
-
-/// Each tab route → 200, renders the `.ed-tabs` bar, marks the right tab
-/// active, shows a section unique to that tab, and does NOT leak a
-/// foreign tab's section. (`Server access` text also appears in a Flow B
-/// card on delivery, so the access marker is the `id="server-access"`
-/// anchor, which is unique to the access tab.)
 #[tokio::test]
 async fn user_detail_tabs_render_gate_and_mark_active() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    seed(&s.inv, 2, 1, &[(0, 0)]).await; // u0 granted s0
+    seed(&s.inv, 2, 1, &[(0, 0)]).await;
     let app = router(s);
     let cases = [
         (
@@ -158,7 +127,6 @@ async fn user_detail_tabs_render_gate_and_mark_active() {
     }
 }
 
-/// Bare `/admin/users/{id}` renders the overview tab directly.
 #[tokio::test]
 async fn user_detail_bare_url_renders_overview_tab() {
     let dir = TempDir::new().unwrap();
@@ -179,7 +147,6 @@ async fn user_detail_bare_url_renders_overview_tab() {
     );
 }
 
-/// Copy-contract — pin the 5 user-detail tab labels in both locales.
 #[tokio::test]
 async fn user_detail_tab_labels_copy_contract() {
     let dir = TempDir::new().unwrap();
@@ -225,10 +192,6 @@ async fn user_detail_tab_labels_copy_contract() {
 
 #[tokio::test]
 async fn user_detail_mint_tuic_button_shows_when_absent_and_mints_on_post() {
-    // A user without tuic_password silently loses naive/HY2/TUIC links
-    // (cdn 2026-06-07). The user-detail page must surface a one-click
-    // mint when absent, hide it when present, and the POST must mint +
-    // audit. Regression guard for the durable fix.
     let dir = TempDir::new().unwrap();
     let st = state(&dir).await;
     st.inv
@@ -246,7 +209,6 @@ async fn user_detail_mint_tuic_button_shows_when_absent_and_mints_on_post() {
         .unwrap();
     let app = router(st.clone());
 
-    // Missing → page shows the mint form + button.
     let resp = app
         .clone()
         .oneshot(
@@ -268,7 +230,6 @@ async fn user_detail_mint_tuic_button_shows_when_absent_and_mints_on_post() {
         "mint button label must render"
     );
 
-    // POST mints it → 303, password now present, audit row written.
     let resp = app
         .clone()
         .oneshot(
@@ -301,7 +262,6 @@ async fn user_detail_mint_tuic_button_shows_when_absent_and_mints_on_post() {
         "audit row user.mint_tuic_password required"
     );
 
-    // A user WITH a tuic_password must NOT show the mint form.
     st.inv
         .add_user(&User {
             id: UserId("hastuic".into()),
@@ -332,9 +292,6 @@ async fn user_detail_mint_tuic_button_shows_when_absent_and_mints_on_post() {
         "user WITH tuic_password must NOT show the mint form"
     );
 
-    // Idempotent no-op: POST mint on a user that already HAS a password
-    // must NOT rotate it and must NOT write an audit row (NM-10
-    // audit-on-actual-mutation contract).
     let resp = app
         .oneshot(
             Request::builder()
@@ -404,7 +361,6 @@ async fn user_detail_page_shows_amber_banner_when_disabled() {
         html.contains("user is DISABLED") || html.contains("пользователь ОТКЛЮЧЁН"),
         "amber banner must announce disabled state on user-detail"
     );
-    // Must show the enable button (the inverse action), NOT the disable one.
     assert!(
         html.contains(r#"action="/admin/users/paused/enable""#),
         "must offer enable button for a disabled user"
@@ -415,8 +371,6 @@ async fn user_detail_page_shows_amber_banner_when_disabled() {
     );
 }
 
-/// user#5 — lifecycle section renders the created / last-seen / last-
-/// fetch / age facts.
 #[tokio::test]
 async fn pr_user_lifecycle_section_renders_facts() {
     let dir = TempDir::new().unwrap();
@@ -429,14 +383,11 @@ async fn pr_user_lifecycle_section_renders_facts() {
     }
 }
 
-/// Copy-contract (EN) — pin every new PR-User headline so a rename has
-/// to update this test in the same PR.
 #[tokio::test]
 async fn pr_user_info_cards_headlines_en() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 1, &[(0, 0)]).await;
-    // Give the user /sub history so the UA + verdict cards render.
     s.inv
         .log_sub_access(
             &UserId("u0".into()),
@@ -447,18 +398,15 @@ async fn pr_user_info_cards_headlines_en() {
         )
         .await
         .unwrap();
-    // ui-audit §4 — these cards span tabs: Presence (chrome, every tab),
-    // verdict/lifecycle/traffic-limit on overview, traffic-by-server on
-    // the traffic tab. Fetch each and pin its subset.
     let app = router(s);
     let overview = fetch_html(app.clone(), "/admin/users/u0").await;
     let traffic = fetch_html(app, "/admin/users/u0/traffic").await;
     for (html, needle) in [
-        (&overview, "Presence"),        // user#1 (chrome)
-        (&traffic, "Live VPN stats"),   // user#2 (R2: merged table)
-        (&overview, "Sharing verdict"), // user#4
-        (&overview, "Lifecycle"),       // user#5
-        (&overview, "Traffic limit"),   // user#3
+        (&overview, "Presence"),
+        (&traffic, "Live VPN stats"),
+        (&overview, "Sharing verdict"),
+        (&overview, "Lifecycle"),
+        (&overview, "Traffic limit"),
     ] {
         assert!(
             html.contains(needle),
@@ -467,8 +415,6 @@ async fn pr_user_info_cards_headlines_en() {
     }
 }
 
-/// Copy-contract (RU) — pin the Russian arm of each new PR-User card.
-/// Extends the i18n RU walker coverage onto the user-detail page.
 #[tokio::test]
 async fn pr_user_info_cards_headlines_ru() {
     let dir = TempDir::new().unwrap();
@@ -488,11 +434,11 @@ async fn pr_user_info_cards_headlines_ru() {
     let overview = fetch_html_with_cookie(app.clone(), "/admin/users/u0", "vpnctl_lang=ru").await;
     let traffic = fetch_html_with_cookie(app, "/admin/users/u0/traffic", "vpnctl_lang=ru").await;
     for (html, needle) in [
-        (&overview, "Присутствие"),             // user#1 (chrome)
-        (&traffic, "Живая статистика VPN"),     // user#2 (R2: merged table)
-        (&overview, "Вердикт по расшариванию"), // user#4
-        (&overview, "Жизненный цикл"),          // user#5
-        (&overview, "Лимит трафика"),           // user#3
+        (&overview, "Присутствие"),
+        (&traffic, "Живая статистика VPN"),
+        (&overview, "Вердикт по расшариванию"),
+        (&overview, "Жизненный цикл"),
+        (&overview, "Лимит трафика"),
     ] {
         assert!(
             html.contains(needle),

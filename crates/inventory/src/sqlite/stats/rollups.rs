@@ -4,8 +4,6 @@ use vpnctl_core::{ServerId, UserId};
 use crate::sqlite::base::SqliteInventory;
 use crate::sqlite::models::{HeavyUser, Result, VpnUserDailyRow};
 
-// Owned row argument is what `.into_iter().map(...)` over `Vec<SqliteRow>`
-// gives us; taking by reference would force a `.collect()` round-trip.
 #[allow(clippy::needless_pass_by_value)]
 fn row_to_vpn_user_daily(r: sqlx::sqlite::SqliteRow) -> Result<VpnUserDailyRow> {
     let date: String = r.try_get("date")?;
@@ -27,8 +25,6 @@ fn row_to_vpn_user_daily(r: sqlx::sqlite::SqliteRow) -> Result<VpnUserDailyRow> 
 }
 
 impl SqliteInventory {
-    /// Drop rows older than `days`. Mirrors `purge_sub_access_older_than`
-    /// — chunk 3 will wire this into the existing retention scheduler.
     pub async fn purge_vpn_stats_older_than(&self, days: u32) -> Result<u64> {
         let res = sqlx::query(
             "DELETE FROM vpn_connection_stats
@@ -40,42 +36,10 @@ impl SqliteInventory {
         Ok(res.rows_affected())
     }
 
-    // ──────────────────────────────────────────────────────────────────
-    // Phase 5a-1 — daily per-user rollups for long-term retention.
-    //
-    // `vpn_connection_stats` is rolling 30-day raw 5-min ticks.
-    // `vpn_user_daily` is the daily aggregate that lives indefinitely
-    // (one row per (user, server, date), ~36k rows/year at 33 users
-    // × 3 servers = trivial SQLite scale).
-    //
-    // Rollup pattern: each call to `rollup_vpn_user_daily` re-computes
-    // the totals for ONE date from `vpn_connection_stats` rows in that
-    // date's window and UPSERT-overwrites the matching `vpn_user_daily`
-    // rows. Idempotent — running it twice on the same date yields the
-    // same data. The hourly rollup scheduler (in `daemon/src/app.rs`)
-    // re-rolls TODAY + YESTERDAY each tick so we capture late-arriving
-    // ticks across midnight UTC.
-    // ──────────────────────────────────────────────────────────────────
-
-    /// Re-compute and UPSERT all `(user, server)` daily rollup rows
-    /// for `date_utc` (format `YYYY-MM-DD`). Reads from
-    /// `vpn_connection_stats` where `user_id IS NOT NULL` AND the
-    /// ts falls within the date's 00:00–24:00 UTC window. Returns
-    /// the number of UPSERTed rows.
-    ///
-    /// Safe to call concurrently for different dates; same-date
-    /// concurrent calls race on the UPSERT but the last writer wins
-    /// idempotently (deterministic sum).
     pub async fn rollup_vpn_user_daily(&self, date_utc: &str) -> Result<u64> {
-        // Derive the 24h window from the date string. SQLite's
-        // strftime returns `YYYY-MM-DDTHH:MM:SS.fffZ` form — match
-        // that to `ts` shape used by `vpn_connection_stats` rows.
         let lower = format!("{date_utc}T00:00:00.000Z");
         let upper = format!("{date_utc}T23:59:59.999Z");
 
-        // Aggregate raw ticks into per-(user, server) sums. Server-
-        // wide rows (user_id IS NULL) are excluded — they belong
-        // to a future server-wide rollup if/when we add one.
         let rows = sqlx::query(
             "SELECT
                 user_id,
@@ -102,10 +66,6 @@ impl SqliteInventory {
             let up_total: i64 = r.try_get("up_total")?;
             let dn_total: i64 = r.try_get("dn_total")?;
             let peak_conns: i64 = r.try_get("peak_conns")?;
-            // distinct_source_ips currently not derivable from
-            // vpn_connection_stats (which doesn't carry source IP)
-            // — left at 0 for now. Phase 5b's destinations table
-            // is where source-IP-diversity lives.
             let res = sqlx::query(
                 "INSERT INTO vpn_user_daily
                     (date, user_id, server_id, upload_bytes,
@@ -133,8 +93,6 @@ impl SqliteInventory {
         Ok(upserted)
     }
 
-    /// Daily rollup rows for ONE user across the last N days.
-    /// Newest-first. Used by the user-detail analytics section.
     pub async fn vpn_user_daily_for_user(
         &self,
         user_id: &UserId,
@@ -157,22 +115,12 @@ impl SqliteInventory {
         rows.into_iter().map(row_to_vpn_user_daily).collect()
     }
 
-    /// Top-N users by daily-total traffic across `days`. Used by
-    /// the dashboard «Heavy users» tile (now actually populated
-    /// post-Phase-4e+5a-1, where the old `top_users_by_traffic`
-    /// returned empty because of NM-11). Sums upload+download
-    /// across all servers per user.
     pub async fn top_users_by_daily_traffic(
         &self,
         days: u32,
         limit: u32,
     ) -> Result<Vec<HeavyUser>> {
         let cutoff = format!("-{} days", days.saturating_sub(1));
-        // Weight each daily row by its server's `usage_coefficient`
-        // before the per-user sum, mirroring the raw-tick path so the
-        // heavy-users ranking is consistent whichever table feeds it.
-        // REAL product is CAST back to INTEGER (bytes, i64). 1.0/NULL
-        // is the identity.
         let rows = sqlx::query(
             "SELECT d.user_id AS user_id,
                     CAST(SUM(d.upload_bytes
@@ -206,10 +154,6 @@ impl SqliteInventory {
         Ok(out)
     }
 
-    /// Month-to-date total for one user across all servers. Used
-    /// for traffic-limit alerts (`users.monthly_bandwidth_limit_bytes`).
-    /// Post-Phase-5a-1 this replaces the old NULL-returning
-    /// `user_traffic_this_month` for production use.
     pub async fn user_traffic_this_month_from_daily(&self, id: &UserId) -> Result<u64> {
         let row = sqlx::query(
             "SELECT CAST(

@@ -1,7 +1,3 @@
-//! Low-load native service-path quality sampling. No Prometheus agent or
-//! external monitor: vpnctld connects directly to the TCP ingress ports
-//! declared by each enabled protocol and stores one compact SQLite batch.
-
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, SocketAddr};
 use std::process::Command;
@@ -72,8 +68,6 @@ impl QualityAlertState {
                 QualityTransition::NoChange
             }
         } else {
-            // Hysteresis band: preserve degraded state, but a partial
-            // recovery/failure does not count toward either edge.
             self.low.insert(server_id.clone(), 0);
             self.high.insert(server_id.clone(), 0);
             QualityTransition::NoChange
@@ -150,8 +144,6 @@ async fn sample_server(
     registry: &Registry,
     server: &Server,
 ) -> Result<Option<ServiceQualityScore>, anyhow::Error> {
-    // Check before resolving targets, TCP, ICMP, or producing alert input.
-    // Failed/skipped/stale deploy audits do not establish provisioning.
     if inv
         .service_quality_measurement_for_server(&server.id)
         .await?
@@ -185,9 +177,6 @@ async fn sample_server(
         .map(|ip| SocketAddr::new(ip, server.ssh_port))
         .collect();
 
-    // Optional secondary signal. `ping` may be absent or forbidden by
-    // the host sandbox; either case yields NULL ICMP fields while the
-    // TCP service score remains complete.
     let mut ping_jobs = JoinSet::new();
     for ip in ips {
         ping_jobs.spawn_blocking(move || ping_ip(ip));
@@ -497,7 +486,6 @@ mod tests {
                 .await
                 .unwrap();
         }
-        // Unknown protocol would error if target construction were reached.
         assert_eq!(
             sample_server(&inv, &Registry::new(), &server)
                 .await
@@ -880,7 +868,6 @@ mod tests {
         assert_eq!(open.len(), 1, "alert must fire and be open");
         let alert_id = open[0].id;
 
-        // Operator manually acknowledges the open alert from Web UI
         inv.ack_alert(alert_id).await.unwrap();
         assert_eq!(inv.unacked_alert_count().await.unwrap(), 0);
 
@@ -908,7 +895,6 @@ mod tests {
             dispatch_quality_alert(&inv, &server, &good_score, &mut state).await;
         }
 
-        // Must NOT insert any new recovery alert row (no new green push)
         let final_all_alerts = inv.recent_alerts(10, true).await.unwrap();
         assert_eq!(
             final_all_alerts.len(),
@@ -916,7 +902,6 @@ mod tests {
             "manually acked alert recovery must NOT create a new alert row"
         );
 
-        // Auto-ack audit was NOT written because no open alert existed
         let audits = inv.recent_audit(20).await.unwrap();
         assert!(
             !audits.iter().any(|a| a.action == "alert.auto_ack"),
@@ -944,7 +929,6 @@ mod tests {
         };
         inv.add_server(&server).await.unwrap();
 
-        // Pre-seed an open unacked alert as if left by a prior process instance
         let alert_id = inv
             .insert_alert_if_no_unacked(
                 "server.quality.degraded",
@@ -962,7 +946,6 @@ mod tests {
 
         assert_eq!(inv.unacked_alert_count().await.unwrap(), 1);
 
-        // Fresh in-memory state on daemon startup (is_degraded in memory is false)
         let mut state = QualityAlertState::default();
 
         let good_score = ServiceQualityScore {
@@ -982,7 +965,6 @@ mod tests {
             last_sample_at: None,
         };
 
-        // 3 healthy ticks trigger recovery of the persisted open alert
         dispatch_quality_alert(&inv, &server, &good_score, &mut state).await;
         dispatch_quality_alert(&inv, &server, &good_score, &mut state).await;
         dispatch_quality_alert(&inv, &server, &good_score, &mut state).await;

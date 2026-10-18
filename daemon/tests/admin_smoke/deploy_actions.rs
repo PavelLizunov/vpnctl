@@ -1,11 +1,3 @@
-//! Integration smoke tests for deploy actions:
-//! - Deploy-all SSE route (`/admin/servers/deploy-all/sse`)
-//! - User deploy-pending SSE route (`/admin/users/{id}/deploy-pending/sse`)
-//! - Single-server deploy SSE route (`/admin/servers/{id}/deploy/sse`)
-//! - Update-kernels routes (`/admin/servers/{id}/update-kernels/sse` and `/admin/servers/update-kernels-all/sse`)
-//!
-//! Covers terminal ok, terminal error, lock/in-flight guard, CSRF sec-fetch-site, and idempotency.
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::response::Response;
@@ -38,10 +30,6 @@ async fn response_body_string(resp: Response) -> String {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     String::from_utf8(bytes.to_vec()).unwrap()
 }
-
-// ────────────────────────────────────────────────────────────────────────────
-// Deploy-all SSE: GET /admin/servers/deploy-all/sse
-// ────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn deploy_all_sse_terminal_ok_on_empty_inventory() {
@@ -205,10 +193,6 @@ async fn deploy_all_sse_refuses_cross_origin_trigger() {
     );
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// User deploy-pending SSE: GET /admin/users/{id}/deploy-pending/sse
-// ────────────────────────────────────────────────────────────────────────────
-
 #[tokio::test]
 async fn user_deploy_pending_sse_terminal_ok_when_nothing_pending() {
     let dir = TempDir::new().unwrap();
@@ -289,7 +273,6 @@ async fn user_deploy_pending_sse_terminal_error_when_pending_server_fails() {
         .await
         .unwrap();
 
-    // Grant user to server + record user.grant audit row -> server becomes pending deploy
     s.inv.grant(&user_id, &srv_id).await.unwrap();
     s.inv
         .audit("admin", "user.grant", Some(&user_id.0), None)
@@ -423,7 +406,6 @@ async fn user_deploy_pending_sse_idempotent_after_server_deploy() {
         .await
         .unwrap();
 
-    // Verify initially pending
     let pending_before = s
         .inv
         .servers_pending_deploy_for_user(&user_id, std::slice::from_ref(&srv_id))
@@ -431,7 +413,6 @@ async fn user_deploy_pending_sse_idempotent_after_server_deploy() {
         .unwrap();
     assert_eq!(pending_before, vec![srv_id.clone()]);
 
-    // Simulate successful deploy by writing the server.deploy audit row
     s.inv
         .audit("admin", "server.deploy", Some(&srv_id.0), None)
         .await
@@ -447,7 +428,6 @@ async fn user_deploy_pending_sse_idempotent_after_server_deploy() {
         "server must no longer be pending after deploy audit"
     );
 
-    // First call after deploy: returns terminal ok (nothing pending)
     let app1 = router(s.clone());
     let resp1 = app1
         .oneshot(
@@ -464,7 +444,6 @@ async fn user_deploy_pending_sse_idempotent_after_server_deploy() {
     assert!(body1.contains("event: ok"));
     assert!(body1.contains("nothing pending"));
 
-    // Second call: idempotent, still returns terminal ok (nothing pending)
     let app2 = router(s);
     let resp2 = app2
         .oneshot(
@@ -535,10 +514,6 @@ async fn user_deploy_pending_sse_refuses_cross_origin_trigger() {
 
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
-
-// ────────────────────────────────────────────────────────────────────────────
-// Single-server deploy SSE: GET /admin/servers/{id}/deploy/sse
-// ────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn server_deploy_sse_unknown_server_404s() {
@@ -613,12 +588,6 @@ async fn server_deploy_sse_lock_reports_error_when_already_in_flight() {
     assert!(body.contains("event: error"));
     assert!(body.contains("deploy already running for server 'da-srv-single-lock'"));
 }
-
-// ────────────────────────────────────────────────────────────────────────────
-// Update kernels routes:
-// GET /admin/servers/{id}/update-kernels/sse
-// GET /admin/servers/update-kernels-all/sse
-// ────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn server_update_kernels_sse_unknown_server_404s() {

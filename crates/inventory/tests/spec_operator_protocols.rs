@@ -1,7 +1,3 @@
-//! Spec for operator protocol management, hidden protocol toggles,
-//! per-grant protocol overrides, audit suppression for no-op mutations,
-//! and audit suppression for no-op mutations.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use tempfile::TempDir;
@@ -51,8 +47,6 @@ async fn count_audit_by_action(inv: &SqliteInventory, action: &str) -> usize {
         .count()
 }
 
-// ── 1. Hidden protocol toggles and no-op audit suppression ───────────
-
 #[tokio::test]
 async fn server_protocol_hidden_noop_audit_and_visibility() {
     let dir = TempDir::new().unwrap();
@@ -69,7 +63,6 @@ async fn server_protocol_hidden_noop_audit_and_visibility() {
     inv.add_user(&usr("alice")).await.unwrap();
     inv.grant(&user_id, &server_id).await.unwrap();
 
-    // Initially both protocols visible
     assert!(
         !inv.is_server_protocol_hidden(&server_id, &proto_vless)
             .await
@@ -87,7 +80,6 @@ async fn server_protocol_hidden_noop_audit_and_visibility() {
         .unwrap();
     assert_eq!(vis, vec![proto_tuic.clone(), proto_vless.clone()]);
 
-    // 1. Setting hidden=false when already false is a no-op -> 0 audit rows
     inv.set_server_protocol_hidden(&server_id, &proto_vless, false)
         .await
         .unwrap();
@@ -96,7 +88,6 @@ async fn server_protocol_hidden_noop_audit_and_visibility() {
         0
     );
 
-    // 2. Setting hidden=true mutates state -> writes 1 audit row
     inv.set_server_protocol_hidden(&server_id, &proto_vless, true)
         .await
         .unwrap();
@@ -123,14 +114,12 @@ async fn server_protocol_hidden_noop_audit_and_visibility() {
     assert_eq!(payload["old_hidden"], serde_json::json!(false));
     assert_eq!(payload["new_hidden"], serde_json::json!(true));
 
-    // Subscription visibility now excludes vless+reality
     let vis_after_hide = inv
         .visible_protocols_for_subscription(&user_id, &server_id)
         .await
         .unwrap();
     assert_eq!(vis_after_hide, vec![proto_tuic.clone()]);
 
-    // Bulk helpers reflect hidden flag
     let per_server = inv
         .list_server_protocols_with_hidden(&server_id)
         .await
@@ -152,7 +141,6 @@ async fn server_protocol_hidden_noop_audit_and_visibility() {
         Some(false)
     );
 
-    // 3. Setting hidden=true again -> no-op, audit count stays 1
     inv.set_server_protocol_hidden(&server_id, &proto_vless, true)
         .await
         .unwrap();
@@ -161,7 +149,6 @@ async fn server_protocol_hidden_noop_audit_and_visibility() {
         1
     );
 
-    // 4. Setting hidden=false mutates back -> writes 2nd audit row
     inv.set_server_protocol_hidden(&server_id, &proto_vless, false)
         .await
         .unwrap();
@@ -181,7 +168,6 @@ async fn server_protocol_hidden_noop_audit_and_visibility() {
         .unwrap();
     assert_eq!(vis_restored, vec![proto_tuic.clone(), proto_vless.clone()]);
 
-    // 5. Setting hidden on a not-enabled protocol errors with Invalid
     let not_enabled = ProtocolId("shadowsocks-2022".into());
     let err = inv
         .set_server_protocol_hidden(&server_id, &not_enabled, true)
@@ -197,8 +183,6 @@ async fn server_protocol_hidden_noop_audit_and_visibility() {
         other => panic!("expected Invalid, got {other:?}"),
     }
 }
-
-// ── 2. Grant protocol override toggles and no-op audit suppression ───
 
 #[tokio::test]
 async fn grant_protocol_override_noop_audit_and_isolation() {
@@ -219,7 +203,6 @@ async fn grant_protocol_override_noop_audit_and_isolation() {
     inv.grant(&user_a, &server_id).await.unwrap();
     inv.grant(&user_b, &server_id).await.unwrap();
 
-    // 1. Setting disabled=false without existing override -> no-op (0 audit rows)
     inv.set_grant_protocol_override(&user_a, &server_id, &proto_vless, false)
         .await
         .unwrap();
@@ -228,7 +211,6 @@ async fn grant_protocol_override_noop_audit_and_isolation() {
         0
     );
 
-    // 2. Setting disabled=true for alice mutates -> 1 audit row
     inv.set_grant_protocol_override(&user_a, &server_id, &proto_vless, true)
         .await
         .unwrap();
@@ -237,7 +219,6 @@ async fn grant_protocol_override_noop_audit_and_isolation() {
         1
     );
 
-    // Alice sees only tuic-v5; Bob still sees both (per-user override isolation)
     let alice_vis = inv
         .visible_protocols_for_subscription(&user_a, &server_id)
         .await
@@ -257,7 +238,6 @@ async fn grant_protocol_override_noop_audit_and_isolation() {
         Some(true)
     );
 
-    // 3. Setting disabled=true again on alice -> no-op, still 1 audit row
     inv.set_grant_protocol_override(&user_a, &server_id, &proto_vless, true)
         .await
         .unwrap();
@@ -266,7 +246,6 @@ async fn grant_protocol_override_noop_audit_and_isolation() {
         1
     );
 
-    // 4. Setting disabled=false clears override -> writes 2nd audit row
     inv.set_grant_protocol_override(&user_a, &server_id, &proto_vless, false)
         .await
         .unwrap();
@@ -284,7 +263,6 @@ async fn grant_protocol_override_noop_audit_and_isolation() {
         vec![proto_tuic.clone(), proto_vless.clone()]
     );
 
-    // 5. Setting override for a user with no grant fails with Invalid
     let user_no_grant = UserId("charlie".into());
     inv.add_user(&usr("charlie")).await.unwrap();
     let err = inv

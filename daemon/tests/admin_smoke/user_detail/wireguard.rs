@@ -15,7 +15,6 @@ async fn admin_user_detail_wireguard_section_shows_pubkey_and_rotate_button() {
     let s = state(&dir).await;
     let inv = s.inv.clone();
     let app = router(s);
-    // Create via the new auto-gen path.
     let resp = app
         .clone()
         .oneshot(
@@ -39,7 +38,6 @@ async fn admin_user_detail_wireguard_section_shows_pubkey_and_rotate_button() {
         .wireguard_pubkey
         .unwrap();
 
-    // Detail page must show that pubkey verbatim + a rotate form.
     let html = fetch_html(app, "/admin/users/carol/delivery").await;
     assert!(html.contains("WireGuard keypair"), "section heading");
     assert!(
@@ -50,7 +48,6 @@ async fn admin_user_detail_wireguard_section_shows_pubkey_and_rotate_button() {
         html.contains("/admin/users/carol/wireguard/regenerate"),
         "rotate-keypair form must POST to the regenerate route"
     );
-    // Private value MUST NOT leak into the HTML — only the exact marker.
     let keypair = html.split_once("WireGuard keypair</div>").unwrap().1;
     let private = keypair
         .split_once(">private </span>")
@@ -68,7 +65,6 @@ async fn admin_user_detail_wireguard_section_shows_pubkey_and_rotate_button() {
         "stored — served via /sub/&lt;token&gt; only</span>",
         "private must be marker-only, never the value itself"
     );
-    // Hard assertion: actual private bytes are NEVER in the HTML.
     let priv_ = inv
         .get_user(&UserId("carol".into()))
         .await
@@ -80,13 +76,6 @@ async fn admin_user_detail_wireguard_section_shows_pubkey_and_rotate_button() {
         !html.contains(priv_.as_str()),
         "PRIVATE LEAK: detail HTML contains the raw private bytes"
     );
-    // Distribution-panel guidance for THREE client personas.
-    // Pavel's \"Flow A / Flow B / Flow C\" pattern: ALWAYS show all
-    // three labels even when no WG-enabled server is granted, so the
-    // operator knows every option exists + sees why B/C are empty.
-    // 2026-05-17: Flow B + Flow C split — pre-split Flow B claimed
-    // to cover both AmneziaVPN and the WG app, but AmneziaVPN rejects
-    // `wireguard://?conf=` with ErrorCode 900. Honest labels now.
     assert!(
         html.contains("Flow A — Hiddify / Sing-box"),
         "user-detail must teach the sing-box/Hiddify recipient flow"
@@ -99,33 +88,19 @@ async fn admin_user_detail_wireguard_section_shows_pubkey_and_rotate_button() {
         html.contains("Flow C — AmneziaVPN"),
         "user-detail must teach the AmneziaVPN-native recipient flow"
     );
-    // No grants → Case A empty state (\"grant a server\"). Pinned
-    // so the no-grant message can't drift into the case-B/C wording.
     assert!(
         html.contains("No servers granted to this user yet"),
         "case A empty-state (no grants) copy missing"
     );
-    // 2026-05-17 — Pavel: «Flow A не показывает QR-код, говорит
-    // про \"above\"». Symmetric `share_link_card` is the fix: Flow A
-    // now renders its OWN QR + readonly copy textarea. The old
-    // \"Recipient scans the QR in the Subscription block above\"
-    // wording must be GONE.
     assert!(
         !html.contains("scans the QR in the"),
         "Flow A must not reference 'above' anymore — it has its own QR"
     );
-    // The Flow A card renders the sub URL inside a readonly textarea
-    // with the click-to-select-all hook.
     assert!(
         html.contains("Recommended default — one URL covers everything"),
         "Flow A footnote (Recommended default) missing — copy regressed"
     );
 }
-
-// ────────────────────────────────────────────────────────────────────────
-// Pavel's \"main-brat\" confusion: user HAS WG keys, granted to a server
-// that does NOT declare wireguard → empty-state must say so explicitly
-// rather than the misleading \"grant a server with WG\" wording.
 
 #[tokio::test]
 async fn admin_user_detail_wireguard_flow_b_empty_state_case_b_grants_no_wg() {
@@ -134,9 +109,6 @@ async fn admin_user_detail_wireguard_flow_b_empty_state_case_b_grants_no_wg() {
     let inv = s.inv.clone();
     let app = router(s);
 
-    // Seed: a server that explicitly does NOT run wireguard (mimics
-    // vps-is-01 post-bash-import: vless+reality, tuic-v5, hysteria2
-    // only).
     inv.add_server(&Server {
         id: ServerId("nowg".into()),
         address: "203.0.113.7".into(),
@@ -155,7 +127,6 @@ async fn admin_user_detail_wireguard_flow_b_empty_state_case_b_grants_no_wg() {
     .await
     .unwrap();
 
-    // Create user via the auto-gen path → WG keypair populated.
     app.clone()
         .oneshot(
             add_same_origin(
@@ -169,30 +140,23 @@ async fn admin_user_detail_wireguard_flow_b_empty_state_case_b_grants_no_wg() {
         )
         .await
         .unwrap();
-    // Grant to the non-WG server.
     inv.grant(&UserId("brat".into()), &ServerId("nowg".into()))
         .await
         .unwrap();
 
     let html = fetch_html(app, "/admin/users/brat/delivery").await;
-    // The misleading message MUST NOT appear (case A copy).
     assert!(
         !html.contains("No servers granted to this user yet"),
         "case A wording leaked into case B — user IS granted but to a non-WG server"
     );
-    // The actually-correct case-B explanation MUST be present.
     assert!(
         html.contains("Keys exist, but no granted server runs WireGuard"),
         "case B headline missing — operator won't understand why no QR"
     );
-    // The granted server's id must be name-dropped so the operator
-    // knows WHICH server needs the protocol added.
     assert!(
         html.contains("nowg"),
         "case B body must name the actually-granted servers"
     );
-    // No WG-capable server in inventory either → tail message points
-    // at the web workaround (operator-action policy: no CLI in copy).
     assert!(
         html.contains("Settings page"),
         "case B must point at the server's Settings page when inventory has zero WG-capable nodes"
@@ -210,8 +174,6 @@ async fn admin_user_detail_wireguard_flow_b_namedrops_other_wg_servers() {
     let inv = s.inv.clone();
     let app = router(s);
 
-    // Two servers: one without WG (granted), one WITH WG (not granted).
-    // Case-B copy should point at the second as a suggestion.
     inv.add_server(&Server {
         id: ServerId("nowg".into()),
         address: "203.0.113.7".into(),
@@ -274,7 +236,6 @@ async fn admin_user_regen_wireguard_rotates_pair_and_audits() {
     let s = state(&dir).await;
     let inv = s.inv.clone();
     let app = router(s);
-    // Seed via creation.
     app.clone()
         .oneshot(
             add_same_origin(
@@ -310,7 +271,6 @@ async fn admin_user_regen_wireguard_rotates_pair_and_audits() {
         .unwrap();
     let before = inv.get_user(&UserId("dave".into())).await.unwrap().unwrap();
 
-    // Rotate.
     let resp = app
         .oneshot(
             add_same_origin(
@@ -333,7 +293,6 @@ async fn admin_user_regen_wireguard_rotates_pair_and_audits() {
         before.wireguard_private, after.wireguard_private,
         "private must change on rotate"
     );
-    // Audit row exists with the new pubkey + provenance marker.
     let audit = inv.recent_audit(5).await.unwrap();
     let row = audit
         .iter()
@@ -466,8 +425,6 @@ async fn admin_user_wireguard_conf_download_serves_attachment() {
         text.contains("Endpoint = 203.0.113.11:51820"),
         ".conf must reference the right server endpoint"
     );
-    // Private bytes MUST be inlined in the .conf so the operator's
-    // recipient can import without a second action.
     assert!(
         text.contains("PrivateKey = 0000000000000000000000000000000000000000000="),
         ".conf must inline the user's private key (server-generated default)"
@@ -528,10 +485,6 @@ async fn admin_user_wireguard_conf_download_404_on_unknown_server_when_user_exis
 
 #[tokio::test]
 async fn admin_user_wireguard_conf_download_refuses_when_user_not_granted_server() {
-    // Both user and server exist; server has wireguard enabled; but
-    // there's NO grant linking them. The endpoint must 404, not leak
-    // the .conf — otherwise a stale browser tab keeps working past
-    // a revoke (review-agent 2026-05-17).
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
@@ -568,7 +521,6 @@ async fn admin_user_wireguard_conf_download_refuses_when_user_not_granted_server
     })
     .await
     .unwrap();
-    // NB: NO grant.
 
     let app = router(s);
     let resp = app
@@ -595,9 +547,6 @@ async fn admin_user_wireguard_conf_download_refuses_when_user_not_granted_server
 
 #[tokio::test]
 async fn admin_user_wg_conf_peer_octet_differs_per_user_index() {
-    // Two users granted to the same WG server. Their .conf files
-    // must claim different /32 addresses (10.66.0.2 + 10.66.0.3).
-    // Pre-fix both claimed 10.66.0.2 — review-agent 2026-05-17.
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
@@ -622,8 +571,6 @@ async fn admin_user_wg_conf_peer_octet_differs_per_user_index() {
     )
     .await
     .unwrap();
-    // Two users — `alex` < `bob` by lex sort (matches the
-    // inv.users_for_server ORDER BY id).
     for (uid, uuid, pubk) in [
         (
             "alex",
@@ -696,7 +643,6 @@ async fn admin_user_wireguard_conf_download_400_when_server_lacks_wg_protocol() 
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
-    // Server that doesn't declare wireguard.
     inv.add_server(&Server {
         id: ServerId("nowg2".into()),
         address: "203.0.113.99".into(),

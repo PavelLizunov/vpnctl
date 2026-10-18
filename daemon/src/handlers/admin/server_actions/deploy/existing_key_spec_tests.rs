@@ -1,26 +1,3 @@
-//! Independent tests derived from the supplied existing-deploy-key spec only.
-//! Integrate as a #[cfg(test)] child module of deploy.rs; do not copy assertions
-//! into production. Only existing test fixture files were read when writing this.
-//!
-//! Assumptions clarified by the parent: success is 303 to
-//! /admin/servers/{id}/setup#push-deploy-key; username syntax is ASCII
-//! [A-Za-z0-9_-]+, at most 32 bytes. No stronger leading-character rule is assumed.
-//!
-//! Each outer test launches one exact child test with Command.env overrides:
-//! no unsafe set_var, process-global environment races, live inventory, or network.
-//! ssh-keygen is real but offline; ssh/keyscan/scp/sshpass/sftp are local scripts.
-//! The fake ssh accepts probes and records argv/stdin; assertions, not the fake,
-//! reject installation/deployment commands. Output is deliberately just `0`.
-//! If the real verifier requires a particular success sentinel, adapt ONLY that
-//! fake output. Do not remove the transport or mutation assertions.
-//!
-//! Additional parent clarifications: a trusted pin is required before SSH, and
-//! VPNCTLD_SSH_TIMEOUT_SECS=10 provides a real timeout bound. Timeout uses a
-//! 30-second exec sleep (not an exit-124 simulation).
-//! Remaining fixture gap: legacy successful password/reference-key installation
-//! needs its existing transport fixture; these tests protect legacy selection /
-//! empty-password validation only. No claim of full legacy-flow coverage.
-
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod spec {
     use super::super::*;

@@ -1,9 +1,3 @@
-//! Spec: `bootstrap_server_secrets` mints the per-server AmneziaWG
-//! obfuscation parameter set (kernel-keyed on `amneziawg`) with the
-//! coherence constraints, only for amneziawg nodes, and idempotently.
-//! Closes the standing backlog bug where the kernel fell back to the
-//! hardcoded H1=1..H4=4 fleet-wide DPI fingerprint.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::HashSet;
@@ -52,14 +46,12 @@ async fn amneziawg_kernel_server_mints_nine_coherent_obfs_params() {
         .await
         .expect("bootstrap");
 
-    // All 9 params present.
     for k in ["jc", "jmin", "jmax", "s1", "s2", "h1", "h2", "h3", "h4"] {
         assert!(
             secrets.contains_key(&format!("amneziawg.{k}")),
             "missing amneziawg.{k}"
         );
     }
-    // Coherence constraints the client artefact relies on.
     assert_ne!(
         num(&secrets, "s2"),
         num(&secrets, "s1") + 56,
@@ -89,10 +81,6 @@ async fn amneziawg_kernel_server_mints_nine_coherent_obfs_params() {
 async fn non_amneziawg_server_mints_no_obfs() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
-    // sing-box-only node — obfs is a property of the amneziawg kernel,
-    // so a vanilla node must NOT get the params (a future wg-quick kernel
-    // serving wireguard can't speak obfs; minting them would mislead the
-    // client artefact into an unconnectable config).
     let s = srv("sbnode", &["sing-box"]);
     inv.add_server(&s).await.unwrap();
 
@@ -121,8 +109,6 @@ async fn obfs_mint_is_idempotent_never_rotates() {
     let (second, minted2) = bootstrap_server_secrets(&inv, &s, &Registry::new())
         .await
         .expect("bootstrap 2");
-    // Re-run must NOT re-mint (would rotate the fingerprint out from under
-    // live clients) — the value is stable and nothing is reported minted.
     assert_eq!(second["amneziawg.h1"], h1_first, "obfs must not rotate");
     assert!(
         !minted2.contains(&"amneziawg obfs params"),

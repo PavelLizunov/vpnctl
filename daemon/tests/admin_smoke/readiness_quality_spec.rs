@@ -1,6 +1,3 @@
-//! Independent black-box regressions from deploy-readiness-quality.md and the
-//! approved public UI/API contract; implementation source was not consulted.
-
 use std::net::SocketAddr;
 
 use tempfile::TempDir;
@@ -10,7 +7,6 @@ use vpnctld::router;
 
 use crate::common::{fetch_html, fetch_html_with_cookie, release_quality_sample, seed, state};
 
-// These section IDs are the public semantic contract, not whole-page snapshots.
 fn section<'a>(html: &'a str, id: &str) -> &'a str {
     let marker = format!("id=\"{id}\"");
     let start = html.find(&marker).unwrap_or_else(|| panic!("missing {id}"));
@@ -30,8 +26,6 @@ fn assert_unknown(text: &str) {
 }
 
 fn fail_pending_queries(dir: &TempDir) {
-    // Existing smoke suites use Python's sqlite3 for disposable DB fault
-    // injection. This approved fault affects only this test's own inventory.
     let status = std::process::Command::new("python3")
         .args([
             "-c",

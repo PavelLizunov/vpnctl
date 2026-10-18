@@ -65,10 +65,6 @@ pub(crate) async fn seed(dir: &TempDir) -> (AppState, String) {
     (state, token)
 }
 
-/// Build a minimal seeded inventory + state with a tunable rate limiter,
-/// returning the inventory clone (for direct ban inserts / assertions),
-/// the state, and the user's `/sub` token. Mirrors the inline setup the
-/// other rate-limit tests duplicate, factored out for the new cases.
 pub(crate) async fn seed_with_limiter(
     dir: &TempDir,
     limiter: Arc<vpnctld::rate_limit::RateLimiter>,

@@ -1,9 +1,3 @@
-//! Spec for `TelegramConfig` + `get_telegram_config` / `set_telegram_config`
-//! on `SqliteInventory`. Written from spec only — impl NOT consulted.
-//!
-//! Storage-layer behaviour only; secret-rendering / masking lives in a
-//! different layer and is intentionally NOT tested here.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use tempfile::TempDir;
@@ -15,18 +9,14 @@ async fn open(dir: &TempDir) -> SqliteInventory {
         .expect("open")
 }
 
-// ─── set_notification_language: round-trip + independence ────────────
-
 #[tokio::test]
 async fn notification_language_round_trips_and_is_independent_of_telegram() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
-    // Fresh DB: language column seeds NULL.
     assert_eq!(
         inv.get_telegram_config().await.unwrap().unwrap().language,
         None
     );
-    // Set ru → reads back ru.
     inv.set_notification_language(Some("ru")).await.unwrap();
     assert_eq!(
         inv.get_telegram_config()
@@ -37,8 +27,6 @@ async fn notification_language_round_trips_and_is_independent_of_telegram() {
             .as_deref(),
         Some("ru")
     );
-    // Saving the Telegram token/chat must NOT clobber the language
-    // (set_telegram_config uses a 3-column UPDATE that leaves it alone).
     inv.set_telegram_config(Some("123:abcdefghijklmno"), Some("42"), None)
         .await
         .unwrap();
@@ -49,7 +37,6 @@ async fn notification_language_round_trips_and_is_independent_of_telegram() {
         "language preserved across telegram save"
     );
     assert_eq!(cfg.token.as_deref(), Some("123:abcdefghijklmno"));
-    // Clearing language back to NULL works.
     inv.set_notification_language(None).await.unwrap();
     assert_eq!(
         inv.get_telegram_config().await.unwrap().unwrap().language,
@@ -57,10 +44,6 @@ async fn notification_language_round_trips_and_is_independent_of_telegram() {
     );
 }
 
-// ─── get_telegram_config: fresh-DB seed ──────────────────────────────
-
-// 1. Fresh DB after migrations: singleton row exists with both halves
-//    NULL. Returns Ok(Some(_)) — NOT Ok(None).
 #[tokio::test]
 async fn get_on_fresh_db_returns_some_with_both_halves_none() {
     let dir = TempDir::new().unwrap();
@@ -80,8 +63,6 @@ async fn get_on_fresh_db_returns_some_with_both_halves_none() {
         "migration 0014 seed must insert singleton row with both halves NULL"
     );
 }
-
-// ─── proxy_via_server_id: round-trip + clear semantics ─────────────
 
 #[tokio::test]
 async fn proxy_via_server_id_is_seeded_null_on_fresh_db() {
@@ -123,9 +104,6 @@ async fn proxy_via_server_id_clears_independently_of_other_fields() {
 
 #[tokio::test]
 async fn proxy_via_server_id_does_not_gate_is_enabled() {
-    // is_enabled() must check ONLY token + chat_id. The proxy field
-    // is independent — operator can set or clear it without touching
-    // the «am I enabled» state.
     let cfg = TelegramConfig {
         token: Some("t".into()),
         chat_id: Some("c".into()),
@@ -157,9 +135,6 @@ async fn proxy_via_server_id_does_not_gate_is_enabled() {
     );
 }
 
-// ─── set_telegram_config: round-trips ────────────────────────────────
-
-// 2. set(Some, Some) → get returns those exact values.
 #[tokio::test]
 async fn set_both_some_then_get_returns_both() {
     let dir = TempDir::new().unwrap();
@@ -180,17 +155,13 @@ async fn set_both_some_then_get_returns_both() {
     );
 }
 
-// 3. set(None, None) clears: next get returns Some(both None).
-//    Crucially NOT Ok(None) — the singleton row must remain.
 #[tokio::test]
 async fn set_both_none_clears_but_singleton_remains() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
-    // Populate first so "clear" has something to clear.
     inv.set_telegram_config(Some("t"), Some("c"), None)
         .await
         .unwrap();
-    // Now clear.
     inv.set_telegram_config(None, None, None)
         .await
         .expect("clear must not error");
@@ -207,9 +178,6 @@ async fn set_both_none_clears_but_singleton_remains() {
     );
 }
 
-// 4. Partial config: set(Some, None) is accepted at the inventory layer
-//    — caller validates the "partial / disabled" state on its side.
-//    Inventory must persist the asymmetry verbatim.
 #[tokio::test]
 async fn set_partial_token_only_is_accepted_and_persisted() {
     let dir = TempDir::new().unwrap();
@@ -234,10 +202,6 @@ async fn set_partial_token_only_is_accepted_and_persisted() {
     );
 }
 
-// 5. Successive set calls overwrite — only one singleton row ever.
-//    We assert observability through get() rather than poking the table:
-//    successive sets must yield exactly the values from the LAST call,
-//    never some merge/append/duplicate.
 #[tokio::test]
 async fn successive_set_calls_overwrite_only_one_row() {
     let dir = TempDir::new().unwrap();
@@ -263,8 +227,6 @@ async fn successive_set_calls_overwrite_only_one_row() {
         "only the LAST set must be observable — proves singleton, not append"
     );
 
-    // And a clear after three sets still produces exactly one row's
-    // worth of state (both None), not an accumulated history.
     inv.set_telegram_config(None, None, None).await.unwrap();
     let cleared = inv.get_telegram_config().await.unwrap();
     assert_eq!(
@@ -279,9 +241,6 @@ async fn successive_set_calls_overwrite_only_one_row() {
     );
 }
 
-// ─── TelegramConfig::is_enabled ──────────────────────────────────────
-
-// 6. Both halves Some(_) → enabled.
 #[tokio::test]
 async fn is_enabled_true_when_both_halves_some() {
     let cfg = TelegramConfig {
@@ -293,7 +252,6 @@ async fn is_enabled_true_when_both_halves_some() {
     assert!(cfg.is_enabled(), "both Some(_) must be enabled");
 }
 
-// 7. token=None, chat_id=Some → disabled.
 #[tokio::test]
 async fn is_enabled_false_when_token_missing() {
     let cfg = TelegramConfig {
@@ -305,7 +263,6 @@ async fn is_enabled_false_when_token_missing() {
     assert!(!cfg.is_enabled(), "missing token must disable");
 }
 
-// 8. token=Some, chat_id=None → disabled.
 #[tokio::test]
 async fn is_enabled_false_when_chat_id_missing() {
     let cfg = TelegramConfig {
@@ -317,7 +274,6 @@ async fn is_enabled_false_when_chat_id_missing() {
     assert!(!cfg.is_enabled(), "missing chat_id must disable");
 }
 
-// 9. Both None → disabled (boundary: clear state must not satisfy).
 #[tokio::test]
 async fn is_enabled_false_when_both_none() {
     let cfg = TelegramConfig {
@@ -329,10 +285,6 @@ async fn is_enabled_false_when_both_none() {
     assert!(!cfg.is_enabled(), "both None must be disabled");
 }
 
-// ─── TelegramConfig::token_last4 ─────────────────────────────────────
-
-// 10. Long token: last 4 chars only. Spec gives "1234567890:ABCDEF"
-//     which has last 4 chars "CDEF".
 #[tokio::test]
 async fn token_last4_returns_last_four_chars_for_long_token() {
     let cfg = TelegramConfig {
@@ -348,7 +300,6 @@ async fn token_last4_returns_last_four_chars_for_long_token() {
     );
 }
 
-// 11. Short token (<4 chars): return whole token, no panic.
 #[tokio::test]
 async fn token_last4_returns_full_token_when_shorter_than_4() {
     let cfg = TelegramConfig {
@@ -364,7 +315,6 @@ async fn token_last4_returns_full_token_when_shorter_than_4() {
     );
 }
 
-// 12. Exactly 4 chars: return whole token (boundary).
 #[tokio::test]
 async fn token_last4_handles_exactly_four_chars() {
     let cfg = TelegramConfig {
@@ -380,7 +330,6 @@ async fn token_last4_handles_exactly_four_chars() {
     );
 }
 
-// 13. None token → empty string.
 #[tokio::test]
 async fn token_last4_returns_empty_string_when_token_none() {
     let cfg = TelegramConfig {
@@ -392,7 +341,6 @@ async fn token_last4_returns_empty_string_when_token_none() {
     assert_eq!(cfg.token_last4(), "", "None token must yield empty string");
 }
 
-// 14. Non-ASCII long token: return last 4 unicode chars without byte-slicing panic.
 #[tokio::test]
 async fn token_last4_handles_non_ascii_long_token() {
     let cfg = TelegramConfig {
@@ -420,7 +368,6 @@ async fn token_last4_handles_non_ascii_long_token() {
     );
 }
 
-// 15. Non-ASCII short token (< 4 chars): return whole token, no panic.
 #[tokio::test]
 async fn token_last4_handles_non_ascii_short_token() {
     let cfg_cjk = TelegramConfig {
@@ -448,7 +395,6 @@ async fn token_last4_handles_non_ascii_short_token() {
     );
 }
 
-// 16. Non-ASCII exact 4 chars: return whole token.
 #[tokio::test]
 async fn token_last4_handles_non_ascii_exact_four_chars() {
     let cfg = TelegramConfig {

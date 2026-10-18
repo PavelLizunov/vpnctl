@@ -65,11 +65,6 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
     let db_path = ui::resolve_db_path(db_flag)?;
     let inv = SqliteInventory::open(&db_path).await?;
 
-    // Per review finding: short-circuit re-runs BEFORE we touch the remote.
-    // Otherwise the pubkey gets re-appended (idempotent thanks to grep -qxF
-    // — but only because of the previous fix), no audit row is written, and
-    // the user just sees a confusing "AlreadyExists" error after the SSH
-    // round-trip.
     let sid = ServerId(args.id.clone());
     if inv.get_server(&sid).await?.is_some() {
         return Err(anyhow::anyhow!(
@@ -86,14 +81,9 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
         ));
     }
 
-    // Load our pubkey first — fail fast if it's missing/unreadable.
     let pub_path = match args.pubkey {
         Some(p) => p,
         None => {
-            // Only deriving the `.pub` sibling here, so resolve the path
-            // without the private-key existence check (the private key itself
-            // is validated below via `resolve_key_path`). When --key is given
-            // explicitly, honour it for the `.pub` derivation too.
             let key_path = match args.key.clone() {
                 Some(p) => p,
                 None => crate::cmd::deploy::default_key_path()?,
@@ -103,11 +93,6 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
     };
     let pubkey_text = std::fs::read_to_string(&pub_path)
         .map_err(|e| anyhow::anyhow!("read pubkey {}: {e}", pub_path.display()))?;
-    // Per review-agent finding: `trim()` doesn't collapse interior newlines —
-    // a pubkey file with a trailing comment or extra blank line would land
-    // a multi-line argument inside `grep -qxF`, which then never matches on
-    // rerun and the key gets double-appended. Take the first non-empty line
-    // only and reject files that contain more than one key line.
     let key_lines: Vec<&str> = pubkey_text
         .lines()
         .map(str::trim)
@@ -132,10 +117,8 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
 
     let priv_key_path = crate::cmd::deploy::resolve_key_path(args.key)?;
 
-    // Build registry early — same validation as `server add`.
     let registry = crate::registry::build()?;
 
-    // ─── 1. SSH connect with password fallback ───────────────────────────
     println!(
         "→ connecting (password fallback) {}@{}:{}",
         args.ssh_user, args.address, args.ssh_port
@@ -147,9 +130,6 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
             .connect()
             .await?;
 
-    // ─── 2. Push pubkey idempotently ─────────────────────────────────────
-    // Use `grep -qxF` so the *exact* line is matched (no false-positive
-    // because of substring overlap), and append only if absent.
     println!(
         "→ installing pubkey into ~{}/.ssh/authorized_keys",
         args.ssh_user
@@ -163,8 +143,6 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
         key_quoted = shell_single_quote(&pubkey_one_line),
     );
     let out = ssh.exec_unprivileged(&install_cmd).await?;
-    // Per review finding: `out.contains("OK")` would happily match MOTD
-    // text like "TOKEN" or "COOKIE". Compare the LAST line exactly.
     let last_line = out.lines().last().map(str::trim).unwrap_or("");
     if last_line != "OK" {
         return Err(anyhow::anyhow!(
@@ -172,23 +150,17 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
         ));
     }
 
-    // ─── 3. Capture TOFU fingerprint ─────────────────────────────────────
     let observed_fp = ssh
         .observed_host_fingerprint()
         .await
         .ok_or_else(|| anyhow::anyhow!("no host fingerprint observed (russh internal)"))?;
     println!("  host fingerprint: {observed_fp}");
 
-    // ─── 4. Persist server in inventory ──────────────────────────────────
     let server = Server {
         id: ServerId(args.id.clone()),
         address: args.address.clone(),
         ssh_port: args.ssh_port,
         ssh_user: args.ssh_user.clone(),
-        // Bootstrap creates the server with the single kernel the
-        // operator chose; multi-kernel can be added later from the
-        // admin UI or `vpnctl server kernel-add`. Pre-multi-kernel
-        // this was `kernel: KernelId(...)`.
         kernels: vec![KernelId(args.kernel.clone())],
         enabled_protocols: args.protocols.iter().cloned().map(ProtocolId).collect(),
         trusted_host_fingerprint: Some(observed_fp.clone()),
@@ -196,9 +168,6 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
         jump_via: None,
         usage_coefficient: args.usage_coefficient,
     };
-    // Support-only validation at bootstrap: no secrets exist yet (the
-    // first deploy mints them), so the secret-aware port-conflict gate
-    // cannot run here — the deploy path is the authoritative gate.
     registry.validate_server_support(&server)?;
     inv.add_server(&server).await?;
 
@@ -225,6 +194,4 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
     Ok(())
 }
 
-// `shell_single_quote` moved to `vpnctl_core::shell::single_quote`
-// (2026-05-18) — was triplicated; consolidated for parity.
 use vpnctl_core::shell::single_quote as shell_single_quote;

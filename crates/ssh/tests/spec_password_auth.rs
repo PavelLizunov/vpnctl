@@ -1,13 +1,3 @@
-//! Spec tests for the **password fallback** behaviour of
-//! `RusshTransportBuilder::password()`.
-//!
-//! Independent: only the public API spec was given; the impl was not
-//! read. Tests must NOT be weakened to make the impl pass.
-//!
-//! ```
-//! cargo test -p vpnctl-ssh --test spec_password_auth -- --ignored
-//! ```
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::process::{Command, Stdio};
@@ -26,8 +16,6 @@ const TEST_PASSWORD: &str = "Sup3rSecretP@ssword-spec-987";
 const WRONG_PASSWORD: &str = "definitely-not-the-right-pw-zzzz";
 const SSHD_INTERNAL_PORT: u16 = 2222;
 
-/// Generate a fresh Ed25519 keypair via `ssh-keygen`. Returns
-/// (private key path, OpenSSH public key string). Mirrors `e2e_sshd.rs`.
 fn fresh_keypair(dir: &TempDir, name: &str) -> (std::path::PathBuf, String) {
     let priv_path = dir.path().join(name);
     let status = Command::new("ssh-keygen")
@@ -50,8 +38,6 @@ fn fresh_keypair(dir: &TempDir, name: &str) -> (std::path::PathBuf, String) {
     (priv_path, pub_str)
 }
 
-/// Build a `linuxserver/openssh-server` image. `authorized_pub == ""`
-/// installs no key; non-empty installs that pubkey for `TEST_USER`.
 fn make_sshd_image(authorized_pub: &str, password_access: bool) -> ContainerRequest<GenericImage> {
     let mut img: ContainerRequest<GenericImage> =
         GenericImage::new("lscr.io/linuxserver/openssh-server", "latest")
@@ -74,10 +60,6 @@ fn make_sshd_image(authorized_pub: &str, password_access: bool) -> ContainerRequ
     img
 }
 
-// ─── Tests ──────────────────────────────────────────────────────────────
-
-/// Rule 1: with ONLY a valid password and any (bad) key, `connect()`
-/// succeeds — pubkey fails first on a fresh server, password wins.
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn password_only_fresh_server_succeeds() {
@@ -108,17 +90,12 @@ async fn password_only_fresh_server_succeeds() {
     assert_eq!(out.trim(), "hi");
 }
 
-/// Rule 2: valid pubkey installed AND wrong password → `connect()` succeeds
-/// because the pubkey path short-circuits; the wrong password is never tried.
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn pubkey_succeeds_short_circuits_wrong_password() {
     let tmp = TempDir::new().expect("tmpdir");
     let (good_priv, good_pub) = fresh_keypair(&tmp, "id_good");
 
-    // Server password is set to the REAL password. If pubkey did NOT
-    // short-circuit and the impl tried WRONG_PASSWORD, sshd would reject
-    // it and connect() would error. Success ⇒ wrong password never sent.
     let container = make_sshd_image(&good_pub, true)
         .start()
         .await
@@ -140,16 +117,12 @@ async fn pubkey_succeeds_short_circuits_wrong_password() {
     assert_eq!(out.trim(), "ok");
 }
 
-/// Rule 3: wrong key + wrong password → `Err(CoreError::Transport(_))`,
-/// and the error message must mention BOTH paths failed.
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn wrong_pubkey_and_wrong_password_errors_mentions_both() {
     let tmp = TempDir::new().expect("tmpdir");
     let (bad_priv, _) = fresh_keypair(&tmp, "id_bad");
 
-    // Server has the REAL password set; we pass WRONG_PASSWORD → both
-    // pubkey and password authentication must fail.
     let container = make_sshd_image("", true)
         .start()
         .await
@@ -188,36 +161,14 @@ async fn wrong_pubkey_and_wrong_password_errors_mentions_both() {
     }
 }
 
-// ─── Rule 4: password is not logged ────────────────────────────────────
-//
-// Implementation strategy (no `unsafe`, no extra dev-deps):
-// the workspace forbids `unsafe`, so we cannot dup2 stderr in-process.
-// Instead, we re-exec the test binary as a child process to run only
-// the worker test (which actually dials sshd and sends the password).
-// The parent collects the child's combined stdout+stderr and asserts
-// the literal password never appears. RUST_LOG=trace is set on the
-// child so any tracing-subscriber the impl might initialise emits at
-// max verbosity.
-//
-// The worker test uses an env-var trip-wire so that, when invoked
-// normally by `cargo test`, it short-circuits to a tautology (we don't
-// want it to require Docker on its own — the controller test sets the
-// env var only for the spawned child).
-
 const LEAK_WORKER_ENV: &str = "VPNCTL_PW_LEAK_WORKER";
 const LEAK_WORKER_PORT: &str = "VPNCTL_PW_LEAK_PORT";
 const LEAK_WORKER_KEY: &str = "VPNCTL_PW_LEAK_KEY";
 
-/// Worker driven by `password_is_not_logged_to_stderr`. When the env
-/// var is unset, this is a no-op pass. When set, it dials sshd at the
-/// port given via env, sends `TEST_PASSWORD`, runs `echo hi`, then
-/// exits the process (so the test binary doesn't continue running other
-/// tests in the child).
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn password_leak_worker_internal_do_not_invoke_directly() {
     if std::env::var(LEAK_WORKER_ENV).is_err() {
-        // Not running in the controlled child — pass silently.
         return;
     }
     let port: u16 = std::env::var(LEAK_WORKER_PORT)
@@ -235,9 +186,6 @@ async fn password_leak_worker_internal_do_not_invoke_directly() {
         .expect("connect");
     let _ = t.exec_unprivileged("echo hi").await.expect("exec");
 
-    // Exit immediately so the test harness in the child stops here.
-    // (If we let it return Ok, the harness might still write summary
-    // lines, which won't contain the password but would clutter output.)
     std::process::exit(0);
 }
 
@@ -256,9 +204,6 @@ async fn password_is_not_logged_to_stderr() {
         .await
         .expect("port mapping");
 
-    // Re-exec this binary, asking the test harness to run only the
-    // worker test by exact name. The worker reads env vars, performs
-    // the connect, and exits.
     let exe = std::env::current_exe().expect("current_exe");
     let output = Command::new(&exe)
         .arg("--exact")
@@ -282,9 +227,6 @@ async fn password_is_not_logged_to_stderr() {
 
     drop(container);
 
-    // Sanity: the worker really ran (it exits with code 0 via
-    // process::exit). If it exited non-zero, the connect/exec failed
-    // and the leak check is meaningless — surface that as a failure.
     assert!(
         output.status.success(),
         "worker child failed (status {:?}); combined output:\n{combined}",
@@ -297,14 +239,11 @@ async fn password_is_not_logged_to_stderr() {
     );
 }
 
-/// Rule 5: after a successful password-fallback connect, `exec("echo hi")`
-/// returns the same output as via the pubkey path.
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn exec_after_password_fallback_behaves_like_pubkey_path() {
     let tmp = TempDir::new().expect("tmpdir");
 
-    // Run A: password-fallback connect.
     let (bad_priv, _) = fresh_keypair(&tmp, "id_bad");
     let cont_a = make_sshd_image("", true).start().await.expect("start A");
     let port_a = cont_a
@@ -320,7 +259,6 @@ async fn exec_after_password_fallback_behaves_like_pubkey_path() {
         .expect("A connect");
     let out_a = t_a.exec_unprivileged("echo hi").await.expect("A exec");
 
-    // Run B: pubkey-only connect.
     let (good_priv, good_pub) = fresh_keypair(&tmp, "id_good");
     let cont_b = make_sshd_image(&good_pub, false)
         .start()

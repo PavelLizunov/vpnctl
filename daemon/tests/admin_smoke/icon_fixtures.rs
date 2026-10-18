@@ -1,5 +1,3 @@
-//! Synthetic router responses for offline browser review; never starts a server.
-
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
@@ -33,14 +31,6 @@ pub(crate) const ICON_PAGES: &[(&str, &str)] = &[
     ("wizard-progress", "/admin/servers/new/step-2"),
 ];
 
-/// Run only with an explicit output directory and an absent fixture-local key:
-/// `VPNCTL_ICON_FIXTURES=/tmp/icons VPNCTLD_DEPLOY_KEY=/tmp/icons/absent-key \
-/// cargo test -p vpnctld --test admin_smoke icon_fixtures::export_icon_fixtures \
-/// -- --ignored --exact --nocapture`
-///
-/// Browser tooling should fulfill routes from manifest.json, serve repository
-/// assets at /admin/assets/*, and mock EventSource BEFORE loading these pages.
-/// Do not follow forms or live-drift links against a daemon. HTML is unmodified.
 #[tokio::test]
 #[ignore = "exports synthetic HTML for offline browser review"]
 async fn export_icon_fixtures() {
@@ -50,8 +40,6 @@ async fn export_icon_fixtures() {
     );
     std::fs::create_dir_all(&output).unwrap();
     let output = output.canonicalize().unwrap();
-    // Settings currently reads the deploy public key and lists backups even on
-    // its appearance tab. Fail closed rather than touch any host's live data.
     let key = vpnctld::app::deploy_key_path();
     assert_eq!(
         key,
@@ -95,7 +83,6 @@ async fn export_icon_fixtures() {
             let cookie =
                 format!("vpnctl_theme={theme}; vpnctl_lang={lang}; vpnctl_wizard={session}");
             for &(name, route) in ICON_PAGES {
-                // GET only: no SSE, POST, drift=live, startup pollers or SSH.
                 let html = fetch_html_with_cookie(app.clone(), route, &cookie).await;
                 assert!(!html.contains(placeholder_password));
                 assert!(html.contains(&format!("<html lang=\"{lang}\"")));

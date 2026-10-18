@@ -1,12 +1,3 @@
-//! Complete spec for server deletion cascading to dependent tables and foreign keys:
-//! - `protocol_assurance_samples` CASCADE on DELETE
-//! - `node_health` CASCADE on DELETE
-//! - `service_quality_samples` CASCADE on DELETE
-//! - `admin_alerts` CASCADE on DELETE
-//! - `servers.jump_via` SET NULL on DELETE
-//!
-//! Written from specs and SQLite foreign key constraints.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use chrono::{Duration, Utc};
@@ -354,11 +345,9 @@ async fn complete_server_cascade_all_in_one() {
     let s1 = ServerId("s1".into());
     let s2 = ServerId("s2".into());
 
-    // 1. Add servers with jump_via dependency (s2 -> s1)
     inv.add_server(&srv("s1", None)).await.unwrap();
     inv.add_server(&srv("s2", Some(s1.clone()))).await.unwrap();
 
-    // 2. Add protocol assurance samples
     inv.record_protocol_assurance_sample(&assurance_sample("s1", "hysteria2"))
         .await
         .unwrap();
@@ -366,11 +355,9 @@ async fn complete_server_cascade_all_in_one() {
         .await
         .unwrap();
 
-    // 3. Add node health rows
     rec_health(&inv, "s1").await;
     rec_health(&inv, "s2").await;
 
-    // 4. Add quality samples
     inv.record_service_quality_sample(&quality_sample("s1"))
         .await
         .unwrap();
@@ -378,7 +365,6 @@ async fn complete_server_cascade_all_in_one() {
         .await
         .unwrap();
 
-    // 5. Add alerts
     inv.insert_alert("server.offline", Some(&s1), "critical", "s1 down", None)
         .await
         .unwrap();
@@ -386,7 +372,6 @@ async fn complete_server_cascade_all_in_one() {
         .await
         .unwrap();
 
-    // Verify all s1 records exist prior to removal
     assert!(
         !inv.latest_protocol_assurance_for_server(&s1)
             .await
@@ -401,13 +386,10 @@ async fn complete_server_cascade_all_in_one() {
             .is_empty()
     );
 
-    // Delete s1
     inv.remove_server(&s1).await.unwrap();
 
-    // Verify s1 is deleted
     assert!(inv.get_server(&s1).await.unwrap().is_none());
 
-    // Verify protocol assurance cascade
     assert!(
         inv.latest_protocol_assurance_for_server(&s1)
             .await
@@ -424,7 +406,6 @@ async fn complete_server_cascade_all_in_one() {
         "protocol_assurance_samples for s2 must remain"
     );
 
-    // Verify node health cascade
     assert!(
         inv.latest_node_health(&s1).await.unwrap().is_none(),
         "latest_node_health for s1 must be None after cascade"
@@ -441,7 +422,6 @@ async fn complete_server_cascade_all_in_one() {
         "latest_node_health for s2 must remain"
     );
 
-    // Verify quality cascade
     assert!(
         inv.service_quality_samples_for_server(&s1, 24)
             .await
@@ -458,7 +438,6 @@ async fn complete_server_cascade_all_in_one() {
         "quality samples for s2 must remain"
     );
 
-    // Verify alerts cascade
     let alerts = inv.recent_alerts(50, true).await.unwrap();
     assert!(
         alerts.iter().all(|a| a.server_id.as_ref() != Some(&s1)),
@@ -469,7 +448,6 @@ async fn complete_server_cascade_all_in_one() {
         "alerts referencing s2 must remain"
     );
 
-    // Verify jump_via SET NULL
     let s2_srv = inv.get_server(&s2).await.unwrap().expect("s2 must survive");
     assert_eq!(
         s2_srv.jump_via, None,

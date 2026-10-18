@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# scripts/tests/test_vpnctl_backup.sh — regression test suite for vpnctl-backup.sh and vpnctl-backup.service
-# Tests AUD-022 deploy key resolution, env loading, dotted paths, archiving, and offsite SSH key usage.
 
 set -euo pipefail
 
@@ -39,12 +37,10 @@ assert_contains() {
 
 echo "=== Running vpnctl-backup regression tests ==="
 
-# 1. Test systemd service EnvironmentFile loading
 echo "Test 1: Service loads optional /etc/vpnctl/vpnctld.env"
 service_content="$(cat "$SERVICE_PATH")"
 assert_contains "$service_content" "EnvironmentFile=-/etc/vpnctl/vpnctld.env" "vpnctl-backup.service has EnvironmentFile=-/etc/vpnctl/vpnctld.env"
 
-# Helper to extract and evaluate only the tunables & config resolution from vpnctl-backup.sh
 eval_tunables() {
     local env_prefix="$1"
     env -i bash -c "
@@ -54,35 +50,30 @@ eval_tunables() {
     "
 }
 
-# 2. Test default resolution (canonical fallback)
 echo "Test 2: Default resolution fallback"
 vals=$(eval_tunables "")
 assert_contains "$vals" "DEPLOY_KEY=/var/lib/vpnctl/.ssh/id_ed25519" "DEPLOY_KEY defaults to canonical fallback"
 assert_contains "$vals" "DEPLOY_KEY_PUB=/var/lib/vpnctl/.ssh/id_ed25519.pub" "DEPLOY_KEY_PUB derived with .pub"
 assert_contains "$vals" "OFFSITE_KEY=/var/lib/vpnctl/.ssh/id_ed25519" "OFFSITE_KEY defaults to resolved deploy key"
 
-# 3. Test resolution from VPNCTLD_DEPLOY_KEY
 echo "Test 3: Resolution from VPNCTLD_DEPLOY_KEY"
 vals=$(eval_tunables "VPNCTLD_DEPLOY_KEY='/custom/deploy/key'")
 assert_contains "$vals" "DEPLOY_KEY=/custom/deploy/key" "DEPLOY_KEY resolved from VPNCTLD_DEPLOY_KEY"
 assert_contains "$vals" "DEPLOY_KEY_PUB=/custom/deploy/key.pub" "DEPLOY_KEY_PUB derived from VPNCTLD_DEPLOY_KEY"
 assert_contains "$vals" "OFFSITE_KEY=/custom/deploy/key" "OFFSITE_KEY defaults to VPNCTLD_DEPLOY_KEY"
 
-# 4. Test dotted custom key path
 echo "Test 4: Dotted custom path resolution"
 vals=$(eval_tunables "VPNCTLD_DEPLOY_KEY='/var/lib/vpnctl/.ssh/id.custom.ed25519'")
 assert_contains "$vals" "DEPLOY_KEY=/var/lib/vpnctl/.ssh/id.custom.ed25519" "DEPLOY_KEY handles dotted custom path"
 assert_contains "$vals" "DEPLOY_KEY_PUB=/var/lib/vpnctl/.ssh/id.custom.ed25519.pub" "DEPLOY_KEY_PUB appends .pub to dotted custom path"
 assert_contains "$vals" "OFFSITE_KEY=/var/lib/vpnctl/.ssh/id.custom.ed25519" "OFFSITE_KEY inherits dotted custom path"
 
-# 5. Test override precedence
 echo "Test 5: Override precedence"
 vals=$(eval_tunables "VPNCTLD_DEPLOY_KEY='/base/key' DEPLOY_KEY='/override/key' OFFSITE_KEY='/custom/offsite' DEPLOY_KEY_PUB='/override/pub'")
 assert_contains "$vals" "DEPLOY_KEY=/override/key" "DEPLOY_KEY overrides VPNCTLD_DEPLOY_KEY"
 assert_contains "$vals" "DEPLOY_KEY_PUB=/override/pub" "DEPLOY_KEY_PUB explicit override preserved"
 assert_contains "$vals" "OFFSITE_KEY=/custom/offsite" "OFFSITE_KEY explicit override preserved"
 
-# 6. End-to-end dry run test for archive paths and offsite SSH command key
 echo "Test 6: Archive creation with dotted key pair & offsite command execution"
 TMP_TEST_DIR=$(mktemp -d /tmp/vpnctl-backup-test.XXXXXX)
 trap 'rm -rf "$TMP_TEST_DIR"' EXIT
@@ -90,7 +81,6 @@ trap 'rm -rf "$TMP_TEST_DIR"' EXIT
 MOCK_BIN="$TMP_TEST_DIR/bin"
 mkdir -p "$MOCK_BIN"
 
-# Mock sqlite3
 cat <<'EOF' > "$MOCK_BIN/sqlite3"
 #!/usr/bin/env bash
 for arg in "$@"; do
@@ -104,7 +94,6 @@ exit 0
 EOF
 chmod +x "$MOCK_BIN/sqlite3"
 
-# Mock age
 cat <<'EOF' > "$MOCK_BIN/age"
 #!/usr/bin/env bash
 out=""
@@ -122,7 +111,6 @@ exit 1
 EOF
 chmod +x "$MOCK_BIN/age"
 
-# Mock scp & ssh to record invocations
 SCP_LOG="$TMP_TEST_DIR/scp.log"
 cat <<EOF > "$MOCK_BIN/scp"
 #!/usr/bin/env bash
@@ -139,7 +127,6 @@ exit 0
 EOF
 chmod +x "$MOCK_BIN/ssh"
 
-# Create fixture files
 DB_FILE="$TMP_TEST_DIR/inv.db"
 touch "$DB_FILE"
 ENV_FILE="$TMP_TEST_DIR/vpnctld.env"
@@ -150,7 +137,6 @@ echo "body { color: red; }" > "$ASSETS_DIR/admin.css"
 RECIPIENT_FILE="$TMP_TEST_DIR/recipient.txt"
 echo "Public key: age1mockrecipientkeyxyz" > "$RECIPIENT_FILE"
 
-# Create dotted custom deploy key pair
 KEY_DIR="$TMP_TEST_DIR/keys"
 mkdir -p "$KEY_DIR"
 DEPLOY_KEY_FILE="$KEY_DIR/id.custom.ed25519"
@@ -160,7 +146,6 @@ echo "PUBLIC KEY CONTENT" > "$DEPLOY_KEY_PUB_FILE"
 
 BACKUP_DEST="$TMP_TEST_DIR/backups"
 
-# Run backup script with custom env
 OUTPUT=$(PATH="$MOCK_BIN:$PATH" \
     DB_PATH="$DB_FILE" \
     ENV_FILE="$ENV_FILE" \
@@ -175,7 +160,6 @@ OUTPUT=$(PATH="$MOCK_BIN:$PATH" \
 
 assert_contains "$OUTPUT" "ok " "Script completed successfully"
 
-# Verify no secret values were logged
 if echo "$OUTPUT" | grep -Fq "super_secret_value"; then
     echo "  [FAIL] Secret leaked in log output!"
     FAILED=$((FAILED + 1))
@@ -187,20 +171,17 @@ else
     PASSED=$((PASSED + 1))
 fi
 
-# Check scp invocation used offsite deploy key
 SCP_CALLS=$(cat "$SCP_LOG")
 assert_contains "$SCP_CALLS" "scp -O " "Primary LAN scp forces legacy protocol for VM 118"
 assert_contains "$SCP_CALLS" "scp -O -q -i $DEPLOY_KEY_FILE" "Primary LAN scp uses resolved deploy key"
 assert_contains "$SCP_CALLS" "-i $DEPLOY_KEY_FILE" "Offsite scp command used resolved deploy key (-i $DEPLOY_KEY_FILE)"
 
-# Check ssh invocation used offsite deploy key
 SSH_CALLS=$(cat "$SSH_LOG")
 assert_contains "$SSH_CALLS" "StrictHostKeyChecking=yes" "Retention requires pinned host keys"
 assert_contains "$SCP_CALLS" "StrictHostKeyChecking=yes" "Delivery requires pinned host keys"
 assert_contains "$SSH_CALLS" "ssh -i $DEPLOY_KEY_FILE" "Primary LAN retention ssh uses resolved deploy key"
 assert_contains "$SSH_CALLS" "-i $DEPLOY_KEY_FILE" "Offsite ssh command used resolved deploy key (-i $DEPLOY_KEY_FILE)"
 
-# 7. Test explicit OFFSITE_KEY override in commands
 echo "Test 7: Explicit OFFSITE_KEY override command execution"
 > "$SCP_LOG"
 > "$SSH_LOG"
@@ -226,7 +207,6 @@ assert_contains "$SCP_CALLS" "-i $OFFSITE_OVERRIDE_KEY" "Offsite scp command use
 SSH_CALLS=$(cat "$SSH_LOG")
 assert_contains "$SSH_CALLS" "-i $OFFSITE_OVERRIDE_KEY" "Offsite ssh command used explicit OFFSITE_KEY override"
 
-# 8. Verify tar archive paths include the dotted key pair
 echo "Test 8: Verify tar archive contains actual key pair"
 TAR_ENTRIES_LOG="$TMP_TEST_DIR/tar_entries.log"
 cat <<EOF > "$MOCK_BIN/tar"
@@ -255,7 +235,6 @@ TAR_LOG_CONTENT=$(cat "$TAR_ENTRIES_LOG")
 assert_contains "$TAR_LOG_CONTENT" "$DEPLOY_KEY_FILE" "Tar archive input contains resolved deploy key"
 assert_contains "$TAR_LOG_CONTENT" "$DEPLOY_KEY_PUB_FILE" "Tar archive input contains derived public deploy key"
 
-# Failure injection stays entirely inside the existing temporary fixture.
 cat <<'EOF' > "$MOCK_BIN/scp"
 #!/usr/bin/env bash
 case "$*" in

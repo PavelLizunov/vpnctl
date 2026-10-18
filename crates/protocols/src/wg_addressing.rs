@@ -1,38 +1,7 @@
-//! Shared WireGuard-family per-peer addressing helper.
-//!
-//! `wireguard.rs` (WireGuard / AmneziaWG native) assigns each granted user
-//! a deterministic /32 inside a kernel-specific /24. The mapping is
-//! `<base>.<2 + index>` where `index` is the user's position in `ctx.peers` (the granted-users
-//! list in stable `ORDER BY id` order — see `RenderCtx::with_peers`).
-//!
-//! Cap at host octet 254 — past that the /24 wraps and a later user
-//! would clobber an earlier one's route. Caller passes the desired
-//! base host octet (typically `2`); the helper enforces the same
-//! 254-octet ceiling for everyone.
-//!
-//! Two distinct missing-from-peers cases:
-//!
-//! * `peers.is_empty()` — happens whenever `RenderCtx::new` was used
-//!   instead of `with_peers`. WireGuard's pre-2026-05-17 single-user
-//!   flow + many tests rely on this fallback. Return `Ok(base)`.
-//! * `peers` is non-empty but doesn't contain `user` — this is the
-//!   bug case (caller built `with_peers` for the wrong server, or
-//!   user was revoked between fetch and render). Fail loud rather
-//!   than silently emitting an octet that collides with whoever is
-//!   actually at index 0. (Fail-closed on peer desync.)
-
 use vpnctl_core::{CoreError, RenderCtx, Result, User};
 
-/// 253 peer slots — host octets 2..=254 inclusive.
 const MAX_HOST_OCTET: u16 = 254;
 
-/// Resolve the per-user host octet inside a /24.
-///
-/// Returns `Ok(base)` when `ctx.peers` is empty (legacy single-user
-/// fallback). Returns the indexed octet when `user` is in `peers`.
-/// Returns `Err(Render)` when `peers` is non-empty but `user` is
-/// missing — caller built the context for the wrong user set, which
-/// would silently produce a colliding tunnel address.
 pub(crate) fn peer_octet_in_slash24(
     ctx: &RenderCtx<'_>,
     user: &User,
@@ -126,7 +95,6 @@ mod tests {
 
     #[test]
     fn user_missing_from_non_empty_peers_errors_loud() {
-        // The bug case the helper specifically protects against.
         let server = dummy_server();
         let secrets: HashMap<String, String> = HashMap::new();
         let peers = vec![dummy_user("alex"), dummy_user("brian")];

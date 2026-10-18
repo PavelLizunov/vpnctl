@@ -1,6 +1,4 @@
-/* ── monitoring · charts ── */
 
-/* line chart (engraving style) */
 .ed-chart {
   position: relative;
   width: 100%;
@@ -46,7 +44,6 @@
   width: 14px; height: 2px; display: inline-block;
 }
 
-/* sparkline embed (inline with metric) */
 .ed-spark {
   height: 26px;
   width: 100%;
@@ -56,7 +53,6 @@
 .ed-spark path { fill: none; stroke: var(--acc); stroke-width: 1; }
 .ed-spark .ed-spark__fill { fill: var(--acc); opacity: 0.08; stroke: none; }
 
-/* probe heatmap */
 .ed-heatmap {
   display: flex; flex-direction: column;
 }
@@ -108,7 +104,6 @@
   margin-right: 5px;
 }
 
-/* status timeline — 24 dots, one per hour */
 .ed-tline {
   display: grid;
   grid-template-columns: repeat(24, 1fr);
@@ -122,7 +117,6 @@
 .ed-tline__c--fail { background: var(--red); opacity: 0.85; }
 .ed-tline__c--miss { background: var(--paper-3); }
 
-/* percentiles list */
 .ed-pcts {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -152,7 +146,6 @@
 .ed-pct__v small { font-size: 14px; color: var(--soft); letter-spacing: 0; }
 .ed-pct__sub { font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); }
 
-/* histogram */
 .ed-hist {
   display: grid;
   grid-template-columns: 80px 1fr 60px;

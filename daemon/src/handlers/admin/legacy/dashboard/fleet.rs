@@ -10,21 +10,12 @@ use crate::handlers::admin::legacy::server_detail::status_tile;
 use crate::handlers::admin::legacy::user_sections::VpnSparklineWindow;
 use crate::http_util::path_segment_encode;
 
-/// Parse a dotted version string (`"1.13.12"`, leading `v` tolerated)
-/// into a comparable numeric tuple. Non-numeric / missing components
-/// read as 0, and we pad to three components so `"1.13"` sorts below
-/// `"1.13.1"`. Used by [`kernel_floor_rollup`] to find the fleet's
-/// highest sing-box version (the de-facto target) and flag any node
-/// below it. Returns `None` for an unparseable string (e.g. empty)
-/// so the caller can skip it rather than treat it as `0.0.0`.
 fn parse_version_tuple(raw: &str) -> Option<(u64, u64, u64)> {
     let trimmed = raw.trim().trim_start_matches('v');
     if trimmed.is_empty() {
         return None;
     }
     let mut parts = trimmed.split('.');
-    // The first component must exist and parse, else the string isn't
-    // a version we can reason about.
     let numeric_prefix = |s: &str| -> Option<u64> {
         let n: String = s.chars().take_while(char::is_ascii_digit).collect();
         (!n.is_empty()).then_some(n)?.parse().ok()
@@ -137,29 +128,11 @@ pub(in crate::handlers::admin::legacy) fn server_detail_kernel_inventory_section
     }
 }
 
-/// PR-Dash dash#3 (SHARED — PR-Server reuses this on the per-server
-/// detail page) — fleet kernel-floor rollup.
-///
-/// Treats the **highest** sing-box version present anywhere in the
-/// fleet as the de-facto target (the "floor" the operator should pull
-/// everyone up to). Renders «sing-box N/M @ {floor} ✓ · K stale ⚠»
-/// where N = servers already at the floor, M = servers reporting any
-/// version, K = servers below it. When a fleet-wide kernel-update
-/// action exists it links there — for the dashboard (static, CSP: no
-/// inline JS) we link to /admin/servers where the SSE «update all
-/// kernels» button lives. Renders the empty-state line when no node
-/// has reported a version yet (quiet, no scary "0/0").
-///
-/// `kernel_versions` is `(ServerId, Option<kernel_versions_json>)` —
-/// exactly the shape `kernel_versions_fleet()` (Q-4e) returns, so both
-/// call sites pass it straight through.
 pub(in crate::handlers::admin::legacy) fn kernel_floor_rollup(
     kernel_versions: &[(vpnctl_core::ServerId, Option<String>)],
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::{K, t, tr};
-    // Collect (server, parsed-version) only for servers that report a
-    // sing-box version we can parse.
     let mut versioned: Vec<(u64, u64, u64)> = Vec::new();
     for (_, json) in kernel_versions {
         if let Some(v) = sing_box_version_of(json.as_deref()) {
@@ -170,7 +143,6 @@ pub(in crate::handlers::admin::legacy) fn kernel_floor_rollup(
     }
     let reporting = versioned.len();
     let Some(floor) = versioned.iter().copied().max() else {
-        // No node reported a parseable version. Quiet empty-state.
         return html! {
             section id="kernel-rollup" style="margin-top: 28px;" {
                 div.ed-art-eyebrow { (t(lang, K::EyebrowKernelRollup)) }
@@ -204,10 +176,6 @@ pub(in crate::handlers::admin::legacy) fn kernel_floor_rollup(
                     }
                 }
             }
-            // When something is stale, point the operator at the place
-            // where the fleet-wide «update all kernels» action lives.
-            // The dashboard is static (CSP: no inline JS), so we LINK to
-            // /admin/servers rather than embed the SSE button here.
             @if !all_current {
                 p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 0;" {
                     (tr(
@@ -229,21 +197,6 @@ pub(in crate::handlers::admin::legacy) fn kernel_floor_rollup(
     }
 }
 
-/// PR-Dash dash#1 — fleet-at-a-glance table. One row per server:
-/// sing-box up · disk% · mem% · active conns now · 24h traffic ·
-/// sing-box version · last-probe age. Every input is pre-loaded by the
-/// caller (the at-a-glance card adds NO new N+1 beyond the existing
-/// fleet-uptime loop). Empty cells render «—».
-///
-/// * `latest_health` — newest `node_health` row per server (disk/mem/
-///   up + probe ts), looked up in the same loop as fleet-uptime.
-/// * `active_conns` — live clash-api connection count per server from
-///   the in-memory snapshot cache (no DB round-trip).
-/// * `traffic_24h` — server-wide upload+download bytes over the last
-///   24h, weighted by `usage_coefficient`, summed from the already-
-///   loaded `recent_vpn_stats_fleet` rows.
-/// * `kernel_versions` — newest `kernel_versions_json` per server (the
-///   sing-box version column).
 #[allow(clippy::too_many_arguments)]
 pub(in crate::handlers::admin::legacy) fn dashboard_fleet_table(
     servers: &[vpnctl_core::Server],
@@ -258,18 +211,11 @@ pub(in crate::handlers::admin::legacy) fn dashboard_fleet_table(
 ) -> Markup {
     use crate::i18n::tr;
     if servers.is_empty() {
-        // No fleet yet — the dashboard metrics deck + the servers page
-        // already cover the "add a server" call-to-action; staying
-        // quiet here avoids a third empty table.
         return html! {};
     }
     let now = chrono::Utc::now();
     let dash = "—";
-    // Busiest node — its conns + traffic cells render bold (mock 1b) and
-    // every share bar scales against its traffic.
     let max_traffic = traffic_24h.values().copied().max().unwrap_or(0);
-    // Fleet-majority sing-box version: the most frequent reported one.
-    // A node on any OTHER version gets a warm «≠» drift marker.
     let majority_version = fleet_majority_version(kernel_versions);
     html! {
             section id="fleet-at-a-glance" style="margin-top: 18px;" {
@@ -373,9 +319,6 @@ pub(in crate::handlers::admin::legacy) fn dashboard_fleet_table(
     }
 }
 
-/// disk-used percentage from a health row, `None` when the probe
-/// didn't carry both numerator + denominator. Floors a `>100%` reading
-/// (impossible but defensive) at 100.
 fn pct_disk(h: &vpnctl_inventory::NodeHealthRow) -> Option<u8> {
     let (used, total) = (h.disk_used_mib?, h.disk_total_mib?);
     if total == 0 {
@@ -384,8 +327,6 @@ fn pct_disk(h: &vpnctl_inventory::NodeHealthRow) -> Option<u8> {
     Some(((used.saturating_mul(100)) / total).min(100) as u8)
 }
 
-/// mem-USED percentage (`100 − available/total`) from a health row.
-/// `None` when the probe lacked the figures.
 fn pct_mem(h: &vpnctl_inventory::NodeHealthRow) -> Option<u8> {
     let (avail, total) = (h.mem_available_mib?, h.mem_total_mib?);
     if total == 0 {
@@ -395,12 +336,6 @@ fn pct_mem(h: &vpnctl_inventory::NodeHealthRow) -> Option<u8> {
     Some(100u8.saturating_sub(free_pct))
 }
 
-/// PR-Dash dash#2 — real fleet traffic totals beside the activity
-/// chart. Uses the same aligned buckets as the chart so the bars and
-/// totals cannot disagree at a day boundary.
-///
-/// `coeffs` maps each server to its `usage_coefficient`; unknown
-/// servers default to 1.0.
 pub(in crate::handlers::admin::legacy) fn dashboard_fleet_traffic_totals(
     rows: &[vpnctl_inventory::VpnStatsRow],
     coeffs: &std::collections::HashMap<vpnctl_core::ServerId, f64>,
@@ -417,11 +352,6 @@ pub(in crate::handlers::admin::legacy) fn dashboard_fleet_traffic_totals(
         now - TimeDelta::seconds(i64::from(window.cells.saturating_sub(1)) * bucket_seconds);
     let prior_start = cur_start - TimeDelta::seconds(i64::from(window.cells) * bucket_seconds);
 
-    // Sum ALL rows (per-user attributed + unattributed remainder).
-    // Since the NM-11 attribution fix the server-wide row holds only
-    // the unattributed remainder, so filtering to user_id IS NULL
-    // undercounts by the attributed share. Match `vpn_traffic_chart`
-    // which already sums every row.
     let weight = |sid: &vpnctl_core::ServerId| -> f64 { coeffs.get(sid).copied().unwrap_or(1.0) };
     let mut cur_up = 0f64;
     let mut cur_dn = 0f64;
@@ -444,9 +374,6 @@ pub(in crate::handlers::admin::legacy) fn dashboard_fleet_traffic_totals(
         }
     }
     let cur_total = cur_up + cur_dn;
-    // Δ% vs the prior equal window. None when the prior window had no
-    // traffic (division by zero / "new baseline" — can't compute a
-    // meaningful percentage from zero).
     let delta_pct: Option<i64> = if prior_total > 0.0 {
         Some((((cur_total - prior_total) / prior_total) * 100.0).round() as i64)
     } else {
@@ -477,11 +404,6 @@ pub(in crate::handlers::admin::legacy) fn dashboard_fleet_traffic_totals(
     }
 }
 
-/// Dashboard 1b — health feed: the newest unacked alerts as a minimal
-/// table (severity mark / kind / target / age), with the unacked total
-/// in the eyebrow and a «full feed →» link to /admin/alerts. Replaces
-/// the PR-Dash dash#4 (kind, severity)-counts card. Quiet-dashboard
-/// contract kept — renders nothing when there are zero unacked alerts.
 pub(in crate::handlers::admin::legacy) fn dashboard_health_feed(
     alerts: &[vpnctl_inventory::AdminAlert],
     unacked_total: u64,
@@ -489,7 +411,6 @@ pub(in crate::handlers::admin::legacy) fn dashboard_health_feed(
 ) -> Markup {
     use crate::i18n::tr;
     if alerts.is_empty() {
-        // Quiet dashboard — no unacked alerts, no card.
         return html! {};
     }
     let now = chrono::Utc::now();
@@ -502,10 +423,6 @@ pub(in crate::handlers::admin::legacy) fn dashboard_health_feed(
             table.ed-feed style="margin-top: 8px;" {
                 tbody {
                     @for a in alerts {
-                        // Kinds carry the subject after a colon
-                        // (`user.traffic_limit:<uid>`); split so the kind
-                        // column stays scannable and the subject joins
-                        // the target cell.
                         @let (kind_base, kind_subject) = match a.kind.split_once(':') {
                             Some((k, s)) => (k, Some(s)),
                             None => (a.kind.as_str(), None),
@@ -525,8 +442,6 @@ pub(in crate::handlers::admin::legacy) fn dashboard_health_feed(
                                         a href=(format!("/admin/servers/{}", path_segment_encode(&sid.0))) { (sid.0) }
                                     },
                                     (None, Some(subject)) => {
-                                        // User-scoped kinds put the user id
-                                        // after the colon — link it.
                                         a href=(format!("/admin/users/{}", path_segment_encode(subject))) { (subject) }
                                     },
                                     (None, None) => span.ed-grid__mut { "—" },
@@ -546,11 +461,6 @@ pub(in crate::handlers::admin::legacy) fn dashboard_health_feed(
     }
 }
 
-/// Colour bucket for an uptime percentage. Shared by the per-server
-/// `server_detail_uptime_section` chips and the dashboard-wide
-/// `dashboard_fleet_uptime` chips so palette stays in one place. The
-/// thresholds (≥99 green, ≥95 amber, <95 red, None grey) match Pavel's
-/// confirmed SLO buckets for sing-box service uptime.
 fn quality_score_color(score: Option<u8>) -> &'static str {
     match score {
         Some(80..=100) => "#2e7d32",
@@ -711,18 +621,13 @@ pub(in crate::handlers::admin::legacy) fn server_detail_assurance_section(
 
 pub(in crate::handlers::admin::legacy) fn pct_color(pct: Option<u8>) -> &'static str {
     match pct {
-        Some(p) if p >= 99 => "#2e7d32", // green
-        Some(p) if p >= 95 => "#e6a23c", // amber
-        Some(_) => "#c62828",            // red (incl. Some(0))
-        None => "var(--mute)",           // grey
+        Some(p) if p >= 99 => "#2e7d32",
+        Some(p) if p >= 95 => "#e6a23c",
+        Some(_) => "#c62828",
+        None => "var(--mute)",
     }
 }
 
-/// Renders an uptime percent as the chip's visible text. `Some(p) →
-/// "p%"` (integer; see `UptimeStat::uptime_pct` doc for why integer
-/// vs decimal). `None → bilingual "— no data" / "— нет данных"` so
-/// the empty branch is visually distinct from `Some(0%)` (down-the-
-/// whole-window).
 pub(in crate::handlers::admin::legacy) fn pct_label(
     pct: Option<u8>,
     lang: crate::i18n::Locale,
@@ -733,26 +638,6 @@ pub(in crate::handlers::admin::legacy) fn pct_label(
     }
 }
 
-/// Fleet-wide uptime tile — dashboard companion to the per-server
-/// `server_detail_uptime_section`. Three chips (24h / 7d / 30d) each
-/// carrying the **fleet-weighted average** sing-box uptime%.
-///
-/// **Aggregation choice (probe-weighted, not server-equal-weighted):**
-/// SUM(up_rows across all servers) / SUM(decidable_rows across all servers).
-/// A server polled ½ as often contributes ½ as much to the average — this
-/// matches the per-server semantics (each chip already counts probe rows
-/// not server-days) and means a single fresh server with 1 probe doesn't
-/// drown out 3 mature servers with 600 probes each. Servers with zero
-/// decidable rows are silently excluded from BOTH numerator + denominator.
-///
-/// Renders ONLY when at least one server has at least one decidable
-/// probe in some window. Otherwise the section is omitted — the operator
-/// already gets «no servers polled yet» context from the absence of any
-/// per-server uptime data on /admin/servers detail pages.
-///
-/// Chip-click navigates to /admin/servers (list) — per-server drill-in
-/// lives there. Stable `data-fleet-uptime-pct` attribute for scrape
-/// targets + future SLO export.
 pub(in crate::handlers::admin::legacy) fn dashboard_fleet_uptime(
     rows: &[(
         vpnctl_core::ServerId,
@@ -762,12 +647,6 @@ pub(in crate::handlers::admin::legacy) fn dashboard_fleet_uptime(
 ) -> Markup {
     use crate::i18n::tr;
 
-    // Aggregate one window across all servers into (up_rows, total_decidable, n_servers).
-    // `total_decidable = total_rows - unknown_rows` — we exclude
-    // probes where sing_box_active is NULL (probe failed mid-flight)
-    // from BOTH halves of the ratio, matching `UptimeStat::uptime_pct`'s
-    // own definition. Server-count is also tallied so the chip footer
-    // can read «N/M servers polled».
     let agg = |window_idx: usize| -> (u64, u64, usize) {
         let mut up: u64 = 0;
         let mut decidable: u64 = 0;
@@ -788,8 +667,6 @@ pub(in crate::handlers::admin::legacy) fn dashboard_fleet_uptime(
     let totals: [(u64, u64, usize); 3] = [agg(0), agg(1), agg(2)];
     let total_servers = rows.len();
 
-    // Empty-fleet branch: NO server has decidable data in any window.
-    // Render nothing — quiet dashboard for an unpolled fleet.
     if totals.iter().all(|(_, dec, _)| *dec == 0) {
         return html! {};
     }
@@ -798,8 +675,6 @@ pub(in crate::handlers::admin::legacy) fn dashboard_fleet_uptime(
         if dec == 0 {
             None
         } else {
-            // u128 to be safe with very large probe counts;
-            // saturating cast back to u8 (% can't exceed 100).
             let p = ((u128::from(up) * 100) / u128::from(dec)) as u64;
             Some(p.min(100) as u8)
         }
@@ -810,8 +685,6 @@ pub(in crate::handlers::admin::legacy) fn dashboard_fleet_uptime(
         let pct = pct_for(up, dec);
         let color = pct_color(pct);
         let pct_text = pct_label(pct, lang);
-        // `data-fleet-uptime-pct` mirrors the per-server chip
-        // attribute — same scrape contract, different prefix.
         let pct_attr = pct.map(|p| p.to_string()).unwrap_or_else(|| "none".into());
         html! {
             div data-fleet-uptime-pct=(pct_attr)

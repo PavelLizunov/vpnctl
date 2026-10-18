@@ -3,13 +3,7 @@ use maud::Markup;
 
 use crate::handlers::admin::helpers::format_msk_iso;
 
-/// Phase 3c — the «update now» button hits
-/// `/admin/settings/geoip/update-now` (SSE source). The button
-/// flips into a live log pane that streams stdout/stderr from the
-/// `vpnctl geoip-update` subprocess until the terminal Ok/Error
-/// event closes the connection.
 pub(crate) fn settings_geoip_section(lang: crate::i18n::Locale) -> Markup {
-    // anchor target for the monitoring page link
     use crate::i18n::tr;
     let dir = std::env::var_os("VPNCTLD_GEOIP_DIR")
         .map(std::path::PathBuf::from)
@@ -24,8 +18,6 @@ pub(crate) fn settings_geoip_section(lang: crate::i18n::Locale) -> Markup {
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| {
-                // GeoIP file mtime — render in MSK to match the
-                // rest of the operator-facing UI.
                 chrono::DateTime::<chrono::Utc>::from_timestamp(d.as_secs() as i64, 0)
                     .map(format_msk_iso)
                     .unwrap_or_else(|| "?".to_string())
@@ -107,19 +99,6 @@ pub(crate) fn settings_geoip_section(lang: crate::i18n::Locale) -> Markup {
                 " ниже. Она скачивает DB-IP Lite (CC-BY 4.0, без регистрации) и атомарно подменяет .mmdb-файлы в этой папке, затем перезагружает БД.",
             ))
         }
-        // ── «update now» button (Phase 3c, CSP-safe since 2026-06-10) ──
-        // Operator clicks → live log pane streams from
-        // /admin/settings/geoip/update-now. Wired through admin.js's
-        // generic `[data-sse-url]` trigger — the original inline
-        // `<script>` + `onclick` were silently REFUSED by the admin CSP
-        // (`script-src 'self'`, no 'unsafe-inline'), so the button did
-        // nothing in a real browser (audit 2026-06-10). The geoip
-        // runner's step/ok/error event shapes parse fine in the generic
-        // handler (no `phase` field → message renders bare; terminal
-        // `ok` has no redirect → admin.js reloads this page, which
-        // also refreshes the file-status lines above). Idempotent
-        // server-side: a concurrent click hits the 1-permit semaphore
-        // and streams an «already running» error event.
         div style="margin: 14px 0;" {
             button id="geoip-update-now-btn"
                    type="button"

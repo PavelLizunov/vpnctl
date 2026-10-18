@@ -1,13 +1,3 @@
-//! Inventory — хранение состояния (servers/users/grants/audit).
-//!
-//! Backing store: `SqliteInventory` (`sqlite.rs`) — production
-//! persistence через `sqlx`, embedded migrations, WAL, FK
-//! enforcement, audit log. Tests use a per-test TempDir + the same
-//! `SqliteInventory::open` so the test-target ↔ production-target gap
-//! is zero (no separate `InMemoryInventory` to drift). The previous
-//! `mem.rs` stub was deleted 2026-05-22 as orphan code — no caller
-//! used it in 9 months (audit I3 catch).
-
 pub mod assurance;
 pub mod backup;
 pub mod bootstrap;

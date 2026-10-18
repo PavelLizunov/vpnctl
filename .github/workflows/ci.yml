@@ -94,19 +94,7 @@ jobs:
           /tmp/sing-box version | grep -q with_v2ray_api
           test -x /tmp/singbox-stats-helper
 
-  # NOTE: a separate `cargo audit` job was removed — the `deny` job above
-  # already runs `cargo deny check advisories` against the same RustSec DB,
-  # AND honours our deny.toml `[advisories].ignore` list. Having both meant
-  # double-failing on RUSTSEC-2023-0071 (Marvin Attack on `rsa` via russh).
 
-  # gitleaks — secret-scanner pre-merge gate (2026-05-18 security
-  # audit recommendation #1). Catches accidental commits of
-  # inventory/<IP>.env files, VPNCTLD_ADMIN_PASSWORD pastes in
-  # docs, leaked bot tokens, etc.
-  #
-  # Default ruleset covers Telegram bot tokens, AWS, GitHub, generic
-  # high-entropy strings. Repo-local allowlist in `.gitleaks.toml`
-  # excludes intentional examples (e.g. test fixtures).
   gitleaks:
     name: gitleaks
     runs-on: ubuntu-latest
@@ -126,29 +114,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: pre-pull sshd image (cuts test latency, surfaces network errors here)
-        run: docker pull lscr.io/linuxserver/openssh-server:latest
+        run: |
+          for i in 1 2 3 4 5; do
+            docker pull lscr.io/linuxserver/openssh-server:latest && exit 0
+            sleep $((i * 20))
+          done
+          exit 1
       - name: e2e_sshd
         run: cargo test -p vpnctl-ssh --test e2e_sshd -- --ignored --nocapture
       - name: spec_password_auth (independent test-writer-agent suite)
         run: cargo test -p vpnctl-ssh --test spec_password_auth -- --ignored --nocapture
 
-  # cargo-mutants — mutation testing on the protocols crate's
-  # byte-equality contract. Catches «tests pass even when impl is
-  # inverted» bugs (the db3998c-style mistake). Promoted from
-  # `just mutants-protocols` to CI per the 2026-05-18 audit
-  # deferred-items list.
-  #
-  # Scoped to `vpnctl-protocols` only because:
-  #   * That crate's `share_link` byte-equality regression tests are
-  #     the highest-value mutation surface.
-  #   * Whole-workspace mutants would push CI past 30 min.
-  #   * `--in-diff origin/main` further narrows runtime on PRs by
-  #     mutating only changed code paths.
-  #
-  # Soft-fail policy: a missed mutant produces a warning annotation
-  # but does NOT block merge. Hardening to a blocking gate happens
-  # once the surface is stable + the false-positive rate is known.
-  # (continue-on-error: true.)
   mutants:
     name: cargo-mutants (protocols, soft-fail)
     runs-on: ubuntu-latest
@@ -164,25 +140,9 @@ jobs:
         run: cargo install --locked cargo-mutants --version ^25
       - name: run mutation tests on protocols crate
         run: |
-          # The `|| true` belt-and-braces with continue-on-error:
-          # cargo-mutants exits non-zero when any mutant survives,
-          # which we want surfaced as an annotation, not a hard fail.
           cargo mutants -p vpnctl-protocols --in-diff origin/main \
             --timeout-multiplier 3 --no-shuffle || true
 
-  # layout-check — programmatic bounding-box assertions over the
-  # rendered admin pages. Pinned in `scripts/layout_check.py`. This
-  # CI job runs them in HEADLESS mode against a CI-local vpnctld
-  # instance is non-trivial (needs Chrome + a running daemon with
-  # seeded inventory), so for now the gate is GITHUB-side syntax /
-  # smoke ONLY — verifies the script parses + that its CHECKS list
-  # references known selectors. Live execution stays manual via
-  # `python3 scripts/layout_check.py http://192.168.0.236:18402
-  # "slovn:$ADMIN_PW"` against the homelab daemon (Layer 6.5 of the
-  # methodology).
-  #
-  # `continue-on-error: true` matches cargo-mutants — annotations
-  # only, not blocking.
   layout-check-smoke:
     name: layout-check (script smoke, soft-fail)
     runs-on: ubuntu-latest
@@ -192,14 +152,10 @@ jobs:
       - name: parse + import-check
         run: |
           python3 -m py_compile scripts/layout_check.py
-          # Verify the CHECKS list compiles as valid Python and
-          # references the helper functions it claims.
           python3 -c "
           import sys, ast
           src = open('scripts/layout_check.py').read()
           ast.parse(src)
-          # Defined helpers must include the assertions referenced by
-          # CHECKS — surfaces 'I renamed a helper and forgot CHECKS'.
           required = {'all_equal_width', 'all_equal_height', 'all_start_at_same_y', 'at_least_one'}
           tree = ast.parse(src)
           defs = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}

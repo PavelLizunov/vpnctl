@@ -5,24 +5,6 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
-/// `GET /admin/users/{user_id}/wireguard/conf/{server_id}` — serve a
-/// drag-drop-ready `.conf` file (INI body — `[Interface]` + `[Peer]`,
-/// optionally + AmneziaWG obfs lines when secrets are set) for this
-/// (user, server) pair. Imports into the official WireGuard app, into
-/// Hiddify, AND into AmneziaVPN's "File with settings" picker — i.e.
-/// every WG client, no matter the URI scheme they prefer.
-///
-/// Headers:
-///   * `Content-Type: text/plain; charset=utf-8` — most clients sniff
-///     the body regardless, but `text/plain` is the closest match.
-///   * `Content-Disposition: attachment; filename="<user>-<server>.conf"`
-///     — triggers the browser's download UI instead of inline display.
-///
-/// Errors:
-///   * 404 if the user or server doesn't exist (canonical body).
-///   * 400 if the server doesn't enable the `wireguard` protocol.
-///   * 500 on rendering errors (missing server pubkey etc.) — these
-///     usually indicate the server hasn't been deployed.
 pub(crate) async fn user_wireguard_conf_download(
     State(state): State<AppState>,
     Path((user_id_str, server_id_str)): Path<(String, String)>,
@@ -47,11 +29,6 @@ pub(crate) async fn user_wireguard_conf_download(
             "server '{server_id_str}' does not enable the 'wireguard' protocol — enable it on the server detail page before downloading a .conf"
         ));
     }
-    // Grant check — refuse the download if the (user, server) pair
-    // isn't granted. Without this, the URL stays "live" after a
-    // revoke and a stale browser tab can still pull the .conf.
-    // Doubles as the source of `ctx.peers` so the .conf address
-    // matches the server's [Peer] block 1:1.
     let peers = match state.inv.users_for_server(&sid).await {
         Ok(p) => p,
         Err(e) => return internal_error(anyhow::Error::new(e)),
@@ -71,8 +48,6 @@ pub(crate) async fn user_wireguard_conf_download(
         Err(e) => return internal_error(anyhow::anyhow!(e)),
     };
 
-    // Strip every RFC-6266 unsafe set + control bytes + non-ASCII characters
-    // from the filename before quoting using sanitize_header_filename.
     let safe_user = sanitize_header_filename(&user.id.0);
     let safe_server = sanitize_header_filename(&server.id.0);
     let filename = format!("{safe_user}-{safe_server}.conf");
@@ -89,8 +64,6 @@ pub(crate) async fn user_wireguard_conf_download(
     resp
 }
 
-/// Shared delivery-button and direct-download policy. Database failures must
-/// propagate: an unavailable visibility/suppression check is never permission.
 pub(crate) async fn amnezia_conf_available(
     state: &AppState,
     user: &vpnctl_core::User,
@@ -159,7 +132,6 @@ fn amnezia_download_error(status: StatusCode, message: &'static str) -> Response
     (status, [(header::CACHE_CONTROL, "no-store")], message).into_response()
 }
 
-/// Read-only native AWG2/3 export. Never mint keys or expose renderer/DB errors.
 pub(crate) async fn user_amneziawg_conf_download(
     State(state): State<AppState>,
     Path((user_id, version, server_id)): Path<(String, String, String)>,

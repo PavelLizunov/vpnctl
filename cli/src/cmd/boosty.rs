@@ -104,10 +104,6 @@ async fn run_sync(inv: &SqliteInventory, apply: bool, disable_lapsed: bool) -> a
     let report = sync_from_inventory(inv, mode).await?;
     print_report(&report, mode);
 
-    // Applied flips only touch inv.db — the nodes keep serving their old
-    // `users[]` until a deploy re-renders their configs. (The daemon's
-    // poller/buttons auto-deploy; the CLI is the automation surface, so
-    // it prints the exact commands instead.)
     if apply {
         let flipped: Vec<&String> = report
             .enabled
@@ -219,7 +215,6 @@ async fn run_link(inv: &SqliteInventory, user: &str, subscriber_id: i64) -> anyh
     if inv.get_user(&UserId(user.to_string())).await?.is_none() {
         return Err(anyhow::anyhow!("no such user: {user}"));
     }
-    // Audit-on-actual-mutation: a same-pair re-link writes nothing.
     let changed = inv
         .link_boosty_subscriber(&UserId(user.to_string()), subscriber_id)
         .await?;
@@ -375,7 +370,6 @@ async fn run_configure(
     }
 
     inv.set_boosty_settings(&s).await?;
-    // Audit WITHOUT any secret values — only which non-secret fields changed.
     inv.audit(
         "cli",
         "boosty.configure",

@@ -1,32 +1,3 @@
-//! `vpnctl update-kernels <server> | --all` — upgrade node kernel
-//! binaries to their version floor WITHOUT rendering or applying config.
-//!
-//! ## Why this exists (the feature's whole point)
-//!
-//! Every `Kernel::ensure_installed(ssh)` already carries the version-gated
-//! apt upgrade for that kernel (sing-box, amneziawg, content-aware
-//! caddy). Running JUST `ensure_installed` upgrades the
-//! on-disk binary and lets the package manager restart the service
-//! against the config that is ALREADY on the node — it never enters
-//! `apply_config`, so it never triggers the DG-1 pre-apply UUID-removal
-//! diff-guard.
-//!
-//! That bypass is deliberate. `vpnctl deploy` refuses to push a config
-//! that would drop a `users[*].uuid` it doesn't know about (service
-//! accounts, inventory-drift nodes). On such a node `deploy` is BLOCKED
-//! at apply-time, so the operator could never get a security/feature
-//! kernel upgrade onto it. `update-kernels` upgrades the binary on those
-//! exact nodes — config is left untouched, the drift is preserved, only
-//! the kernel version moves.
-//!
-//! ## What it does NOT do
-//!
-//! No render, no `apply_config`, no firewall step, no secret bootstrap.
-//! Kernel ids come from each server's declaration and resolve through the
-//! existing registry, so adding a kernel does not add another updater list.
-//! It reuses `Kernel::status` (before/after version) and
-//! `Kernel::ensure_installed` (the upgrade) only.
-
 use crate::{OutputFormat, ui};
 use serde::Serialize;
 use serde_json::json;
@@ -35,16 +6,12 @@ use vpnctl_core::{Server, ServerId, SshTransport};
 use vpnctl_inventory::{NodeOperationLock, SqliteInventory};
 use vpnctl_ssh::SubprocessSshTransport;
 
-/// Which node(s) to upgrade.
 #[derive(Debug, Clone)]
 pub(crate) enum UpdateTarget {
-    /// A single server, by inventory id.
     One(String),
-    /// Every server in the inventory.
     All,
 }
 
-/// Per-kernel result row — also the JSON output shape.
 #[derive(Debug, Clone, Serialize)]
 struct KernelUpdate {
     kernel: String,
@@ -59,7 +26,6 @@ struct KernelUpdate {
     error: Option<String>,
 }
 
-/// Per-server block in the output.
 #[derive(Debug, Clone, Serialize)]
 struct ServerUpdate {
     server: String,
@@ -69,18 +35,6 @@ struct ServerUpdate {
     error: Option<String>,
 }
 
-/// Pure record-classification helper, extracted so the before/after
-/// logic is unit-testable without SSH. Returns `(changed, label)`.
-///
-/// * `err == true`  → `(false, "error")` — an `ensure_installed` failure
-///   means we did not observe a successful upgrade, so it is never
-///   reported as "changed", regardless of the version readings.
-/// * version moved   → `(true, "upgraded")`
-/// * version steady   → `(false, "unchanged")`
-///
-/// A `None` reading (status couldn't parse a version) is treated as a
-/// distinct value: `None → Some` and `Some → None` both count as a
-/// change, `None → None` does not.
 fn summarize(before: Option<&str>, after: Option<&str>, err: bool) -> (bool, &'static str) {
     if err {
         return (false, "error");
@@ -232,15 +186,6 @@ pub(crate) async fn run(
     Ok(())
 }
 
-/// Connect to one server (TOFU-persisting the host fingerprint on a
-/// first connect, mirroring `deploy`/`status`) and run `ensure_installed`
-/// for each declared kernel. Returns the per-kernel result rows.
-///
-/// Per-kernel error isolation: one kernel's `ensure_installed` failure is
-/// recorded in its row and the remaining kernels still run — mirroring
-/// the redeploy pipeline's posture. An SSH-connect failure (no kernel
-/// could be touched at all) IS propagated, so `--all` does not silently
-/// pretend an unreachable node was upgraded.
 async fn update_one_server(
     inv: &SqliteInventory,
     registry: &vpnctl_core::Registry,
@@ -298,9 +243,6 @@ async fn update_one_server(
             Err(error) => (None, Some(format!("status before update failed: {error}"))),
         };
 
-        // THE upgrade. NEVER apply_config — that is the whole point of
-        // this command (see module doc): it must not enter the DG-1
-        // diff-guard, so inventory-drift nodes can still get the binary.
         let upgrade = k.ensure_installed(&ssh).await;
         let upgrade_error = upgrade.as_ref().err().map(|e| format!("{e:#}"));
         let reboot_required = upgrade_error
@@ -308,8 +250,6 @@ async fn update_one_server(
             .is_some_and(is_reboot_required_error);
         let mut error = upgrade_error.filter(|error| !is_reboot_required_error(error));
 
-        // Re-query after the attempt regardless — even on a failed
-        // upgrade the on-disk version + active flag are informative.
         let (version_after, active_after, status_after_error) = match k.status(&ssh).await {
             Ok(status) => (status.version, Some(status.active), None),
             Err(status_error) => (
@@ -449,8 +389,6 @@ mod tests {
 
     #[test]
     fn summarize_none_to_some_is_changed() {
-        // status couldn't read a version before the upgrade, then could:
-        // that is a meaningful change (e.g. binary freshly installed).
         let (changed, label) = summarize(None, Some("1.11.0"), false);
         assert!(changed);
         assert_eq!(label, "upgraded");
@@ -465,9 +403,6 @@ mod tests {
 
     #[test]
     fn summarize_error_overrides_version_change() {
-        // Even if the post-attempt version reading differs, an
-        // ensure_installed error must surface as "error" and NOT as a
-        // successful upgrade.
         let (changed, label) = summarize(Some("1.10.0"), Some("1.11.0"), true);
         assert!(!changed, "an errored upgrade is never reported as changed");
         assert_eq!(label, "error");

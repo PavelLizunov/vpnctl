@@ -36,11 +36,6 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     let config = DaemonConfig::resolve(cli.db, cli.addr).await?;
-    // Safety gate (audit B3, 2026-05-22): a non-loopback bind without
-    // admin credentials would have served the entire admin UI to any
-    // peer. Loopback binds + non-loopback-with-auth proceed; otherwise
-    // refuse to start with a concrete remediation message naming the
-    // env vars that need to be set.
     assert_auth_safe_for_addr(config.addr)?;
     info!(
         target = "vpnctld",
@@ -55,17 +50,6 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("bind {}", config.addr))?;
     info!(target = "vpnctld", "listening on http://{}", config.addr);
 
-    // `into_make_service_with_connect_info::<SocketAddr>()` lets the
-    // `/sub/<token>` handler extract `ConnectInfo<SocketAddr>` so it
-    // can log the source IP into `sub_access_log` (Phase Track-1
-    // abuse-detection layer). Without this, axum's `ConnectInfo`
-    // extractor fails and the IP shows up as "unknown".
-    //
-    // Reverse-proxy caveat: when vpnctld eventually sits behind nginx
-    // / Cloudflare / Caddy, ConnectInfo will be the proxy's loopback
-    // address. Honour `X-Forwarded-For` (only when the immediate peer
-    // is in a trusted-proxy allowlist) at that point — out of scope
-    // for the LAN-only deployment shape we have today.
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -78,10 +62,6 @@ async fn main() -> anyhow::Result<()> {
 
 fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};
-    // Production default: info-only, tower_http at warn (request span at info
-    // is too noisy and was leaking the token-bearing URI for /sub/<token>
-    // before we switched the trace span to use MatchedPath). Set RUST_LOG
-    // for verbose traces.
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,vpnctld=info,tower_http=warn"));
     fmt().with_env_filter(filter).with_target(true).init();

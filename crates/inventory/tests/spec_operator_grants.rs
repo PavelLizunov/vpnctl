@@ -1,6 +1,3 @@
-//! Spec for operator grant management, revocations, per-grant protocol overrides,
-//! and audit trail invariants (including no-op audit suppression).
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use tempfile::TempDir;
@@ -67,7 +64,6 @@ async fn grant_and_revoke_lifecycle() {
     assert!(inv.users_for_server(&server_id).await.unwrap().is_empty());
     assert!(inv.servers_for_user(&user_id).await.unwrap().is_empty());
 
-    // Grant access
     inv.grant(&user_id, &server_id).await.unwrap();
 
     assert_eq!(inv.count_grants().await.unwrap(), 1);
@@ -82,7 +78,6 @@ async fn grant_and_revoke_lifecycle() {
     let per_server_counts = inv.users_count_per_server().await.unwrap();
     assert_eq!(per_server_counts.get(&server_id).copied(), Some(1));
 
-    // Revoke access
     inv.revoke(&user_id, &server_id).await.unwrap();
 
     assert_eq!(inv.count_grants().await.unwrap(), 0);
@@ -103,19 +98,15 @@ async fn grant_and_revoke_are_idempotent() {
         .unwrap();
     inv.add_user(&usr("bob")).await.unwrap();
 
-    // First grant
     inv.grant(&user_id, &server_id).await.unwrap();
     assert_eq!(inv.count_grants().await.unwrap(), 1);
 
-    // Duplicate grant is a no-op and succeeds
     inv.grant(&user_id, &server_id).await.unwrap();
     assert_eq!(inv.count_grants().await.unwrap(), 1);
 
-    // First revoke
     inv.revoke(&user_id, &server_id).await.unwrap();
     assert_eq!(inv.count_grants().await.unwrap(), 0);
 
-    // Duplicate revoke is a no-op and succeeds
     inv.revoke(&user_id, &server_id).await.unwrap();
     assert_eq!(inv.count_grants().await.unwrap(), 0);
 }
@@ -160,14 +151,12 @@ async fn protocol_override_toggle_and_visibility() {
     inv.add_user(&usr("carol")).await.unwrap();
     inv.grant(&user_id, &server_id).await.unwrap();
 
-    // Initially both protocols visible
     let visible_init = inv
         .visible_protocols_for_subscription(&user_id, &server_id)
         .await
         .unwrap();
     assert_eq!(visible_init, vec![proto_tuic.clone(), proto_vless.clone()]);
 
-    // Disable tuic-v5 for this user on this server
     inv.set_grant_protocol_override(&user_id, &server_id, &proto_tuic, true)
         .await
         .unwrap();
@@ -187,7 +176,6 @@ async fn protocol_override_toggle_and_visibility() {
         .unwrap();
     assert_eq!(visible_after, vec![proto_vless.clone()]);
 
-    // Re-enable tuic-v5 by removing the override
     inv.set_grant_protocol_override(&user_id, &server_id, &proto_tuic, false)
         .await
         .unwrap();
@@ -222,7 +210,6 @@ async fn protocol_override_fails_without_existing_grant() {
         .unwrap();
     inv.add_user(&usr("dave")).await.unwrap();
 
-    // No grant exists yet
     let err = inv
         .set_grant_protocol_override(&user_id, &server_id, &proto_vless, true)
         .await
@@ -259,7 +246,6 @@ async fn protocol_override_noop_audit_suppression() {
         0
     );
 
-    // 1. Setting disabled=false when no override exists should be a no-op (0 audit rows)
     inv.set_grant_protocol_override(&user_id, &server_id, &proto_vless, false)
         .await
         .unwrap();
@@ -269,7 +255,6 @@ async fn protocol_override_noop_audit_suppression() {
         "no-op delete must not write audit log"
     );
 
-    // 2. Setting disabled=true mutates state -> writes exactly 1 audit row
     inv.set_grant_protocol_override(&user_id, &server_id, &proto_vless, true)
         .await
         .unwrap();
@@ -279,7 +264,6 @@ async fn protocol_override_noop_audit_suppression() {
         "mutation must write exactly 1 audit row"
     );
 
-    // Verify audit entry payload and target
     let recent = inv.recent_audit(10).await.unwrap();
     let entry = recent
         .iter()
@@ -293,7 +277,6 @@ async fn protocol_override_noop_audit_suppression() {
     assert_eq!(payload["protocol_id"], serde_json::json!("vless+reality"));
     assert_eq!(payload["disabled"], serde_json::json!(true));
 
-    // 3. Setting disabled=true again on an already disabled override -> no-op (still 1 audit row)
     inv.set_grant_protocol_override(&user_id, &server_id, &proto_vless, true)
         .await
         .unwrap();
@@ -303,7 +286,6 @@ async fn protocol_override_noop_audit_suppression() {
         "no-op re-disable must NOT write another audit row"
     );
 
-    // 4. Setting disabled=false mutates state back -> writes 2nd audit row
     inv.set_grant_protocol_override(&user_id, &server_id, &proto_vless, false)
         .await
         .unwrap();
@@ -349,7 +331,6 @@ async fn revoke_cascades_and_removes_protocol_overrides() {
         .unwrap();
     assert_eq!(overrides.len(), 2);
 
-    // Revoking grant should cascade and delete associated overrides
     inv.revoke(&user_id, &server_id).await.unwrap();
 
     let overrides_after = inv

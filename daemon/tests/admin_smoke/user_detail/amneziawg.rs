@@ -56,8 +56,6 @@ async fn fixture(dir: &TempDir, keys: bool) -> AppState {
     state
 }
 
-// Fault injection only in this test's disposable inventory. Python's stdlib
-// avoids adding a daemon dependency or exposing the inventory's private pool.
 fn mutate_test_database(dir: &TempDir, sql: &str) {
     let status = std::process::Command::new("python3")
         .args(["-c", "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.executescript(sys.argv[2]); c.commit(); c.close()"])
@@ -106,8 +104,6 @@ fn download(version: u8) -> String {
 
 #[tokio::test]
 async fn authenticated_native_download_is_no_store_and_read_only() {
-    // Set auth only in a child process: no unsafe process-global env mutation,
-    // and no contamination of the admin smoke suite's auth-free fixtures.
     const CHILD: &str = "VPNCTL_AWG_AUTH_SMOKE_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -253,8 +249,6 @@ async fn stale_urls_and_delivery_obey_every_visibility_gate() {
                     .unwrap();
             }
             "role" => {
-                // Corrupt a legacy row deliberately: normal role mutation refuses
-                // existing grants. The read path must still fail closed.
                 mutate_test_database(
                     &dir,
                     "DROP TRIGGER trg_workload_role_rejects_grants; UPDATE servers SET role = 'workload-only' WHERE id = 's0';",

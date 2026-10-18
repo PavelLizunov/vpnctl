@@ -1,10 +1,3 @@
-//! Server action admin handlers: the write side of the servers surface —
-//! traffic limits, protocol/kernel enable-disable, grants (single + bulk),
-//! deploy, quick-add, delete, deploy-key push, the per-server config
-//! setters and protocol hide/unhide. The read-only server list lives in
-//! `servers.rs`. Extracted from `legacy.rs` as part of the admin
-//! submodules refactor.
-
 mod billing;
 mod config;
 mod deploy;

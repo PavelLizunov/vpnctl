@@ -1,6 +1,3 @@
-//! Wire the axum Router. Kept separate from `main.rs` so tests can build
-//! the same Router without the network/signal plumbing.
-
 pub mod registry;
 pub mod routes;
 pub mod schedulers;

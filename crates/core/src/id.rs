@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Стабильный строковый id (типа `"sing-box"`, `"caddy"`).
-/// Нельзя перепутать с другим `Id` благодаря newtype-обёртке.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct KernelId(pub String);
 

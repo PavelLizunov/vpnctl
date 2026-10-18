@@ -1,5 +1,3 @@
-//! Localized alert message templates.
-
 use crate::i18n::Locale;
 use serde_json::Value;
 
@@ -15,10 +13,6 @@ fn ps<'a>(p: &'a Value, k: &str) -> Option<&'a str> {
     p.get(k).and_then(Value::as_str)
 }
 
-/// Render a localized alert. `subject` is the already-resolved
-/// display-name — the country label for server alerts (`server_display_label`)
-/// or the user id for user alerts. We HTML-escape it here, so callers pass
-/// it RAW.
 pub fn render_alert(
     kind: &str,
     severity: &str,
@@ -28,11 +22,9 @@ pub fn render_alert(
 ) -> RenderedAlert {
     let subj = esc(subject);
     let icon = icon_for(kind, severity);
-    // Strip a `:identifier` suffix (e.g. user.traffic_limit:alice).
     let base = kind.split(':').next().unwrap_or(kind);
 
     let (title, body, action): (String, String, Option<String>) = match base {
-        // ───────────────────────── critical ─────────────────────────
         "server.singbox.down" => {
             let ip = ps(payload, "ip").map(code).unwrap_or_default();
             (
@@ -105,25 +97,19 @@ pub fn render_alert(
             )
         }
 
-        // ───────────────────────── warnings ─────────────────────────
-        "server.unreachable" if severity == "info" => {
-            // Recovery variant (edit-on-recover flips the original 🔴 to
-            // this 🟢). Unreachable has no separate `.up` kind, so the
-            // recovery is signalled by severity=info on the same kind.
-            (
-                pick(
-                    loc,
-                    format!("Node reachable again — {subj}"),
-                    format!("Нода снова доступна — {subj}"),
-                ),
-                pick(
-                    loc,
-                    format!("{subj} is responding again — SSH probes succeed."),
-                    format!("{subj} снова отвечает — SSH-проверки проходят."),
-                ),
-                None,
-            )
-        }
+        "server.unreachable" if severity == "info" => (
+            pick(
+                loc,
+                format!("Node reachable again — {subj}"),
+                format!("Нода снова доступна — {subj}"),
+            ),
+            pick(
+                loc,
+                format!("{subj} is responding again — SSH probes succeed."),
+                format!("{subj} снова отвечает — SSH-проверки проходят."),
+            ),
+            None,
+        ),
         "server.unreachable" => {
             let n = u(payload, "consecutive_failures").unwrap_or(3);
             let ip = ps(payload, "ip");
@@ -548,7 +534,6 @@ pub fn render_alert(
             )
         }
 
-        // ──────────────────────── soft-warnings ─────────────────────
         "server.attribution.stalled" => (
             pick(
                 loc,
@@ -611,10 +596,7 @@ pub fn render_alert(
             )
         }
 
-        // ───────────────────── boosty.sync.failed ───────────────────
         "boosty.sync.failed" => {
-            // payload.auth=true → dead credentials (cannot self-heal);
-            // false → transient network/API failure, next tick retries.
             let auth = payload
                 .get("auth")
                 .and_then(serde_json::Value::as_bool)
@@ -654,13 +636,7 @@ pub fn render_alert(
             }
         }
 
-        // ───────────────────────── fallback ─────────────────────────
         other => {
-            // Unknown kind: neutral, still localized scaffolding so a new
-            // kind shipped without an arm is at least readable (and the
-            // test `every_known_kind_has_a_dedicated_arm` catches the gap).
-            // Escape the raw kind too — keeps the module invariant that
-            // EVERY interpolated value into parse_mode=HTML is esc()'d.
             let okind = esc(other);
             (
                 pick(loc, format!("Alert — {subj}"), format!("Событие — {subj}")),

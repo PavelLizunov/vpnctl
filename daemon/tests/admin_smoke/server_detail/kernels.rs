@@ -31,12 +31,10 @@ async fn admin_server_detail_kernels_section_shows_every_registered_kernel() {
     let app = router(s);
     let html = fetch_html(app, "/admin/servers/sb-only/protocols").await;
     assert!(html.contains("Kernels"), "Kernels heading missing");
-    // sing-box is registered AND enabled → disable form
     assert!(
         html.contains("/admin/servers/sb-only/kernels/sing-box/disable"),
         "enabled kernel must have disable form"
     );
-    // amneziawg is registered but NOT enabled → enable form
     assert!(
         html.contains("/admin/servers/sb-only/kernels/amneziawg/enable"),
         "disabled kernel must have enable form"
@@ -134,9 +132,6 @@ async fn admin_server_enable_kernel_rejects_unregistered_id() {
 
 #[tokio::test]
 async fn admin_multi_kernel_server_enables_wireguard_protocol() {
-    // The end-to-end scenario Pavel raised: add amneziawg kernel
-    // to a sing-box node → wireguard protocol becomes enable-able
-    // (not "incompatible") on the same server.
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
@@ -157,14 +152,10 @@ async fn admin_multi_kernel_server_enables_wireguard_protocol() {
         .unwrap();
     let app = router(s);
     let html = fetch_html(app.clone(), "/admin/servers/dual/protocols").await;
-    // wireguard MUST now show an enable form (previously was
-    // "incompatible" under the sing-box-only kernel).
     assert!(
         html.contains("/admin/servers/dual/protocols/wireguard/enable"),
         "wireguard must be enable-able once amneziawg kernel is on the server"
     );
-    // Validate end-to-end: actually enable wireguard, then assert
-    // it lands in the row.
     let resp = app
         .oneshot(
             add_same_origin(
@@ -189,9 +180,6 @@ async fn admin_multi_kernel_server_enables_wireguard_protocol() {
     );
 }
 
-/// "Update kernels" button (update-kernels PR2): the server-detail page
-/// shows the SSE-driven kernel-binary upgrade trigger with its OWN log
-/// pane (`update-kernels-log`, distinct from `deploy-log`). Copy-contract.
 #[tokio::test]
 async fn admin_server_detail_shows_update_kernels_button() {
     let dir = TempDir::new().unwrap();
@@ -217,7 +205,6 @@ async fn admin_server_detail_shows_update_kernels_button() {
         html.contains(r#"data-sse-url="/admin/servers/ukb/update-kernels/sse""#),
         "update-kernels button must carry the per-server SSE trigger URL"
     );
-    // Its OWN log pane — distinct from the deploy button's `deploy-log`.
     assert!(
         html.contains(r#"id="update-kernels-log""#),
         "update-kernels needs its own live log pane (not deploy-log)"
@@ -232,11 +219,6 @@ async fn admin_server_detail_shows_update_kernels_button() {
     );
 }
 
-/// Operator-action-policy contract (CLAUDE.md HARD rule): the
-/// update-kernels button's title / caption must NOT carry a bare
-/// `ssh root@…` operator instruction. It describes what the DAEMON does
-/// (apt upgrade + service restart), matching Deploy's allowed descriptive
-/// register — it must not read as a shell-on-node instruction-to-operator.
 #[tokio::test]
 async fn admin_server_detail_update_kernels_copy_has_no_ssh_operator_instruction() {
     let dir = TempDir::new().unwrap();
@@ -258,19 +240,12 @@ async fn admin_server_detail_update_kernels_copy_has_no_ssh_operator_instruction
         .unwrap();
     let app = router(s);
     let html = fetch_html(app, "/admin/servers/ukpolicy").await;
-    // No bare operator-facing `ssh root@…` instruction anywhere on the
-    // page (the page carries no ssh-instruction copy today; the new
-    // update-kernels block must not introduce one).
     assert!(
         !html.contains("ssh root@"),
         "update-kernels copy must not instruct the operator to `ssh root@…` the node"
     );
 }
 
-/// Handler smoke: a cross-site `Sec-Fetch-Site` on the per-server
-/// update-kernels SSE route is refused with 403 (CSRF guard), mirroring
-/// the deploy SSE guard. A full stream needs a live node — the guard +
-/// not-found below are the daemon-side analog.
 #[tokio::test]
 async fn server_update_kernels_sse_cross_site_is_403() {
     let dir = TempDir::new().unwrap();
@@ -308,8 +283,6 @@ async fn server_update_kernels_sse_cross_site_is_403() {
     );
 }
 
-/// Handler smoke: the per-server update-kernels SSE route 404s for an
-/// unknown server id (server lookup runs after the same-origin guard).
 #[tokio::test]
 async fn server_update_kernels_sse_unknown_server_is_404() {
     let dir = TempDir::new().unwrap();
@@ -333,8 +306,6 @@ async fn server_update_kernels_sse_unknown_server_is_404() {
     );
 }
 
-/// server#2 — per-server kernel rollup renders the sing-box floor +
-/// on-target verdict from this node's kernel_versions_json.
 #[tokio::test]
 async fn server_detail_kernel_rollup_renders_version_for_this_node() {
     let dir = TempDir::new().unwrap();

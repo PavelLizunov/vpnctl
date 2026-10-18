@@ -13,12 +13,10 @@ async fn admin_wizard_new_renders_form_with_required_fields() {
     let dir = TempDir::new().unwrap();
     let app = router(state(&dir).await);
     let html = fetch_html(app, "/admin/servers/new").await;
-    // Form posts back to the same URL.
     assert!(
         html.contains(r#"action="/admin/servers/new""#),
         "form action missing"
     );
-    // Both fields present, both required.
     assert!(html.contains(r#"name="address""#), "address field missing");
     assert!(
         html.contains(r#"id="ssh_user" name="ssh_user" type="text" value="root""#),
@@ -28,14 +26,10 @@ async fn admin_wizard_new_renders_form_with_required_fields() {
         html.contains(r#"name="root_password""#),
         "root_password field missing"
     );
-    // Password input must be type=password (no echo to the page).
     assert!(
         html.contains(r#"id="root_password" name="root_password" type="password""#),
         "root_password must be type=password"
     );
-    // Headline + step indicator (copy contract). «of 2» — the wizard
-    // is a 2-step flow; the old «of 3» promised a step that never
-    // existed (review 2026-06-04).
     assert!(
         html.contains("Add server · step 1 of 2"),
         "step indicator missing"
@@ -80,8 +74,6 @@ async fn admin_wizard_submit_rejects_shell_injection_in_address() {
                     .uri("/admin/servers/new")
                     .header("content-type", "application/x-www-form-urlencoded"),
             )
-            // %3B is `;`, %20 is space — these are exactly what a
-            // browser form would send for `; rm -rf /`.
             .body(Body::from(
                 "address=10.0.0.1%3B%20rm%20-rf%20%2F&root_password=hunter2",
             ))
@@ -219,9 +211,6 @@ async fn admin_wizard_submit_rejects_empty_password_400() {
     );
 }
 
-/// Happy path: valid input → 303 to step-2 + HttpOnly session cookie.
-/// The cookie's Path scope MUST be limited to the wizard so the
-/// session id never rides along on /admin/users/* etc.
 #[tokio::test]
 async fn admin_wizard_submit_happy_path_sets_scoped_cookie_and_redirects() {
     let dir = TempDir::new().unwrap();
@@ -262,7 +251,6 @@ async fn admin_wizard_submit_happy_path_sets_scoped_cookie_and_redirects() {
         cookie.starts_with("vpnctl_wizard="),
         "wrong cookie name: {cookie}"
     );
-    // Security flags: path-scope, HttpOnly, SameSite=Strict.
     assert!(
         cookie.contains("Path=/admin/servers/new"),
         "cookie path must be wizard-scoped, got: {cookie}"
@@ -275,7 +263,6 @@ async fn admin_wizard_submit_happy_path_sets_scoped_cookie_and_redirects() {
         cookie.contains("SameSite=Strict"),
         "cookie must be SameSite=Strict, got: {cookie}"
     );
-    // Server-side state has the row.
     assert_eq!(s.wizard.len(), 1, "session must be stashed server-side");
 }
 
@@ -305,7 +292,6 @@ async fn admin_wizard_step2_renders_address_with_valid_session() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let html = std::str::from_utf8(&body).unwrap();
-    // Address + selected user echo back; password MUST NOT be in the page.
     assert!(
         html.contains("vpn-de1.example.org"),
         "address must echo on step-2"
@@ -315,7 +301,6 @@ async fn admin_wizard_step2_renders_address_with_valid_session() {
         !html.contains("r00tpwXYZ-distinct"),
         "root password must NEVER appear in step-2 HTML"
     );
-    // Step indicator («of 2» — see step-1's copy-contract note).
     assert!(
         html.contains("Add server · step 2 of 2"),
         "step indicator missing on step-2"
@@ -392,24 +377,6 @@ async fn admin_wizard_step2_rejects_bogus_cookie_400() {
     );
 }
 
-// ───────────────────────────────────────────────────────────────────
-// Phase E sub-iter 4b — wizard SSE bootstrap.
-//
-// The step-2 page must:
-//   * render an inline EventSource pointed at the SSE source,
-//   * have a log pane + status line populated by the client JS,
-//   * NEVER echo the operator's root password into the HTML,
-//   * link a fallback "start over" anchor.
-//
-// The SSE endpoint must:
-//   * reject missing/bogus session with 400 + canonical body,
-//   * single-shot consume the session (re-attach 400s),
-//   * advertise `Content-Type: text/event-stream` (browsers refuse
-//     to treat the response as an EventSource otherwise),
-//   * never appear in the CSRF/auth blast radius without protection
-//     (it's a GET — CSRF passes through, basic-auth wraps it).
-// ───────────────────────────────────────────────────────────────────
-
 #[tokio::test]
 async fn admin_wizard_step2_page_attaches_autostart_sse_to_endpoint() {
     let dir = TempDir::new().unwrap();
@@ -426,15 +393,10 @@ async fn admin_wizard_step2_page_attaches_autostart_sse_to_endpoint() {
     )
     .await;
 
-    // v2 6b — CSP-safe: admin.js opens the EventSource from the
-    // data-sse-autostart attribute (the old inline <script> was blocked
-    // by script-src 'self').
     assert!(
         html.contains(r#"data-sse-autostart="/admin/servers/new/step-2/sse""#),
         "step-2 log pane must carry the autostart SSE URL"
     );
-    // The old inline EventSource block is gone (CSP-blocked); the
-    // only <script> is the external admin.js the shell always ships.
     assert!(
         !html.contains("new EventSource("),
         "step-2 must not ship an inline EventSource script (CSP-blocked)"
@@ -443,8 +405,6 @@ async fn admin_wizard_step2_page_attaches_autostart_sse_to_endpoint() {
         html.contains("id=\"wizard-log\""),
         "step-2 must have a log pane the SSE handlers append into"
     );
-    // v2 6b — the live steps checklist replaced the status <div>;
-    // admin.js maps each `step` event's phase to a row here.
     assert!(
         html.contains("id=\"wizard-steps\"") && html.contains("data-step-phase="),
         "step-2 must have the live steps checklist"
@@ -508,10 +468,6 @@ async fn admin_wizard_sse_rejects_bogus_cookie_400() {
 async fn admin_wizard_sse_consumes_session_on_first_attach() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    // Address that's deliberately unroutable — the SSE handler will
-    // start streaming events, the bootstrap's probe phase will fail
-    // (RFC 5737 TEST-NET-1 doesn't route), but we only care here
-    // that the session is GONE after the first attach.
     let session_id = s
         .wizard
         .insert("198.51.100.1".into(), "root".into(), "pw".into(), 22);
@@ -534,9 +490,6 @@ async fn admin_wizard_sse_consumes_session_on_first_attach() {
         StatusCode::OK,
         "first SSE attach with valid session must succeed"
     );
-    // The response body is an open SSE stream; we don't have to drain
-    // it — dropping the response closes the receiver. Session must be
-    // gone immediately on attach (single-shot semantics).
     assert_eq!(
         s.wizard.len(),
         0,
@@ -579,8 +532,6 @@ async fn admin_wizard_sse_advertises_event_stream_content_type() {
 
 #[tokio::test]
 async fn admin_wizard_submit_carries_ssh_port_2222_into_session() {
-    // Review-agent (2026-05-17, important-4): Cloudzy hosts on
-    // 2222, the wizard's ssh_port input field must round-trip.
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let app = router(s.clone());
@@ -600,7 +551,6 @@ async fn admin_wizard_submit_carries_ssh_port_2222_into_session() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    // Session must have port 2222 stashed.
     let cookie = resp
         .headers()
         .get("set-cookie")
@@ -683,9 +633,6 @@ async fn admin_wizard_submit_rejects_bogus_ssh_port_400() {
 
 #[tokio::test]
 async fn admin_wizard_step1_form_has_ssh_port_field() {
-    // Front-end: ensure the operator sees the (optional) ssh_port
-    // field on step 1 — otherwise they'd never know they can change
-    // it for Cloudzy / non-22 hosts.
     let dir = TempDir::new().unwrap();
     let app = router(state(&dir).await);
     let html = fetch_html(app, "/admin/servers/new").await;
@@ -701,15 +648,8 @@ async fn admin_wizard_step1_form_has_ssh_port_field() {
 
 #[tokio::test]
 async fn admin_wizard_sse_collision_appends_numeric_suffix() {
-    // Operator runs the wizard for the same IP twice. The second
-    // attach must derive a non-colliding server id rather than
-    // 400-ing — that's the difference between an operator hitting
-    // back-button + retry (good UX) vs. having to invent a new
-    // address (bad UX).
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    // Pre-seed a server with the id that would be derived from the
-    // wizard's address.
     let server = vpnctl_core::Server {
         id: vpnctl_core::ServerId("198.51.100.1".into()),
         address: "198.51.100.1".into(),
@@ -739,10 +679,6 @@ async fn admin_wizard_sse_collision_appends_numeric_suffix() {
         )
         .await
         .unwrap();
-    // The SSE attach itself succeeds (200) — the collision is handled
-    // by id suffixing inside the handler. The bootstrap pipeline will
-    // then fail at the probe phase (no real server) but that's fine
-    // for this test; we only care that the attach didn't 409.
     assert_eq!(
         resp.status(),
         StatusCode::OK,
@@ -751,8 +687,6 @@ async fn admin_wizard_sse_collision_appends_numeric_suffix() {
     drop(resp);
 }
 
-/// HANDOFF §6 #2 — the Phase-E wizard (step 1) must reject a duplicate
-/// address up-front, before the operator commits to a full bootstrap.
 #[tokio::test]
 async fn admin_wizard_step1_rejects_duplicate_address() {
     use vpnctl_core::{KernelId, Server, ServerId};

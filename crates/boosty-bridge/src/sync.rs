@@ -1,5 +1,3 @@
-//! Sync orchestration, reconciliation execution, auto-provisioning, and inventory application.
-
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -14,19 +12,13 @@ use crate::roster::{is_vpn_eligible, subscriber_events};
 use crate::types::{ApplyMode, BridgeError, NewSubscriberInfo, SubscriberSnapshot, SyncReport};
 
 const MAX_AUTO_PROVISION_PER_TICK: usize = 5;
-// ponytail: 10 minutes exceeds today's bounded roster pass; renew the lease
-// only if a future account grows enough for a measured sync to approach it.
 const SYNC_LEASE_SECS: i64 = 600;
 
 fn sync_gate() -> &'static tokio::sync::Mutex<()> {
-    // ponytail: the schema has one Boosty account, so one local gate is enough;
-    // the DB lease in sync_from_inventory covers other processes.
     static GATE: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
     GATE.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-/// Full sync from stored settings: build the client, reconcile against the
-/// blog roster, apply per `mode`, and persist any rotated refresh token.
 pub async fn sync_from_settings(
     inv: &SqliteInventory,
     settings: &BoostySettings,
@@ -35,8 +27,6 @@ pub async fn sync_from_settings(
     sync_from_settings_at(inv, settings, mode, BOOSTY_BASE_URL).await
 }
 
-/// Production entry point. Serializing refreshes prevents the manual Web
-/// button and background poller from consuming the same rotating token.
 pub async fn sync_from_inventory(
     inv: &SqliteInventory,
     mode: ApplyMode,
@@ -69,8 +59,6 @@ pub async fn sync_from_inventory(
     result
 }
 
-/// [`sync_from_settings`] against an explicit API base URL (tests point
-/// this at a mock server; production uses [`BOOSTY_BASE_URL`]).
 pub async fn sync_from_settings_at(
     inv: &SqliteInventory,
     settings: &BoostySettings,
@@ -95,8 +83,6 @@ pub async fn sync_from_settings_at(
     )
     .await;
 
-    // Refresh recovery: if initial Bearer request failed with auth failure,
-    // and refresh credentials are configured, try once with refresh flow.
     if let Err(ref err) = result
         && err.is_auth_failure()
         && settings.access_token.is_some()
@@ -125,9 +111,6 @@ pub async fn sync_from_settings_at(
             )
             .await;
             if result.is_ok() {
-                // Stale bearer token successfully recovered via refresh; clear it with CAS guard
-                // so future sync passes use the valid refreshed credentials directly without overwriting
-                // any fresh access token concurrently entered by the operator.
                 if let Some(stale_token) = settings.access_token.as_deref() {
                     if let Err(e) = inv.clear_boosty_access_token(stale_token).await {
                         tracing::warn!(
@@ -141,11 +124,6 @@ pub async fn sync_from_settings_at(
         }
     }
 
-    // Boosty rotates the refresh token on every refresh and invalidates the
-    // old one, and every pass starts with a refresh (fresh client). Persist
-    // the rotated value BEFORE propagating a sync error: a pass that
-    // authenticated but failed mid-fetch has already consumed the stored
-    // token — losing the rotated one would brick auth on the next pass.
     if let Some(expected) = settings.refresh_token.as_deref()
         && let Some(rotated) = active_client.refresh_token().await
         && expected != rotated
@@ -158,8 +136,6 @@ pub async fn sync_from_settings_at(
             ),
             Err(e) => {
                 if result.is_ok() {
-                    // Sync worked; the failed persist is now the real error —
-                    // the next pass would refresh with a consumed token.
                     return Err(e.into());
                 }
                 tracing::warn!(
@@ -171,9 +147,6 @@ pub async fn sync_from_settings_at(
         }
     }
 
-    // Persist the applied report so /admin/boosty can render its actionable
-    // sections without a live (state-mutating) sync on GET. Dry-run passes
-    // are pure previews and deliberately leave the stored report untouched.
     if mode != ApplyMode::DryRun
         && let Ok(report) = &mut result
     {
@@ -205,12 +178,6 @@ pub async fn sync_from_settings_at(
     result
 }
 
-/// Run one reconciliation pass against the live Boosty roster.
-///
-/// Fetches every subscriber of `blog`, joins them with the linked vpnctl
-/// users, computes the [`reconcile`] plan, and applies it according to
-/// `mode`. A single failed enable/disable write is logged into
-/// [`SyncReport::errors`] and does not abort the pass.
 pub async fn sync_once(
     client: &ApiClient,
     inv: &SqliteInventory,
@@ -220,7 +187,6 @@ pub async fn sync_once(
     sync_once_with_policy(client, inv, blog, mode, 0, false).await
 }
 
-/// Reconcile with the operator's grace-period and provisioning policy.
 pub async fn sync_once_with_policy(
     client: &ApiClient,
     inv: &SqliteInventory,
@@ -229,7 +195,6 @@ pub async fn sync_once_with_policy(
     grace_days: u16,
     auto_create_users: bool,
 ) -> Result<SyncReport, BridgeError> {
-    // 1. Fetch the live roster (active + inactive).
     let subscribers = client
         .get_all_subscribers(blog, Some("on_time"), Some("gt"))
         .await?;
@@ -287,16 +252,6 @@ pub async fn sync_once_with_policy(
     let subscriber_by_id: HashMap<i64, &boosty_api::model::Subscriber> =
         subscriber_ids.iter().copied().zip(&subscribers).collect();
 
-    // VPN-eligibility = actively subscribed to a PAID level. Boosty's free
-    // "Follower" pseudo-level has `level.price == 0`; those follows report
-    // status "active" but must NOT get VPN (operator policy 2026-07-10:
-    // paid tiers only). So the reconciler's `active` flag means "paid-\
-    // active", not merely "active": a free follower is never enabled, never
-    // surfaced to link, and a linked user who DOWNGRADES to free gets
-    // disabled — exactly like a lapse.
-    // ponytail: gate is `level.price > 0`; if a blog ever needs per-level
-    // rules (e.g. only tiers ≥ N₽), add a level allow-list to
-    // boosty_settings then — not needed for a single paid/free split.
     let states: Vec<SubscriberState> = subscribers
         .iter()
         .zip(&subscriber_ids)
@@ -306,16 +261,11 @@ pub async fn sync_once_with_policy(
         })
         .collect();
     let active_count = states.iter().filter(|s| s.active).count();
-    // Active-but-not-eligible subscribers, excluded from VPN by the paid-only
-    // gate (surfaced for operator transparency, not an error). Exact
-    // complement of `is_vpn_eligible` among active subscribers, so NaN /
-    // negative prices land HERE rather than vanishing from both totals.
     let excluded_unpaid = subscribers
         .iter()
         .filter(|s| s.is_active() && !is_vpn_eligible(s))
         .count();
 
-    // 2. Join links with each linked user's current disabled state.
     let link_pairs = inv.list_boosty_links_with_lapse().await?;
     let users = inv.list_users().await?;
     let disabled_by_user: HashMap<&str, bool> = users
@@ -366,24 +316,9 @@ pub async fn sync_once_with_policy(
         ..Default::default()
     };
 
-    // Fail-safe: suppress ALL disables (Full mode) when the roster looks
-    // fleet-cuttingly wrong while payers are linked. Two signatures:
-    //   * an EMPTY roster (wrong blog_url / API error), and
-    //   * subscribers are present and ACTIVE, yet NONE are paid-eligible
-    //     (`active_count == 0 && excluded_unpaid > 0`) — the signature of a
-    //     Boosty `level.price` serialization quirk returning 0 for paid
-    //     tiers, far likelier than every payer downgrading to free at once.
-    // Crucially this does NOT fire on a genuine all-*inactive* roster
-    // (everyone lapsed): those are real lapses and flow through to
-    // lapse/disable. A single downgrade among payers also flows through
-    // (others keep active_count > 0). Only the anomaly is held for the
-    // operator to confirm — matching the codebase's safe-default posture.
-    // (API *errors* abort before this point; this guards the successful-
-    // but-wrong response.)
     let suppress_disables =
         !links.is_empty() && (subscribers.is_empty() || (active_count == 0 && excluded_unpaid > 0));
 
-    // 3. Reconcile + apply.
     for action in reconcile(&states, &links) {
         match action {
             Action::Enable { user_id } => {
@@ -483,9 +418,6 @@ async fn provision_boosty_user(
             }
             Ok(id)
         }
-        // A poller tick and a manual sync may race. The fixed username makes
-        // one INSERT win; the loser accepts only the link created for this
-        // exact subscriber, never an unrelated username collision.
         Err(SqliteInventoryError::AlreadyExists(_)) => inv
             .list_boosty_links()
             .await?
@@ -500,8 +432,6 @@ async fn provision_boosty_user(
     }
 }
 
-/// Apply one `disabled` flip (or record it, in dry-run), auditing on
-/// actual state change and collecting any error into the report.
 async fn apply_disabled(
     inv: &SqliteInventory,
     report: &mut SyncReport,

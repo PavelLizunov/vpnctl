@@ -1,5 +1,3 @@
-//! Admin monitoring page handlers (fleet health surface, v2 3a).
-
 use crate::handlers::admin::icons::{icon, status};
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -11,9 +9,6 @@ use super::ui::*;
 use crate::AppState;
 use crate::http_util::path_segment_encode;
 
-/// Phase F monitoring page. Pulls hourly + daily access buckets from
-/// `sub_access_log`, gap-fills, renders two inline-SVG sparklines
-/// (hits + distinct IPs) plus headline KPIs. No JS — pure SSR.
 pub(crate) async fn monitoring(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -21,12 +16,6 @@ pub(crate) async fn monitoring(
     use crate::i18n::tr;
     let (theme, accent, lang) = theme_accent_lang(&headers);
 
-    // Design v2 3a — the monitoring page IS the fleet-health surface:
-    // six status tiles, per-node uptime, 24h resource trends, the
-    // monitor's real thresholds, probe failures and the GeoIP DB age.
-    // The former sub-access analytics moved out (the aggregate JSON
-    // stays at /api/v1/stats/sub-access; heavy-users live on the
-    // dashboard's Activity tab).
     let servers = state
         .inv
         .list_servers()
@@ -60,7 +49,6 @@ pub(crate) async fn monitoring(
         .unwrap_or_default();
     let recent_all_alerts = state.inv.recent_alerts(50, true).await.unwrap_or_default();
 
-    // ── tile aggregates ──────────────────────────────────────────────
     let probeable_total = latest.len();
     let up_count = latest
         .iter()
@@ -121,8 +109,6 @@ pub(crate) async fn monitoring(
         / 60;
     let now = chrono::Utc::now();
     let has_open = |kind: &str| -> bool { alerts_by_kind.iter().any(|(k, _, _)| k == kind) };
-    // Probe failures — the unreachable alerts (open OR acked) from the
-    // last 7 days; recovery events show as the acked state.
     let probe_failures: Vec<&vpnctl_inventory::AdminAlert> = recent_all_alerts
         .iter()
         .filter(|a| {
@@ -325,10 +311,6 @@ pub(crate) async fn monitoring(
                         @let (dmax, mmax, lmax) = (fmax(&disk_series), fmax(&mem_series), fmax(&log_series));
                         @let load = h.as_ref().and_then(|h| h.load_1min_x100).map(|l| format!("{:.2}", l as f64 / 100.0));
                         @let cell = |series: &[f64], max: f64, warm: bool, unit: &str| -> Markup {
-                            // % series get the fixed 0–100 axis; the
-                            // MiB series auto-scales (shape only). The
-                            // caption below is the max label, so the
-                            // in-SVG one is off.
                             let y_max = if unit == "%" { Some(100.0) } else { None };
                             html! {
                                 @if series.is_empty() {
@@ -504,12 +486,6 @@ pub(crate) async fn monitoring(
     Ok(render_page(&state, "monitoring", &theme, &accent, lang, body).await)
 }
 
-/// Design v2 3a — «probe all now». Runs the SAME per-server probe the
-/// poller runs on its tick, immediately, then bounces back to the
-/// monitoring page (whose tables re-read the freshly written
-/// node_health rows). Sequential SSH — a few seconds per node; a down
-/// node adds its connect timeout. Alert state-machines stay with the
-/// background monitor; this only refreshes the data.
 pub(crate) async fn monitoring_probe_all(
     State(state): State<AppState>,
 ) -> Result<Response, Response> {

@@ -1,32 +1,16 @@
 use serde::Deserialize;
 use vpnctl_core::{CoreError, Protocol, RenderCtx, Result, User};
 
-/// Loopback port the sing-box VLESS+ws backend listens on (caddy's
-/// `reverse_proxy` upstream). Loopback-only + uniform across the fleet,
-/// so it's never in a firewall rule and never the public-facing port.
 pub(crate) const VLESSWS_BACKEND_PORT: u16 = 11443;
 
-/// On-node Caddyfile path (shared by the naive single-file path and the
-/// vless-ws bundle).
 pub(crate) const CADDYFILE_PATH: &str = "/etc/caddy/Caddyfile";
-/// On-node path of the loopback sing-box config + its systemd unit name.
 pub(crate) const VLESSWS_SINGBOX_CONFIG: &str = "/etc/caddy/vlessws-singbox.json";
 pub(crate) const VLESSWS_UNIT: &str = "caddy-vlessws";
-/// Rendered firewall-meta member: carries the operator-chosen front port
-/// so `apply_config` can `ufw allow` it without re-parsing the Caddyfile.
 pub(crate) const VLESSWS_DEPLOY_ENV: &str = "/etc/caddy/.vlessws-deploy.env";
 
-/// Multi-file bundle delimiter. The vless-ws
-/// `render_config` emits `Caddyfile` + sing-box JSON + the firewall meta
-/// in this shape; `apply_config` unpacks it. The naive render (a single
-/// Caddyfile starting with `# Rendered by vpnctl`) never begins with this
-/// marker, so `apply_config` dispatches the two shapes unambiguously.
 pub(crate) const BUNDLE_DELIMITER: &str = "====FILE: ";
 pub(crate) const BUNDLE_DELIMITER_END: &str = "====";
 
-/// JSON envelope returned by `Naive::server_inbound`. Deserialised here,
-/// walked to assemble the Caddyfile. Private to the kernel: the contract
-/// is "consume the protocol's envelope shape".
 #[derive(Debug, Deserialize)]
 pub(crate) struct NaiveEnvelope {
     pub(crate) domain: String,
@@ -41,19 +25,12 @@ pub(crate) struct NaiveAuth {
     pub(crate) password: String,
 }
 
-/// JSON envelope returned by `VlessWs::server_inbound`. Deserialised here,
-/// walked to assemble the Caddyfile (decoy + `reverse_proxy` of the secret
-/// path) AND the loopback sing-box ws config. Private to the kernel: the
-/// contract is "consume the protocol's envelope shape".
 #[derive(Debug, Deserialize)]
 pub(crate) struct VlessWsEnvelope {
     pub(crate) domain: String,
     #[serde(default)]
     pub(crate) acme_email: String,
     pub(crate) front_port: u16,
-    /// Secret ws path WITH the leading slash (`/<secret>`), as the protocol
-    /// emits it — used verbatim in both the Caddyfile `path` matcher and
-    /// the sing-box `transport.path` so they agree byte-for-byte.
     pub(crate) path: String,
     #[serde(default)]
     pub(crate) users: Vec<VlessWsUser>,
@@ -66,10 +43,6 @@ pub(crate) struct VlessWsUser {
     pub(crate) name: String,
 }
 
-/// Render the vless-ws deploy BUNDLE: the Caddyfile (decoy `file_server` +
-/// `reverse_proxy` of the secret path → loopback sing-box) + the loopback
-/// sing-box ws config + a firewall-port meta file, in the
-/// `BUNDLE_DELIMITER` framing `apply_config` unpacks.
 pub(crate) fn render_vlessws_bundle(
     ctx: &RenderCtx<'_>,
     users: &[User],
@@ -79,10 +52,6 @@ pub(crate) fn render_vlessws_bundle(
     let env: VlessWsEnvelope = serde_json::from_value(env_json)
         .map_err(|e| CoreError::Render(format!("vless-ws envelope parse: {e}")))?;
 
-    // Defense-in-depth: the protocol already injection-guards domain/path,
-    // but re-reject here before they land in the Caddyfile (mirrors the
-    // naive render's ILLEGAL guard). `caddy validate` in apply_config is a
-    // backstop, not the primary defence.
     const ILLEGAL: [char; 5] = ['\n', '\r', ' ', '{', '}'];
     if env.domain.trim().is_empty() || env.domain.contains(ILLEGAL) {
         return Err(CoreError::Render(format!(
@@ -96,8 +65,6 @@ pub(crate) fn render_vlessws_bundle(
             env.acme_email
         )));
     }
-    // `path` is `/<secret>`; the secret is `[A-Za-z0-9_-]` (protocol-checked).
-    // Re-reject anything that could break the Caddyfile `path` token / JSON.
     if !env.path.starts_with('/')
         || env.path.len() < 2
         || !env.path[1..]
@@ -112,7 +79,6 @@ pub(crate) fn render_vlessws_bundle(
 
     let has_users = !env.users.is_empty();
 
-    // ── 1. Caddyfile ──────────────────────────────────────────────────
     let mut cf = String::with_capacity(1024);
     cf.push_str("# Rendered by vpnctl. Do not hand-edit \u{2014} your changes will be\n");
     cf.push_str("# overwritten on next `vpnctl deploy`.\n");
@@ -120,11 +86,6 @@ pub(crate) fn render_vlessws_bundle(
     if !env.acme_email.trim().is_empty() {
         cf.push_str(&format!("\temail {}\n", env.acme_email));
     }
-    // Disable HTTP/3 — caddy otherwise binds UDP on the front port, which
-    // collides with a co-tenant QUIC protocol (TUIC / hysteria2) sharing
-    // that port number on the node (caught on `is`: tuic-v5 holds UDP:8443,
-    // so caddy's h3 listener failed with `address already in use`). The ws
-    // tunnel is TCP-only, so h3 buys nothing here.
     cf.push_str("\tservers {\n\t\tprotocols h1 h2\n\t}\n");
     cf.push_str("\tlog {\n\t\texclude http.log.error\n\t}\n");
     cf.push_str("}\n\n");
@@ -136,10 +97,6 @@ pub(crate) fn render_vlessws_bundle(
     cf.push_str("\tencode\n");
     cf.push_str("\theader -Server\n");
     if has_users {
-        // Route ONLY the secret path to the ws backend; everything else
-        // (including a wrong path) falls through to the decoy file_server
-        // → an active probe sees a real site, never a bare-proxy tell.
-        // `reverse_proxy` upgrades the WebSocket transparently.
         cf.push_str(&format!("\t@vlessws path {}\n", env.path));
         cf.push_str(&format!(
             "\treverse_proxy @vlessws 127.0.0.1:{VLESSWS_BACKEND_PORT}\n"
@@ -148,12 +105,6 @@ pub(crate) fn render_vlessws_bundle(
     cf.push_str("\tfile_server {\n\t\troot /var/www/naive-site\n\t}\n");
     cf.push_str("}\n");
 
-    // ── 2. Loopback sing-box VLESS+ws config ──────────────────────────
-    // NO `tls` (caddy is the sole TLS edge), NO `flow` (XTLS-Vision is
-    // incompatible with a ws transport). The vless inbound exists ONLY
-    // when there are users; an empty `inbounds` is a valid sing-box config
-    // (the unit starts cleanly and does nothing) — mirrors naive's
-    // decoy-only degenerate render.
     let inbounds = if has_users {
         let users_json: Vec<serde_json::Value> = env
             .users
@@ -179,10 +130,8 @@ pub(crate) fn render_vlessws_bundle(
     let sb_json = serde_json::to_string_pretty(&sb)
         .map_err(|e| CoreError::Render(format!("vless-ws sing-box config marshal: {e}")))?;
 
-    // ── 3. Firewall meta (front port for apply_config's ufw) ──────────
     let meta = format!("VLESSWS_FRONT_PORT={}\n", env.front_port);
 
-    // ── Assemble the bundle ───────────────────────────────────────────
     let mut bundle = String::with_capacity(cf.len() + sb_json.len() + meta.len() + 256);
     for (path, body) in [
         (CADDYFILE_PATH, cf.as_str()),
@@ -201,7 +150,6 @@ pub(crate) fn render_vlessws_bundle(
     Ok(bundle.into_bytes())
 }
 
-/// Render the naive single-Caddyfile configuration.
 pub(crate) fn render_naive_config(
     ctx: &RenderCtx<'_>,
     users: &[User],
@@ -216,13 +164,6 @@ pub(crate) fn render_naive_config(
             "naive requires a non-empty `naive.domain` secret".into(),
         ));
     }
-    // Fail closed: EVERY operator-supplied field written into the
-    // Caddyfile (domain, acme_email, and each basic_auth user/pass)
-    // is rejected if it carries a char that could break out of its
-    // line/block and inject a directive. Upstream constraints (user
-    // ids `^[a-z0-9._-]{2,32}$`, generated passwords) make this
-    // defense-in-depth today; `caddy validate` in apply_config is a
-    // backstop, not the primary defence.
     const ILLEGAL: [char; 5] = ['\n', '\r', ' ', '{', '}'];
     if env.domain.contains(ILLEGAL) {
         return Err(CoreError::Render(format!(
@@ -245,11 +186,6 @@ pub(crate) fn render_naive_config(
         }
     }
 
-    // Assemble the Caddyfile. Structure verified live on the
-    // experimental node (docs/NAIVE_CADDY_PLAN.md Phase 0). The
-    // `:443, <domain>` form is LOAD-BEARING: a proxy CONNECT carries
-    // the *target* host as `:authority`, so a bare `<domain> {`
-    // block never matches it — the `:443` catch-all matcher does.
     let mut out = String::with_capacity(1024);
     out.push_str("# Rendered by vpnctl. Do not hand-edit \u{2014} your changes will be\n");
     out.push_str("# overwritten on next `vpnctl deploy`.\n");
@@ -269,10 +205,6 @@ pub(crate) fn render_naive_config(
     out.push_str("\theader -Server\n");
 
     if env.auth.is_empty() {
-        // No granted users yet → no proxy, just the cover website.
-        // (probe_resistance without basic_auth is meaningless and
-        // can reject config; a plain file_server is the correct
-        // degenerate render.)
         out.push_str("\tfile_server {\n\t\troot /var/www/naive-site\n\t}\n");
     } else {
         out.push_str("\tforward_proxy {\n");
@@ -401,11 +333,6 @@ pub(crate) fn caddy_state_machine_prologue(
     )
 }
 
-/// The bundle-unpack + atomic-swap + verify + ROLLBACK script run after the
-/// vless-ws deploy bundle has been uploaded to `…/.vlessws-bundle.new`.
-/// Two units: the loopback sing-box BACKEND (restarted FIRST so caddy's
-/// `reverse_proxy` upstream is up) and caddy itself. Snapshot/rollback
-/// discipline, plus a `caddy validate` before the swap and a wider (caddy ACME) poll.
 pub(crate) fn vlessws_apply_script() -> String {
     let prologue = caddy_state_machine_prologue(
         CADDYFILE_PATH,
@@ -499,8 +426,6 @@ pub(crate) fn vlessws_apply_script() -> String {
     )
 }
 
-/// Snapshot → validate → swap → restart/reload → poll → retire stale VLESS-WS backend/configs on success / restore on failure
-/// script for the single-Caddyfile (naive) apply path.
 pub(crate) fn naive_apply_script() -> String {
     let prologue = caddy_state_machine_prologue(
         CADDYFILE_PATH,

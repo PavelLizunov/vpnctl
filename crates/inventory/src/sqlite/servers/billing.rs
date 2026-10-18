@@ -8,7 +8,6 @@ use crate::sqlite::{
 };
 
 impl SqliteInventory {
-    /// Get the billing record for a server if configured.
     pub async fn get_server_billing(&self, sid: &ServerId) -> Result<Option<ServerBilling>> {
         let row = sqlx::query(
             "SELECT server_id, due_date, billing_cycle, amount_cents, currency, auto_renew, billing_url, notes, updated_at
@@ -40,9 +39,6 @@ impl SqliteInventory {
         }))
     }
 
-    /// Set or update the billing record for a server.
-    ///
-    /// Validates that the server exists and that `due_date` is a valid ISO-8601 date (YYYY-MM-DD).
     pub async fn set_server_billing(
         &self,
         sid: &ServerId,
@@ -50,7 +46,6 @@ impl SqliteInventory {
     ) -> Result<ServerBilling> {
         validate_due_date(&input.due_date)?;
 
-        // Pre-compute conversion outside the transaction to prevent pool deadlock
         let conv_snapshot = if let Some(count) = input.initial_payments_count {
             if count > 0 {
                 let settings = self.get_currency_settings().await.unwrap_or_default();
@@ -71,7 +66,6 @@ impl SqliteInventory {
 
         let mut tx = self.pool.begin().await?;
 
-        // Server must exist
         let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM servers WHERE id = ?1")
             .bind(&sid.0)
             .fetch_optional(&mut *tx)
@@ -171,7 +165,6 @@ impl SqliteInventory {
             }
         }
 
-        // Write audit log
         sqlx::query(
             "INSERT INTO audit_log (actor, action, target, payload)
              VALUES ('admin', 'server.billing.set', ?1, ?2)",
@@ -185,7 +178,6 @@ impl SqliteInventory {
         Ok(updated)
     }
 
-    /// Advance the server's billing due date by its recurring cycle (+1 month, +3 months, etc.).
     pub async fn advance_server_billing_cycle(&self, sid: &ServerId) -> Result<ServerBilling> {
         let current_billing = self.get_server_billing(sid).await?;
         let Some(curr) = current_billing else {
@@ -205,9 +197,6 @@ impl SqliteInventory {
         })
     }
 
-    /// Atomically advance the server's billing cycle and record payment ONLY IF
-    /// the server's current `due_date` matches `expected_due`, and if `require_auto_renew` is true,
-    /// only if `auto_renew = 1`. Returns `Ok(None)` if CAS check fails (preventing duplicate billing).
     pub async fn advance_server_billing_cycle_guarded(
         &self,
         sid: &ServerId,
@@ -227,7 +216,6 @@ impl SqliteInventory {
 
         let next_due = advance_date_by_cycle(&curr.due_date, curr.billing_cycle)?;
 
-        // Pre-compute conversion outside the transaction to prevent pool deadlock
         let settings = self.get_currency_settings().await.unwrap_or_default();
         let conv = self
             .convert_amount(
@@ -268,7 +256,6 @@ impl SqliteInventory {
             return Ok(None);
         }
 
-        // Snapshot payment in server_payments for immutable historical Total Spend
         sqlx::query(
             "INSERT INTO server_payments
                 (server_id, amount_minor, currency, cycle,
@@ -326,8 +313,6 @@ impl SqliteInventory {
         Ok(Some(updated))
     }
 
-    /// Check all servers with `auto_renew = true` and advance the billing cycle
-    /// for any whose `due_date <= today`. Returns the list of advanced servers and new due dates.
     pub async fn advance_auto_renew_servers(&self) -> Result<Vec<(ServerId, String)>> {
         let fleet = self.list_fleet_billing().await?;
         let today = chrono::Utc::now().date_naive();
@@ -354,8 +339,6 @@ impl SqliteInventory {
         Ok(advanced)
     }
 
-    /// List billing records for all fleet servers, ordered by due_date ascending (earliest first),
-    /// with unconfigured servers placed at the end.
     pub async fn list_fleet_billing(&self) -> Result<Vec<ServerBillingItem>> {
         let rows = sqlx::query(
             "SELECT s.id, s.display_name, s.hoster, s.address,
@@ -408,14 +391,12 @@ impl SqliteInventory {
     }
 }
 
-/// Helper to validate YYYY-MM-DD date strings.
 pub fn validate_due_date(s: &str) -> Result<NaiveDate> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|e| {
         SqliteInventoryError::Invalid(format!("date must be in YYYY-MM-DD format: {e}"))
     })
 }
 
-/// Advance a date string by a billing cycle.
 pub fn advance_date_by_cycle(date_str: &str, cycle: BillingCycle) -> Result<String> {
     let date = validate_due_date(date_str)?;
     let next = add_calendar_months(date, cycle.months());

@@ -1,17 +1,3 @@
-//! End-to-end integration tests for production `SubprocessSshTransport`
-//! against a real OpenSSH server running in a Docker container.
-//!
-//! Exercises:
-//! - Root login: `exec`, `upload`, `read_file`
-//! - Non-root login with passwordless sudo (`sudo -n`): `exec`, `upload`, `read_file`, `exec_unprivileged`
-//! - Strict host key verification (`StrictHostKeyChecking=accept-new` + `known_hosts` pinning & mismatch detection)
-//!
-//! Gated by `#[ignore]` because it requires Docker. Run with:
-//!
-//! ```sh
-//! cargo test -p vpnctld --test subprocess_ssh_e2e -- --ignored --nocapture
-//! ```
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::PathBuf;
@@ -28,14 +14,13 @@ use vpnctld::ssh_subprocess::SubprocessSshTransport;
 const TEST_USER: &str = "vpnctltest";
 const SSHD_INTERNAL_PORT: u16 = 2222;
 
-/// Generate a fresh Ed25519 keypair via `ssh-keygen`. Returns (priv_path, pub_str).
 fn fresh_keypair(dir: &TempDir, name: &str) -> (PathBuf, String) {
     let priv_path = dir.path().join(name);
     let status = Command::new("ssh-keygen")
         .arg("-t")
         .arg("ed25519")
         .arg("-N")
-        .arg("") // no passphrase
+        .arg("")
         .arg("-q")
         .arg("-f")
         .arg(&priv_path)
@@ -51,7 +36,6 @@ fn fresh_keypair(dir: &TempDir, name: &str) -> (PathBuf, String) {
     (priv_path, pub_str)
 }
 
-/// Helper to build a linuxserver openssh-server container with sudo support.
 fn make_sshd_image(
     user_name: &str,
     pub_key: &str,
@@ -85,7 +69,6 @@ async fn subprocess_ssh_root_roundtrip() {
     let (priv_path, pub_str) = fresh_keypair(&tmp, "id_root");
     let known_hosts_path = tmp.path().join("known_hosts");
 
-    // linuxserver/openssh-server running with root login or user configured as root
     let image = make_sshd_image("root", &pub_str, false);
     let container = image.start().await.expect("start sshd container");
     let host_port = container
@@ -98,7 +81,6 @@ async fn subprocess_ssh_root_roundtrip() {
         .known_hosts(known_hosts_path)
         .timeout(Duration::from_secs(30));
 
-    // ── 1. exec check ──────────────────────────────────────────────────
     let uname = transport.exec("uname -s").await.expect("uname");
     assert_eq!(uname.trim(), "Linux", "uname output: {uname:?}");
 
@@ -108,11 +90,9 @@ async fn subprocess_ssh_root_roundtrip() {
     let whoami_out = transport.exec("whoami").await.expect("whoami");
     assert_eq!(whoami_out.trim(), "root", "whoami must be root");
 
-    // ── 2. stderr and non-zero exit propagation ────────────────────────
     let err = transport.exec("ls /non-existent-file-path-12345").await;
     assert!(err.is_err(), "expected non-zero exit error, got {err:?}");
 
-    // ── 3. upload and read_file binary payload roundtrip ───────────────
     let remote_path = "/tmp/vpnctl-root-e2e-payload.bin";
     let payload: Vec<u8> = (0u8..=255).cycle().take(8192).collect();
 
@@ -127,7 +107,6 @@ async fn subprocess_ssh_root_roundtrip() {
     assert_eq!(read_back.len(), payload.len(), "size mismatch");
     assert_eq!(read_back, payload, "content mismatch");
 
-    // ── 4. cleanup ─────────────────────────────────────────────────────
     let _ = transport.exec(&format!("rm -f {remote_path}")).await;
 }
 
@@ -150,7 +129,6 @@ async fn subprocess_ssh_non_root_passwordless_sudo_roundtrip() {
         .known_hosts(known_hosts_path)
         .timeout(Duration::from_secs(30));
 
-    // ── 1. privileged exec (automatically wrapped with sudo -n) ────────
     let id_out = transport.exec("id -u").await.expect("sudo id -u");
     assert_eq!(id_out.trim(), "0", "privileged id -u must return root (0)");
 
@@ -161,7 +139,6 @@ async fn subprocess_ssh_non_root_passwordless_sudo_roundtrip() {
         "privileged whoami must return root"
     );
 
-    // ── 2. unprivileged exec (runs directly as login user) ─────────────
     let unpriv_user = transport
         .exec_unprivileged("whoami")
         .await
@@ -172,8 +149,6 @@ async fn subprocess_ssh_non_root_passwordless_sudo_roundtrip() {
         "exec_unprivileged must return {TEST_USER}"
     );
 
-    // ── 3. privileged upload and read_file in root-owned location ──────
-    // /etc is owned by root and writable only by root.
     let remote_path = "/etc/vpnctl-sudo-e2e-payload.bin";
     let payload: Vec<u8> = (0u8..=255).rev().cycle().take(4096).collect();
 
@@ -189,11 +164,9 @@ async fn subprocess_ssh_non_root_passwordless_sudo_roundtrip() {
     assert_eq!(read_back.len(), payload.len(), "size mismatch");
     assert_eq!(read_back, payload, "content mismatch");
 
-    // ── 4. stderr and non-zero exit propagation under sudo ─────────────
     let err = transport.exec("cat /non-existent-path-sudo-test").await;
     assert!(err.is_err(), "expected error on non-zero exit under sudo");
 
-    // ── 5. cleanup ─────────────────────────────────────────────────────
     let _ = transport.exec(&format!("rm -f {remote_path}")).await;
 }
 
@@ -211,7 +184,6 @@ async fn subprocess_ssh_strict_host_key_verification() {
         .await
         .expect("port mapping");
 
-    // Initial state: known_hosts does not exist
     assert!(
         !known_hosts_path.exists(),
         "known_hosts should not exist initially"
@@ -222,7 +194,6 @@ async fn subprocess_ssh_strict_host_key_verification() {
         .known_hosts(known_hosts_path.clone())
         .timeout(Duration::from_secs(30));
 
-    // ── 1. First connect: TOFU (accept-new) records host key ──────────
     let uname = transport
         .exec("uname -s")
         .await
@@ -239,15 +210,12 @@ async fn subprocess_ssh_strict_host_key_verification() {
         "known_hosts must pin the host and port"
     );
 
-    // ── 2. Second connect: strictly verifies against pinned key ───────
     let uname2 = transport
         .exec("uname -s")
         .await
         .expect("subsequent connect with matching known_hosts must succeed");
     assert_eq!(uname2.trim(), "Linux");
 
-    // ── 3. Host key mismatch: strict checking rejects changed key ─────
-    // Corrupt the known_hosts with a mismatched host key for this host:port
     let bogus_entry = format!(
         "[127.0.0.1]:{host_port} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBogusKeyMismatchedFingerprint1234567890abcdef\n"
     );

@@ -1,15 +1,6 @@
-//! Spec tests for `extract_all_sha256_tokens`.
-//!
-//! Independent of the implementation — pins the contract that the
-//! multi-key parse path (full `ssh-keyscan | ssh-keygen -lf -` dump
-//! for a host) relies on. A failing test means the impl drifted or
-//! the spec is ambiguous; don't weaken the test to make it pass.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use vpnctl_host_fingerprint::extract_all_sha256_tokens;
-
-// ─── empty / no-token inputs ─────────────────────────────────────
 
 #[test]
 fn empty_input_returns_empty_vec() {
@@ -18,7 +9,6 @@ fn empty_input_returns_empty_vec() {
 
 #[test]
 fn input_with_no_sha256_token_returns_empty_vec() {
-    // An MD5-style ssh-keygen line carries no `SHA256:` token.
     let line = "256 MD5:1f:0a:7e:9c:33:aa:bc:de:01:23:45:67:89:ab:cd:ef host (ED25519)";
     assert_eq!(extract_all_sha256_tokens(line), Vec::<String>::new());
 }
@@ -30,8 +20,6 @@ fn whitespace_only_input_returns_empty_vec() {
         Vec::<String>::new()
     );
 }
-
-// ─── single key ──────────────────────────────────────────────────
 
 #[test]
 fn single_key_line_returns_one_token() {
@@ -63,8 +51,6 @@ fn returned_token_has_no_trailing_algo_or_whitespace() {
     );
 }
 
-// ─── the verbatim two-key real-world example ─────────────────────
-
 #[test]
 fn two_key_real_world_example_returns_both_in_order() {
     let dump = "256 SHA256:Jl4XlKj9/e2igS3EoZmKshf5x6UqkWRjqoEavJaizp4 213.155.9.39 (ED25519)\n\
@@ -77,8 +63,6 @@ fn two_key_real_world_example_returns_both_in_order() {
         ],
     );
 }
-
-// ─── three-key dump (ed25519 + rsa + ecdsa) ──────────────────────
 
 #[test]
 fn three_key_dump_returns_three_tokens_preserving_order() {
@@ -95,12 +79,8 @@ fn three_key_dump_returns_three_tokens_preserving_order() {
     );
 }
 
-// ─── does NOT validate base64 shape ──────────────────────────────
-
 #[test]
 fn does_not_validate_shape_short_token_returned_verbatim() {
-    // Shape validation is a different function's job; any token
-    // starting with `SHA256:` is returned as-is.
     let line = "256 SHA256:short comment (ED25519)";
     assert_eq!(
         extract_all_sha256_tokens(line),
@@ -110,8 +90,6 @@ fn does_not_validate_shape_short_token_returned_verbatim() {
 
 #[test]
 fn token_must_start_with_prefix_substring_match_does_not_count() {
-    // A token where `SHA256:` is not at the start is NOT a match;
-    // only tokens that START with the literal prefix are returned.
     let line = "256 NOTSHA256:Jl4XlKj9 host (ED25519)";
     assert_eq!(extract_all_sha256_tokens(line), Vec::<String>::new());
 }

@@ -1,11 +1,3 @@
-//! Spec for migration `0031_servers_udp_pair_enabled.sql` (UX-3) — the
-//! per-server naive↔HY2 UDP-pairing opt-in. Pins the
-//! `set_server_udp_pair_enabled` / `is_server_udp_pair_enabled` contract:
-//!   * Default: off.
-//!   * Toggle on/off persists.
-//!   * Audit-on-actual-change only (idempotent re-set is silent).
-//!   * Unknown id → `Invalid` on the setter; `false` on the getter.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use tempfile::TempDir;
@@ -76,12 +68,12 @@ async fn audits_only_on_actual_change() {
     inv.add_server(&srv("lv")).await.unwrap();
     let sid = ServerId("lv".into());
 
-    inv.set_server_udp_pair_enabled(&sid, true).await.unwrap(); // change
-    inv.set_server_udp_pair_enabled(&sid, true).await.unwrap(); // no-op
+    inv.set_server_udp_pair_enabled(&sid, true).await.unwrap();
+    inv.set_server_udp_pair_enabled(&sid, true).await.unwrap();
     assert_eq!(audit_count(&inv, "server.udp_pair.set").await, 1);
 
-    inv.set_server_udp_pair_enabled(&sid, false).await.unwrap(); // change
-    inv.set_server_udp_pair_enabled(&sid, false).await.unwrap(); // no-op
+    inv.set_server_udp_pair_enabled(&sid, false).await.unwrap();
+    inv.set_server_udp_pair_enabled(&sid, false).await.unwrap();
     assert_eq!(audit_count(&inv, "server.udp_pair.set").await, 2);
 }
 

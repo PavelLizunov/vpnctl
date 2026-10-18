@@ -1,7 +1,3 @@
-//! `SubprocessSshTransport` — implements `vpnctl_core::SshTransport`
-//! by shelling out to the system `/usr/bin/ssh` binary instead of
-//! linking the Rust `russh` client.
-
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -12,10 +8,8 @@ use base64::engine::general_purpose::STANDARD as B64_STANDARD;
 use tempfile::TempDir;
 use vpnctl_core::{CoreError, PinnedJumpRoute, Result, SshTransport};
 
-/// Default host-keys file. Per-vpnctld-process, not per-host.
 const DEFAULT_KNOWN_HOSTS: &str = "/var/lib/vpnctl/.ssh/known_hosts";
 
-/// Hard wall-clock cap on a single SSH invocation (seconds).
 const DEFAULT_SSH_TIMEOUT_SECS: u64 = 300;
 
 fn default_ssh_timeout() -> Duration {
@@ -27,24 +21,15 @@ fn default_ssh_timeout() -> Duration {
     Duration::from_secs(secs)
 }
 
-/// One transport instance per (host, port, user, key_path, optional jump_host).
 #[derive(Clone, Debug)]
 pub struct SubprocessSshTransport {
-    /// Destination IP or hostname.
     host: String,
-    /// SSH management user.
     user: String,
-    /// TCP port the destination's sshd listens on.
     port: u16,
-    /// Optional fully pinned SSH jump route (ProxyJump).
     jump: Option<PinnedJumpRoute>,
-    /// Inventory-authoritative pin for a direct target.
     target_fingerprint: Option<String>,
-    /// Identity key path passed to `ssh -i`.
     key_path: PathBuf,
-    /// `known_hosts` file.
     known_hosts: PathBuf,
-    /// Hard wall-clock cap on each invocation.
     timeout: Duration,
 }
 
@@ -98,8 +83,6 @@ impl SubprocessSshTransport {
         }
     }
 
-    /// Build argv for an ordinary direct connection. Pinned jump routes use
-    /// [`prepare_pinned_jump`] instead and can never fall back to this path.
     fn build_direct_ssh_args(&self, remote_cmd: &str) -> Vec<String> {
         let mut args: Vec<String> = vec![
             "-i".into(),

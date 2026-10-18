@@ -3,13 +3,6 @@ use crate::http_util::path_segment_encode;
 use maud::{Markup, html};
 use std::collections::HashMap;
 
-/// Migration 0018 / NM-10: the two axes are server.hidden (set on
-/// server-detail) and grant_protocol_overrides.state='disabled'
-/// (set here). Visibility resolution is OR-semantics — either axis
-/// suppresses the protocol from this user's subscription URL.
-///
-/// `hidden_map = None` is treated as an empty map (server has no
-/// enabled protocols at all — render an empty-state explainer).
 pub(crate) fn user_detail_per_protocol_grid(
     uid: &vpnctl_core::UserId,
     server: &vpnctl_core::Server,
@@ -21,14 +14,6 @@ pub(crate) fn user_detail_per_protocol_grid(
     use crate::i18n::tr;
     let uid_enc = path_segment_encode(&uid.0);
     let sid_enc = path_segment_encode(&server.id.0);
-    // Iterate the `server_protocols` table directly (not the in-memory
-    // `enabled_protocols` field) so the OR-semantics deny resolution
-    // matches `visible_protocols_for_subscription` BYTE-for-BYTE.
-    // Review-agent 2026-05-20: a divergence between the in-memory
-    // `enabled_protocols` cache and the on-disk `server_protocols`
-    // rows would silently lie about what the operator's clients see
-    // on next pull. Sort alphabetically to match the canonical
-    // query's `ORDER BY sp.protocol_id` .
     let mut pids: Vec<&vpnctl_core::ProtocolId> =
         hidden_map.map(|m| m.keys().collect()).unwrap_or_default();
     pids.sort_by(|a, b| a.0.cmp(&b.0));
@@ -63,11 +48,6 @@ pub(crate) fn user_detail_per_protocol_grid(
                             .copied()
                             .unwrap_or(false);
                         @let pid_enc = path_segment_encode(&pid.0);
-                        // NM-12: same registry-driven risk chip the
-                        // server-detail uses. Shrinks the protocol
-                        // name to 10px (vs 11px row-default) when
-                        // Weak — small visual sentence saying "you
-                        // shouldn't be delivering this here".
                         @let risk = registry.protocol(pid).map(|p| p.dpi_risk());
                         @let pid_is_weak = matches!(risk, Some(vpnctl_core::DpiRisk::Weak));
                         li style="display: flex; align-items: baseline; gap: 10px; padding: 2px 0;" {

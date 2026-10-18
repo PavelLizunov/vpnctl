@@ -1,6 +1,3 @@
-//! Admin Handlers Module Entry Point
-
-// Axum Response is the established handler error type across this module.
 #![allow(clippy::result_large_err)]
 
 pub(crate) mod alerts;

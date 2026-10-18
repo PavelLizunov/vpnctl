@@ -1,63 +1,25 @@
-//! Pure reconciliation logic: given the current Boosty subscription state
-//! and the set of vpnctl users linked to Boosty subscribers, decide what
-//! access changes are needed. No I/O — every branch is unit-tested.
-//!
-//! ## Safety invariant
-//!
-//! The reconciler ONLY ever emits actions for users that are LINKED to a
-//! Boosty subscriber (`links`). A vpnctl user with no Boosty link
-//! (`tester`, `claude-chat-proxy`, hand-created accounts) is never touched
-//! — it can neither be disabled nor enabled by the bridge. This is what
-//! makes it safe to run against a production inventory that mixes
-//! Boosty-sourced and operator-managed users.
-
 use std::collections::{HashMap, HashSet};
 
-/// Current subscription state of one Boosty subscriber.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscriberState {
-    /// Boosty's numeric subscriber id.
     pub subscriber_id: i64,
-    /// Whether the subscriber is VPN-eligible: actively subscribed to a
-    /// PAID level. The caller (`sync_once`) already folds the paid-tier
-    /// gate into this flag — a free "Follower" is `active = false` here, so
-    /// the reconciler never enables/surfaces them and disables a linked
-    /// user who downgrades to free.
     pub active: bool,
 }
 
-/// A vpnctl user that is linked to a Boosty subscriber.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkedUser {
-    /// vpnctl user id (username).
     pub user_id: String,
-    /// The Boosty subscriber this user is linked to.
     pub subscriber_id: i64,
-    /// Whether the user's VPN access is currently disabled (soft-muted).
     pub disabled: bool,
 }
 
-/// A reconciliation action the bridge should apply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// Linked user whose subscription is active but whose access is
-    /// currently disabled → re-enable (set `disabled = false`).
     Enable { user_id: String },
-    /// Linked user whose subscription has lapsed (inactive or removed) but
-    /// whose access is currently enabled → disable (set `disabled = true`).
     Disable { user_id: String },
-    /// Active subscriber with no linked vpnctl user → surface so the
-    /// operator can link an existing user or provision a new one. Never
-    /// applied automatically.
     NewSubscriber { subscriber_id: i64 },
 }
 
-/// Compute the set of actions that reconcile vpnctl access with Boosty
-/// subscription state.
-///
-/// A linked user whose `subscriber_id` is absent from `subscribers` is
-/// treated as **inactive** (the subscriber is no longer on the blog's
-/// roster at all), which is the access-revoking safe default.
 pub fn reconcile(subscribers: &[SubscriberState], links: &[LinkedUser]) -> Vec<Action> {
     let active_by_id: HashMap<i64, bool> = subscribers
         .iter()
@@ -68,29 +30,23 @@ pub fn reconcile(subscribers: &[SubscriberState], links: &[LinkedUser]) -> Vec<A
 
     let mut actions = Vec::new();
 
-    // Linked users: enable/disable to match subscription state.
     for link in links {
-        // Absent from the roster ⇒ no longer a subscriber ⇒ inactive.
         let active = active_by_id
             .get(&link.subscriber_id)
             .copied()
             .unwrap_or(false);
 
         match (active, link.disabled) {
-            // Paying again but muted → turn access back on.
             (true, true) => actions.push(Action::Enable {
                 user_id: link.user_id.clone(),
             }),
-            // Lapsed but still enabled → cut access.
             (false, false) => actions.push(Action::Disable {
                 user_id: link.user_id.clone(),
             }),
-            // Already in the right state → no-op.
             (true, false) | (false, true) => {}
         }
     }
 
-    // Active subscribers with no link at all → surface for the operator.
     for sub in subscribers {
         if sub.active && !linked_subscriber_ids.contains(&sub.subscriber_id) {
             actions.push(Action::NewSubscriber {
@@ -156,8 +112,6 @@ mod tests {
 
     #[test]
     fn linked_user_absent_from_roster_is_disabled() {
-        // Subscriber 1 is gone from the roster entirely; the linked, still-
-        // enabled user must be disabled (access-revoking safe default).
         let actions = reconcile(&[], &[link("gone", 1, false)]);
         assert_eq!(
             actions,
@@ -180,26 +134,17 @@ mod tests {
 
     #[test]
     fn unlinked_user_never_touched() {
-        // The reconciler only knows about LINKED users. An operator-managed
-        // user simply isn't in `links`, so no action can target it. This
-        // test documents the invariant: with an empty link set and no
-        // active subscribers, nothing happens regardless of roster.
         assert!(reconcile(&[sub(1, false), sub(2, false)], &[]).is_empty());
     }
 
     #[test]
     fn mixed_batch_is_handled_independently() {
-        let subscribers = vec![
-            sub(1, true),  // alice active
-            sub(2, false), // bob lapsed
-            sub(3, true),  // carol active
-            sub(9, true),  // unlinked active → surfaced
-        ];
+        let subscribers = vec![sub(1, true), sub(2, false), sub(3, true), sub(9, true)];
         let links = vec![
-            link("alice", 1, true),  // enable
-            link("bob", 2, false),   // disable
-            link("carol", 3, false), // noop
-            link("dave", 4, false),  // subscriber 4 absent → disable
+            link("alice", 1, true),
+            link("bob", 2, false),
+            link("carol", 3, false),
+            link("dave", 4, false),
         ];
         let mut actions = reconcile(&subscribers, &links);
         actions.sort_by_key(|a| match a {
@@ -226,16 +171,12 @@ mod tests {
 
     #[test]
     fn many_users_share_one_subscriber() {
-        // BB-4: one person's several devices are distinct users linked to
-        // ONE subscriber. They all follow that subscriber's active state.
-        // Active → every disabled one re-enables; the already-enabled one
-        // is a no-op; no NewSubscriber (the subscriber is linked).
         let mut actions = reconcile(
             &[sub(11297041, true)],
             &[
-                link("demonnot-1", 11297041, true),  // disabled → enable
-                link("demonnot-2", 11297041, true),  // disabled → enable
-                link("demonnot-3", 11297041, false), // already on → noop
+                link("demonnot-1", 11297041, true),
+                link("demonnot-2", 11297041, true),
+                link("demonnot-3", 11297041, false),
             ],
         );
         actions.sort_by_key(|a| match a {
@@ -254,7 +195,6 @@ mod tests {
             ]
         );
 
-        // Lapsed → every enabled device disables together.
         let mut lapsed = reconcile(
             &[sub(11297041, false)],
             &[

@@ -1,7 +1,3 @@
-//! Spec for `record_node_health`, `recent_node_health_for_server`,
-//! `latest_node_health`, `purge_node_health_older_than` on
-//! `SqliteInventory`. Written from spec only — impl NOT consulted.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::PathBuf;
@@ -60,17 +56,16 @@ async fn rec(
         l,
         ports,
         log_bytes,
-        None, // kernel_versions_json — covered by the dedicated PR-Q test
-        None, // nic_iface
-        None, // nic_rx_bytes
-        None, // nic_tx_bytes
-        None, // sing_box_nrestarts — covered by the dedicated restart test
+        None,
+        None,
+        None,
+        None,
+        None,
     )
     .await
     .expect("record_node_health");
 }
 
-// 1. Empty inventory: recent_* and latest_* return empty / None.
 #[tokio::test]
 async fn empty_inventory_returns_empty_and_none() {
     let dir = TempDir::new().unwrap();
@@ -90,8 +85,6 @@ async fn empty_inventory_returns_empty_and_none() {
     assert!(latest.is_none(), "expected None, got {latest:?}");
 }
 
-// 2. Single insert with all fields populated; read-back roundtrips
-//    and ts is approx now.
 #[tokio::test]
 async fn single_insert_roundtrips_all_fields_and_ts_is_now() {
     let dir = TempDir::new().unwrap();
@@ -142,7 +135,6 @@ async fn single_insert_roundtrips_all_fields_and_ts_is_now() {
     );
 }
 
-// 3. Partial-fields probe: some Option::None survives as NULL → None.
 #[tokio::test]
 async fn partial_fields_none_preserved_on_read() {
     let dir = TempDir::new().unwrap();
@@ -153,13 +145,13 @@ async fn partial_fields_none_preserved_on_read() {
         &inv,
         "s1",
         Some(true),
-        None, // fail2ban parser failed
+        None,
         Some(1),
-        None, // disk total parser failed
+        None,
         None,
         Some(8_192),
         Some(100),
-        None, // ports parser failed
+        None,
         Some(0),
     )
     .await;
@@ -180,7 +172,6 @@ async fn partial_fields_none_preserved_on_read() {
     assert_eq!(r.sing_box_log_bytes, Some(0));
 }
 
-// 4. All-None probe still persists a row (worst-case tick).
 #[tokio::test]
 async fn all_none_probe_still_inserts_one_row() {
     let dir = TempDir::new().unwrap();
@@ -213,7 +204,6 @@ async fn all_none_probe_still_inserts_one_row() {
     assert_eq!(r.sing_box_log_bytes, None);
 }
 
-// 5. Newest-first ordering across 3 ticks (50ms apart, ISO-8601 millis).
 #[tokio::test]
 async fn recent_returns_newest_first() {
     let dir = TempDir::new().unwrap();
@@ -253,7 +243,6 @@ async fn recent_returns_newest_first() {
     }
 }
 
-// 6. latest_* returns single newest row.
 #[tokio::test]
 async fn latest_returns_single_newest_row() {
     let dir = TempDir::new().unwrap();
@@ -314,7 +303,6 @@ async fn latest_returns_single_newest_row() {
     assert_eq!(r.disk_total_mib, Some(30));
 }
 
-// 7. since_hours=0 excludes everything (strict ts > now-0).
 #[tokio::test]
 async fn since_hours_zero_excludes_everything() {
     let dir = TempDir::new().unwrap();
@@ -345,7 +333,6 @@ async fn since_hours_zero_excludes_everything() {
     );
 }
 
-// 8. since_hours=1 includes a freshly-written row (well within 30s).
 #[tokio::test]
 async fn since_hours_one_includes_30s_old_row() {
     let dir = TempDir::new().unwrap();
@@ -377,12 +364,10 @@ async fn since_hours_one_includes_30s_old_row() {
     );
 }
 
-// 9. FK enforcement: insert for unknown server must fail.
 #[tokio::test]
 async fn record_for_unknown_server_fails_fk() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
-    // Deliberately do NOT add "ghost".
 
     let res = inv
         .record_node_health(
@@ -409,7 +394,6 @@ async fn record_for_unknown_server_fails_fk() {
     );
 }
 
-// 10. CASCADE: removing a server drops its node_health rows.
 #[tokio::test]
 async fn remove_server_cascades_node_health() {
     let dir = TempDir::new().unwrap();
@@ -463,8 +447,6 @@ async fn remove_server_cascades_node_health() {
     assert_eq!(s2_rows.len(), 1, "s2's rows must survive");
 }
 
-// 11. purge boundary: recent kept, old dropped, return count is right.
-//     Then purge(0) sweeps everything.
 #[tokio::test]
 async fn purge_boundary_and_purge_zero_sweeps_all() {
     let dir = TempDir::new().unwrap();
@@ -486,7 +468,6 @@ async fn purge_boundary_and_purge_zero_sweeps_all() {
     )
     .await;
 
-    // Anything older than 30 days must remove ZERO rows.
     let removed = inv.purge_node_health_older_than(30).await.unwrap();
     assert_eq!(
         removed, 0,
@@ -498,7 +479,6 @@ async fn purge_boundary_and_purge_zero_sweeps_all() {
         .unwrap();
     assert_eq!(still_there.len(), 1, "recent row must survive 30d purge");
 
-    // purge(0) → everything older than now ⇒ all current rows go.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let removed_all = inv.purge_node_health_older_than(0).await.unwrap();
     assert_eq!(
@@ -512,16 +492,12 @@ async fn purge_boundary_and_purge_zero_sweeps_all() {
     assert!(after.is_empty(), "after purge(0), no rows left");
 }
 
-// 12. listening_ports_json roundtrips byte-for-byte verbatim (TEXT).
 #[tokio::test]
 async fn listening_ports_json_roundtrips_verbatim() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_server(&srv("s1")).await.unwrap();
 
-    // Note: deliberately weird whitespace + ordering — the column is
-    // TEXT and the spec says "returned verbatim", so we must NOT
-    // round-trip through a JSON parser that would re-canonicalise it.
     let raw = r#"[  "tcp/22" ,"udp/8443","tcp/443"]"#;
     rec(
         &inv,
@@ -550,15 +526,12 @@ async fn listening_ports_json_roundtrips_verbatim() {
     );
 }
 
-// 13. PR-Q: kernel_versions_json roundtrips verbatim; NULL stays NULL
-//     for old rows / partial probes (the nullable column is additive).
 #[tokio::test]
 async fn kernel_versions_json_roundtrips_and_nullable() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_server(&srv("s1")).await.unwrap();
 
-    // Row WITH versions.
     let kv = r#"{"sing-box":"1.13.12","caddy":"2.8.4"}"#;
     inv.record_node_health(
         &ServerId("s1".into()),
@@ -591,7 +564,6 @@ async fn kernel_versions_json_roundtrips_and_nullable() {
         "kernel_versions_json must roundtrip verbatim"
     );
 
-    // Row WITHOUT versions (partial probe / old node) → stays NULL.
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     rec(
         &inv,
@@ -618,16 +590,12 @@ async fn kernel_versions_json_roundtrips_and_nullable() {
     );
 }
 
-// 14. Migration 0042: sing_box_nrestarts roundtrips; NULL stays NULL for
-//     rows without a reading (non-systemd host / partial probe). The
-//     health monitor relies on NULL-vs-Some to skip first-observation.
 #[tokio::test]
 async fn sing_box_nrestarts_roundtrips_and_nullable() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_server(&srv("s1")).await.unwrap();
 
-    // Row WITH a counter reading.
     inv.record_node_health(
         &ServerId("s1".into()),
         Some(true),
@@ -658,7 +626,6 @@ async fn sing_box_nrestarts_roundtrips_and_nullable() {
         "sing_box_nrestarts must roundtrip the monotonic counter"
     );
 
-    // Row WITHOUT a reading (rec helper passes None) → stays NULL, NOT 0.
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     rec(
         &inv,
@@ -685,7 +652,6 @@ async fn sing_box_nrestarts_roundtrips_and_nullable() {
     );
 }
 
-// 15. New writes mint valid UUID sample_id; recent/latest expose it.
 #[tokio::test]
 async fn sample_id_roundtrips_as_valid_uuid_and_orders_consistently() {
     let dir = TempDir::new().unwrap();
@@ -748,8 +714,6 @@ async fn sample_id_roundtrips_as_valid_uuid_and_orders_consistently() {
     assert_eq!(latest.sample_id.as_deref(), Some(sid0));
 }
 
-// 16. Migration 0051 backfills legacy rows deterministically with stable legacy IDs
-//     and enforces unique index constraint.
 #[tokio::test]
 async fn migration_0051_backfills_legacy_sample_ids_and_enforces_uniqueness() {
     use std::path::Path;
@@ -758,7 +722,6 @@ async fn migration_0051_backfills_legacy_sample_ids_and_enforces_uniqueness() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("migration_test.db");
 
-    // Apply migrations up to 0050 into a temporary migration folder
     let migrations_temp_dir = TempDir::new().unwrap();
     let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
     for entry in std::fs::read_dir(&src_dir).unwrap().filter_map(|e| e.ok()) {
@@ -784,7 +747,6 @@ async fn migration_0051_backfills_legacy_sample_ids_and_enforces_uniqueness() {
         .unwrap();
     migrator.run(&pool).await.unwrap();
 
-    // Insert server and legacy node_health rows without sample_id
     sqlx::query("INSERT INTO servers (id, address, ssh_port, ssh_user, hoster) VALUES ('s1', '1.1.1.1', 22, 'root', 'generic')")
         .execute(&pool)
         .await
@@ -799,11 +761,9 @@ async fn migration_0051_backfills_legacy_sample_ids_and_enforces_uniqueness() {
     .await
     .unwrap();
 
-    // Apply migration 0051
     let m51_sql = std::fs::read_to_string(src_dir.join("0051_node_health_sample_id.sql")).unwrap();
     sqlx::raw_sql(&m51_sql).execute(&pool).await.unwrap();
 
-    // Check backfilled sample IDs
     let sample_ids: Vec<(String,)> =
         sqlx::query_as("SELECT sample_id FROM node_health ORDER BY ts ASC")
             .fetch_all(&pool)
@@ -825,7 +785,6 @@ async fn migration_0051_backfills_legacy_sample_ids_and_enforces_uniqueness() {
         "legacy IDs must be distinct"
     );
 
-    // Omitting sample_id must fail the NOT NULL constraint.
     let null_err = sqlx::query(
         "INSERT INTO node_health (ts, server_id) VALUES ('2026-01-01T00:15:00.000Z', 's1')",
     )
@@ -833,7 +792,6 @@ async fn migration_0051_backfills_legacy_sample_ids_and_enforces_uniqueness() {
     .await;
     assert!(null_err.is_err(), "sample_id must be required by schema");
 
-    // Inserting a duplicate sample_id must fail unique constraint
     let dup_err = sqlx::query(
         "INSERT INTO node_health (sample_id, ts, server_id) VALUES (?1, '2026-01-01T00:20:00.000Z', 's1')",
     )
@@ -848,7 +806,6 @@ async fn migration_0051_backfills_legacy_sample_ids_and_enforces_uniqueness() {
     pool.close().await;
 }
 
-// 17. Sample IDs persist and stay unchanged across SQLite VACUUM.
 #[tokio::test]
 async fn sample_ids_persist_across_vacuum() {
     let dir = TempDir::new().unwrap();
@@ -883,7 +840,6 @@ async fn sample_ids_persist_across_vacuum() {
         .map(|r| r.sample_id.clone().unwrap())
         .collect();
 
-    // Run VACUUM via a raw pool
     let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path(&dir).display()))
         .await
         .unwrap();
@@ -906,7 +862,6 @@ async fn sample_ids_persist_across_vacuum() {
     );
 }
 
-// 18. Sample IDs persist across VACUUM INTO / backup restore.
 #[tokio::test]
 async fn sample_ids_persist_across_vacuum_into_and_restore() {
     let dir = TempDir::new().unwrap();
@@ -950,7 +905,6 @@ async fn sample_ids_persist_across_vacuum_into_and_restore() {
         .unwrap();
     pool.close().await;
 
-    // Open restored DB
     let restored_inv = SqliteInventory::open(&backup_path).await.unwrap();
     let restored_rows = restored_inv
         .recent_node_health_for_server(&ServerId("s1".into()), 24)
@@ -967,7 +921,6 @@ async fn sample_ids_persist_across_vacuum_into_and_restore() {
     );
 }
 
-// 19. Retention deletion / new inserts cannot reuse old sample IDs.
 #[tokio::test]
 async fn sample_ids_retention_deletion_and_new_inserts_cannot_reuse() {
     let dir = TempDir::new().unwrap();
@@ -995,7 +948,6 @@ async fn sample_ids_retention_deletion_and_new_inserts_cannot_reuse() {
         .unwrap();
     let sid1 = r1.sample_id.expect("sample_id 1");
 
-    // Purge all rows
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     inv.purge_node_health_older_than(0).await.unwrap();
     let empty_rows = inv
@@ -1004,7 +956,6 @@ async fn sample_ids_retention_deletion_and_new_inserts_cannot_reuse() {
         .unwrap();
     assert!(empty_rows.is_empty());
 
-    // Insert new row
     rec(
         &inv,
         "s1",

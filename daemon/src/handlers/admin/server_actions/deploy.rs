@@ -6,35 +6,6 @@ use super::super::helpers::{bad_request, error_resp, internal_error, not_found};
 use crate::AppState;
 use crate::http_util::{form_field, path_segment_encode};
 
-/// `POST /admin/servers/{id}/deploy` — the operator-facing deploy
-/// button. Per CLAUDE.md "Web is the ONLY operator surface; CLI is
-/// implementation detail" — Pavel must never have to open a terminal
-/// to deploy a server.
-///
-/// **What this does TODAY (no SSH dep in production binary):**
-///   * Bootstrap every missing server-secret the inventory needs to
-///     render configs: REALITY keypair + short_id (for vless+reality),
-///     WireGuard server keypair (for wireguard), Hysteria2 obfs
-///     password (for hysteria2 + salamander). All mints happen
-///     server-side via vpnctl_crypto — no SSH.
-///   * Persist each new secret with audit_log row.
-///   * Render kernel configs for the operator's pre-flight review
-///     (writes nothing to the node — just confirms the render
-///     succeeds with the now-complete secret set).
-///
-/// **What still needs an SSH push to the node** (post-musl-build
-/// roadmap — tracked as TODO `web-deploy-apply`):
-///   * `ensure_installed` (apt install sing-box / amneziawg-tools)
-///   * `apply_config` (scp render output + systemctl restart)
-///
-/// Until the daemon ships with a working SSH path (musl static
-/// binary OR glibc upgrade on the host), the install/apply steps
-/// remain a one-time per-node CLI action — but the button still
-/// solves the per-click pain (no operator-typed keypair generation).
-///
-/// Returns 303 to /admin/servers/{id} after success so the operator
-/// sees the now-populated `secret_keys` block + any newly-enabled
-/// share-links in the user-detail Flow B section.
 pub(crate) async fn server_deploy(
     State(state): State<AppState>,
     Path(server_id_str): Path<String>,
@@ -49,13 +20,6 @@ pub(crate) async fn server_deploy(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
 
-    // Pre-flight: validate kernel/protocol compatibility via the
-    // registry. If a protocol declared on this server can't be
-    // rendered by any of its kernels, every bootstrap step below
-    // would still succeed but the render would later fail with a
-    // confusing "unsupported protocol" — surface that upfront.
-    // Secrets are loaded first so the port-conflict guard honours
-    // per-server overrides (vless.listen_port).
     let pre_secrets = match state.inv.list_server_secrets(&sid).await {
         Ok(s) => s,
         Err(e) => return internal_error(anyhow::Error::new(e)),
@@ -64,12 +28,6 @@ pub(crate) async fn server_deploy(
         return bad_request(&format!("config invalid before deploy: {e}"));
     }
 
-    // Concurrency gate: refuse a second node-touching deploy of THIS
-    // server while one is already in flight (another tab, a curl, the
-    // SSE deploy / deploy-all path). Without it two pipelines render +
-    // restart the same sing-box at once. The permit is released when
-    // this handler returns (RAII) — including every early-return error
-    // path below.
     let _deploy_guard = match crate::wizard_bootstrap::DeployGuard::try_acquire(&server.id.0) {
         Some(g) => g,
         None => {
@@ -83,11 +41,6 @@ pub(crate) async fn server_deploy(
         }
     };
 
-    // Bootstrap missing secrets. Shared with the Phase-E wizard
-    // via `wizard_bootstrap::bootstrap_server_secrets` so any new
-    // server-side secret added for a future protocol is minted
-    // identically by deploy + wizard. Idempotent — re-clicking
-    // deploy when everything is already minted is a safe no-op.
     let (_, bootstrapped) = match crate::wizard_bootstrap::bootstrap_server_secrets(
         &state.inv,
         &server,
@@ -115,14 +68,6 @@ pub(crate) async fn server_deploy(
         return bad_request(&format!("config changed before deploy: {e}"));
     }
 
-    // SSH push to the node — Path C via SubprocessSshTransport.
-    // For each declared kernel: ensure_installed → render config
-    // (only protocols this kernel can run) → apply_config.
-    //
-    // Per-kernel + per-step errors are isolated to the offending
-    // kernel: a failed amneziawg install does NOT prevent the
-    // sing-box restart. Aggregate result is captured in the audit
-    // payload (`ssh_kernels_pushed`, `ssh_errors`).
     use crate::ssh_subprocess::SubprocessSshTransport;
     let key_path = crate::app::deploy_key_path();
     let mut ssh_kernels_pushed: Vec<String> = Vec::new();
@@ -147,8 +92,6 @@ pub(crate) async fn server_deploy(
                 .trusted_fingerprint(server.trusted_host_fingerprint.clone())
                 .with_jump(jump);
 
-        // Pre-load users + render context once; reused for every
-        // kernel's render call.
         let users = match state.inv.users_for_server(&sid).await {
             Ok(u) => u,
             Err(e) => return internal_error(anyhow::Error::new(e)),
@@ -186,9 +129,6 @@ pub(crate) async fn server_deploy(
                 .filter_map(|p| state.registry.protocol(p))
                 .collect();
             if protocols.is_empty() {
-                // Kernel installed but no protocols for it — still
-                // a valid step (e.g. preparing a node for future
-                // protocols). Skip render+apply, report neutral.
                 ssh_kernels_pushed.push(format!("{} (installed, no protocols)", kid.0));
                 continue;
             }
@@ -199,8 +139,6 @@ pub(crate) async fn server_deploy(
                     continue;
                 }
             };
-            // Reserved-ports pre-apply guard (post-2026-05-26).
-            // Refuses configs that would bind a co-tenant's port.
             if kid.0 == "sing-box" {
                 match state.inv.get_reserved_ports(&server.id).await {
                     Ok(reserved) => {
@@ -225,9 +163,6 @@ pub(crate) async fn server_deploy(
             }
             ssh_kernels_pushed.push(kid.0.clone());
             configs_applied += 1;
-            // Best-effort firewall open (Kernel::open_firewall) — a fresh
-            // deploy must be reachable without a manual `ufw allow`; non-fatal
-            // (the config is already applied).
             if let Err(e) = kernel.open_firewall(&ssh, &ctx, &protocols).await {
                 tracing::warn!(target = "vpnctld::deploy", kernel = %kid.0, error = %e, "open_firewall skipped (best-effort)");
             }
@@ -298,39 +233,6 @@ pub(crate) async fn server_deploy(
     .into_response()
 }
 
-/// `POST /admin/servers/{id}/push-deploy-key` — append the daemon's
-/// deploy pubkey to the server's `~/.ssh/authorized_keys`. Recovery
-/// action for servers added via quick-add / migrate-from-bash
-/// (Phase E wizard does this automatically as step 3 of bootstrap).
-///
-/// `auth_method=deploy-key` verifies an already-installed deploy key and saves
-/// the chosen SSH login only after key/sudo verification. It never pushes keys;
-/// only an actual login change is audited. Omitting the method keeps installation.
-///
-/// ## Installation egress paths, tried in order
-///
-/// 1. **Reference SSH key** (preferred) — if `VPNCTLD_REFERENCE_SSH_KEY`
-///    env var points at a readable private key on the daemon host AND
-///    `root_password` is left empty, the handler uses that key
-///    (assumed pre-authorised on every inventory server, e.g. the
-///    operator's existing `~/.ssh/id_ed25519`) for a silent push. This
-///    matches Pavel's «if I added the server, the daemon should have
-///    all the access» expectation: configure the env var ONCE, all
-///    subsequent push-deploy-key clicks are no-input.
-/// 2. **Root password via sshpass** — fallback when reference key
-///    isn't set / isn't readable / didn't work. Operator-typed
-///    password → SSHPASS env var of the sshpass child process →
-///    never in argv (`ps auxe` from non-root can't see it). After
-///    the SSH call returns, the password lives only on this handler's
-///    stack; not stored, not logged, not in the audit payload.
-///
-/// Server-side command is byte-identical to the wizard's step 3
-/// (push-key) and idempotent (`grep -qxF || echo >>`) — a successful
-/// click followed by an accidental second click is a no-op.
-///
-/// **Audit row** written on both success + failure (operator action
-/// either way). Payload: `{success: bool, method: "reference-key" | "sshpass", error?: str}`
-/// — never the password.
 pub(crate) async fn server_push_deploy_key(
     Path(server_id_str): Path<String>,
     State(state): State<AppState>,
@@ -338,7 +240,6 @@ pub(crate) async fn server_push_deploy_key(
 ) -> Response {
     let sid = vpnctl_core::ServerId(server_id_str.clone());
 
-    // Look up server. 404 if not in inventory.
     let server = match state.inv.get_server(&sid).await {
         Ok(Some(s)) => s,
         Ok(None) => return not_found(&format!("no such server '{server_id_str}'")),
@@ -368,14 +269,8 @@ pub(crate) async fn server_push_deploy_key(
         );
     }
     let (method, push_result) = if verify_only {
-        // The key is already installed: no public-key read or remote mutation.
         ("deploy-key", Ok(()))
     } else {
-        // ─── Credentials gate (BEFORE expensive pubkey read) ─────────
-        // 400 ASAP if operator gave neither a password nor a usable
-        // reference key on the daemon host — otherwise a missing
-        // deploy-pubkey file (read step below) would surface as a
-        // misleading 500 hiding the real «no creds» bug.
         let reference_key_path = std::env::var("VPNCTLD_REFERENCE_SSH_KEY").ok();
         let try_reference = reference_key_path
             .as_ref()
@@ -387,8 +282,6 @@ pub(crate) async fn server_push_deploy_key(
             );
         }
 
-        // Read the daemon's deploy pubkey from disk. Same path the
-        // Settings page surfaces + the wizard's BootstrapPlan uses.
         let pubkey = match crate::ssh_subprocess::read_public_key(&key_path) {
             Ok(p) => p,
             Err(e) => {
@@ -403,8 +296,6 @@ pub(crate) async fn server_push_deploy_key(
             }
         };
 
-        // Idempotent remote append + chmod. Byte-identical to the
-        // wizard's step 3 (push-key).
         let push_cmd = format!(
             "set -eu; \
          mkdir -p ~/.ssh && chmod 0700 ~/.ssh; \
@@ -467,10 +358,6 @@ pub(crate) async fn server_push_deploy_key(
         (method, push_result)
     };
 
-    // Do not persist a changed login until the daemon proves that its own
-    // deploy key works for that account. For non-root users `exec("true")`
-    // uses the transport's exact `sudo -n sh -c` primitive, so this also
-    // verifies the privilege contract needed by deploys and pollers.
     let result =
         match push_result {
             Ok(()) => {
@@ -508,7 +395,6 @@ pub(crate) async fn server_push_deploy_key(
             ))
             .into_response(),
             Err(error) => {
-                // Never echo remote stderr: even a failed SSH command can print secrets.
                 let reason = if error.contains("sudo:") {
                     "Passwordless sudo verification failed."
                 } else if error.contains("Permission denied") {
@@ -533,9 +419,6 @@ pub(crate) async fn server_push_deploy_key(
         };
     }
 
-    // Audit either way. Payload: server id, success, optional error.
-    // Never the password (caller-owned secret); never the full sshpass
-    // stderr (might quote the password verbatim if sshpass leaks it).
     let audit_payload = match &result {
         Ok(_) => serde_json::json!({
             "success": true,
@@ -571,18 +454,11 @@ pub(crate) async fn server_push_deploy_key(
     }
 
     match result {
-        Ok(_) => {
-            // Anchor scroll back to the section + a query flag a
-            // future toast could read. For now the operator just
-            // sees the page refresh; pubkey-auth verification
-            // happens organically the next time the node probe
-            // poller runs.
-            Redirect::to(&format!(
-                "/admin/servers/{}/setup#push-deploy-key",
-                path_segment_encode(&server_id_str)
-            ))
-            .into_response()
-        }
+        Ok(_) => Redirect::to(&format!(
+            "/admin/servers/{}/setup#push-deploy-key",
+            path_segment_encode(&server_id_str)
+        ))
+        .into_response(),
         Err(e) => error_resp(
             StatusCode::BAD_GATEWAY,
             &format!(

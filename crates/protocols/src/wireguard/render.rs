@@ -4,33 +4,10 @@ use vpnctl_core::{CoreError, RenderCtx, Result, User};
 use super::amnezia::amneziawg_block;
 use super::helpers::{CLIENT_PRIVKEY_PLACEHOLDER, listen_port, peer_octet_for};
 
-/// Public wrapper around the same `.conf` renderer used internally
-/// by `share_link` and `amnezia_share_link`. Exposed so the daemon's
-/// `.conf` download handler can serve a drag-drop-ready file
-/// without going through a `share_link` plus base64-decode dance.
-///
-/// Returns the full INI body (Interface + Peer sections + AmneziaWG
-/// obfs lines when secrets are set). Same error contract as
-/// `share_link`: missing `wireguard.server_public_key` returns
-/// `MissingSecret`.
 pub fn render_client_conf_public(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
     render_client_conf(ctx, user)
 }
 
-/// Render the actual `.conf` text the share-link encodes. INI-format,
-/// LF newlines, opens with a "do-not-edit" warning. Mirrors the conf
-/// the AmneziaWG kernel writes server-side — same obfuscation block,
-/// peer's keys swapped for client perspective.
-///
-/// **Private-key sourcing** (per CLAUDE.md "users are low-tech" rule):
-///
-/// - `user.wireguard_private` set (= server-generated via
-///   `--gen-wireguard`) → conf is ready-to-import, single-action UX;
-///   no editor step needed.
-/// - `user.wireguard_private` is `None` (= operator-provided pubkey
-///   only) → falls back to the legacy `<PASTE YOUR PRIVATE KEY HERE>`
-///   placeholder + the comment block instructing the operator to
-///   swap in the client-side privkey before forwarding to the user.
 pub(crate) fn render_client_conf(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
     let server_pub = ctx.require("wireguard.server_public_key")?;
     let listen_port: u16 = listen_port(ctx.secrets);
@@ -61,8 +38,6 @@ pub(crate) fn render_client_conf(ctx: &RenderCtx<'_>, user: &User) -> Result<Str
     out.push_str(&peer_octet.to_string());
     out.push_str("/32\n");
     out.push_str("DNS = 1.1.1.1\n");
-    // AmneziaWG params (only if the server set them — same all-or-nothing
-    // contract as the JSON envelope).
     if let Some(amnezia) = amneziawg_block(ctx) {
         let m = amnezia
             .as_object()

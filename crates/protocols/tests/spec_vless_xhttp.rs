@@ -1,10 +1,4 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-//! Spec tests for `vpnctl_protocols::VlessXhttp` (VLESS over Xray-core's
-//! `xhttp` transport + REALITY, sharing the sibling `vless+reality`
-//! protocol's keypair via `RenderCtx::secrets`). Written from the spec
-//! only — no flow key anywhere is the single most safety-critical
-//! contract here (xhttp framing is incompatible with XTLS-Vision at the
-//! wire level). If a test fails, the impl is wrong — DO NOT weaken it.
 
 use std::collections::HashMap;
 
@@ -47,8 +41,6 @@ fn user(name: &str) -> User {
     }
 }
 
-/// Full happy-path secret set. Callers mutate / remove entries to
-/// exercise failure + boundary branches.
 fn secrets() -> HashMap<String, String> {
     let mut s = HashMap::new();
     s.insert("vless.private_key".into(), PRIVATE_KEY.into());
@@ -64,8 +56,6 @@ fn missing_secret_key(err: &CoreError) -> Option<&str> {
         _ => None,
     }
 }
-
-// ── trait-surface constants ─────────────────────────────────────────
 
 #[test]
 fn id_is_vless_plus_xhttp() {
@@ -97,10 +87,6 @@ fn server_secret_specs_is_exactly_vlessxhttp_path_password_and_nothing_vless_nam
             entropy_bytes: 16,
         }]
     );
-    // Regression guard: this protocol must NOT mint its own copy of the
-    // REALITY keypair / short_id — it reuses the sibling `vless+reality`
-    // protocol's secrets by reading them from RenderCtx, never declaring
-    // them here.
     for spec in &specs {
         let key = match spec {
             ServerSecretSpec::Password { key, .. } => *key,
@@ -128,8 +114,6 @@ fn server_secret_specs_is_exactly_vlessxhttp_path_password_and_nothing_vless_nam
         );
     }
 }
-
-// ── server_inbound (Xray-core wire schema) ──────────────────────────
 
 #[test]
 fn server_inbound_happy_path_full_shape() {
@@ -294,10 +278,6 @@ fn server_inbound_sni_and_mode_overridden_by_secrets() {
 
 #[test]
 fn server_inbound_unknown_mode_is_render_error() {
-    // Coverage relocated here from the removed in-file `#[cfg(test)] mod
-    // tests`: `checked_mode` rejects anything outside Xray's known xhttp
-    // transport modes, so a bad `vlessxhttp.mode` secret fails loud at
-    // render — not opaquely at `xray -test` apply time.
     let s = srv();
     let mut sec = secrets();
     sec.insert("vlessxhttp.mode".into(), "bogus-mode".into());
@@ -322,10 +302,6 @@ fn server_inbound_never_contains_a_flow_key_anywhere() {
         !dumped.contains("\"flow\""),
         "server_inbound must never carry a flow key (xhttp is Vision-incompatible): {dumped}"
     );
-    // Also walk each per-client object explicitly — a top-level string
-    // search could in principle miss a key whose value happens to look
-    // like the literal text `"flow"` while the key itself differs, so
-    // this is a belt-and-braces structural check too.
     for client in v["settings"]["clients"].as_array().unwrap() {
         assert!(
             client.get("flow").is_none(),
@@ -333,8 +309,6 @@ fn server_inbound_never_contains_a_flow_key_anywhere() {
         );
     }
 }
-
-// ── client_config (sing-box-style outbound) ─────────────────────────
 
 #[test]
 fn client_config_happy_path_full_shape() {
@@ -438,8 +412,6 @@ fn client_config_never_contains_a_flow_key_at_top_level() {
         "xhttp client_config must not carry a flow key anywhere: {dumped}"
     );
 }
-
-// ── share_link (byte-exact) ──────────────────────────────────────────
 
 #[test]
 fn share_link_happy_path_byte_exact() {

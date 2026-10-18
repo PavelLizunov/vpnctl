@@ -6,12 +6,6 @@ use maud::{Markup, html};
 use crate::handlers::admin::helpers::kernel_priority;
 use crate::http_util::path_segment_encode;
 
-/// Kernels editor — one row per kernel registered in the registry,
-/// with enable/disable form. Mirrors the protocols section directly
-/// below it. Per CLAUDE.md architectural principle (Kernel ×
-/// Protocol orthogonality), adding a new kernel here is the first
-/// step before enabling protocols that only that kernel supports
-/// (e.g. amneziawg → then wireguard).
 pub(super) fn server_detail_kernels_section(
     server: &vpnctl_core::Server,
     registry: &vpnctl_core::Registry,
@@ -119,27 +113,6 @@ pub(super) fn server_detail_kernels_section(
     }
 }
 
-/// Phase G chunk 3.5 follow-up — «Push deploy key» recovery action.
-///
-/// The Phase E wizard at `/admin/servers/new` does this automatically
-/// as step 3 of bootstrap (sshpass + `mkdir -p ~/.ssh && grep -qxF ||
-/// echo ... >>`). But three operator paths leave a server in
-/// inventory WITHOUT the daemon's pubkey on it:
-///
-///   * **migrate-from-bash** — imported pre-existing servers that
-///     have their own SSH key infra, daemon's key never pushed
-///   * **quick-add** (`POST /admin/servers`) — minimal form, only
-///     id + address + port; no password field, no push
-///   * **wizard failure mid-flow** — bootstrap got past step 1-2
-///     but failed before step 3 completed (rare)
-///
-/// All three leave Pavel with the «open a terminal + ssh root@…
-/// + paste the pubkey» chore. This section makes it a single click
-/// + paste-password instead.
-///
-/// Reuses `wizard_bootstrap::ssh_password_run` so the actual remote
-/// command is byte-identical to what the wizard runs (idempotent
-/// `grep -qxF || echo >>` — re-clicking after success is safe).
 pub(super) fn server_detail_push_deploy_key_section(
     server: &vpnctl_core::Server,
     lang: crate::i18n::Locale,
@@ -230,8 +203,6 @@ pub(super) fn server_detail_push_deploy_key_section(
                 label style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                     (tr(lang, "ssh password", "ssh-пароль"))
                 }
-                // R2: short placeholder (the old sentence truncated
-                // mid-word in the 400px field); full rules in `title`.
                 input type="password"
                       name="root_password"
                       autocomplete="off"
@@ -259,10 +230,6 @@ pub(super) fn server_detail_push_deploy_key_section(
                 button type="submit"
                        title=(crate::i18n::tr(
                            lang,
-                           // Honest copy (audit 2026-06-10): with the
-                           // password filled the handler goes straight
-                           // to sshpass — the reference key is tried
-                           // ONLY when the password field is empty.
                            "Append the daemon's deploy pubkey to ~/.ssh/authorized_keys on this server. With the password filled it connects via sshpass; leave the password empty to use the configured reference key instead.",
                            "Добавить deploy-pubkey демона в ~/.ssh/authorized_keys на этом сервере. С заполненным паролем подключается через sshpass; оставь пароль пустым, чтобы использовать настроенный reference-key.",
                        ))
@@ -322,8 +289,6 @@ pub(super) fn server_detail_routing_policy_section(
     }
 }
 
-/// Client entry / Входной сервер section on the server-detail page.
-/// Configures `client_detour_via` for 2-hop VPN chaining.
 pub(super) fn server_detail_client_detour_section(
     server: &vpnctl_core::Server,
     current_detour: Option<&vpnctl_core::ServerId>,
@@ -366,15 +331,6 @@ pub(super) fn server_detail_client_detour_section(
     }
 }
 
-/// Trusted host SSH fingerprint section — shows current pinned
-/// fingerprint (if any) plus a form for the operator to set / replace
-/// it. Two paths:
-///   * paste a `SHA256:…` literal (when the operator already has it),
-///   * "Auto-detect" button → POST that runs `ssh-keyscan +
-///     ssh-keygen -lf -` server-side, pins the resulting fingerprint.
-///
-/// Both go to the same `POST /admin/servers/{id}/set-fingerprint`
-/// route; the form's hidden `mode=keyscan` differentiates.
 pub(super) fn server_detail_fingerprint_section(
     server: &vpnctl_core::Server,
     lang: crate::i18n::Locale,
@@ -393,14 +349,6 @@ pub(super) fn server_detail_fingerprint_section(
             (t(lang, K::EyebrowTrustedFingerprint))
         }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-            // Honest copy (audit 2026-06-10): the daemon's SSH transport
-            // uses `StrictHostKeyChecking=accept-new` + its own
-            // known_hosts and does NOT read this pin — daemon-side the
-            // pin only feeds the fingerprint-drift WARNING alert
-            // (health_monitor::check_fingerprint_drift). Hard refusal
-            // happens only on the CLI deploy path (russh
-            // `trusted_fingerprint`). The old copy claimed every
-            // pipeline refuses on mismatch.
             (tr(
                 lang,
                 "Pinned SHA-256 of the node's SSH ed25519 host key. The CLI deploy refuses a host whose live key doesn't match; the daemon's pipelines (web deploy / probe / clash-poller) verify against their own known_hosts and use this pin to raise a fingerprint-drift warning alert — ",

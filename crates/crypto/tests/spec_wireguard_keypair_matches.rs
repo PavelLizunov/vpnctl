@@ -1,4 +1,3 @@
-//! Implementation-blind contract tests using only the public crypto API.
 #![allow(clippy::unwrap_used)]
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -18,8 +17,6 @@ fn malformed_encodings(key: &str) -> Vec<(&'static str, String)> {
         .iter()
         .position(|&byte| byte == noncanonical[42])
         .unwrap();
-    // A 32-byte encoding has two unused low bits in its final sextet.
-    // Changing just those bits must be rejected, not decoded as the same key.
     noncanonical[42] = alphabet[last | 1];
 
     let mut cases = vec![
@@ -59,7 +56,6 @@ fn accepts_canonical_generated_and_independently_derived_pairs() {
             assert!(key.ends_with('='));
             let decoded = STANDARD.decode(key).unwrap();
             assert_eq!(decoded.len(), 32);
-            // Boolean assertions deliberately avoid printing key material.
             assert!(STANDARD.encode(decoded) == *key);
         }
         assert!(wireguard_keypair_matches(&private, &public));

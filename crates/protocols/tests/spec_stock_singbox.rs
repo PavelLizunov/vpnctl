@@ -1,12 +1,4 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-//! Spec test for stock sing-box protocol compatibility.
-//!
-//! Source of truth: `docs/specs/singbox-chain-subscription.md`.
-//!
-//! Standard sing-box clients (stock sing-box 1.13+) do not support custom
-//! transport extensions such as `vless+xhttp` (which target sing-box-lx /
-//! VPNRouter). Stock sing-box JSON subscriptions MUST exclude `VlessXhttp`
-//! while including native sing-box protocols like `VlessReality`.
 
 use vpnctl_core::Protocol;
 use vpnctl_protocols::{

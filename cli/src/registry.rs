@@ -1,6 +1,3 @@
-//! Single source of truth for kernel/protocol registration. Both the CLI's
-//! `registry` subcommand and (in v0.2 Phase 3b) `deploy` will pull from here.
-
 use vpnctl_core::Registry;
 use vpnctl_kernels::{AmneziaWg, Caddy, SingBox, Xray};
 use vpnctl_protocols::{
@@ -8,59 +5,25 @@ use vpnctl_protocols::{
     WireGuard,
 };
 
-/// Build the canonical Registry. Add new kernels/protocols here.
 pub(crate) fn build() -> anyhow::Result<Registry> {
     let mut reg = Registry::new();
 
-    // ─── ЯДРА ────────────────────────────────────────────────────────────
     reg.register_kernel(Box::new(SingBox::new()))?;
-    // AmneziaWG — anti-DPI WireGuard fork. Apt-installed from the
-    // AmneziaVPN PPA; obfuscation params live in
-    // RenderCtx::secrets["amneziawg.{jc,jmin,jmax,s1,s2,h1,h2,h3,h4}"].
     reg.register_kernel(Box::new(AmneziaWg::new()))?;
-    // Caddy + forwardproxy@naive — serves the `naive` protocol with a
-    // real masquerade website (HTTP 200 to probes, tunnel to authed
-    // clients). Built from source on-node (xcaddy); ACME built into
-    // Caddy. Binds 80+443 → a naive node must not also run a 443-TCP
-    // sing-box protocol. Secrets: `naive.domain`, `naive.acme_email`.
     reg.register_kernel(Box::new(Caddy::new()))?;
-    // Xray-core — see crates/kernels/src/xray.rs module doc-comment.
     reg.register_kernel(Box::new(Xray::new()))?;
 
-    // ─── ПРОТОКОЛЫ ───────────────────────────────────────────────────────
-    // All stateless — real REALITY keys / TUIC certs / WG private keys
-    // live in inventory.server_secrets and arrive via RenderCtx at
-    // deploy time.
     reg.register_protocol(Box::new(VlessReality::new()))?;
     reg.register_protocol(Box::new(TuicV5::new()))?;
     reg.register_protocol(Box::new(Hysteria2::new()))?;
     reg.register_protocol(Box::new(Shadowsocks2022::new()))?;
-    // WireGuard wire-format — served by AmneziaWg today, future
-    // WireGuardKernel (vanilla wg-quick) too.
     reg.register_protocol(Box::new(WireGuard::new()))?;
     reg.register_protocol(Box::new(vpnctl_protocols::AmneziaWg2::new()))?;
     reg.register_protocol(Box::new(vpnctl_protocols::AmneziaWg3::new()))?;
-    // AnyTLS — REALITY successor; different TLS fingerprint, useful
-    // as fallback channel when REALITY gets DPI'd. Sing-box ≥ 1.12.
     reg.register_protocol(Box::new(AnyTls::new()))?;
-    // Trojan — venerable TLS-mimic. Third "TLS-looking" channel
-    // for protocol diversity; many older clients know Trojan but
-    // not REALITY/AnyTLS.
     reg.register_protocol(Box::new(Trojan::new()))?;
-    // naive — Chromium-fingerprint proxy served by the Caddy kernel.
-    // Strongest active-probe resistance (real cover website). Reuses
-    // `User.tuic_password` for HTTP Basic; server params
-    // `naive.domain` / `naive.acme_email` in inventory.server_secrets.
     reg.register_protocol(Box::new(Naive::new()))?;
-    // vless-ws — VLESS over WebSocket+TLS, DIRECT (no CDN), also served
-    // by the Caddy kernel (real LE cert on an alt-port + decoy site +
-    // reverse_proxy of one secret path → loopback sing-box ws inbound).
-    // RU-DPI-resistant AND client-universal (v2rayNG/v2RayTun/Happ/
-    // sing-box). No static listen_port → coexists with REALITY on :443.
-    // Server params `vlessws.domain` / `vlessws.acme_email` /
-    // `vlessws.listen_port`; `vlessws.path` auto-minted.
     reg.register_protocol(Box::new(VlessWs::new()))?;
-    // vless+xhttp — see crates/protocols/src/vless_xhttp.rs.
     reg.register_protocol(Box::new(VlessXhttp::new()))?;
 
     Ok(reg)

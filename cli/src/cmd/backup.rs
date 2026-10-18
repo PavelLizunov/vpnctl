@@ -170,11 +170,6 @@ fn backup_dir_from_env() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from(vpnctl_inventory::DEFAULT_BACKUP_DIR))
 }
 
-// `format_size_bytes` moved to `vpnctl_core::humanize::format_size_bytes`
-// (2026-05-18). The «duplicated here because the daemon module isn't
-// a CLI dep» note is no longer true — both surfaces now share
-// `vpnctl-core`, which has zero tokio/sqlx baggage.
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -188,7 +183,6 @@ mod tests {
         let backup_dir = dir.path().join("backups");
         std::fs::create_dir_all(&backup_dir).unwrap();
 
-        // Seed an inventory
         let inv = SqliteInventory::open(&db_path).await.unwrap();
         inv.add_user(&vpnctl_core::User {
             id: vpnctl_core::UserId("alice".into()),
@@ -204,7 +198,6 @@ mod tests {
         .unwrap();
         drop(inv);
 
-        // Run snapshot with custom db flag
         let snap = vpnctl_inventory::snapshot_now(
             &SqliteInventory::open(&db_path).await.unwrap(),
             &backup_dir,
@@ -213,7 +206,6 @@ mod tests {
         .unwrap();
         assert!(snap.exists());
 
-        // Test restore
         let restored_db = dir.path().join("restored.db");
         run_restore(snap, Some(restored_db.clone()), OutputFormat::Json)
             .await

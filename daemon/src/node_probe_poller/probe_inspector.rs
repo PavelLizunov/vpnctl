@@ -1,59 +1,20 @@
 use vpnctl_core::{Registry, SshTransport};
 use vpnctl_inventory::SqliteInventory;
 
-/// Centralised "does this kernel expose the probe-able surface" check.
-/// Today only `sing-box` answers — AmneziaWG nodes don't run systemd
-/// `sing-box`, so the probe script's `systemctl is-active sing-box`
-/// would just emit `unknown` noise. Used by BOTH `node_probe_poller`
-/// (writes node_health) AND `health_monitor` (reads node_health) so
-/// the two surfaces never disagree on what's in scope.
-///
-/// **TODO(amneziawg)**: when the AmneziaWG kernel ships, either teach
-/// this fn to return `true` for it AND wire a per-kernel probe variant
-/// (`wg show` instead of `systemctl is-active sing-box`), OR keep the
-/// sing-box-only behaviour and add a sibling `probeable_amneziawg`.
-/// Today's grep target: `fn probeable`.
 pub(crate) fn probeable(server: &vpnctl_core::Server) -> bool {
     !server.kernels.is_empty()
 }
 
-/// Outcome of one `probe_one_server` invocation. The poller's state
-/// machine reads this to drive the `server.unreachable` consecutive-
-/// failure detector (Phase G chunk 2). Probe success ⇒ `Ok(_)`; SSH-
-/// or-shell-broken ⇒ `SshFailed`; probe parsed but row insert failed
-/// ⇒ `RowWriteFailed` (the failure is logged but doesn't count
-/// against the unreachable detector — the node IS reachable).
-// `Ok(Probe)` is much larger than the error variants, but a ProbeOutcome
-// is created once per probe + matched immediately (never bulk-stored), so
-// boxing would add indirection for no real memory benefit.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeOutcome {
-    /// Probe succeeded; carries the parsed snapshot so the caller can
-    /// dispatch derived alerts (e.g. `fail2ban.banned_self`).
     Ok(crate::node_probe::Probe),
-    /// SSH transport / probe script failed entirely. Counts toward the
-    /// `server.unreachable` consecutive-failure threshold. Carries a
-    /// short human-readable reason (already redacted, safe for
-    /// alert payload).
     SshFailed(String),
-    /// Probe ran fine but the inventory write failed (sqlx-level
-    /// error). Does NOT count toward unreachable (the node IS
-    /// reachable; storage is broken, separate problem).
     RowWriteFailed,
-    /// Server has no probe-able kernel (e.g. AmneziaWG-only). Skipped
-    /// entirely; not a failure.
     Skipped,
-    /// Deploy key not on disk. Skipped at the SSH transport boundary;
-    /// not a failure.
     NoDeployKey,
 }
 
-/// Probe one server, insert the row, and return a [`ProbeOutcome`]
-/// so the caller's `FailState` can drive the `server.unreachable`
-/// detector. Pure side-effect, never panics. Every error is logged
-/// at warn-or-info and folded into the outcome enum (callers don't
-/// need to re-check Result variants).
 pub(crate) async fn probe_one_server(
     inv: &SqliteInventory,
     server: &vpnctl_core::Server,
@@ -70,11 +31,6 @@ pub(crate) async fn probe_one_server_with_registry(
     registry: &Registry,
     server: &vpnctl_core::Server,
 ) -> ProbeOutcome {
-    // Skip non-sing-box kernels for now via the centralised filter
-    // (see `probeable` doc-comment for the AmneziaWG TODO). Once-per-
-    // tick info log so the operator can grep + spot the no-op state
-    // when a new kernel lands without probe support — debug is too
-    // quiet (invisible by default).
     if !probeable(server) {
         tracing::info!(
             target = "vpnctld::node_probe",
@@ -87,8 +43,6 @@ pub(crate) async fn probe_one_server_with_registry(
 
     let key_path = crate::app::deploy_key_path();
     if !key_path.exists() {
-        // Pre-deploy: same as clash_poller, log once per tick at info
-        // (operator can grep) without spamming at warn.
         tracing::info!(
             target = "vpnctld::node_probe",
             server = %server.id.0,
@@ -134,9 +88,6 @@ pub(crate) async fn probe_one_server_with_registry(
         probe.sing_box_log_bytes = None;
     }
 
-    // Serialise the sorted (proto, port) set as a JSON array of
-    // "proto/port" strings — matches `0007_node_health.sql` schema
-    // doc-comment.
     let listening_json: Option<String> = if probe.listening.is_empty() {
         None
     } else {
@@ -148,9 +99,6 @@ pub(crate) async fn probe_one_server_with_registry(
         serde_json::to_string(&v).ok()
     };
 
-    // PR-Q — serialise the on-node kernel versions as a JSON object
-    // (BTreeMap → deterministic key order). NULL when empty (old node /
-    // partial-probe tick) rather than `{}`.
     let kernel_versions_json: Option<String> =
         if probe.kernel_versions.is_empty() && probe.kernel_active.is_empty() {
             None
@@ -212,9 +160,6 @@ pub(crate) async fn probe_one_server_with_registry(
     }
 }
 
-/// Reuse each declared kernel's own status implementation instead of
-/// duplicating version parsers in the generic shell probe. One broken kernel
-/// leaves only that observation unknown; the rest of the snapshot survives.
 async fn collect_declared_kernel_statuses(
     probe: &mut crate::node_probe::Probe,
     registry: &Registry,
@@ -222,8 +167,6 @@ async fn collect_declared_kernel_statuses(
     ssh: &dyn SshTransport,
 ) {
     for kid in &server.kernels {
-        // Fast path: if the single probe script already captured both active state
-        // and version for this kernel, skip redundant SSH executions.
         if probe.kernel_active.contains_key(&kid.0) && probe.kernel_versions.contains_key(&kid.0) {
             continue;
         }

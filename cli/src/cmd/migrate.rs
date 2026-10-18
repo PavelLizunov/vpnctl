@@ -88,10 +88,6 @@ pub(crate) async fn run_from_bash(
     db: Option<PathBuf>,
     output: OutputFormat,
 ) -> anyhow::Result<()> {
-    // Shared resolver: honours an explicit --key, else falls back to the
-    // default `$HOME/.ssh/id_ed25519` *with* an existence pre-check so a
-    // missing default (the classic sudo `$HOME=/root` footgun) yields an
-    // actionable error instead of an opaque russh "load key io error".
     let key_path = crate::cmd::deploy::resolve_key_path(args.key.clone())?;
     if !args.inventory_dir.is_dir() {
         anyhow::bail!(
@@ -103,7 +99,6 @@ pub(crate) async fn run_from_bash(
         anyhow::bail!("--server-id requires --server <IP> (only valid for single-server import)");
     }
 
-    // Enumerate .env files. Skip `EXAMPLE.env.tpl` and any non-.env files.
     let mut env_files: Vec<PathBuf> = Vec::new();
     for entry in std::fs::read_dir(&args.inventory_dir)? {
         let entry = entry?;
@@ -115,10 +110,6 @@ pub(crate) async fn run_from_bash(
         if !name.ends_with(".env") || name.ends_with(".env.tpl") {
             continue;
         }
-        // Apply --server filter via EXACT basename match
-        // (`<IP>.env`). Pre-2026-05-17 used `starts_with(only)`
-        // which made `--server 1` match `1.2.3.40.env` AND
-        // `10.0.0.1.env` — false matches on shared prefix.
         if let Some(only) = &args.server
             && name != format!("{only}.env")
         {
@@ -142,12 +133,6 @@ pub(crate) async fn run_from_bash(
             inv.server_ip, inv.ssh_port
         );
         let singbox = fetch_bash_singbox(&inv.server_ip, inv.ssh_port, &key_path).await?;
-        // sub_token generator. RNG failure → bail the WHOLE
-        // migration, never invent a deterministic token: if RNG is
-        // broken for one user it's likely broken for ALL of them,
-        // and a collision means find_user_by_sub_token returns the
-        // first match and every other user is silently unreachable
-        // via /sub. (review-agent 2026-05-17 critical.)
         let token_err: std::sync::Arc<std::sync::Mutex<Option<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(None));
         let token_err_clone = std::sync::Arc::clone(&token_err);
@@ -158,10 +143,6 @@ pub(crate) async fn run_from_bash(
                     if let Ok(mut g) = token_err_clone.lock() {
                         *g = Some(format!("sub-token RNG failure for '{name}': {e}"));
                     }
-                    // Return an empty string — the bail check below
-                    // surfaces the real error to the operator. We
-                    // can't bail from inside the closure (signature
-                    // is `FnMut(&str) -> String`).
                     String::new()
                 }
             }
@@ -188,13 +169,9 @@ pub(crate) async fn run_from_bash(
         return Ok(());
     }
 
-    // ─── APPLY ─────────────────────────────────────────────────────
     let db_path = crate::ui::resolve_db_path(db)?;
     let inv = SqliteInventory::open(&db_path).await?;
     println!();
-    // Surface UUID-replacement conflicts up front. Without
-    // --overwrite-existing this is informational; WITH it, this is
-    // the operator's last chance to abort if a conflict is unexpected.
     let mut total_conflicts = 0usize;
     for plan in &plans {
         total_conflicts += report_overwrite_conflicts(&inv, plan).await?;
@@ -208,14 +185,6 @@ pub(crate) async fn run_from_bash(
         );
     }
 
-    // L7 destructive-op gate — `Server.address` / `ssh_port` / `ssh_user`
-    // change detection. ONLY relevant in overwrite mode (without
-    // --overwrite-existing the address is left alone in
-    // apply_migration_plan). The check still surfaces the diff so the
-    // operator knows the planned address vs what's in inv.db, but the
-    // bail-out only fires when overwrite is active AND the address
-    // would actually change AND --i-really-mean-overwrite-address is
-    // absent.
     let mut total_address_changes = 0usize;
     for plan in &plans {
         if report_address_overwrite_warnings(&inv, plan).await? {
@@ -311,10 +280,6 @@ async fn fetch_bash_singbox(
             .port(port)
             .connect()
             .await?;
-    // Each file goes through `cat` standalone so the contents can
-    // contain ANY byte sequence (including what would have been our
-    // old sentinel). `set -eu` makes a missing file abort with
-    // exit≠0 → SSH transport surfaces that as an Err.
     let cfg = ssh
         .exec("set -eu; cat /etc/sing-box/config.json")
         .await
@@ -356,9 +321,6 @@ fn print_plan(plan: &MigrationPlan) {
         } else {
             "no"
         };
-        // Print ONLY the name + presence markers — never any byte
-        // of uuid/password/token. Operator wants to verify the
-        // PLAN, not exfiltrate secrets through scrollback.
         println!("      · {}  uuid:set  tuic:{tuic}", u.id.0);
     }
     if plan.users_to_import.len() > 5 {
@@ -391,9 +353,6 @@ async fn report_overwrite_conflicts(
         if let Some(existing) = inv.get_user(&u.id).await?
             && existing.uuid != u.uuid
         {
-            // Show only the first 6 chars of each uuid so the
-            // operator can SEE a divergence without giving away
-            // either full uuid. Six chars is enough to compare.
             let prefix = |s: &str| -> String {
                 let n = s.len().min(6);
                 s.get(..n).unwrap_or("").to_string()
@@ -532,9 +491,6 @@ mod tests {
 
     #[test]
     fn detects_address_change_in_isolation() {
-        // The vps-is-01 ↔ 104 cross-overwrite case (2026-05-17):
-        // operator passed `--server vps-is-01` but the .env file was
-        // actually for 104; the address swap was silent until L7.
         let existing = fake_server("198.51.100.5", 22, "root");
         let planned = fake_server("203.0.113.7", 22, "root");
         let diff = AddressOverwriteDiff::compute(&existing, &planned);
@@ -546,9 +502,6 @@ mod tests {
 
     #[test]
     fn detects_ssh_port_change_in_isolation() {
-        // DigitalOcean drops their managed firewall block on 22 →
-        // operator imports a Cloudzy node on 2222 over an existing
-        // DO row. Different attack but same gate.
         let existing = fake_server("198.51.100.5", 22, "root");
         let planned = fake_server("198.51.100.5", 2222, "root");
         let diff = AddressOverwriteDiff::compute(&existing, &planned);
@@ -560,9 +513,6 @@ mod tests {
 
     #[test]
     fn detects_ssh_user_change_in_isolation() {
-        // Less common (we always provision as root, then deploy creates
-        // a non-root daemon user) but still part of the SSH-coordinate
-        // surface — pin it.
         let existing = fake_server("198.51.100.5", 22, "root");
         let planned = fake_server("198.51.100.5", 22, "admin");
         let diff = AddressOverwriteDiff::compute(&existing, &planned);

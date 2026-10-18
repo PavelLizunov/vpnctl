@@ -1,18 +1,3 @@
-//! `vpnctl deploy <server>` — главная команда v0.2.
-//!
-//! Полный сценарий идемпотентного развёртывания:
-//!
-//!   1. Прочитать сервер + grants из inventory.
-//!   2. Открыть SSH (TOFU first-connect → запись fingerprint в inventory).
-//!   3. Установить ядро если не установлено.
-//!   4. Bootstrap secrets:
-//!      - VLESS+REALITY: gen x25519 keypair + 8-hex short_id, если их нет
-//!        в `server_secrets`.
-//!      - TUIC v5: на ноде сгенерить self-signed cert+key, если их там нет.
-//!   5. Собрать `RenderCtx`, отрендерить server config через `Kernel`.
-//!   6. Залить + перезагрузить ядро.
-//!   7. audit_log("server.deploy", payload).
-
 use crate::ui;
 use serde_json::json;
 use std::path::PathBuf;
@@ -37,11 +22,6 @@ pub(crate) async fn run(
         .ok_or_else(|| anyhow::anyhow!("server '{}' is busy with deploy/update", server.id))?;
 
     let registry = crate::registry::build()?;
-    // Secrets are loaded BEFORE the first validate so the port-conflict
-    // guard sees per-server overrides (vless.listen_port) that earlier
-    // deploys or the operator already set — an empty map here would
-    // false-positive naive+reality on a co-tenant node where reality has
-    // been moved off 443.
     let secrets = inv.list_server_secrets(&sid).await?;
     registry.validate_server(&server, &secrets)?;
 
@@ -72,10 +52,6 @@ pub(crate) async fn run(
         anyhow::bail!("inventory changed while preparing deploy; retry");
     }
 
-    // Multi-kernel: resolve every declared kernel up front. validate_server
-    // already verified each is registered + each protocol has at least one
-    // kernel that supports it; the unwrap-ish lookup below is now just
-    // construction of the dispatch loop.
     let kernels: Vec<&dyn vpnctl_core::Kernel> = server
         .kernels
         .iter()
@@ -86,7 +62,6 @@ pub(crate) async fn run(
         })
         .collect::<anyhow::Result<_>>()?;
 
-    // ─── 1. SSH ──────────────────────────────────────────────────────────
     let key_path = resolve_key_path(ssh_key)?;
     println!(
         "→ connecting to {}@{}:{} (key {})",
@@ -112,28 +87,13 @@ pub(crate) async fn run(
         .trusted_fingerprint(fingerprint)
         .with_jump(jump);
 
-    // ─── 2. Install every declared kernel if needed ──────────────────────
     for k in &kernels {
         println!("→ ensuring kernel '{}' is installed", k.id());
         k.ensure_installed(&ssh).await?;
     }
 
-    // The shared node-side self-signed TLS cert (/etc/sing-box/{cert,key}.pem)
-    // that tuic-v5 / hysteria2 / trojan / anytls all reference is now
-    // provisioned idempotently by the sing-box kernel's `ensure_installed`
-    // (step 2 above) — in BOTH this CLI path and the daemon web/SSE path.
-    // It used to be minted here, gated on tuic-v5, so a hy2/trojan/anytls-
-    // only node missed it; see `crates/kernels/src/sing_box.rs`.
-
-    // ─── 4. Resolve users + per-kernel protocol partition ────────────────
     let ctx = RenderCtx::new(&server, &secrets);
 
-    // ─── 5. Render + apply, one kernel at a time ─────────────────────────
-    // Each kernel renders ONLY the protocols it supports. A protocol
-    // landing on multiple kernels (currently impossible — no overlap
-    // in registered supported_protocols, but trait allows it) would
-    // be rendered twice, once per kernel; sing-box/amneziawg topology
-    // makes this a non-issue today.
     let mut total_config_bytes = 0usize;
     let mut rendered_kernels: Vec<String> = Vec::new();
     for k in &kernels {
@@ -162,11 +122,6 @@ pub(crate) async fn run(
             protocols_for_k.len()
         );
         let config = k.render_config(&ctx, &users, &protocols_for_k)?;
-        // Reserved-ports pre-apply guard (post-2026-05-26). Refuses
-        // to push a config that would bind a port the operator has
-        // marked reserved on this server (typically a co-tenant
-        // service like a legacy 3x-ui panel on :443). The guard is
-        // sing-box-specific today; other kernels are no-ops here.
         if k.id().0 == "sing-box" {
             let reserved = inv.get_reserved_ports(&server.id).await?;
             vpnctl_kernels::validate_config_excludes_ports(&config, &reserved)?;
@@ -177,8 +132,6 @@ pub(crate) async fn run(
             config.len()
         );
         k.apply_config(&ssh, &config).await?;
-        // Best-effort firewall open (Kernel::open_firewall) so a fresh
-        // deploy is reachable without a manual `ufw allow`. Non-fatal.
         if let Err(e) = k.open_firewall(&ssh, &ctx, &protocols_for_k).await {
             println!("⚠ firewall step skipped for {}: {e}", k.id());
         }
@@ -223,31 +176,12 @@ pub(crate) async fn run(
     Ok(())
 }
 
-/// Resolve the SSH private-key path for a command, validating that the
-/// *default* actually exists before we hand it to russh.
-///
-/// When the operator passes `--key` explicitly we trust them and return it
-/// as-is — a bad path then surfaces from the transport as usual. But when we
-/// fall back to the default `$HOME/.ssh/id_ed25519`, a missing file otherwise
-/// dies deep inside russh as an opaque `load key ... io error` with no hint of
-/// the real footgun: under `sudo`, `$HOME` is `/root`, so the default differs
-/// from the login shell's `~/.ssh/id_ed25519`. We pre-check `exists()` and emit
-/// an actionable error pointing at `--key` and the sudo/`$HOME` gotcha.
-///
-/// Shared by `deploy`, `status`, `bootstrap` (private-key load) and `migrate`.
-/// For call sites that only need the *path* (e.g. deriving the `.pub`
-/// sibling), use [`default_key_path`] to skip the existence check.
 pub(crate) fn resolve_key_path(flag: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     resolve_key_path_inner(flag, default_key_path()?)
 }
 
-/// Inner resolver with the default path injected, so tests can exercise the
-/// missing-default branch without mutating the global `$HOME` env (the crate
-/// forbids `unsafe`, so `std::env::set_var` is off-limits).
 fn resolve_key_path_inner(flag: Option<PathBuf>, default: PathBuf) -> anyhow::Result<PathBuf> {
     if let Some(p) = flag {
-        // Explicit --key: trust the operator; let the transport surface a bad
-        // path. (We don't second-guess an intentional choice.)
         return Ok(p);
     }
     if !default.exists() {
@@ -260,9 +194,6 @@ fn resolve_key_path_inner(flag: Option<PathBuf>, default: PathBuf) -> anyhow::Re
     Ok(default)
 }
 
-/// The default SSH private-key path (`$HOME/.ssh/id_ed25519`) without any
-/// existence check. Use [`resolve_key_path`] when the key will actually be
-/// loaded; this is only for deriving sibling paths (e.g. the `.pub` file).
 pub(crate) fn default_key_path() -> anyhow::Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot resolve $HOME"))?;
     Ok(home.join(".ssh/id_ed25519"))
@@ -271,16 +202,6 @@ pub(crate) fn default_key_path() -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    //! Regression net for the secret-bootstrap drift: `vpnctl deploy` must
-    //! mint EVERY enabled protocol's server-side secret via the shared
-    //! declarative `bootstrap_server_secrets` (built over each protocol's
-    //! `server_secret_specs()`), NOT the old hardcoded vless/wireguard
-    //! set. The bug: shadowsocks-2022's `ss2022.psk` was never minted →
-    //! the whole node deploy hard-failed at render with `MissingSecret {
-    //! ss2022.psk }`; hysteria2's `hysteria2.obfs.password` was omitted →
-    //! Salamander obfs silently degraded. We exercise the SAME shared
-    //! function the deploy path now calls (the deploy `run` itself needs a
-    //! live node over SSH, so we test the secret-bootstrap seam directly).
 
     use super::resolve_key_path_inner;
     use std::path::PathBuf;
@@ -290,9 +211,6 @@ mod tests {
 
     #[test]
     fn resolve_key_path_default_missing_returns_actionable_error() {
-        // Point the *default* at a tempdir with NO `.ssh/id_ed25519` (mirrors
-        // the sudo `$HOME=/root` footgun). The default fallback must fail with
-        // an actionable error, not an opaque russh load error later.
         let home = TempDir::new().unwrap();
         let default = home.path().join(".ssh/id_ed25519");
         assert!(!default.exists());
@@ -313,9 +231,6 @@ mod tests {
 
     #[test]
     fn resolve_key_path_explicit_existing_key_is_ok() {
-        // An explicit --key to an existing file is returned verbatim, no error.
-        // (The injected default is intentionally bogus — an explicit --key must
-        // never even consult it.)
         let dir = TempDir::new().unwrap();
         let key = dir.path().join("my_key");
         std::fs::write(&key, b"PRIVATE KEY").unwrap();
@@ -326,7 +241,6 @@ mod tests {
 
     #[test]
     fn resolve_key_path_default_present_is_ok() {
-        // Default points at an existing file: resolves Ok with that path.
         let home = TempDir::new().unwrap();
         let ssh = home.path().join(".ssh");
         std::fs::create_dir_all(&ssh).unwrap();
@@ -370,9 +284,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Headline fix: ss2022 PSK minted (was silently omitted), in the
-        // sing-box-compatible STANDARD base64 (24 chars, padded — a
-        // url-safe/unpadded PSK would crash the node config).
         let psk = secrets
             .get("ss2022.psk")
             .expect("ss2022.psk must be minted by the CLI deploy bootstrap");
@@ -382,17 +293,11 @@ mod tests {
             !psk.contains('-') && !psk.contains('_'),
             "PSK must be STANDARD base64, not url-safe"
         );
-        // hysteria2 Salamander obfs password minted.
         assert!(secrets.contains_key("hysteria2.obfs.password"));
-        // REALITY still minted (no regression for the protocols the old
-        // hardcoded path already covered).
         assert!(secrets.contains_key("vless.private_key"));
         assert!(secrets.contains_key("vless.public_key"));
         assert!(secrets.contains_key("vless.short_id"));
 
-        // The contract: every enabled protocol renders its server inbound
-        // WITHOUT a MissingSecret after bootstrap — the exact failure mode
-        // the bug produced at deploy time.
         let ctx = RenderCtx::new(&server, &secrets);
         for pid in &server.enabled_protocols {
             let proto = registry.protocol(pid).unwrap();

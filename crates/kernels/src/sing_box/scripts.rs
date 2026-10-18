@@ -122,29 +122,8 @@ cleanup_stages
 trap - EXIT HUP INT TERM
 "#;
 
-/// Idempotent node-setup script run by [`SingBox::ensure_installed`] on
-/// EVERY deploy — both the CLI (`vpnctl deploy`) and the daemon web/SSE
-/// paths call `ensure_installed` before render/apply. Installs (or
-/// upgrades, when below [`SING_BOX_MIN_VERSION`]) sing-box + its APT
-/// prereqs, pre-creates the sing-box-owned log file, wires logrotate,
-/// and provisions the shared self-signed TLS cert/key.
-///
-/// Built once via `LazyLock`: only the version-gate prelude is
-/// interpolated (the floor from [`SING_BOX_MIN_VERSION`]); the rest is a
-/// static raw string. The composed script can be asserted directly in
-/// tests (`SING_BOX_SETUP_SCRIPT.as_str()` yields `&str`).
 pub(super) static SING_BOX_SETUP_SCRIPT: std::sync::LazyLock<String> = std::sync::LazyLock::new(
     || {
-        // VERSION-AWARE INSTALL GATE. Install/upgrade only when sing-box package
-        // state is not 'install ok installed', /usr/bin/sing-box is absent, or
-        // its version is BELOW SING_BOX_MIN_VERSION; no-op at/above.
-        // The node has dpkg, so `dpkg --compare-versions` does the comparison.
-        // `$CUR` is quoted (it can be empty if `sing-box version` ever changes
-        // its output) — an empty CUR compares LOWER than any real floor, so
-        // `ge` fails and NEED=1 (reinstall), which is the safe default. The
-        // `|| NEED=1` keeps the non-zero compare from tripping `set -e`.
-        // `apt-get install -y sing-box` installs the repo CANDIDATE (newest in
-        // the SagerNet channel), which is ≥ the floor.
         let head = format!(
             r#"
     set -eu
@@ -198,11 +177,6 @@ pub(super) static SING_BOX_SETUP_SCRIPT: std::sync::LazyLock<String> = std::sync
     },
 );
 
-/// Static remainder of the node-setup script (everything after the
-/// version-aware install gate). Kept as a separate raw string — it
-/// carries literal `{`/`}` (logrotate fragment, fail2ban heredoc
-/// `${F2B_SSH_PORT}`) that must NOT pass through `format!`. UNCHANGED
-/// from before the version-gate refactor.
 pub(super) const SING_BOX_SETUP_SCRIPT_TAIL: &str = r#"    # Pre-create log file with sing-box ownership ONLY IF ABSENT.
     # Otherwise the service crash-loops with "open /var/log/sing-box.log:
     # permission denied" — observed live on the staging deploy.
@@ -340,12 +314,6 @@ F2B
 "#;
 
 pub(super) fn sing_box_apply_script() -> &'static str {
-    // Атомарная замена + валидация перед перезагрузкой + ВЕРИФИКАЦИЯ
-    // что сервис реально поднялся, + откат к последнему рабочему конфигу.
-    // Без верификации deploy'и молча «succeed» когда sing-box crash-loop'ит
-    // (живой пример: permission denied на /var/log/sing-box.log на свежей
-    // ноде); без отката нода остаётся в crash-loop'е с уже стёртым
-    // прошлым-рабочим конфигом.
     r#"
             set -eu
             /usr/bin/sing-box check -c /etc/sing-box/config.json.new
@@ -414,16 +382,6 @@ pub(super) fn sing_box_apply_script() -> &'static str {
         "#
 }
 
-/// Build the idempotent, ufw-guarded shell snippet that opens every
-/// `(transport, port)` in `ports` (deduplicated; sorted for stable output).
-/// Returns `None` when `ports` is empty. Mirrors the Caddy kernel's
-/// best-effort posture: the `command -v ufw` guard makes it a clean no-op on
-/// hosts with no ufw (e.g. DigitalOcean droplets, where an upstream Cloud
-/// Firewall — not local ufw — governs ingress), `ufw allow` is idempotent
-/// (skips an existing rule) and opens both IPv4 + IPv6. `port` is `u16` and
-/// `transport` is a `"tcp"`/`"udp"` `&'static str` from the protocol's
-/// `effective_listen_ports()`, so the interpolation carries no injection
-/// surface.
 pub(super) fn firewall_open_script(ports: &[(&str, u16)]) -> Option<String> {
     let uniq: std::collections::BTreeSet<(&str, u16)> = ports.iter().copied().collect();
     if uniq.is_empty() {

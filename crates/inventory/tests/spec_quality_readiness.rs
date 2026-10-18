@@ -1,6 +1,3 @@
-//! Independent tests derived from deploy-readiness-quality.md and the approved
-//! public inventory contract. No implementation source was consulted.
-
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use std::net::SocketAddr;
@@ -99,8 +96,6 @@ async fn removing_user_durably_marks_all_formerly_granted_servers_pending() {
         assert!(!inv.server_pending_deploy(sid).await.unwrap());
     }
 
-    // Only the public mutation is invoked: callers must not need to reconstruct
-    // deleted grant links or append their own per-server audit after removal.
     inv.remove_user(&uid).await.unwrap();
     let audit_count = inv.recent_audit(100).await.unwrap().len();
     inv.remove_user(&uid).await.unwrap();
@@ -171,7 +166,6 @@ async fn deleting_user_rolls_back_when_durable_audit_evidence_cannot_be_written(
     .unwrap();
     inv.grant(&uid, &sid).await.unwrap();
     applied(&inv, &sid).await;
-    // Approved fault-injection schema contract, confined to a disposable DB.
     let status = std::process::Command::new("python3")
         .args([
             "-c",
@@ -257,8 +251,6 @@ async fn every_granted_user_config_action_stays_pending_until_canonical_deploy()
         let reopened = SqliteInventory::open(&dir.path().join("inventory.db"))
             .await
             .unwrap();
-        // Attempts and a successful apply on another server cannot clear this
-        // server's saved-but-unapplied change, including after a reopen.
         for attempt in [
             "server.deploy.failed",
             "server.deploy.skipped",
@@ -388,7 +380,6 @@ async fn recreated_server_cannot_inherit_prior_incarnation_provisioning() {
 
     inv.remove_server(&sid).await.unwrap();
     inv.add_server(&server).await.unwrap();
-    // A fresh connection must not resurrect an old success for this reused ID.
     let reopened = SqliteInventory::open(&dir.path().join("inventory.db"))
         .await
         .unwrap();
@@ -413,7 +404,6 @@ async fn recreated_server_cannot_inherit_prior_incarnation_provisioning() {
             .is_empty()
     );
 
-    // Only a new canonical success can unlock the replacement server.
     applied(&reopened, &sid).await;
     record(&reopened, &sample(&sid, true), 443).await;
     let current = reopened
@@ -531,7 +521,6 @@ async fn ordinary_redeploy_preserves_real_failures_and_measurement_epoch() {
     applied(&inv, &sid).await;
     record(&inv, &sample(&sid, true), 443).await;
 
-    // Reopening is a public persistence boundary, not a simulated worker state.
     let reopened = SqliteInventory::open(&dir.path().join("inventory.db"))
         .await
         .unwrap();
@@ -559,7 +548,6 @@ async fn ordinary_redeploy_preserves_real_failures_and_measurement_epoch() {
 async fn changed_targets_and_return_to_old_targets_do_not_pool_epochs() {
     let (_dir, inv, sid) = fixture().await;
     applied(&inv, &sid).await;
-    // Deliberately equal timestamps: insertion order must distinguish A→B→A.
     let failed = sample(&sid, false);
     let mut good = sample(&sid, true);
     good.ts = failed.ts;

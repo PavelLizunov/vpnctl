@@ -1,10 +1,3 @@
-//! Spec for `SqliteInventory::uptime_for_server` (`UptimeStat`).
-//! Written from spec only — impl NOT consulted.
-//! `record_node_health` always stamps `ts=now`; to pin specific ages
-//! we raw-INSERT via a second sqlx pool to the same DB file with the
-//! same ISO format the production writer uses. Same pattern as
-//! `spec_sub_access.rs`.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::{Path, PathBuf};
@@ -43,8 +36,6 @@ async fn raw_pool(path: &Path) -> sqlx::SqlitePool {
         .expect("raw pool")
 }
 
-/// Insert `node_health` row at `now - hours_ago h` with given sba
-/// (None → SQL NULL → "unknown"). Only ts + sba matter for uptime.
 async fn ins(pool: &sqlx::SqlitePool, sid: &str, sba: Option<bool>, hours_ago: i64) {
     let sample_id = format!("uptime-{sid}-{hours_ago}-{}", vpnctl_crypto::gen_uuid());
     sqlx::query(
@@ -66,7 +57,6 @@ async fn stat(inv: &SqliteInventory, sid: &str, win: u32) -> vpnctl_inventory::U
         .expect("uptime_for_server")
 }
 
-// 1. Empty server: every counter zero, every Option None.
 #[tokio::test]
 async fn empty_server_returns_all_zero_uptime_stat() {
     let dir = TempDir::new().unwrap();
@@ -84,7 +74,6 @@ async fn empty_server_returns_all_zero_uptime_stat() {
     assert!(s.last_probe_at.is_none());
 }
 
-// 2. All-up: pct=100, no last_outage.
 #[tokio::test]
 async fn all_up_rows_yield_one_hundred_percent_uptime() {
     let dir = TempDir::new().unwrap();
@@ -106,7 +95,6 @@ async fn all_up_rows_yield_one_hundred_percent_uptime() {
     assert!(s.last_probe_at.is_some(), "had probes");
 }
 
-// 3. All-down: pct=0, last_outage = most recent ts (= last_probe).
 #[tokio::test]
 async fn all_down_rows_yield_zero_percent_and_last_outage() {
     let dir = TempDir::new().unwrap();
@@ -127,7 +115,6 @@ async fn all_down_rows_yield_zero_percent_and_last_outage() {
     assert_eq!(o, p, "newest row IS a down → last_outage = last_probe");
 }
 
-// 4. Mixed 9 up + 1 down → pct=90; last_outage = the down row.
 #[tokio::test]
 async fn mixed_up_and_down_pct_and_last_outage_pin_to_down_ts() {
     let dir = TempDir::new().unwrap();
@@ -137,7 +124,7 @@ async fn mixed_up_and_down_pct_and_last_outage_pin_to_down_ts() {
     for h in (5..14).rev() {
         ins(&raw, "s1", Some(true), h).await;
     }
-    ins(&raw, "s1", Some(false), 3).await; // newest of all
+    ins(&raw, "s1", Some(false), 3).await;
     raw.close().await;
 
     let s = stat(&inv, "s1", 24).await;
@@ -151,7 +138,6 @@ async fn mixed_up_and_down_pct_and_last_outage_pin_to_down_ts() {
     assert_eq!(o, p, "-3h down is newest in window");
 }
 
-// 5. Unknown rows excluded from denominator.
 #[tokio::test]
 async fn uptime_excludes_unknown_from_denominator() {
     let dir = TempDir::new().unwrap();
@@ -177,7 +163,6 @@ async fn uptime_excludes_unknown_from_denominator() {
     assert!(s.last_outage_at.is_none(), "no down → no last_outage");
 }
 
-// 6. All-unknown: pct=None (not Some(0)).
 #[tokio::test]
 async fn all_unknown_rows_yield_none_uptime_pct() {
     let dir = TempDir::new().unwrap();
@@ -199,15 +184,14 @@ async fn all_unknown_rows_yield_none_uptime_pct() {
     assert!(s.last_probe_at.is_some());
 }
 
-// 7. Window filters by ts age (24h excludes 100h-old; 168h includes).
 #[tokio::test]
 async fn window_filters_rows_by_ts_age() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_server(&srv("s1")).await.unwrap();
     let raw = raw_pool(&db_path(&dir)).await;
-    ins(&raw, "s1", Some(true), 100).await; // ancient
-    ins(&raw, "s1", Some(true), 1).await; // fresh
+    ins(&raw, "s1", Some(true), 100).await;
+    ins(&raw, "s1", Some(true), 1).await;
     raw.close().await;
 
     let day = stat(&inv, "s1", 24).await;
@@ -219,7 +203,6 @@ async fn window_filters_rows_by_ts_age() {
     assert_eq!(week.up_rows, 2);
 }
 
-// 8. Per-server isolation.
 #[tokio::test]
 async fn other_servers_rows_do_not_contaminate_query() {
     let dir = TempDir::new().unwrap();
@@ -251,7 +234,6 @@ async fn other_servers_rows_do_not_contaminate_query() {
     assert_eq!(b.uptime_pct, Some(0));
 }
 
-// 9. last_outage = MAX(ts WHERE down); newer UP must NOT move it.
 #[tokio::test]
 async fn last_outage_is_max_down_ts_even_when_newer_up_exists() {
     let dir = TempDir::new().unwrap();
@@ -274,7 +256,6 @@ async fn last_outage_is_max_down_ts_even_when_newer_up_exists() {
     );
 }
 
-// 10. Integer-truncated percentage (75%, 33%).
 #[tokio::test]
 async fn uptime_pct_is_integer_truncated() {
     async fn pct_for(ups: u32, downs: u32) -> Option<u8> {

@@ -1,34 +1,3 @@
-//! Phase 4c — In-memory cache of the last `clash-api` snapshot per
-//! VPN server, plus aggregate helpers for the «Live connections»
-//! drill-down on `/admin/servers/<id>`.
-//!
-//! ## Why a cache (and why in-memory only)
-//!
-//! The poller (`clash_poller::spawn_clash_poller`) already pulls a
-//! full `Snapshot { connections: Vec<Connection>, … }` from each
-//! server every 5 minutes. Today we agregate that into one server-
-//! wide `vpn_connection_stats` row and **discard** the per-
-//! connection detail. For the admin UI's per-connection breakdown
-//! we need the same detail back — but writing every connection to
-//! SQLite would be ~370k rows/day at 3 servers (426 conn × 288
-//! ticks × 3), and we don't actually need history beyond «what's
-//! happening right now».
-//!
-//! Trade-off: keep the last snapshot per server in memory only.
-//! Daemon restart → empty for the next 5 minutes until the poller
-//! tick refills it. Size: ~85 KiB per server × 3 = ~255 KiB total.
-//!
-//! ## Per-user attribution
-//!
-//! Our patched sing-box clash-api emits `metadata.user` on every
-//! connection (the NM-11 fix — upstream's `TrackerMetadata.MarshalJSON`
-//! dropped that field). Per-user attribution is therefore read straight
-//! off each `Connection.metadata.user`; this cache no longer carries a
-//! side attribution map. (`sub_access_log.ip` → user via
-//! `SqliteInventory::users_for_source_ips` remains a secondary fallback
-//! in the online-badge for connections whose user is somehow absent —
-//! e.g. an as-yet-unpatched node.)
-
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -38,29 +7,13 @@ use vpnctl_core::ServerId;
 
 use crate::clash_api::Snapshot;
 
-/// The freshest clash-api snapshot for one server. Per-user
-/// attribution lives on each `Connection.metadata.user` (emitted by
-/// our patched sing-box clash-api — the NM-11 fix), so the snapshot is
-/// self-describing and no side attribution map is needed.
 #[derive(Debug)]
 pub struct ServerSnapshot {
     pub snapshot: Snapshot,
-    /// When the poller last wrote this entry. A cache entry is only
-    /// «live» for roughly two poll intervals after this stamp; past
-    /// that it is stale and must NOT drive green reachable badges or
-    /// live connection tables (the poller may have stopped reaching
-    /// the node, but the last good snapshot would otherwise sit here
-    /// forever looking current).
     pub observed_at: DateTime<Utc>,
 }
 
 impl ServerSnapshot {
-    /// True once `now` is more than two `poll_interval`s past
-    /// [`Self::observed_at`]. Two intervals (not one) so a single
-    /// slow/missed tick doesn't flap the UI to «stale» — the node gets
-    /// one grace tick, matching the poller's own missed-tick tolerance.
-    /// Pure (no clock read) so tests exercise fresh vs stale by passing
-    /// a fixed `now` instead of sleeping.
     pub fn is_stale(&self, now: DateTime<Utc>, poll_interval: Duration) -> bool {
         let threshold = chrono::Duration::from_std(poll_interval.saturating_mul(2))
             .unwrap_or(chrono::Duration::MAX);
@@ -68,17 +21,11 @@ impl ServerSnapshot {
     }
 }
 
-/// Inner state behind the cache's `RwLock`: the freshest
-/// `ServerSnapshot` per `ServerId`.
 #[derive(Debug, Default)]
 struct CacheState {
     snapshots: HashMap<ServerId, Arc<ServerSnapshot>>,
 }
 
-/// Process-shared cache of last-tick clash-api snapshots, keyed by
-/// `ServerId`. Cloneable handle (the inner `Arc` makes `.clone()`
-/// cheap — both AppState and the poller hold their own clones, but
-/// write through the same `RwLock`).
 #[derive(Debug, Clone, Default)]
 pub struct SnapshotCache {
     inner: Arc<RwLock<CacheState>>,
@@ -89,18 +36,10 @@ impl SnapshotCache {
         Self::default()
     }
 
-    /// Store the freshest snapshot for `server`, replacing any previous
-    /// entry, stamped with the current wall clock. A poisoned lock
-    /// (another thread panicked mid-write) is logged-and-ignored: the
-    /// next successful write recovers, and a poisoning event doesn't
-    /// affect SQL correctness.
     pub fn store(&self, server: ServerId, snap: Snapshot) {
         self.store_at(server, snap, Utc::now());
     }
 
-    /// [`Self::store`] with an explicit observation time. The poller
-    /// always uses `store` (now); this entry point exists so tests can
-    /// back-date an entry and assert the staleness gate without sleeping.
     pub fn store_at(&self, server: ServerId, snap: Snapshot, observed_at: DateTime<Utc>) {
         let entry = Arc::new(ServerSnapshot {
             snapshot: snap,
@@ -120,8 +59,6 @@ impl SnapshotCache {
         }
     }
 
-    /// Drop a server's cached snapshot when it leaves inventory so the map
-    /// does not grow monotonically.
     pub fn forget(&self, server: &ServerId) {
         match self.inner.write() {
             Ok(mut g) => {
@@ -137,18 +74,10 @@ impl SnapshotCache {
         }
     }
 
-    /// Borrow the freshest server-snapshot bundle for `server`.
-    /// None when the poller has never reached this server. Returns the
-    /// entry regardless of age — callers rendering live badges/tables
-    /// must use [`Self::get_live`] (or [`Self::get_if_fresh`]) so a
-    /// snapshot the poller stopped refreshing can't keep looking current.
     pub fn get(&self, server: &ServerId) -> Option<Arc<ServerSnapshot>> {
         self.inner.read().ok()?.snapshots.get(server).cloned()
     }
 
-    /// [`Self::get`] gated on freshness: `None` when the entry is older
-    /// than ~2 `poll_interval`s as of `now`. Both are injected so tests
-    /// drive fresh vs stale deterministically (no sleeps, no env).
     pub fn get_if_fresh(
         &self,
         server: &ServerId,
@@ -159,12 +88,6 @@ impl SnapshotCache {
         (!entry.is_stale(now, poll_interval)).then_some(entry)
     }
 
-    /// Production freshness gate: the entry for `server` only if the
-    /// poller refreshed it within ~2 of the configured poll interval
-    /// (env `VPNCTLD_POLL_INTERVAL_SECS`, 5-min default). Use this for
-    /// every «is the node live right now» surface — reachable badges,
-    /// active-conn counts, live connection tables — so polling that has
-    /// stopped can't keep painting a green picture from a frozen snapshot.
     pub fn get_live(&self, server: &ServerId) -> Option<Arc<ServerSnapshot>> {
         self.get_if_fresh(
             server,
@@ -174,10 +97,6 @@ impl SnapshotCache {
     }
 }
 
-/// One aggregated bucket — used by both source-IP and destination
-/// aggregations. `conns` is connection count, `upload` / `download`
-/// are per-bucket sums in bytes. `label` is the human-readable key
-/// (IP, `host:port`, etc) for rendering.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConnAggregate {
     pub label: String,
@@ -192,18 +111,6 @@ impl ConnAggregate {
     }
 }
 
-/// Group `snap.connections` by **destination**. Label resolution
-/// priority (Phase 5a-2):
-///   1. `metadata.host` if non-empty (sing-box already resolved
-///      DNS — typically from HTTPS SNI / HTTP Host).
-///   2. `dns_ptr_map[destination_ip]` if cache hit (positive).
-///      → label becomes `<hostname>:<port> (<ip>)` so the operator
-///      still sees the raw IP for debugging.
-///   3. `destination_ip:port` if everything else fails.
-///
-/// Returns aggregates sorted by total bytes DESC, truncated to
-/// `top_n`. Pass an empty `dns_ptr_map` to skip enrichment (tests
-/// and pre-5a-2 call sites).
 pub fn aggregate_by_destination(
     snap: &Snapshot,
     top_n: usize,
@@ -212,18 +119,12 @@ pub fn aggregate_by_destination(
     let mut by_dest: HashMap<String, ConnAggregate> = HashMap::new();
     for c in &snap.connections {
         let label = if !c.metadata.host.is_empty() {
-            // Prefer DNS name when sing-box has it — far more
-            // useful than a raw IP for the operator.
             if c.metadata.destination_port.is_empty() {
                 c.metadata.host.clone()
             } else {
                 format!("{}:{}", c.metadata.host, c.metadata.destination_port)
             }
         } else if !c.metadata.destination_ip.is_empty() {
-            // Phase 5a-2: consult reverse-DNS cache. Some(Some)
-            // = resolved hostname (enrich label). Some(None) =
-            // cached "no PTR" (use bare IP). None = not yet
-            // looked up (use bare IP).
             let cached_hostname = dns_ptr_map
                 .get(&c.metadata.destination_ip)
                 .and_then(|v| v.as_deref());
@@ -260,10 +161,6 @@ pub fn aggregate_by_destination(
     out
 }
 
-/// Group `snap.connections` by source IP (real client public IP,
-/// preserved despite NM-11). Returns aggregates sorted by total
-/// bytes DESC. Empty source IPs are bucketed under `(unknown)` so
-/// they're visible rather than silently dropped.
 pub fn aggregate_by_source(snap: &Snapshot, top_n: usize) -> Vec<ConnAggregate> {
     let mut by_src: HashMap<String, ConnAggregate> = HashMap::new();
     for c in &snap.connections {
@@ -290,10 +187,6 @@ pub fn aggregate_by_source(snap: &Snapshot, top_n: usize) -> Vec<ConnAggregate> 
     out
 }
 
-/// TCP / UDP / other split for the «network breakdown» row.
-/// Counts connections + sums bytes per network kind. «other» is
-/// any value of `metadata.network` other than literal `"tcp"` or
-/// `"udp"` (defensive — unlikely from sing-box but possible).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NetworkBreakdown {
     pub tcp_conns: u32,
@@ -386,8 +279,6 @@ mod tests {
         assert!(c.get(&ServerId("never-stored".into())).is_none());
     }
 
-    /// A fixed `now` + a 5-min poll interval, so the fresh/stale boundary
-    /// is exercised purely (no sleeps, no env).
     fn clock() -> (chrono::DateTime<chrono::Utc>, std::time::Duration) {
         use chrono::TimeZone;
         (
@@ -399,8 +290,6 @@ mod tests {
     #[test]
     fn snapshot_is_fresh_within_two_intervals() {
         let (now, interval) = clock();
-        // Observed exactly now, and just under two intervals ago — both
-        // fresh (a single missed tick must not flap the UI to stale).
         let fresh_now = ServerSnapshot {
             snapshot: Snapshot::default(),
             observed_at: now,
@@ -409,7 +298,7 @@ mod tests {
 
         let one_missed = ServerSnapshot {
             snapshot: Snapshot::default(),
-            observed_at: now - chrono::Duration::seconds(599), // < 2×300
+            observed_at: now - chrono::Duration::seconds(599),
         };
         assert!(
             !one_missed.is_stale(now, interval),
@@ -420,11 +309,9 @@ mod tests {
     #[test]
     fn snapshot_is_stale_past_two_intervals() {
         let (now, interval) = clock();
-        // Past the two-interval grace → stale. The poller has stopped
-        // reaching this node; the frozen snapshot must not look live.
         let stale = ServerSnapshot {
             snapshot: Snapshot::default(),
-            observed_at: now - chrono::Duration::seconds(601), // > 2×300
+            observed_at: now - chrono::Duration::seconds(601),
         };
         assert!(stale.is_stale(now, interval));
     }
@@ -438,16 +325,12 @@ mod tests {
             "1.1.1.1", "2.2.2.2", "443", "x", "tcp", 100, 200,
         )]);
 
-        // Fresh entry (observed now) is returned.
         c.store_at(sid.clone(), s.clone(), now);
         assert!(
             c.get_if_fresh(&sid, now, interval).is_some(),
             "a just-stored snapshot must be live"
         );
 
-        // Back-dated past two intervals → gated out, even though `get`
-        // still sees it. This is the «live forever after polling stops»
-        // regression: the raw entry exists but must not be served as live.
         c.store_at(sid.clone(), s, now - chrono::Duration::seconds(3600));
         assert!(
             c.get(&sid).is_some(),
@@ -492,9 +375,6 @@ mod tests {
 
     #[test]
     fn aggregate_by_destination_uses_dns_ptr_cache_when_host_empty_and_cache_hit() {
-        // Phase 5a-2: when sing-box gives only an IP (no SNI/Host),
-        // the reverse-DNS cache fills the gap. Cached hostname becomes
-        // `hostname:port (ip)` so the operator sees BOTH.
         let s = snap(vec![conn(
             "1.1.1.1",
             "35.217.1.178",
@@ -516,7 +396,6 @@ mod tests {
 
     #[test]
     fn aggregate_by_destination_skips_cache_when_negative_entry() {
-        // Cached "no PTR" → bare IP, not enriched.
         let s = snap(vec![conn("1.1.1.1", "5.5.5.5", "443", "", "tcp", 10, 20)]);
         let mut cache: HashMap<String, Option<String>> = HashMap::new();
         cache.insert("5.5.5.5".to_string(), None);
@@ -526,8 +405,6 @@ mod tests {
 
     #[test]
     fn aggregate_by_destination_uses_metadata_host_over_dns_cache() {
-        // sing-box already resolved (via SNI) → metadata.host wins,
-        // cache ignored to preserve the protocol's own DNS answer.
         let s = snap(vec![conn(
             "1.1.1.1",
             "8.8.8.8",
@@ -540,7 +417,6 @@ mod tests {
         let mut cache: HashMap<String, Option<String>> = HashMap::new();
         cache.insert("8.8.8.8".to_string(), Some("dns.google".to_string()));
         let top = aggregate_by_destination(&s, 10, &cache);
-        // metadata.host wins; cache.dns.google ignored.
         assert_eq!(top[0].label, "actually-sni.example.com:443");
     }
 
@@ -609,8 +485,6 @@ mod tests {
         let s = snap(conns);
         let top = aggregate_by_source(&s, 5);
         assert_eq!(top.len(), 5);
-        // Highest total is i=19 (200*(19+1) = 4000); top should
-        // start with 10.0.0.19.
         assert_eq!(top[0].label, "10.0.0.19");
     }
 }

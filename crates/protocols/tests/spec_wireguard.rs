@@ -1,8 +1,4 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-//! Spec tests for `vpnctl_protocols::WireGuard`.
-//! Written from the spec only (envelope schema, share-link format,
-//! per-user contract). If a test fails, the impl is wrong — DO NOT
-//! weaken the test.
 
 use std::collections::HashMap;
 
@@ -45,10 +41,6 @@ fn user(name: &str, pubkey: Option<&str>) -> User {
     }
 }
 
-/// Same as `user` but the user was created via `--gen-wireguard`
-/// (server-side keypair generation, both halves stored). Used by
-/// the low-tech-UX spec tests that pin the
-/// no-`<PASTE>`-placeholder contract.
 fn user_with_keypair(name: &str, pubkey: &str, privkey: &str) -> User {
     User {
         id: UserId(name.into()),
@@ -230,7 +222,6 @@ fn wg_client_config_amneziawg_block_present_when_all_obfs_secrets_set() {
 fn wg_client_config_amneziawg_block_omitted_when_any_obfs_secret_missing() {
     let s = srv();
     let mut secrets = server_secrets();
-    // Set 8 out of 9 — h4 missing.
     for k in [
         "amneziawg.jc",
         "amneziawg.jmin",
@@ -291,12 +282,10 @@ fn wg_share_link_base64_payload_decodes_to_valid_ini() {
         "decoded conf has [Interface]: {text}"
     );
     assert!(text.contains("[Peer]\n"), "decoded conf has [Peer]: {text}");
-    // Server pubkey is what the client peer must use.
     assert!(
         text.contains(SERVER_PUB),
         "client conf must reference server's PUBLIC key"
     );
-    // Client private key is a placeholder — never the server's private.
     assert!(text.contains(CLIENT_PRIVKEY_PLACEHOLDER));
     assert!(
         !text.contains(SERVER_PRIV),
@@ -319,13 +308,6 @@ fn wg_share_link_user_without_pubkey_returns_render_error() {
     );
 }
 
-// ── Low-tech-UX contract (CLAUDE.md "users are low-tech"
-//    one-action ceiling): when `wireguard_private` is set on the user
-//    (i.e. created via `--gen-wireguard` / web `gen_wireguard` flow),
-//    rendered configs must contain the REAL private key and NOT the
-//    `<PASTE YOUR PRIVATE KEY HERE>` placeholder. The recipient
-//    imports the artefact as-is in one action.
-
 const CLIENT_PRIV_FOR_TEST: &str = "BBBaaaCCCdddEEEfffGGGhhhIIIjjjKKKlllMMMnnno=";
 
 #[test]
@@ -335,7 +317,6 @@ fn wg_client_conf_uses_server_generated_private_verbatim() {
     let ctx = RenderCtx::new(&s, &secrets);
     let u = user_with_keypair("alice", PUBKEY_A, CLIENT_PRIV_FOR_TEST);
     let link = WireGuard::new().share_link(&ctx, &u).unwrap();
-    // share_link wraps a base64(.conf) payload — decode and inspect
     let b64 = link
         .strip_prefix("wireguard://?conf=")
         .and_then(|s| s.split('#').next())
@@ -354,8 +335,6 @@ fn wg_client_conf_uses_server_generated_private_verbatim() {
 
 #[test]
 fn wg_client_config_outbound_uses_server_generated_private_verbatim() {
-    // Mirror of the above on the JSON outbound path that vpnctl
-    // returns via `/sub/<token>`.
     let s = srv();
     let secrets = server_secrets();
     let ctx = RenderCtx::new(&s, &secrets);
@@ -373,9 +352,6 @@ fn wg_client_config_outbound_uses_server_generated_private_verbatim() {
 
 #[test]
 fn wg_client_conf_keeps_placeholder_when_private_is_none() {
-    // Operator-paranoid path (legacy `--wireguard-pubkey` only): no
-    // private stored → conf still has `<PASTE>` so the operator knows
-    // to do the editor step. This pins the FALLBACK contract.
     let s = srv();
     let secrets = server_secrets();
     let ctx = RenderCtx::new(&s, &secrets);

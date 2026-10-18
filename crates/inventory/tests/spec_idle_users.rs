@@ -1,18 +1,3 @@
-//! Spec for `SqliteInventory::idle_users` — backs the dashboard A2
-//! «idle users · revoke candidates» panel. Written from spec only —
-//! impl NOT consulted at test-writer time.
-//!
-//! Contract: returns `(UserId, Option<DateTime<Utc>>)` for users whose
-//! most recent `sub_access_log` row (with `is_vpn_egress=0`) is older
-//! than `days` days, OR who have never appeared in the access log
-//! at all (`last_seen = None`). Sorted oldest-first with NULL first,
-//! with deterministic secondary tie-breaker by `u.id ASC`.
-//!
-//! Test strategy: `sub_access_log` rows can be populated via standard
-//! `log_sub_access` or deterministically injected via `raw_pool` with
-//! explicit ISO timestamps / SQLite relative offsets for stress-safe
-//! timing.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::PathBuf;
@@ -28,7 +13,6 @@ async fn open(dir: &TempDir) -> SqliteInventory {
     SqliteInventory::open(&db_path(dir)).await.expect("open")
 }
 
-/// Raw pool against the test DB for stress-safe deterministic timestamp injection.
 async fn raw_pool(dir: &TempDir) -> sqlx::SqlitePool {
     let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path(dir).display()))
         .await
@@ -40,7 +24,6 @@ async fn raw_pool(dir: &TempDir) -> sqlx::SqlitePool {
     pool
 }
 
-/// Inject sub_access_log row with an explicit RFC3339 timestamp.
 async fn inject_sub_access_at(pool: &sqlx::SqlitePool, uid: &str, ip: &str, ts: &str) {
     sqlx::query(
         "INSERT INTO sub_access_log (ts, user_id, ip, status, bytes)
@@ -54,7 +37,6 @@ async fn inject_sub_access_at(pool: &sqlx::SqlitePool, uid: &str, ip: &str, ts: 
     .unwrap();
 }
 
-/// Inject sub_access_log row with a relative SQLite offset (e.g. `"-30 days"`).
 async fn inject_sub_access_offset(pool: &sqlx::SqlitePool, uid: &str, ip: &str, offset: &str) {
     sqlx::query(
         "INSERT INTO sub_access_log (ts, user_id, ip, status, bytes)
@@ -105,7 +87,6 @@ async fn user_with_no_access_rows_is_idle_with_none_last_seen() {
 
 #[tokio::test]
 async fn user_seen_recently_is_excluded_at_30_day_threshold() {
-    // Hit happened «now» → NOT idle on the 30-day threshold.
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_user(&user("active", 2)).await.unwrap();
@@ -127,9 +108,6 @@ async fn user_seen_recently_is_excluded_at_30_day_threshold() {
 
 #[tokio::test]
 async fn user_with_any_hit_is_idle_at_zero_day_threshold_with_some_last_seen() {
-    // threshold=0 → cutoff = now → ANY existing row (<= now) makes user idle.
-    // last_seen must be Some(...) (NOT None — that's the never-seen
-    // branch).
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_user(&user("dormant", 3)).await.unwrap();
@@ -147,8 +125,6 @@ async fn user_with_any_hit_is_idle_at_zero_day_threshold_with_some_last_seen() {
 
 #[tokio::test]
 async fn never_seen_user_sorts_before_seen_user() {
-    // Both must appear (threshold=0 captures everything). Sort
-    // contract: NULL-last-seen first, then seen rows by ts ASC.
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_user(&user("ghost", 4)).await.unwrap();
@@ -227,7 +203,6 @@ async fn exact_cutoff_timestamp_is_included_in_idle_users() {
     inv.add_user(&user("border", 30)).await.unwrap();
 
     let pool = raw_pool(&dir).await;
-    // Exactly 30 days ago
     inject_sub_access_offset(&pool, "border", "1.1.1.1", "-30 days").await;
 
     let got = inv.idle_users(30, 50).await.unwrap();

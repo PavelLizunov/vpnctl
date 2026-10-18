@@ -1,18 +1,3 @@
-//! Integration tests for migration `0049_remove_wgturn.sql`.
-//!
-//! Invariants pinned:
-//! 1. Migration audits each actually affected server (active protocols, kernels, or overrides)
-//!    exactly once with `actor = 'system'`, `action = 'protocol.remove_wgturn'`, `target = server_id`,
-//!    and a payload recording counts of removed entities and retained server secrets.
-//! 2. Deletes all `wgturn` grant protocol overrides, `wgturn` server protocols,
-//!    and `wgturn` server kernels.
-//! 3. Preserves all `wgturn:*` server secrets as rollback material.
-//! 4. Preserves all non-WgTurn protocols, kernels, secrets, and overrides.
-//! 5. Preserves pre-existing audit log history.
-//! 6. Emits zero audit rows on an empty database, on a database without WgTurn,
-//!    or on a server with only stale secrets.
-//! 7. Respects foreign keys and SQLite constraints.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::Path;
@@ -76,17 +61,8 @@ async fn migration_0049_removes_wgturn_and_audits_affected_servers_only() {
     let db_path = dir.path().join("test_migration.db");
     let pool = create_raw_pool(&db_path).await;
 
-    // Apply migrations up to 0048
     apply_migrations_up_to_0048(&pool).await;
 
-    // Seed servers:
-    // s1: fully populated with wgturn + non-wgturn
-    // s2: non-wgturn only
-    // s3: only wgturn:vk_link secret (no wgturn protocol/kernel/override) -> stale secret only, no audit
-    // s4: only wgturn protocol
-    // s5: only wgturn kernel
-    // s6: only wgturn override
-    // s7: clean server
     let seed_sql = r#"
         INSERT INTO servers (id, address, ssh_port, ssh_user, hoster) VALUES
             ('s1', '1.1.1.1', 22, 'root', 'generic'),
@@ -138,10 +114,8 @@ async fn migration_0049_removes_wgturn_and_audits_affected_servers_only() {
 
     sqlx::raw_sql(seed_sql).execute(&pool).await.unwrap();
 
-    // Run migration 0049
     apply_migration_0049(&pool).await;
 
-    // Check audit_log
     #[derive(sqlx::FromRow, Debug)]
     struct AuditRow {
         actor: String,
@@ -156,19 +130,16 @@ async fn migration_0049_removes_wgturn_and_audits_affected_servers_only() {
             .await
             .unwrap();
 
-    // 1 pre-existing row + 4 affected servers (s1, s4, s5, s6) = 5 rows
     assert_eq!(
         audit_rows.len(),
         5,
         "expected 5 audit rows, got {audit_rows:?}"
     );
 
-    // Historical audit row is preserved
     assert_eq!(audit_rows[0].actor, "admin");
     assert_eq!(audit_rows[0].action, "server.create");
     assert_eq!(audit_rows[0].target.as_deref(), Some("s1"));
 
-    // Check affected servers
     let wgturn_audits: Vec<&AuditRow> = audit_rows
         .iter()
         .filter(|r| r.action == "protocol.remove_wgturn")
@@ -212,7 +183,6 @@ async fn migration_0049_removes_wgturn_and_audits_affected_servers_only() {
         }
     }
 
-    // Unaffected servers (s2, s7) and stale-secret-only servers (s3) must NOT be audited
     assert!(
         wgturn_audits
             .iter()
@@ -222,7 +192,6 @@ async fn migration_0049_removes_wgturn_and_audits_affected_servers_only() {
         "s2, s3, and s7 must not be audited"
     );
 
-    // Verify active WgTurn bindings are deleted
     let wgturn_protocols: (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM server_protocols WHERE protocol_id = 'wgturn'")
             .fetch_one(&pool)
@@ -245,7 +214,6 @@ async fn migration_0049_removes_wgturn_and_audits_affected_servers_only() {
     .unwrap();
     assert_eq!(wgturn_overrides.0, 0);
 
-    // Verify wgturn:* secrets ARE PRESERVED as rollback material
     let wgturn_secrets: (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM server_secrets WHERE key LIKE 'wgturn:%'")
             .fetch_one(&pool)
@@ -253,7 +221,6 @@ async fn migration_0049_removes_wgturn_and_audits_affected_servers_only() {
             .unwrap();
     assert_eq!(wgturn_secrets.0, 4);
 
-    // Verify non-WgTurn data is preserved
     #[derive(sqlx::FromRow, Debug, PartialEq, Eq)]
     struct ProtoRow {
         server_id: String,
@@ -372,7 +339,6 @@ async fn migration_0049_removes_wgturn_and_audits_affected_servers_only() {
         ]
     );
 
-    // Foreign key check
     let fk_violations: Vec<(String,)> = sqlx::query_as("PRAGMA foreign_key_check")
         .fetch_all(&pool)
         .await

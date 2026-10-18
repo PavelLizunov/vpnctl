@@ -1,12 +1,3 @@
-//! Integration tests for `RusshTransport`. Запускаются **только** через
-//! `cargo test -- --ignored`, потому что ходят в реальный SSH-сервер.
-//!
-//! По умолчанию используется хост `192.168.0.207` (LAN test host)
-//! и SSH-ключ `~/.ssh/id_ed25519` (`claude-chat`). Перекрыть можно через env:
-//!   VPNCTL_TEST_HOST=192.168.0.207
-//!   VPNCTL_TEST_USER=user
-//!   VPNCTL_TEST_KEY=/home/appuser/.ssh/id_ed25519
-
 use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -56,7 +47,6 @@ async fn upload_then_read() {
     let got = t.read_file(path).await.expect_err_or_pass("read");
     assert_eq!(got, payload);
 
-    // cleanup
     let _ = t.exec(&format!("rm -f {path}")).await;
 }
 
@@ -89,9 +79,6 @@ async fn host_fingerprint_observed() {
     );
 }
 
-// Helper: integration tests legitimately panic on setup failure.
-// We can't `.unwrap()` because workspace lints forbid it; this helper
-// converts unexpected errors to descriptive panics.
 trait ResultExt<T> {
     fn expect_err_or_pass(self, what: &str) -> T;
 }

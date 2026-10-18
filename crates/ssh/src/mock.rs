@@ -1,5 +1,3 @@
-//! In-memory SSH-транспорт для unit-тестов.
-
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -16,14 +14,12 @@ impl MockTransport {
         Self::default()
     }
 
-    /// Зарегистрировать ответ на конкретную команду.
     pub fn expect(&self, cmd: &str, response: &str) {
         if let Ok(mut g) = self.exec_responses.lock() {
             g.insert(cmd.to_string(), response.to_string());
         }
     }
 
-    /// Получить содержимое «залитого» файла (для проверок в тестах).
     pub fn uploaded(&self, path: &str) -> Option<Vec<u8>> {
         self.files.lock().ok()?.get(path).cloned()
     }

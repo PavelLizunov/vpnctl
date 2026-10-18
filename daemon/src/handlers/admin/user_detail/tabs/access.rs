@@ -26,8 +26,6 @@ pub(crate) fn render_access_tab(
     lang: Locale,
 ) -> Markup {
     html! {
-        // v2 4b — per-server grant/key-state table above the existing
-        // per-protocol delivery grid.
         div.ed-art-eyebrow style="margin-top: 12px;" {
             (crate::i18n::tr(lang, "Grants · per-server key state", "Гранты · состояние ключей по серверам")) " "
             span.ed-tip title=(crate::i18n::tr(
@@ -116,9 +114,6 @@ pub(crate) fn render_access_tab(
                 }
             }
         }
-        // v2 4b — per-protocol identities, masked (secrets never leave
-        // the server unmasked; length hint only — mock's reveal button
-        // deliberately not implemented).
         div.ed-art-eyebrow style="margin-top: 16px;" {
             (crate::i18n::tr(lang, "Per-protocol identities", "Идентичности по протоколам"))
         }
@@ -158,10 +153,6 @@ pub(crate) fn render_access_tab(
             }
         }
             div.ed-rule {}
-            // NM-12 follow-up: the per-grant disable/enable buttons in
-            // the per-protocol grid below redirect with the
-            // `#server-access` fragment so the operator stays anchored
-            // here after a click instead of being scrolled to the top.
             div.ed-art-eyebrow id="server-access" {
                 (crate::i18n::t(lang, crate::i18n::K::EyebrowServerAccess))
             }
@@ -176,20 +167,8 @@ pub(crate) fn render_access_tab(
             } @else {
                 ul style="list-style: none; padding: 0; font-family: var(--serif); font-size: 14px; line-height: 1.8;" {
                     @for s in all_servers {
-                        // Outer li wraps BOTH the grant toggle row AND
-                        // (for granted servers only) the per-protocol
-                        // delivery grid. Single `border-bottom` keeps the
-                        // visual rule between *servers*, not between the
-                        // grant toggle and its own grid below.
                         li style="padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
                             div style="display: flex; align-items: baseline; gap: 12px;" {
-                                // Server id → link to /admin/servers/{id} in a
-                                // new tab (Pavel 2026-05-19: «хочу чтоб через
-                                // пользователя можно было открыть страницу
-                                // сервера в отдельном окне»). `target="_blank"`
-                                // + `rel="noopener"` so the new tab doesn't
-                                // share window.opener with the user-detail
-                                // page (security hygiene + tab-isolation).
                                 span style="flex: 1;" {
                                     a href=(format!("/admin/servers/{}", path_segment_encode(&s.id.0)))
                                       target="_blank"
@@ -243,16 +222,6 @@ pub(crate) fn render_access_tab(
                                     }
                                 }
                             }
-                            // Per-(user, server, protocol) delivery grid
-                            // (migration 0018 / NM-10). Renders ONLY for
-                            // GRANTED servers — ungranted ones have no
-                            // (user, server) row to attach overrides to,
-                            // so `set_grant_protocol_override` would
-                            // refuse with Invalid. Each protocol cell
-                            // shows its current delivery state +
-                            // block/unblock button. Server-hidden
-                            // protocols are flagged read-only (operator
-                            // adjusts those on /admin/servers/{id}).
                             @if granted_ids.contains(&s.id) {
                                 (user_detail_per_protocol_grid(
                                     &user.id,

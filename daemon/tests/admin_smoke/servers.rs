@@ -9,9 +9,6 @@ use vpnctld::router;
 
 use super::common::*;
 
-/// Servers screen must show the empty-state when the DB is empty,
-/// pointing the operator at the web wizard (operator-action policy:
-/// no terminal instructions in admin copy).
 #[tokio::test]
 async fn admin_servers_empty_state_points_at_wizard() {
     let dir = TempDir::new().unwrap();
@@ -27,27 +24,21 @@ async fn admin_servers_empty_state_points_at_wizard() {
         !html.contains("vpnctl bootstrap"),
         "empty-state must not instruct a CLI command"
     );
-    // No <article class="ed-server"> when the list is empty.
     assert!(
         !html.contains(r#"class="ed-server""#),
         "server cards must not render on empty inventory"
     );
 }
 
-/// Populated servers screen must render exactly one ed-server card per
-/// server, expose each server id and address, and mark the right user
-/// counts (0 for ungranted, N for granted).
 #[tokio::test]
 async fn admin_servers_renders_one_card_per_server_with_user_counts() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    // s0 -> 2 users, s1 -> 1 user, s2 -> 0 users
     seed(&s.inv, 3, 2, &[(0, 0), (1, 0), (0, 1)]).await;
 
     let app = router(s);
     let html = fetch_html(app, "/admin/servers").await;
 
-    // One row per server in the dense inventory table (densify 2a).
     assert!(
         html.contains(r#"<table class="ed-grid">"#),
         "servers list must render the dense inventory table"
@@ -57,20 +48,16 @@ async fn admin_servers_renders_one_card_per_server_with_user_counts() {
         3,
         "expected three server rows (one ed-grid__id link each)"
     );
-    // Header shows total.
     assert!(
         html.contains("3 <em>servers</em>"),
         "page header should announce 3 servers"
     );
-    // Each id renders.
     for id in ["s0", "s1", "s2"] {
         assert!(html.contains(id), "server id {id} missing from html");
     }
-    // Each address renders (port suffix appended by render).
     for addr in ["10.0.0.0:22", "10.0.0.1:22", "10.0.0.2:22"] {
         assert!(html.contains(addr), "address {addr} missing");
     }
-    // User counts: 2 users, 1 user, 0 users — singular vs plural.
     assert!(
         html.contains("<b>2</b> users"),
         "s0 should show 2 users granted access"
@@ -85,8 +72,6 @@ async fn admin_servers_renders_one_card_per_server_with_user_counts() {
     );
 }
 
-/// "Deploy all" button (2026-06-03): the servers page shows the
-/// SSE-driven deploy-all trigger + the live log pane when ≥1 server.
 #[tokio::test]
 async fn admin_servers_renders_deploy_all_button() {
     let dir = TempDir::new().unwrap();
@@ -107,11 +92,6 @@ async fn admin_servers_renders_deploy_all_button() {
     );
 }
 
-/// `run_deploy_all` flattens each server's re-deploy into one stream and
-/// ends in a terminal Error when ANY server failed (here: no deploy key
-/// on disk → every server errors). Per-server ✗ lines still surface
-/// individual failures; the terminal kind tells the frontend the run
-/// was not fully green.
 #[tokio::test]
 async fn run_deploy_all_streams_terminal_error_with_per_server_failures() {
     use tokio_stream::StreamExt;
@@ -119,9 +99,6 @@ async fn run_deploy_all_streams_terminal_error_with_per_server_failures() {
     let s = state(&dir).await;
     seed(&s.inv, 2, 0, &[]).await;
     let servers = s.inv.list_servers().await.unwrap();
-    // A deploy-key path that does NOT exist → run_redeploy fails each
-    // server at the pre-flight; deploy_all forwards the failures and
-    // reaches a terminal Error.
     let key = dir.path().join("nope-id_ed25519");
     let stream = vpnctld::wizard_bootstrap::run_deploy_all(
         servers,
@@ -134,7 +111,6 @@ async fn run_deploy_all_streams_terminal_error_with_per_server_failures() {
     while let Some(ev) = stream.next().await {
         events.push(ev);
     }
-    // Terminal Error — the failed list is non-empty.
     match events.last() {
         Some(vpnctld::wizard_bootstrap::BootstrapEvent::Error { phase, message }) => {
             assert_eq!(*phase, "done");
@@ -145,8 +121,6 @@ async fn run_deploy_all_streams_terminal_error_with_per_server_failures() {
         }
         other => panic!("expected terminal Error, got {other:?}"),
     }
-    // Per-server failures surfaced as ✗ step lines, and a summary that
-    // names them (both seeded servers failed → "failed: …").
     let joined: String = events
         .iter()
         .filter_map(|e| match e {
@@ -167,8 +141,6 @@ async fn run_deploy_all_streams_terminal_error_with_per_server_failures() {
     );
 }
 
-/// A single-server inventory must render the page header in the singular
-/// form. Catches the easy-to-miss pluralisation bug.
 #[tokio::test]
 async fn admin_servers_header_singular_for_one_server() {
     let dir = TempDir::new().unwrap();
@@ -188,15 +160,6 @@ async fn admin_servers_header_singular_for_one_server() {
     );
 }
 
-/// REGRESSION (audit 2026-06-10): deleting a server while its deploy
-/// pipeline holds the per-server permit must 409, not proceed — the
-/// pipeline would keep SSH-pushing to the node, FK-fail its secret
-/// upserts mid-stream, then audit a deploy for a deleted server.
-///
-/// Server id is test-UNIQUE («del-409-srv», not the shared «s0»):
-/// DeployGuard's in-flight set is process-global and admin_smoke tests
-/// run in parallel threads — holding «s0» here would intermittently
-/// collide with every other test that deploys s0.
 #[tokio::test]
 async fn admin_server_delete_refuses_while_deploy_in_flight() {
     let dir = TempDir::new().unwrap();
@@ -218,7 +181,6 @@ async fn admin_server_delete_refuses_while_deploy_in_flight() {
     .unwrap();
     let app = router(s);
 
-    // Hold the deploy permit, as a live pipeline would.
     let _held =
         vpnctld::wizard_bootstrap::DeployGuard::try_acquire("del-409-srv").expect("hold permit");
     let resp = app
@@ -248,7 +210,6 @@ async fn admin_server_delete_refuses_while_deploy_in_flight() {
         "server must survive the refused delete"
     );
 
-    // Permit released → the same delete goes through.
     drop(_held);
     let resp = app
         .oneshot(
@@ -273,18 +234,11 @@ async fn admin_server_delete_refuses_while_deploy_in_flight() {
     );
 }
 
-/// Security audit 2026-05-18 — quick-add must reject addresses
-/// containing control bytes (`\n`, `\r`, `\t`, etc) that would
-/// produce broken multi-line audit / log records downstream. Old
-/// validator only rejected ASCII space + length>253.
 #[tokio::test]
 async fn server_quick_add_rejects_control_chars_in_address() {
     let dir = TempDir::new().unwrap();
     let app = router(state(&dir).await);
 
-    // Control chars MID-STRING (not trailing — `.trim()` would strip
-    // those). These produce broken multi-line audit / log records
-    // if persisted as-is.
     for (encoded_addr, label) in [
         ("198%0A.51.100.1", "embedded newline in middle"),
         ("198%0D.51.100.1", "embedded CR"),
@@ -320,20 +274,6 @@ async fn server_quick_add_rejects_control_chars_in_address() {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────────
-// Phase E sub-iter 4a — add-server wizard step 1 + step-2 stub.
-//
-// The wizard is the marquee differentiator over the bash project
-// (per CLAUDE.md "Strategic context"). Sub-iter 4a's contract:
-//   * GET /admin/servers/new renders a form with `address` +
-//     `root_password` fields and the editorial chrome.
-//   * POST validates input, stashes it server-side keyed by an
-//     HttpOnly+SameSite=Strict cookie, and 303s to step 2.
-//   * GET step-2 either reads the session cookie and shows the
-//     stashed address, or 400s if the session is missing/expired.
-//   * /admin/servers list links to /admin/servers/new (the CLI
-//     nudge alone leaves operators stranded).
-
 #[tokio::test]
 async fn admin_servers_index_links_to_wizard() {
     let dir = TempDir::new().unwrap();
@@ -344,7 +284,6 @@ async fn admin_servers_index_links_to_wizard() {
         "servers list must link to the wizard; got {}",
         &html[..html.len().min(800)]
     );
-    // The "add server →" CTA is the editorial-voice prompt.
     assert!(
         html.contains("add server"),
         "wizard CTA copy missing on /admin/servers"
@@ -362,13 +301,6 @@ async fn admin_servers_list_link_to_detail_page() {
         "server card headline must link to detail page"
     );
 }
-
-// ────────────────────────────────────────────────────────────────────────
-// Pavel iter A2 — quick-add server inline form on /admin/servers.
-// Single-action UX matching the one-input user-create form: id +
-// address + ssh_port → server registered with default kernel=sing-box
-// and EVERY sing-box-supported protocol enabled. Per-knob tuning
-// lives on the detail page.
 
 #[tokio::test]
 async fn admin_server_quick_add_registers_with_default_protocols() {
@@ -399,8 +331,6 @@ async fn admin_server_quick_add_registers_with_default_protocols() {
     assert_eq!(srv.ssh_port, 2222);
     assert_eq!(srv.kernels.len(), 1);
     assert_eq!(srv.kernels[0].0, "sing-box");
-    // Default protocols = every protocol the kernel supports. Spot-check
-    // a few that sing-box implements in the workspace registry.
     let pids: Vec<&str> = srv.enabled_protocols.iter().map(|p| p.0.as_str()).collect();
     assert!(
         pids.contains(&"vless+reality"),
@@ -408,16 +338,9 @@ async fn admin_server_quick_add_registers_with_default_protocols() {
     );
     assert!(pids.contains(&"tuic-v5"));
     assert!(pids.contains(&"hysteria2"));
-    // wireguard must NOT be in defaults — different kernel.
     assert!(!pids.contains(&"wireguard"));
 }
 
-/// REGRESSION (review 2026-06-04): quick-add validated server ids with
-/// the USER-id validator (2..=32, lowercase-only) while the error text
-/// promised «1-64 chars of A-Z a-z 0-9 . _ -» — so a 1-char or
-/// mixed-case id was rejected with a message claiming it's allowed.
-/// The dedicated `valid_server_id` now enforces exactly what the
-/// message says.
 #[tokio::test]
 async fn admin_server_quick_add_id_policy_matches_error_text() {
     let dir = TempDir::new().unwrap();
@@ -436,7 +359,6 @@ async fn admin_server_quick_add_id_policy_matches_error_text() {
         .unwrap()
     };
 
-    // Mixed case — promised by the message, used to 400.
     let resp = app
         .clone()
         .oneshot(post("id=Fra-01&address=203.0.113.8"))
@@ -454,7 +376,6 @@ async fn admin_server_quick_add_id_policy_matches_error_text() {
             .is_some()
     );
 
-    // 1-char — promised by the message («1-64»), used to 400 (user cap 2..=32).
     let resp = app
         .clone()
         .oneshot(post("id=x&address=203.0.113.9"))
@@ -466,7 +387,6 @@ async fn admin_server_quick_add_id_policy_matches_error_text() {
         "1-char server id must be accepted"
     );
 
-    // Genuinely invalid stays rejected: embedded space…
     let resp = app
         .clone()
         .oneshot(post("id=bad%20id&address=203.0.113.10"))
@@ -474,7 +394,6 @@ async fn admin_server_quick_add_id_policy_matches_error_text() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
-    // Traversal and leading/trailing punctuation are rejected
     for bad_id in [
         "..",
         "srv..01",
@@ -507,7 +426,6 @@ async fn admin_server_quick_add_id_policy_matches_error_text() {
             "server id {bad_id:?} must be rejected"
         );
     }
-    // …and over-long (65 chars).
     let long = format!("id={}&address=203.0.113.11", "a".repeat(65));
     let resp = app
         .oneshot(
@@ -573,11 +491,6 @@ async fn admin_server_quick_add_rejects_duplicate_id() {
     );
 }
 
-/// HANDOFF §6 #2 — duplicate-ADDRESS guard. Two inventory records for one
-/// physical node fight over its `users[]`; the second deploy trips the
-/// DG-1 user-removal guard (the `us` / `us1` incident, 2026-07-08).
-/// quick-add must 400 when the address already belongs to another server,
-/// naming the clashing id, and must NOT create the duplicate.
 #[tokio::test]
 async fn admin_server_quick_add_rejects_duplicate_address() {
     use vpnctl_core::{KernelId, Server, ServerId};
@@ -599,7 +512,6 @@ async fn admin_server_quick_add_rejects_duplicate_address() {
     .await
     .unwrap();
     let app = router(s);
-    // Different id, SAME address → rejected.
     let resp = app
         .oneshot(
             add_same_origin(
@@ -620,7 +532,6 @@ async fn admin_server_quick_add_rejects_duplicate_address() {
         txt.contains("already registered to server 'us'"),
         "dup-address 400 must name the clashing server id, got: {txt}"
     );
-    // The duplicate must NOT have been created.
     assert!(
         inv.get_server(&ServerId("us1".into()))
             .await
@@ -630,9 +541,6 @@ async fn admin_server_quick_add_rejects_duplicate_address() {
     );
 }
 
-/// "Update all kernels" button (update-kernels PR2): the servers-list
-/// page shows the fleet-wide SSE trigger + its own log pane when ≥1
-/// server. Copy-contract.
 #[tokio::test]
 async fn admin_servers_renders_update_all_kernels_button() {
     let dir = TempDir::new().unwrap();
@@ -653,8 +561,6 @@ async fn admin_servers_renders_update_all_kernels_button() {
     );
 }
 
-/// Handler smoke: the fleet-wide update-kernels-all SSE route refuses a
-/// cross-site `Sec-Fetch-Site` with 403, mirroring the deploy-all guard.
 #[tokio::test]
 async fn servers_update_kernels_all_sse_cross_site_is_403() {
     let dir = TempDir::new().unwrap();
@@ -676,14 +582,10 @@ async fn servers_update_kernels_all_sse_cross_site_is_403() {
     );
 }
 
-/// The delete-confirm page must render the retype form (POSTing to the
-/// delete route, with a `confirm` field) and disclose the cascade scope —
-/// the exact grant count that will be dropped.
 #[tokio::test]
 async fn admin_server_delete_confirm_page_shows_form_and_grant_count() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    // s0 carries two grants (u0, u1); s1 carries none.
     seed(&s.inv, 2, 2, &[(0, 0), (1, 0)]).await;
     let html = fetch_html(router(s), "/admin/servers/s0/delete-confirm").await;
     assert!(
@@ -700,9 +602,6 @@ async fn admin_server_delete_confirm_page_shows_form_and_grant_count() {
     );
 }
 
-/// A mismatched confirm token must be rejected with 400 and leave the
-/// server (and its grants) fully intact — the guard against fat-finger
-/// deletes.
 #[tokio::test]
 async fn admin_server_delete_rejects_confirm_mismatch() {
     let dir = TempDir::new().unwrap();
@@ -741,10 +640,6 @@ async fn admin_server_delete_rejects_confirm_mismatch() {
     );
 }
 
-/// The happy path: an exact-match confirm deletes the server, cascades its
-/// grants, audits `server.remove` (with the captured grant count), redirects
-/// to the server list — and leaves OTHER servers and the affected users
-/// themselves untouched.
 #[tokio::test]
 async fn admin_server_delete_cascades_grants_and_audits() {
     let dir = TempDir::new().unwrap();
@@ -765,7 +660,6 @@ async fn admin_server_delete_cascades_grants_and_audits() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
-    // Server is gone.
     assert!(
         s.inv
             .get_server(&ServerId("s0".into()))
@@ -774,7 +668,6 @@ async fn admin_server_delete_cascades_grants_and_audits() {
             .is_none(),
         "deleted server must be absent from inventory"
     );
-    // Its grants cascaded.
     assert_eq!(
         s.inv
             .users_for_server(&ServerId("s0".into()))
@@ -784,7 +677,6 @@ async fn admin_server_delete_cascades_grants_and_audits() {
         0,
         "grants for the deleted server must cascade away"
     );
-    // The other server is untouched.
     assert!(
         s.inv
             .get_server(&ServerId("s1".into()))
@@ -793,7 +685,6 @@ async fn admin_server_delete_cascades_grants_and_audits() {
             .is_some(),
         "cascade must be scoped — sibling server must survive"
     );
-    // The users themselves survive (only the grant rows cascade).
     assert!(
         s.inv
             .get_user(&UserId("u0".into()))
@@ -802,7 +693,6 @@ async fn admin_server_delete_cascades_grants_and_audits() {
             .is_some(),
         "user must survive — only its grant to s0 is removed"
     );
-    // Audit row landed, target s0, with the captured grant count.
     let audit = s.inv.recent_audit(20).await.unwrap();
     let row = audit
         .iter()
@@ -932,13 +822,11 @@ async fn admin_servers_billing_page_and_actions() {
 
     let app = router(s);
 
-    // 1. GET /admin/servers/billing initially renders unconfigured state
     let html = fetch_html(app.clone(), "/admin/servers/billing").await;
     assert!(html.contains("Server rental &amp; payment schedule"));
     assert!(html.contains("srv-bill-1"));
     assert!(html.contains("unconfigured"));
 
-    // 2. POST /admin/servers/{id}/billing sets parameters
     let resp = app
         .clone()
         .oneshot(
@@ -955,7 +843,6 @@ async fn admin_servers_billing_page_and_actions() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
-    // 3. GET /admin/servers/billing shows updated info
     let html_after = fetch_html(app.clone(), "/admin/servers/billing").await;
     assert!(html_after.contains("5.50 €"), "amount missing in html");
     assert!(html_after.contains("Order123"), "notes missing in html");
@@ -966,7 +853,6 @@ async fn admin_servers_billing_page_and_actions() {
     assert!(html_after.contains("Order123"));
     assert!(html_after.contains("15.10.2026"));
 
-    // 4. POST /admin/servers/{id}/billing/advance advances due date by 1 month
     let resp_adv = app
         .clone()
         .oneshot(
@@ -989,7 +875,6 @@ async fn admin_servers_billing_page_and_actions() {
         "due date should advance to November: {html_adv}"
     );
 
-    // 5. POST /admin/servers/billing/settings sets display currency and markup coefficient
     let resp_settings = app
         .clone()
         .oneshot(
@@ -1006,7 +891,6 @@ async fn admin_servers_billing_page_and_actions() {
         .unwrap();
     assert_eq!(resp_settings.status(), StatusCode::SEE_OTHER);
 
-    // Insert a known EUR/RUB rate (98.00)
     inv.upsert_currency_rate(&vpnctl_inventory::CurrencyRate {
         base_currency: "EUR".into(),
         target_currency: "RUB".into(),
@@ -1018,7 +902,6 @@ async fn admin_servers_billing_page_and_actions() {
     .unwrap();
 
     let html_rub = fetch_html(app.clone(), "/admin/servers/billing").await;
-    // 5.50 EUR * 98.0 * 1.07 = 576.73 RUB
     assert!(
         html_rub.contains("576.73 ₽"),
         "converted RUB amount missing: {html_rub}"
@@ -1032,13 +915,11 @@ async fn admin_server_billing_boosty_income_and_pl_overview() {
     let s = state(&dir).await;
     let inv = s.inv.clone();
 
-    // 1. Initially without Boosty report: renders tip and graceful fallback
     let app = router(s);
     let html_no_boosty = fetch_html(app.clone(), "/admin/servers/billing").await;
     assert!(html_no_boosty.contains("Connect Boosty on"));
     assert!(html_no_boosty.contains("/admin/boosty"));
 
-    // 2. Set Boosty report: 1 active subscriber with 1000 RUB price and 3000 RUB payments
     inv.set_boosty_report_and_events(
         &serde_json::json!({
             "observed_at": 1_754_000_000_i64,
@@ -1063,7 +944,6 @@ async fn admin_server_billing_boosty_income_and_pl_overview() {
     .await
     .unwrap();
 
-    // 3. Add a server with 5.00 EUR monthly billing
     inv.add_server(&Server {
         id: ServerId("node-1".into()),
         address: "192.0.2.10".into(),
@@ -1084,7 +964,7 @@ async fn admin_server_billing_boosty_income_and_pl_overview() {
         &vpnctl_inventory::ServerBillingInput {
             due_date: "2026-10-01".into(),
             billing_cycle: vpnctl_inventory::BillingCycle::Monthly,
-            amount_cents: 500, // 5.00 EUR
+            amount_cents: 500,
             currency: "EUR".into(),
             auto_renew: true,
             billing_url: None,
@@ -1095,7 +975,6 @@ async fn admin_server_billing_boosty_income_and_pl_overview() {
     .await
     .unwrap();
 
-    // Set EUR/RUB rate = 100.00 (1 EUR = 100 RUB)
     inv.upsert_currency_rate(&vpnctl_inventory::CurrencyRate {
         base_currency: "EUR".into(),
         target_currency: "RUB".into(),
@@ -1106,10 +985,6 @@ async fn admin_server_billing_boosty_income_and_pl_overview() {
     .await
     .unwrap();
 
-    // In EUR display currency at spot rate (without inflating revenue by expense markup):
-    // Boosty MRR: 1000 RUB / 100 = 10.00 EUR
-    // Server Spend: 5.00 EUR
-    // Net Margin: 10.00 - 5.00 = +5.00 EUR
     let html_pl = fetch_html(app.clone(), "/admin/servers/billing").await;
     assert!(html_pl.contains("Financial Balance &amp; P&amp;L"));
     assert!(html_pl.contains("Boosty Income (MRR)"));

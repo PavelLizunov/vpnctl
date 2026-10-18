@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-# Acquire or build vpnctl's managed sing-box node binary.
-# It uses the hardened sing-box-vpnctl release with native AWG 2.0/3.1,
-# XHTTP, V2Ray Stats API, and Clash API user attribution.
-#
-# Requirements: curl, tar, sha256sum (or Go >= 1.25.x for FORCE_BUILD=1).
-# Output: a static linux binary for the target architecture.
 set -euo pipefail
 
 VERSION="${SINGBOX_VERSION:-1.14.0-vpnctl.5}"
@@ -71,7 +65,6 @@ if [ "$FORCE_BUILD" != "1" ]; then
     exit 0
 fi
 
-# Fallback / build from source mode:
 TAG="v${VERSION}"
 WORK="${WORK:-/tmp/sb-vpnctl-build}"
 TAGS="with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,with_v2ray_api,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0,with_xhttp,with_awg"

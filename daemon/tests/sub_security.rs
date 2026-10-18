@@ -1,7 +1,3 @@
-//! Spec-driven security tests for the `vpnctld` HTTP surface. INDEPENDENT
-//! of the daemon impl: encodes the public contract. Mirrors `sub_endpoint.rs`'s
-//! oneshot+shim-router pattern (handlers are `pub(crate)`). If a test fails,
-//! the implementation is wrong — do not weaken the test.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::sync::Arc;
@@ -32,8 +28,6 @@ impl std::fmt::Debug for AppState {
     }
 }
 
-// Shape per spec: health JSON; sub → 404/500 plaintext or 200 sing-box JSON
-// with selector→servers→direct→block + route + log.
 fn router(state: AppState) -> axum::Router {
     use axum::extract::{Path, State};
     use axum::http::StatusCode as Sc;
@@ -145,7 +139,6 @@ async fn token_for(inv: &SqliteInventory, id: &UserId) -> String {
     inv.get_user(id).await.unwrap().unwrap().sub_token.unwrap()
 }
 
-// Happy-path seed: 1 server (vless+tuic, fp set), 1 user granted.
 async fn seed_full(dir: &TempDir) -> (SqliteInventory, Arc<Registry>, String) {
     let inv = open_inv(dir).await;
     let srv = mk_server(
@@ -198,8 +191,6 @@ fn ct(h: &axum::http::HeaderMap) -> String {
         .unwrap_or("")
         .to_string()
 }
-
-// ── tests ───────────────────────────────────────────────────────────────
 
 async fn full_app() -> (axum::Router, String, TempDir) {
     let dir = TempDir::new().unwrap();
@@ -320,7 +311,6 @@ async fn t6_response_has_selector_proxy_with_all_tags_plus_direct_and_block() {
 async fn t7_unknown_protocol_in_grants_is_skipped_not_crashed() {
     let dir = TempDir::new().unwrap();
     let inv = open_inv(&dir).await;
-    // Registry with ONLY tuic-v5; vless+reality intentionally absent.
     let mut reg = Registry::new();
     reg.register_kernel(Box::new(SingBox::new())).unwrap();
     reg.register_protocol(Box::new(TuicV5::new())).unwrap();

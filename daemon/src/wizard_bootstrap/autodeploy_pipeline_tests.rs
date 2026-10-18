@@ -193,11 +193,9 @@ async fn revoke_and_last_protocol_removal_during_remote_apply_converge_via_canon
         1
     );
     assert!(!inv.server_pending_deploy(&server.id).await.unwrap());
-    // A fresh coordinator cannot fabricate applied evidence after restart.
     inv.add_server_protocol(&server.id, &TestProtocol.id())
         .await
         .unwrap();
-    // Protocol setters deliberately leave auditing to their admin caller.
     inv.audit(
         "admin",
         "server.protocol.enable",

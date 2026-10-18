@@ -47,9 +47,6 @@ pub(super) async fn server_detail_render(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
     let user_count = users.len();
-    // Pavel iter B: centralised grants — also load the full user list
-    // so the operator can grant access to non-granted users without
-    // navigating to each user's page.
     let all_users = state
         .inv
         .list_users()
@@ -64,24 +61,11 @@ pub(super) async fn server_detail_render(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
-    // Server-side pending-deploy flag (audit 2026-06-10 follow-up):
-    // «grant membership changed since the last deploy». Crucially this
-    // covers the REVOKE case the per-user banner can't — the revoked
-    // server leaves the user's granted list, so THIS page is the only
-    // surface that can warn that the node still runs the revoked UUID.
-    // Best-effort: a detector error renders no banner, not a 500.
     let pending_deploy = state.inv.server_pending_deploy(&sid).await.ok();
     let operation_status = crate::wizard_bootstrap::autodeploy_status(&state.inv, &sid.0);
 
-    // Design v2 3e — is the clash-api poller currently holding a LIVE
-    // snapshot for this node (checklist row «clash api reachable»).
-    // `get_live`: a stale snapshot (polling stopped) must read as
-    // NOT reachable, not keep a green «reachable» row from a frozen tick.
     let clash_ok = state.snapshot_cache.get_live(&sid).is_some();
 
-    // Design v2 3d — Grants-tab-only data: grant dates (migration
-    // 0039), WHICH granted users still await a deploy, per-user live
-    // conns on THIS node (clash snapshot), and per-user 24h traffic.
     let (grant_dates, pending_users, pending_users_known, grants_presence, grants_traffic) =
         if tab == ServerTab::Grants {
             let dates: HashMap<vpnctl_core::UserId, Option<chrono::DateTime<chrono::Utc>>> = state
@@ -96,8 +80,6 @@ pub(super) async fn server_detail_render(
             let pending: HashSet<vpnctl_core::UserId> =
                 pending_result.unwrap_or_default().into_iter().collect();
             let mut presence: HashMap<String, u32> = HashMap::new();
-            // `get_live`: per-user live conns on this node must drop out once
-            // the snapshot goes stale (polling stopped).
             if let Some(snap) = state.snapshot_cache.get_live(&sid) {
                 for c in &snap.snapshot.connections {
                     if let Some(uid) = c.metadata.user.as_deref() {
@@ -117,14 +99,6 @@ pub(super) async fn server_detail_render(
             Default::default()
         };
 
-    // Phase H+ — rolling uptime windows for the per-server SLO chip
-    // section. Three independent SQL aggregates (24h / 7d / 30d) —
-    // each is one indexed scan against `(server_id, ts)`. Failure
-    // → render an empty-state block, not 500: the rest of the page
-    // is still valuable when uptime is the broken part. Bonus: the
-    // 30d query is the only one whose denominator might be empty
-    // for a new server, which `UptimeStat.uptime_pct: Option<u8>`
-    // already encodes («None = no data» vs «Some(0) = was down»).
     let uptime_24h = state.inv.uptime_for_server(&sid, 24).await.ok();
     let uptime_7d = state.inv.uptime_for_server(&sid, 24 * 7).await.ok();
     let uptime_30d = state.inv.uptime_for_server(&sid, 24 * 30).await.ok();
@@ -148,7 +122,6 @@ pub(super) async fn server_detail_render(
         .service_quality_measurement_for_server(&sid)
         .await
         .ok();
-    // No mutation since last audit is not proof that a first deploy ever happened.
     let pending_deploy = match (pending_deploy, quality_measurement.as_ref()) {
         (Some(pending), Some(measurement)) => Some(pending || measurement.provisioned_at.is_none()),
         _ => None,
@@ -159,13 +132,6 @@ pub(super) async fn server_detail_render(
         .await
         .unwrap_or_default();
 
-    // A3 (audit 2026-05-22, shipped 2026-05-23) — 24h resource-trend
-    // sparklines (disk %, mem-used %, sing-box log MiB). The hero
-    // tile shows «right now»; the sparkline tile shows «is the
-    // right-now value typical or a spike?». Helps the operator
-    // distinguish a slow leak (climbing trendline) from a transient
-    // burst (flat trend with one tall bar). Loaded best-effort —
-    // a probe-fetch failure shouldn't break the rest of the page.
     let trend_rows = state
         .inv
         .recent_node_health_for_server(&sid, 24)
@@ -180,11 +146,6 @@ pub(super) async fn server_detail_render(
             Vec::new()
         });
 
-    // Phase 4b — server-wide live activity rollup (active conns
-    // now, bytes up/down over the last 24h, last poll ts). Failure
-    // → zero-default; the section still renders so the operator
-    // sees the diagnostic in journalctl + a clean «no data yet»
-    // tile instead of a 500.
     let live_activity = state
         .inv
         .server_live_activity(&sid, 24)
@@ -194,10 +155,6 @@ pub(super) async fn server_detail_render(
             vpnctl_inventory::ServerLiveActivity::default()
         });
 
-    // Traffic accounting — NIC ground-truth (ALL protocols) vs the
-    // sing-box part clash-api attributed vs the GAP between them. The
-    // gap is the operator's headline: real traffic vpnctl can't yet
-    // break down per-user (naive/Caddy + overhead).
     let traffic = state
         .inv
         .server_traffic_breakdown(&sid, 24)
@@ -215,19 +172,7 @@ pub(super) async fn server_detail_render(
             }
         });
 
-    // Phase 4c+4d — last clash-api snapshot + log-derived
-    // attribution for the «Live connections» drill-down. None
-    // when the poller has never reached this server (fresh
-    // daemon start / no key / etc) OR the last snapshot went stale
-    // (`get_live`: polling stopped → the live connection tables must
-    // collapse to their empty state, not render a frozen tick as live).
     let last_server_snap = state.snapshot_cache.get_live(&sid);
-    // Phase 5a-2 — bulk-fetch cached PTR hostnames for unique
-    // destination IPs in the snapshot. Used to enrich the «top
-    // destinations» table — `35.217.1.178:50005` becomes
-    // `r3.googlevideo.com:50005` when cached. Misses fall back
-    // to bare IP. Resolver task fills the cache asynchronously
-    // every 5 minutes.
     let dns_ptr_map = if let Some(s) = last_server_snap.as_ref() {
         let mut dst_ips: HashSet<String> = HashSet::new();
         for c in &s.snapshot.connections {
@@ -248,12 +193,6 @@ pub(super) async fn server_detail_render(
         HashMap::new()
     };
 
-    // Phase 4c — sub_access correlation as the FALLBACK. We
-    // extract unique sourceIPs from the snapshot, then ask
-    // inventory which users have hit subscription URL from those
-    // IPs in the last 7 days. Used when the Phase 4d log scrape
-    // has no entry for a given (IP, port) pair (e.g. connection
-    // older than the log tail window).
     let source_user_map = if let Some(s) = last_server_snap.as_ref() {
         let mut ips: HashSet<String> = HashSet::new();
         for c in &s.snapshot.connections {
@@ -274,21 +213,12 @@ pub(super) async fn server_detail_render(
         HashMap::new()
     };
 
-    // Per-server secrets — only read here so kernel-specific sections
-    // can display their current state.
-    // Fetched even when no such kernel is enabled because the cost is
-    // one indexed SELECT; conditional load would complicate the section
-    // helper without measurable savings).
     let server_secrets = state
         .inv
         .list_server_secrets(&sid)
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
-    // Per-(server, protocol) hidden state (migration 0018 / NM-10).
-    // One bulk SELECT keyed on server_id → HashMap<ProtocolId, bool>
-    // so the Enabled-protocols section can render the hide/unhide
-    // chip without N+1 calls into `is_server_protocol_hidden`.
     let hidden_map = state
         .inv
         .list_server_protocols_with_hidden(&sid)
@@ -323,33 +253,24 @@ pub(super) async fn server_detail_render(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
-    // Per-server reserved-ports list (migration 0028). Empty for
-    // every server in the fleet by default; this load is one
-    // indexed SELECT so the section helper always has data without
-    // a conditional fetch.
     let reserved_ports = state
         .inv
         .get_reserved_ports(&sid)
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
-    // Operator-set subscription label (servers.display_name, migration
-    // 0029). One indexed SELECT; None → the section shows the auto
-    // (country-map) fallback.
     let display_name = state
         .inv
         .server_display_name(&sid)
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
-    // Auto-suppress state (migration 0030): (opt-in, suppressed_at).
     let (auto_suppress_optin, suppressed_at) = state
         .inv
         .server_auto_suppress_state(&sid)
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
-    // naive↔HY2 UDP-pairing opt-in (migration 0031, UX-3).
     let udp_pair_enabled = state
         .inv
         .is_server_udp_pair_enabled(&sid)
@@ -362,17 +283,6 @@ pub(super) async fn server_detail_render(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
-    // ── PR-Server informativeness cards ─────────────────────────────
-    // All three SQL-backed loads are best-effort: a query error logs +
-    // empty-states the relevant card rather than 500-ing the whole
-    // page (the rest of the server detail stays useful). Each is one
-    // indexed scan — no new N+1 (the drift-LIVE SSH read, the only
-    // expensive path, is gated behind `?drift=live` below).
-
-    // server#3 — top users by 24h traffic on THIS server (Q top-users).
-    // Currently empty in prod (NM-11: clash-api drops the per-user
-    // field upstream), so the section carries an explicit NM-11
-    // empty-state rather than rendering a blank card.
     let top_users = state
         .inv
         .top_users_by_traffic_for_server(&sid, 24, 10)
@@ -382,8 +292,6 @@ pub(super) async fn server_detail_render(
             Vec::new()
         });
 
-    // server#4 — per-server traffic sparkline. Reuse the fleet's compact
-    // hourly rollup and retain only this server.
     let traffic_window = pick_vpn_sparkline_window(query.vpn_window.as_deref());
     let traffic_since_hours = traffic_window.cells * traffic_window.bucket_hours;
     let traffic_rows = state
@@ -400,7 +308,6 @@ pub(super) async fn server_detail_render(
             Vec::new()
         });
 
-    // server#7 — server-scoped audit timeline (Q audit-for-server).
     let server_audit = state
         .inv
         .audit_for_server(&sid.0, 20)
@@ -410,32 +317,11 @@ pub(super) async fn server_detail_render(
             Vec::new()
         });
 
-    // server#2 — kernel-floor rollup scoped to THIS server. Reuses the
-    // SHARED `kernel_floor_rollup` (PR-Dash) with a single-element
-    // slice — `latest` already carries this node's newest
-    // `kernel_versions_json` (no extra query).
     let server_kernel_versions: Vec<(vpnctl_core::ServerId, Option<String>)> = vec![(
         sid.clone(),
         latest.as_ref().and_then(|h| h.kernel_versions_json.clone()),
     )];
 
-    // server#1 — drift-detail (live on-node UUIDs). HIGHEST RISK: the
-    // ONLY card that reaches out over SSH, so it's gated behind the
-    // explicit `?drift=live` opt-in. Without the flag the default page
-    // load does ZERO SSH and renders a «[check live drift →]» link.
-    //
-    // When armed, the live read is best-effort with a hard ≤6s
-    // timeout: any failure (node down, key not authorised, parse
-    // error) collapses to `None` → the section renders a policy-safe
-    // empty-state, NEVER a 500. The inventory UUID set comes from
-    // `users` (already loaded; `.uuid` resolves COALESCE(client_uuid,
-    // users.uuid)) so an orphan = a UUID the node serves that no
-    // granted user accounts for.
-    // Gate on the tab too, not just the query flag: the drift-detail
-    // card (with its `?drift=live` arm link) only renders on the
-    // protocols tab, so `/status?drift=live` (bookmark / hand-typed /
-    // crawler) must NOT trigger the 6s SSH read and throw the result
-    // away. review-agent Phase 1.
     let drift_live: Option<DriftLiveResult> = if tab == ServerTab::Protocols && query.drift_live() {
         match state.inv.resolve_jump_host(&server).await {
             Ok(jump) => Some(load_drift_live(&server, &users, &all_users, jump).await),
@@ -448,7 +334,6 @@ pub(super) async fn server_detail_render(
         None
     };
 
-    // Compute drift: declared vs observed ports.
     let observed: BTreeSet<(String, u16)> = latest
         .as_ref()
         .and_then(|h| h.listening_ports_json.as_deref())
@@ -472,10 +357,6 @@ pub(super) async fn server_detail_render(
         .collect();
 
     let missing: Vec<_> = expected.difference(&observed).cloned().collect();
-    // SSH is always listening — never "extra drift". Use the
-    // server's CONFIGURED port (Cloudzy is on 2222, DO sticks on 22,
-    // future hosters could be anything). Hardcoded 22 was caught by
-    // review-agent: false-positive drift on Cloudzy nodes.
     let ssh_port = server.ssh_port;
     let extra: Vec<_> = observed
         .difference(&expected)
@@ -567,26 +448,6 @@ pub(super) async fn server_detail_render(
             " · " (crate::i18n::tr(lang, "hoster ", "хостер ")) (server.hoster)
         }
 
-        // Operator-facing Deploy button. Per CLAUDE.md "Web is the
-        // ONLY operator surface" — Pavel must never need to open
-        // a terminal. One click does the FULL deploy cycle:
-        //   1. mint any missing per-protocol server secrets (REALITY
-        //      keypair, WG server keypair, Hy2 obfs password) via
-        //      `bootstrap_server_secrets` — idempotent,
-        //   2. for each enabled kernel: SSH-push install
-        //      (`ensure_installed`: apt-get + start) + render config +
-        //      `apply_config` (systemctl restart),
-        //   3. write an `admin / server.deploy` audit row with the
-        //      bootstrapped secrets + per-kernel push result.
-        //
-        // Re-clicking is safe — already-minted secrets are left
-        // untouched; already-installed kernels skip apt-get; config
-        // render is deterministic so a redeploy with no changes is a
-        // no-op systemctl restart.
-        // Pending-deploy banner — grant/revoke happened after the last
-        // deploy, so the node's running config doesn't match inventory.
-        // The revoke case is the dangerous one: the revoked user's UUID
-        // is STILL ACCEPTED by the node until the deploy below runs.
         @let deploy_state = if is_guard_active {
             "running"
         } else {
@@ -660,14 +521,8 @@ pub(super) async fn server_detail_render(
                 }
             }
         }
-        // Hero: current state (live or empty-state)
         (server_detail_hero(&latest, &server, lang))
 
-        // ── in-page tabs (ui-audit §3-§4). Chrome above (nav / hero /
-        // deploy / update-kernels / pending-deploy banner) shows on
-        // EVERY tab so the daily deploy action never hides behind one;
-        // each group below renders only on its own tab. Bare
-        // /admin/servers/{id} == the `status` tab.
         @let tab_base = format!("/admin/servers/{}", path_segment_encode(&server.id.0));
         @let protocols_tab_label = if latest.is_none() || (missing.is_empty() && extra.is_empty()) {
             crate::i18n::tr(lang, "Protocols", "Протоколы").to_string()
@@ -683,12 +538,9 @@ pub(super) async fn server_detail_render(
             ("setup", crate::i18n::tr(lang, "Setup", "Настройка")),
         ], lang))
 
-        // ── STATUS (default) — "is the node healthy, what changed".
         @if tab == ServerTab::Status {
             div.ed-detail-grid {
                 div {
-                    // Rolling uptime SLO (24h/7d/30d) + compact drift
-                    // verdict form the left scan column.
                     (server_detail_uptime_section(
                         uptime_24h.as_ref(),
                         uptime_7d.as_ref(),
@@ -698,8 +550,6 @@ pub(super) async fn server_detail_render(
                     (server_detail_drift_summary(&missing, &extra, latest.is_some(), &tab_base, lang))
                 }
                 div {
-                    // The three 24h resource sparklines own the wider
-                    // right column so trend shape stays legible.
                     (server_detail_resource_trend_section(&trend_rows, lang))
                 }
             }
@@ -727,14 +577,7 @@ pub(super) async fn server_detail_render(
             (server_detail_assurance_section(&assurance_rows, lang))
         }
 
-        // ── ACTIVITY — clash-api-snapshot-derived + the audit trail
-        // (design v2 3b moved events here from Status: «what happened»
-        // belongs with «what's happening»).
         @if tab == ServerTab::Activity {
-            // v2 3b — last-deploy summary line above the events. The
-            // page-level #deploy-log pane (headrow deploy button)
-            // streams live runs; this line recalls the newest archived
-            // deploy from the audit trail.
             @if let Some(last_deploy) = server_audit.iter().find(|e| e.action == "server.deploy") {
                 div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin: 0 0 10px;" {
                     (crate::i18n::tr(lang, "last deploy ", "последний деплой "))
@@ -746,63 +589,29 @@ pub(super) async fn server_detail_render(
                     }
                 }
             }
-            // server#7 — server-scoped audit timeline (last 20),
-            // moved from Status (v2 3b).
             (server_detail_audit_section(&server_audit, lang))
-            // Phase 4b — live activity tile (server-wide clash-api totals).
             (server_detail_live_activity_section(&live_activity, lang))
-            // Traffic accounting — NIC ground-truth vs clash-attributed vs gap.
             (server_detail_gap_section(&traffic, lang))
-            // Phase 4c/4d/5a-2 — per-connection drill-down (top dests +
-            // reverse-DNS, source IPs with user correlation, TCP/UDP split).
             (server_detail_live_connections_section(last_server_snap.as_deref(), &source_user_map, &dns_ptr_map, lang))
-            // server#4 — per-server traffic 24h/7d sparkline (?vpn_window=).
             (server_detail_traffic_section(&traffic_rows, traffic_window, &server.id, lang))
-            // server#3 — top users on this server (24h); NM-11 empty-state.
             (server_detail_top_users_section(&top_users, lang))
-            // server#5 — TCP/UDP split from the live clash-api snapshot.
             (server_detail_network_split_section(last_server_snap.as_deref(), lang))
         }
 
-        // ── PROTOCOLS — "what does this node serve, on which ports".
         @if tab == ServerTab::Protocols {
-            // Kernels — multi-kernel runtime selection + version-floor rollup.
-            // Enable amneziawg kernel here → enable wireguard protocol
-            // below → deploy. The `update kernels →` button lives in the
-            // chrome above (adjacent to Deploy).
             (kernel_floor_rollup(&server_kernel_versions, lang))
-            // Declared vs observed drift FIRST (R2 2026-07-10) — the ⚠
-            // on this tab's label is about drift, but the grid used to
-            // sit at the very bottom below four config forms: the tab
-            // opened without answering its own warning.
             (server_detail_drift_section(&server, &state.registry, &server_secrets, &observed, &missing, &extra, latest.is_some(), lang))
             (server_detail_kernels_section(&server, &state.registry, lang))
-            // Enabled protocols — enable/disable/hide (NM-10 hidden_map:
-            // hidden=1 keeps the inbound running but stops emitting the
-            // protocol from /sub + /api/v1/app/config). Changes take
-            // effect on the NEXT deploy.
             (server_detail_protocols_section(&server, &state.registry, &hidden_map, lang))
-            // Naive (Caddy) + vless-ws per-server config (domain + ACME).
             (server_detail_naive_config_section(&server, &server_secrets, lang))
             (server_detail_vlessws_config_section(&server, &server_secrets, lang))
-            // REALITY per-server listen port (co-tenant 443 override).
             (server_detail_reality_config_section(&server, &server_secrets, lang))
-            // naive↔HY2 UDP pairing opt-in (UX-3) — shared `pair=` so a
-            // client routes UDP over the co-located HY2.
             (server_detail_udp_pair_section(&server, udp_pair_enabled, lang))
-            // Reserved ports — operator port allowlist the apply-guard skips.
             (server_detail_reserved_ports_section(&server, &reserved_ports, lang))
-            // Drift DETAIL — on-node orphan UUIDs; `?drift=live` arms a
-            // best-effort 6s SSH read of the node's sing-box config.
-            // Stays at the bottom: it's the on-demand deep dive, not
-            // the at-a-glance verdict.
             (server_detail_drift_detail_section(&server, drift_live.as_ref(), query.drift_live(), lang))
         }
 
-        // ── GRANTS — 2nd-most-frequent action; its own uncluttered page.
         @if tab == ServerTab::Grants {
-            // Design v2 3d — dense grants table: presence, per-node 24h
-            // traffic, key-state (pending deploy vs on node), grant date.
             @let deployed_count = user_count.saturating_sub(pending_users.len());
             div.ed-headrow {
                 div.ed-art-eyebrow style="margin: 0;" {
@@ -816,9 +625,6 @@ pub(super) async fn server_detail_render(
                 span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                     (user_count) (crate::i18n::tr(lang, " of ", " из ")) (all_users.len())
                     " "
-                    // RU forms are GENITIVE (after «из»): из 41
-                    // пользователя / из 42 пользователей — not the
-                    // nominative counting forms.
                     (crate::i18n::noun_for(lang, all_users.len() as u64, "user granted", "users granted", "пользователя с доступом", "пользователей с доступом", "пользователей с доступом"))
                     " · "
                     @if pending_users_known {
@@ -871,7 +677,6 @@ pub(super) async fn server_detail_render(
             @let sid_enc_b = path_segment_encode(&server.id.0);
             @let ungranted = all_users.iter().filter(|u| !granted_user_ids.contains(&u.id)).collect::<Vec<_>>();
             @let granted_count = granted_user_ids.len();
-            // Grant bar (v2 3d) + the B2 bulk actions on one row.
             div.ed-inbar {
                 span.ed-inbar__label { (crate::i18n::tr(lang, "grant access", "выдать доступ")) }
                 form method="post" action=(format!("/admin/servers/{sid_enc_b}/grants"))
@@ -935,10 +740,6 @@ pub(super) async fn server_detail_render(
                     }
                 }
             }
-            // v2 3d — sort links. `presence`/`traffic` sort desc by their
-            // metric; `id` (default) is A→Z. Pending-deploy rows always
-            // float to the top of any sort so the silent-failure set stays
-            // visible. The link row lives just under the grant bar.
             @let grant_sort = query.grant_sort.as_deref().unwrap_or("id");
             @let sort_href = |kind: &str| -> String {
                 format!("/admin/servers/{}/grants?grant_sort={kind}", path_segment_encode(&server.id.0))
@@ -958,7 +759,6 @@ pub(super) async fn server_detail_render(
             @let granted_rows = {
                 let mut v = all_users.iter().filter(|u| granted_user_ids.contains(&u.id)).collect::<Vec<_>>();
                 v.sort_by(|a, b| {
-                    // Pending-deploy first in every sort (silent-failure set).
                     let pa = pending_users.contains(&a.id);
                     let pb = pending_users.contains(&b.id);
                     let ca = grants_presence.get(&a.id.0).copied().unwrap_or(0);
@@ -968,7 +768,7 @@ pub(super) async fn server_detail_render(
                     let by_metric = match grant_sort {
                         "presence" => cb.cmp(&ca).then(tb.cmp(&ta)),
                         "traffic" => tb.cmp(&ta).then(cb.cmp(&ca)),
-                        _ => std::cmp::Ordering::Equal, // id → fall through to id cmp
+                        _ => std::cmp::Ordering::Equal,
                     };
                     pb.cmp(&pa).then(by_metric).then(a.id.0.cmp(&b.id.0))
                 });
@@ -1046,8 +846,6 @@ pub(super) async fn server_detail_render(
                     }
                 }
             }
-            // Not-granted footnote — each id carries its own inline
-            // grant form so the operator never leaves the page.
             @if !ungranted.is_empty() {
                 div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-family: var(--mono); font-size: 10px; color: var(--mute); margin-top: 8px;" {
                     (crate::i18n::tr(lang, "not granted: ", "без доступа: "))
@@ -1072,14 +870,7 @@ pub(super) async fn server_detail_render(
         }
 
 
-        // ── SETUP — the 0-2-uses/month config tail (ui-audit §4),
-        // deliberately last.
         @if tab == ServerTab::Setup {
-            // Design v2 3e — node-setup checklist, re-verified from the
-            // latest probe (not just at bootstrap): a manually broken
-            // node surfaces here without a redeploy. Honest subset —
-            // only facts the probe/inventory actually carry today
-            // (bbr/ntp/logrotate-config checks need probe extensions).
             div.ed-art-eyebrow {
                 (crate::i18n::tr(lang, "Node setup · verified at last probe", "Настройка ноды · сверено последней пробой")) " "
                 span.ed-tip title=(crate::i18n::tr(
@@ -1163,8 +954,6 @@ pub(super) async fn server_detail_render(
                     }
                 }
             }
-            // v2 3e — bootstrap record from the audit trail (best
-            // effort; nodes imported outside the wizard have none).
             @let bootstrap_row = server_audit.iter().find(|e| e.action.starts_with("server.bootstrap") || e.action == "bootstrap");
             div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin: 0 0 16px;" {
                 (crate::i18n::tr(lang, "bootstrap record: ", "запись bootstrap: "))
@@ -1174,27 +963,14 @@ pub(super) async fn server_detail_render(
                 }
             }
 
-            // Trusted host fingerprint — TOFU pin for the SSH probe +
-            // clash-api poller + deploy (web action + the
-            // `vpnctl server set-fingerprint <id>` CLI, one source of truth).
             (server_detail_fingerprint_section(&server, lang))
             (server_detail_routing_policy_section(&server, server_role, &routing_candidates, routing_error.as_deref(), lang))
             (server_detail_client_detour_section(&server, client_detour_via.as_ref(), &client_detour_candidates, lang))
-            // Display name — operator subscription label (migration 0029).
             (server_detail_display_name_section(&server, display_name.as_deref(), lang))
-            // Server billing — rental and payment tracker (migration 0057).
             (server_detail_billing_section(&server, server_billing.as_ref(), lang))
-            // Auto-suppress from subscription when unreachable (migration 0030).
             (server_detail_auto_suppress_section(&server, auto_suppress_optin, suppressed_at.as_deref(), lang))
-            // Push deploy key — recovery for quick-add/migrate nodes whose
-            // wizard step-3 pubkey push never ran.
             (server_detail_push_deploy_key_section(&server, lang))
 
-            // Danger zone — remove this server from inventory entirely.
-            // Retype-to-confirm page (mirrors user delete). Grants, secrets,
-            // protocols, probe history + alerts cascade-delete; if another
-            // server uses this as a ProxyJump host that link clears. The
-            // node's own sing-box is NOT touched.
             div.ed-rule {}
             div style="margin: 18px 0 8px;" {
                 a href=(format!("/admin/servers/{}/delete-confirm", path_segment_encode(&server.id.0)))
