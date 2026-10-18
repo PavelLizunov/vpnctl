@@ -78,6 +78,7 @@ pub(super) fn server_detail_kernels_section(
                         }
                         form method="post"
                              action=(format!("/admin/servers/{}/kernels/{}/disable", sid_enc, path_segment_encode(&kid.0)))
+                             data-confirm=(crate::i18n::tr(lang, "Disable this kernel on the server?", "Отключить это ядро на сервере?"))
                              style="margin: 0; padding: 0;" {
                             @let dis_title = match lang {
                                 crate::i18n::Locale::En => format!("Remove {} from {}.kernels. Takes effect on next deploy.", kid.0, server.id.0),
@@ -157,7 +158,7 @@ pub(super) fn server_detail_push_deploy_key_section(
             label for="verify_ssh_user" { (tr(lang, "SSH user", "SSH-пользователь")) }
             input id="verify_ssh_user" type="text" name="ssh_user" value=(server.ssh_user)
                 required autocomplete="username" autocapitalize="none" spellcheck="false"
-                pattern="[A-Za-z0-9_-]+" maxlength="32";
+                pattern="[A-Za-z0-9_\\-]+" maxlength="32";
             button type="submit" class="ed-abtn ed-abtn--recovery" {
                 (tr(lang, "Check key and save", "Проверить ключ и сохранить"))
             }
@@ -198,7 +199,7 @@ pub(super) fn server_detail_push_deploy_key_section(
                 input id="setup_ssh_user" type="text" name="ssh_user"
                       value=(server.ssh_user)
                       autocomplete="username" autocapitalize="none" spellcheck="false"
-                      pattern="[A-Za-z0-9_-]+" maxlength="32"
+                      pattern="[A-Za-z0-9_\\-]+" maxlength="32"
                       style="font-family: var(--mono); font-size: 12px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper);";
                 label style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                     (tr(lang, "ssh password", "ssh-пароль"))
@@ -407,7 +408,7 @@ pub(super) fn server_detail_fingerprint_section(
                 input type="hidden" name="mode" value="manual";
                 input type="text" name="fingerprint" placeholder="SHA256:..."
                       style="flex: 1; padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);"
-                      pattern="SHA256:[A-Za-z0-9+/=_-]{1,44}"
+                      pattern="SHA256:[A-Za-z0-9+\\/=_\\-]{1,44}"
                       title="SHA256:<43-char-base64>";
                 button type="submit"
                        title=(tr(

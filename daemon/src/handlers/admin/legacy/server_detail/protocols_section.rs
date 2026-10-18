@@ -100,6 +100,7 @@ pub(crate) fn server_detail_protocols_section(
                         }
                         form method="post"
                              action=(format!("/admin/servers/{}/protocols/{}/disable", sid_enc, path_segment_encode(&pid.0)))
+                             data-confirm=(crate::i18n::tr(lang, "Disable this protocol on the server for every user?", "Отключить этот протокол на сервере для всех пользователей?"))
                              style="margin: 0; padding: 0;" {
                             @let dis_proto_title = match lang {
                                 crate::i18n::Locale::En => format!("Remove {} from {}.enabled_protocols. Takes effect on next deploy.", pid.0, server.id.0),

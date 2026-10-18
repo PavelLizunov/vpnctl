@@ -2,9 +2,9 @@ use crate::id::{KernelId, ProtocolId, ServerId};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
-    #[error("kernel `{kernel}` does not support protocol `{protocol}`")]
+    #[error("no kernel assigned to this server (`{kernels}`) supports protocol `{protocol}`")]
     UnsupportedProtocol {
-        kernel: KernelId,
+        kernels: String,
         protocol: ProtocolId,
     },
     #[error("kernel `{0}` is already registered")]

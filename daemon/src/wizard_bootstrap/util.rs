@@ -75,7 +75,11 @@ pub async fn ssh_password_run(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let output = cmd.output().map_err(|e| {
-            format!("spawning sshpass: {e} (is sshpass installed on the daemon host?)")
+            format!(
+                "vpnctld cannot run sshpass on its own host ({e}); this is a daemon \
+                 installation problem, not the node's IP or password — the vpnctld host \
+                 needs the sshpass package"
+            )
         })?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

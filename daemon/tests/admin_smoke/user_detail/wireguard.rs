@@ -757,3 +757,49 @@ async fn admin_user_wireguard_conf_download_400_when_server_lacks_wg_protocol() 
         "expected the canonical 'wireguard protocol not enabled' message, got {text:?}"
     );
 }
+
+#[tokio::test]
+async fn admin_destructive_user_actions_ask_for_confirmation() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    s.inv
+        .add_user(&User {
+            id: UserId("keyed".into()),
+            uuid: "66666666-6666-6666-6666-666666666666".into(),
+            tuic_password: Some("tp".into()),
+            wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
+            wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
+            sub_token: Some("st-keyed".into()),
+            vpn_router_device_id: None,
+            disabled: false,
+        })
+        .await
+        .unwrap();
+    let app = router(s);
+    let overview = fetch_html(app.clone(), "/admin/users/u0/overview").await;
+    let delivery = fetch_html(app.clone(), "/admin/users/keyed/delivery").await;
+    let first_key = fetch_html(app.clone(), "/admin/users/u0/delivery").await;
+    let access = fetch_html(app, "/admin/users/u0/access").await;
+    let at = first_key.find("/wireguard/regenerate\"").unwrap();
+    let head = &first_key[first_key[..at].rfind("<form").unwrap()..at + 200];
+    assert!(
+        !head.contains("data-confirm="),
+        "minting the first key breaks nothing and must not ask"
+    );
+    for (page, action) in [
+        (&overview, "/sub-token/regenerate\""),
+        (&delivery, "/wireguard/regenerate\""),
+        (&access, "/revoke\""),
+    ] {
+        let at = page
+            .find(action)
+            .unwrap_or_else(|| panic!("{action} form missing"));
+        let form_start = page[..at].rfind("<form").unwrap();
+        let form_head = &page[form_start..at + 400.min(page.len() - at)];
+        assert!(
+            form_head.contains("data-confirm="),
+            "{action} must ask for confirmation"
+        );
+    }
+}

@@ -37,7 +37,7 @@ pub(crate) async fn wizard_new(headers: HeaderMap, State(state): State<AppState>
                 input id="address" name="address" type="text" required="required"
                       placeholder="198.51.100.42 or vpn-de1.example.org"
                       autocomplete="off" autocapitalize="none" spellcheck="false"
-                      pattern="[A-Za-z0-9.:_-]+"
+                      pattern="[A-Za-z0-9.:_\\-]+"
                       title=(tr(
                           lang,
                           "IPv4, IPv6 or hostname — no shell metacharacters",
@@ -59,7 +59,7 @@ pub(crate) async fn wizard_new(headers: HeaderMap, State(state): State<AppState>
                 }
                 input id="ssh_user" name="ssh_user" type="text" value="root"
                       autocomplete="username" autocapitalize="none" spellcheck="false"
-                      pattern="[A-Za-z0-9_-]+" maxlength="32"
+                      pattern="[A-Za-z0-9_\\-]+" maxlength="32"
                       title=(tr(lang, "Examples: root, debian, ubuntu", "Примеры: root, debian, ubuntu"))
                       style="padding: 6px 10px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 13px; color: var(--ink); max-width: 240px;";
                 p style="font-family: var(--serif); font-style: italic; font-size: 11px; color: var(--mute); margin: 0;" {

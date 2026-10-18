@@ -80,6 +80,7 @@ async fn bootstrap_pipeline(
     .await
     {
         Ok(_) => send_step!("probe", "ok — {} login confirmed.", plan.ssh_user),
+        Err(e) if e.starts_with("vpnctld cannot run sshpass") => fail!("probe", "{e}."),
         Err(e) => fail!("probe", "{e}. Re-check IP, port, SSH user and password."),
     }
     if plan.ssh_user != "root" {

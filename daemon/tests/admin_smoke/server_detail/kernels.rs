@@ -4,7 +4,7 @@ use http_body_util::BodyExt;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-use vpnctl_core::{KernelId, Server, ServerId};
+use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
 use vpnctld::router;
 
 use crate::common::*;
@@ -344,4 +344,159 @@ async fn server_detail_kernel_rollup_renders_version_for_this_node() {
         html.contains("on target"),
         "single node at its own floor reads on-target"
     );
+}
+
+#[tokio::test]
+async fn admin_kernel_disable_refuses_to_orphan_enabled_protocols() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let inv = s.inv.clone();
+    let resp = router(s)
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/s0/kernels/sing-box/disable"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.starts_with("vpnctl admin: cannot disable kernel 'sing-box'"),
+        "{text}"
+    );
+    assert!(text.contains("vless+reality"), "{text}");
+    let server = inv
+        .get_server(&ServerId("s0".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(server.kernels, vec![KernelId("sing-box".into())]);
+}
+
+#[tokio::test]
+async fn admin_protocol_enable_refuses_protocol_no_assigned_kernel_serves() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let inv = s.inv.clone();
+    let resp = router(s)
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/s0/protocols/vless%2Bxhttp/enable"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains("cannot enable protocol 'vless+xhttp'"),
+        "{text}"
+    );
+    assert!(
+        text.contains("xray"),
+        "must name the kernel that would serve it: {text}"
+    );
+    let server = inv
+        .get_server(&ServerId("s0".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !server
+            .enabled_protocols
+            .contains(&ProtocolId("vless+xhttp".into()))
+    );
+}
+
+#[tokio::test]
+async fn admin_form_errors_render_inside_the_admin_shell_for_browsers() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let app = router(s);
+    let req = |accept: &str| {
+        add_same_origin(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/servers/s0/kernels/sing-box/disable")
+                .header("accept", accept)
+                .header(
+                    "referer",
+                    "http://127.0.0.1:18402/admin/servers/s0/protocols",
+                ),
+        )
+        .body(Body::empty())
+        .unwrap()
+    };
+    let resp = app
+        .clone()
+        .oneshot(req("text/html,application/xhtml+xml"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let html =
+        String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).to_string();
+    assert!(
+        html.contains("<nav") || html.contains("ed-tb"),
+        "must keep the admin shell"
+    );
+    assert!(html.contains("cannot disable kernel"));
+    assert!(
+        html.contains("href=\"/admin/servers/s0/protocols\""),
+        "back link to the form page"
+    );
+
+    let resp = app.oneshot(req("*/*")).await.unwrap();
+    let text =
+        String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).to_string();
+    assert!(
+        text.starts_with("vpnctl admin: "),
+        "non-browser clients keep the plain contract"
+    );
+}
+
+#[tokio::test]
+async fn admin_kernel_disable_allowed_when_another_kernel_still_serves_protocols() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let sid = ServerId("s0".into());
+    s.inv
+        .add_server_kernel(&sid, &KernelId("xray".into()))
+        .await
+        .unwrap();
+    let inv = s.inv.clone();
+    let resp = router(s)
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/s0/kernels/xray/disable")
+                    .header("accept", "text/html"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.status().is_redirection(), "got {}", resp.status());
+    assert!(
+        resp.headers().get("location").is_some(),
+        "success redirects must pass through the error-page layer unchanged"
+    );
+    let server = inv.get_server(&sid).await.unwrap().unwrap();
+    assert_eq!(server.kernels, vec![KernelId("sing-box".into())]);
 }

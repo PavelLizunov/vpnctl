@@ -131,6 +131,7 @@ pub(crate) fn render_delivery_tab(
                         }
                         form method="post"
                              action=(format!("/admin/users/{}/wireguard/regenerate", path_segment_encode(&user.id.0)))
+                             data-confirm=(crate::i18n::tr(lang, "Generate a new WireGuard key pair? Configs already handed to the user stop working after the next deploy.", "Сгенерировать новую пару ключей WireGuard? Выданные пользователю конфиги перестанут работать после следующего деплоя."))
                              style="margin-top: 12px;" {
                             button type="submit"
                                    title="Mint a fresh Curve25519 pair. The previous keys stop working — every device using the old config must re-import."
@@ -459,7 +460,8 @@ pub(crate) fn render_delivery_tab(
                                 "Ready files require a stored private key. Rotating replaces the existing pair; devices using it must re-import after deployment.",
                                 "Для готового файла нужен сохранённый приватный ключ. Ротация заменит текущую пару; после деплоя устройствам потребуется повторный импорт."))
                         }
-                        form method="post" action=(format!("/admin/users/{}/wireguard/regenerate", path_segment_encode(&user.id.0))) {
+                        form method="post" action=(format!("/admin/users/{}/wireguard/regenerate", path_segment_encode(&user.id.0)))
+                             data-confirm=(crate::i18n::tr(lang, "Generate a new WireGuard key pair? Configs already handed to the user stop working after the next deploy.", "Сгенерировать новую пару ключей WireGuard? Выданные пользователю конфиги перестанут работать после следующего деплоя.")) {
                             button type="submit" class="ed-abtn ed-abtn--warning" {
                                 (icon("rotate-cw")) (crate::i18n::tr(lang, "rotate WG keypair", "сменить WG-пару ключей"))
                             }

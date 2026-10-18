@@ -145,7 +145,7 @@ pub(crate) async fn user_regen_wireguard(
     spawn_user_servers_redeploy(&state, servers, user_id_str.clone(), "user.wireguard.regen");
 
     Redirect::to(&format!(
-        "/admin/users/{}/overview",
+        "/admin/users/{}/delivery",
         path_segment_encode(&user_id_str)
     ))
     .into_response()

@@ -77,7 +77,12 @@ impl Registry {
         for proto in &server.enabled_protocols {
             if !resolved.iter().any(|(_, sup)| sup.contains(proto)) {
                 return Err(CoreError::UnsupportedProtocol {
-                    kernel: server.kernels[0].clone(),
+                    kernels: server
+                        .kernels
+                        .iter()
+                        .map(|k| k.0.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
                     protocol: proto.clone(),
                 });
             }

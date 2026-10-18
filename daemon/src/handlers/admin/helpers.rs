@@ -619,6 +619,55 @@ pub(crate) fn operator_name() -> Option<String> {
         .filter(|name| !name.is_empty())
 }
 
+pub(crate) async fn html_error_pages(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let headers = req.headers().clone();
+    let wants_html = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|a| a.contains("text/html"));
+    let resp = next.run(req).await;
+    let status = resp.status();
+    let plain = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|c| c.starts_with("text/plain"));
+    if !wants_html || !plain || !(status.is_client_error() || status.is_server_error()) {
+        return resp;
+    }
+    let (mut parts, body) = resp.into_parts();
+    let message = match axum::body::to_bytes(body, 64 * 1024).await {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).trim().to_string(),
+        Err(_) => error_text("request failed").trim().to_string(),
+    };
+    let back = headers
+        .get(axum::http::header::REFERER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|r| r.split_once("://").map(|(_, rest)| rest))
+        .and_then(|rest| rest.find('/').map(|i| rest[i..].to_string()))
+        .filter(|path| path.starts_with("/admin") && !path.starts_with("//"))
+        .unwrap_or_else(|| "/admin/".to_string());
+    let (theme, accent, lang) = theme_accent_lang(&headers);
+    let body = maud::html! {
+        div.ed-art-eyebrow { (crate::i18n::tr(lang, "Action not completed", "Действие не выполнено")) }
+        div.ed-alert.ed-alert--warn role="alert" style="margin: 12px 0 16px;" { (message) }
+        a.ed-abtn.ed-abtn--secondary href=(back) {
+            (crate::handlers::admin::icons::icon("arrow-left")) (crate::i18n::tr(lang, "back", "назад"))
+        }
+    };
+    let page = render_page(&state, "", &theme, &accent, lang, body).await;
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    parts.headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    Response::from_parts(parts, axum::body::Body::from(page.into_string()))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {

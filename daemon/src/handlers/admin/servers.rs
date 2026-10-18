@@ -227,7 +227,7 @@ pub(crate) async fn servers(
             span.ed-inbar__label { (crate::i18n::tr(lang, "add server", "добавить сервер")) }
             input type="text" name="id" required="required"
                   placeholder=(crate::i18n::tr(lang, "e.g. fra-01", "напр. fra-01"))
-                  pattern="(?!.*\\.\\.)[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?"
+                  pattern="(?!.*\\.\\.)[A-Za-z0-9](?:[A-Za-z0-9._\\-]{0,62}[A-Za-z0-9])?"
                   maxlength="64"
                   title=(crate::i18n::tr(
                       lang,

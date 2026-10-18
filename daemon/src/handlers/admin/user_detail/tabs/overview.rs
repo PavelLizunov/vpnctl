@@ -76,6 +76,7 @@ pub(crate) async fn render_overview_tab(
                                 div { span style="color: var(--mute);" { "token " } (mask_secret(token)) }
                                 form method="post"
                                      action=(format!("/admin/users/{}/sub-token/regenerate", path_segment_encode(&user.id.0)))
+                                     data-confirm=(crate::i18n::tr(lang, "Rotate the subscription token? The current subscription link stops working immediately.", "Сменить токен подписки? Текущая ссылка подписки сразу перестанет работать."))
                                      style="margin-top: 10px;" {
                                     button type="submit"
                                            title=(crate::i18n::tr(
@@ -109,6 +110,7 @@ pub(crate) async fn render_overview_tab(
                             }
                             form method="post"
                                  action=(format!("/admin/users/{}/sub-token/regenerate", path_segment_encode(&user.id.0)))
+                                 data-confirm=(crate::i18n::tr(lang, "Rotate the subscription token? The current subscription link stops working immediately.", "Сменить токен подписки? Текущая ссылка подписки сразу перестанет работать."))
                                  style="margin-top: 14px;" {
                                 button type="submit"
                                        title=(crate::i18n::tr(
