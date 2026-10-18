@@ -644,13 +644,10 @@ pub(crate) async fn html_error_pages(
         Ok(bytes) => String::from_utf8_lossy(&bytes).trim().to_string(),
         Err(_) => error_text("request failed").trim().to_string(),
     };
-    let back = headers
+    let referer = headers
         .get(axum::http::header::REFERER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|r| r.split_once("://").map(|(_, rest)| rest))
-        .and_then(|rest| rest.find('/').map(|i| rest[i..].to_string()))
-        .filter(|path| path.starts_with("/admin") && !path.starts_with("//"))
-        .unwrap_or_else(|| "/admin/".to_string());
+        .and_then(|v| v.to_str().ok());
+    let back = sanitize_referer(referer);
     let (theme, accent, lang) = theme_accent_lang(&headers);
     let body = maud::html! {
         div.ed-art-eyebrow { (crate::i18n::tr(lang, "Action not completed", "Действие не выполнено")) }
@@ -747,6 +744,91 @@ mod tests {
         assert!(!valid_server_id("srv..01"));
         assert!(!valid_server_id(".."));
         assert!(!valid_server_id("srv/01"));
+    }
+
+    #[tokio::test]
+    async fn html_error_pages_sanitizes_referer_back_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("inv.db");
+        let inv = vpnctl_inventory::SqliteInventory::open(&db_path)
+            .await
+            .unwrap();
+        let registry = std::sync::Arc::new(crate::app::build_registry().unwrap());
+        let (state, _handle) = crate::app::make_app_state_for_tests(inv, registry);
+
+        let make_req = |referer_val: Option<&str>| {
+            let mut req = axum::extract::Request::builder()
+                .uri("/admin/test")
+                .header(axum::http::header::ACCEPT, "text/html")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            if let Some(ref_str) = referer_val {
+                req.headers_mut().insert(
+                    axum::http::header::REFERER,
+                    axum::http::HeaderValue::from_str(ref_str).unwrap(),
+                );
+            }
+            req
+        };
+
+        use axum::middleware::from_fn_with_state;
+        use tower::ServiceExt;
+
+        // Test malicious referer with path traversal / open redirect attempt
+        let req = make_req(Some("/admin//evil.com"));
+        let app = axum::Router::new()
+            .route(
+                "/admin/test",
+                axum::routing::get(|| async {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        [(axum::http::header::CONTENT_TYPE, "text/plain")],
+                        "error message",
+                    )
+                }),
+            )
+            .route_layer(from_fn_with_state(state.clone(), html_error_pages));
+
+        let resp = app.oneshot(req).await.unwrap();
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+
+        assert!(
+            body_str.contains("href=\"/admin/\""),
+            "malicious referer must be sanitized to /admin/, got body: {body_str}"
+        );
+        assert!(
+            !body_str.contains("/admin//evil.com"),
+            "body must not contain unsanitized referer"
+        );
+
+        // Test valid referer
+        let req_valid = make_req(Some("/admin/users"));
+        let app_valid = axum::Router::new()
+            .route(
+                "/admin/test",
+                axum::routing::get(|| async {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        [(axum::http::header::CONTENT_TYPE, "text/plain")],
+                        "error message",
+                    )
+                }),
+            )
+            .route_layer(from_fn_with_state(state, html_error_pages));
+
+        let resp_valid = app_valid.oneshot(req_valid).await.unwrap();
+        let body_bytes_valid = axum::body::to_bytes(resp_valid.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body_str_valid = String::from_utf8(body_bytes_valid.to_vec()).unwrap();
+
+        assert!(
+            body_str_valid.contains("href=\"/admin/users\""),
+            "valid referer /admin/users must be preserved, got body: {body_str_valid}"
+        );
     }
 
     #[tokio::test]
