@@ -175,9 +175,13 @@ pub(crate) async fn monitoring(
             } @else {
                 (status_tile_with_warn(
                     tr(lang, "fleet", "флот"),
-                    &format!("{up_count} / {probeable_total} up"),
-                    if up_count == probeable_total { "var(--green)" } else { "var(--red)" },
-                    up_count != probeable_total,
+                    &if probed_count == probeable_total {
+                        format!("{up_count} / {probeable_total} up")
+                    } else {
+                        format!("{up_count} / {probed_count} up · {} {}", probeable_total - probed_count, tr(lang, "not probed", "без проверки"))
+                    },
+                    if up_count == probed_count { "var(--green)" } else { "var(--red)" },
+                    up_count != probed_count,
                 ))
             }
             (status_tile_with_warn(

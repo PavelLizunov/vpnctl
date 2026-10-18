@@ -132,7 +132,7 @@ async fn phase4b_server_detail_renders_live_activity_section_when_no_samples() {
         "server-detail must surface the Phase 4b live-activity section eyebrow"
     );
     assert!(
-        html.contains("does not report"),
+        html.contains("server-wide totals are exact"),
         "section must explain the sing-box caveat so the operator knows why per-user is zero"
     );
     assert!(
@@ -267,7 +267,7 @@ async fn phase4c_server_detail_renders_top_destinations_and_sources_from_snapsho
     assert!(html.contains(">tcp<") || html.contains("tcp"));
     assert!(html.contains("udp"));
     assert!(
-        html.contains("does not report"),
+        html.contains("does not report the user of a connection"),
         "section must explain the per-user attribution caveat"
     );
 }
@@ -633,7 +633,8 @@ async fn server_detail_top_users_renders_nm11_empty_state() {
         "top-users eyebrow missing"
     );
     assert!(
-        html.contains("does not report"),
+        html.contains("No per-user traffic attributed on this server yet")
+            && html.contains("does not report users per connection; see the dashboard note"),
         "empty top-users card must explain the per-user attribution caveat"
     );
 }

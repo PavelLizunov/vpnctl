@@ -124,8 +124,8 @@ pub(super) fn server_detail_hero(
                 span.ed-mono { (server.address) }
                 (tr(
                     lang,
-                    ". It appears after the first successful deploy and health check (every 10 min).",
-                    ". Они появятся после первого успешного деплоя и проверки (каждые 10 минут).",
+                    ". Health checks run every 10 min after the first deploy, only on servers with the sing-box kernel; an empty result can also mean the node is unreachable over SSH.",
+                    ". Проверки идут каждые 10 минут после первого деплоя и только на серверах с ядром sing-box; пустой результат также бывает, если нода недоступна по SSH.",
                 ))
             }
         };
