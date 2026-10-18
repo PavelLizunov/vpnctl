@@ -486,7 +486,7 @@ async fn i18n_ru_renders_translated_body_copy_on_each_page() {
     let h = fetch("/admin/").await;
     assert!(
         h.contains("одним взглядом"),
-        "dashboard H1 must read 'homelab одним взглядом' under ru"
+        "dashboard H1 must read 'парк одним взглядом' under ru"
     );
     assert!(
         h.contains("Счётчики читаются напрямую из SQLite-инвентаря"),
@@ -542,8 +542,8 @@ async fn i18n_ru_renders_translated_body_copy_on_each_page() {
 
     let h = fetch("/admin/settings").await;
     assert!(
-        h.contains("homelab") && h.contains("управление"),
-        "settings H1 must read 'homelab управление'"
+        h.contains("парк: ") && h.contains("управление"),
+        "settings H1 must read 'парк: управление'"
     );
     assert!(
         h.contains("Здесь лежат настройки уровня всего демона"),
@@ -574,7 +574,7 @@ async fn i18n_en_default_renders_english_body_copy() {
     let html = fetch_html(router(s), "/admin/").await;
     assert!(
         html.contains("at a glance"),
-        "default EN dashboard H1 must read 'homelab at a glance'"
+        "default EN dashboard H1 must read 'fleet at a glance'"
     );
     assert!(
         !html.contains("одним взглядом"),

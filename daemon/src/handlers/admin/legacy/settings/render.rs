@@ -14,7 +14,7 @@ use crate::http_util::{form_field, path_segment_encode};
 use vpnctl_core::humanize::format_size_bytes;
 
 use super::backups::settings_disaster_recovery_section;
-use super::system::settings_geoip_section;
+use super::system::{settings_geoip_section, settings_public_address_section};
 
 pub(crate) async fn settings_timezone_set(State(state): State<AppState>, body: String) -> Response {
     let tz_name = form_field(&body, "tz").unwrap_or_default();
@@ -96,6 +96,11 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
     let deploy_pubkey =
         crate::ssh_subprocess::read_public_key(&deploy_key_path).map_err(|e| e.to_string());
 
+    let public_base_url = state
+        .inv
+        .get_public_base_url()
+        .await
+        .map_err(|e| e.to_string());
     let backup_dir = std::path::PathBuf::from(crate::app::DEFAULT_BACKUP_DIR);
     let snapshots = vpnctl_inventory::list_snapshots(&backup_dir).map_err(|e| e.to_string());
 
@@ -128,7 +133,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
     let body = html! {
             div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageSettings)) }
             h1.ed-art-h1 {
-                (crate::i18n::tr(lang, "homelab ", "homelab "))
+                (crate::i18n::tr(lang, "fleet ", "парк: "))
                 em { (crate::i18n::tr(lang, "controls", "управление")) }
             }
             p.ed-art-deck {
@@ -206,7 +211,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                         }
                     }
                     button type="submit"
-                           style="padding: 4px 12px; border: 1px solid var(--accent); background: var(--accent); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                           style="padding: 4px 12px; border: 1px solid var(--acc); background: var(--acc); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
                         (icon("save")) (crate::i18n::tr(lang, "save", "сохранить"))
                     }
                     span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
@@ -699,6 +704,9 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                     }
                 }
             }
+
+            div.ed-rule {}
+            (settings_public_address_section(public_base_url.as_ref().map(|v| v.as_deref()).map_err(String::as_str), lang))
 
             div.ed-rule {}
             (settings_geoip_section(lang))

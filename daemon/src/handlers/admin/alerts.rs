@@ -131,8 +131,8 @@ pub(crate) async fn alerts(
                     @if include_acked {
                         (crate::i18n::tr(
                             lang,
-                            "no alerts on record. Either the homelab has been ",
-                            "ни одного алерта в записях. Либо homelab был ",
+                            "no alerts on record. Either the fleet has been ",
+                            "ни одного алерта в записях. Либо парк был ",
                         ))
                         em { (crate::i18n::tr(lang, "extraordinarily", "удивительно")) }
                         (crate::i18n::tr(

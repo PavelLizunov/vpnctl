@@ -65,8 +65,8 @@ pub(crate) async fn wizard_new(headers: HeaderMap, State(state): State<AppState>
                 p style="font-family: var(--serif); font-style: italic; font-size: 11px; color: var(--mute); margin: 0;" {
                     (tr(
                         lang,
-                        "For non-root users, passwordless sudo is required. Bahnhof commonly provides debian.",
-                        "Для пользователя не root нужен беспарольный sudo. Bahnhof часто выдаёт пользователя debian.",
+                        "For non-root users, passwordless sudo is required. Some hosters provide a user such as debian instead of root.",
+                        "Для пользователя не root нужен беспарольный sudo. Некоторые хостеры выдают пользователя вроде debian вместо root.",
                     ))
                 }
             }

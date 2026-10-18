@@ -440,8 +440,8 @@ async fn admin_frontend_section_headlines_match_voice() {
 
     let dash = fetch_html(app.clone(), "/admin/").await;
     assert!(
-        dash.contains("homelab "),
-        "dashboard headline lost the 'homelab' wordmark"
+        dash.contains("fleet ") && !dash.contains("homelab"),
+        "dashboard headline lost the 'fleet' wordmark"
     );
     assert!(
         dash.contains("at a glance"),
@@ -472,7 +472,7 @@ async fn admin_frontend_section_headlines_match_voice() {
     assert!(
         detail.contains("Legacy")
             && detail.contains("LAN-only")
-            && detail.contains("scripts/import_from_subscription_server.py"),
+            && !detail.contains("scripts/import_from_subscription_server.py"),
         "user-detail legacy-fallback copy drifted (no-device_id branch)"
     );
     let detail_activity = fetch_html(app.clone(), "/admin/users/u0/activity").await;

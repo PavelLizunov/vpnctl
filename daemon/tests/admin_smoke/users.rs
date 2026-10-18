@@ -104,16 +104,17 @@ async fn admin_users_href_url_encodes_special_chars() {
 }
 
 #[tokio::test]
-async fn admin_users_list_deck_mentions_ninitux_endpoint() {
+async fn admin_users_list_deck_mentions_public_app_config_endpoint() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 0, 1, &[]).await;
 
     let html = fetch_html(router(s), "/admin/users").await;
     assert!(
-        html.contains("ninitux.com/api/v1/app/config/&lt;device_id&gt;")
-            || html.contains("ninitux.com/api/v1/app/config/<device_id>"),
-        "users-list deck must mention the production ninitux URL shape"
+        (html.contains("/api/v1/app/config/&lt;device_id&gt;")
+            || html.contains("/api/v1/app/config/<device_id>"))
+            && !html.contains("ninitux.com"),
+        "users-list deck must mention the app config URL shape without an owner domain"
     );
 }
 
@@ -161,7 +162,7 @@ async fn admin_users_renders_search_form_before_add_user_form() {
          else accidental Enter from search-flow creates a user (Pavel-2026-05-19 bug)"
     );
     assert!(
-        html.contains("border-left: 1px dashed var(--accent)"),
+        html.contains("border-left: 1px dashed var(--acc)"),
         "add-user form must use a dashed accent divider"
     );
 }

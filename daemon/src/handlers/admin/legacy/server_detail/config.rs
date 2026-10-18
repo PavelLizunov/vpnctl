@@ -30,8 +30,8 @@ pub(super) fn server_detail_kernels_section(
                 "Демоны, работающие на этой ноде. Один физический VPS может держать несколько (sing-box на 443/TCP + amneziawg на 51820/UDP уживаются нормально).",
             ))
         }
-        div style="padding: 8px 12px; margin: 0 0 12px; background: var(--paper); border-left: 3px solid var(--accent); font-family: var(--serif); font-size: 12px; line-height: 1.5;" {
-            b style="color: var(--accent); font-family: var(--mono); letter-spacing: 0.1em; text-transform: uppercase; font-size: 11px;" {
+        div style="padding: 8px 12px; margin: 0 0 12px; background: var(--paper); border-left: 3px solid var(--acc); font-family: var(--serif); font-size: 12px; line-height: 1.5;" {
+            b style="color: var(--acc); font-family: var(--mono); letter-spacing: 0.1em; text-transform: uppercase; font-size: 11px;" {
                 (icon("triangle-alert"))
                 (tr(
                     lang,

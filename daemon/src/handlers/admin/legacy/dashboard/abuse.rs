@@ -171,7 +171,7 @@ pub(in crate::handlers::admin::legacy) fn sharing_review(
         form method="get" action="/admin/sharing" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 16px 0;" {
             label for="sharing-q" style="display: grid; gap: 4px; font-family: var(--mono); font-size: 11px;" {
                 (tr(lang, "User", "Пользователь"))
-                input id="sharing-q" type="search" name="q" value=(query.q.as_deref().unwrap_or("")) placeholder="ninitux";
+                input id="sharing-q" type="search" name="q" value=(query.q.as_deref().unwrap_or("")) placeholder="user id";
             }
             label for="sharing-level" style="display: grid; gap: 4px; font-family: var(--mono); font-size: 11px;" {
                 (tr(lang, "Risk level", "Уровень риска"))

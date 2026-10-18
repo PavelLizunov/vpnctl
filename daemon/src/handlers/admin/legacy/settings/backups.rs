@@ -12,6 +12,21 @@ pub(crate) fn settings_disaster_recovery_section(
     let deploy_key_pub = crate::ssh_subprocess::public_key_path(&deploy_key);
     let deploy_key_bundle_label =
         format!("{} · {}", deploy_key.display(), deploy_key_pub.display());
+    let env_value = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let backup_target = |host: &str, dir: &str| match (env_value(host), env_value(dir)) {
+        (Some(h), Some(d)) => format!("{h}:{d}/"),
+        (Some(h), None) => format!("{h}:"),
+        _ => format!("{host} not set for vpnctld (backup job default applies)"),
+    };
+    let lan_target = backup_target("TARGET_HOST", "TARGET_DIR");
+    let offsite_target = backup_target("OFFSITE_HOST", "OFFSITE_DIR");
+    let lan_days = env_value("RETENTION_DAYS").unwrap_or_else(|| "14".into());
+    let offsite_days = env_value("OFFSITE_RETENTION_DAYS").unwrap_or_else(|| "30".into());
     let last = last_self_test.map(|e| {
         let payload = e.payload.as_ref();
         let overall = payload
@@ -26,13 +41,13 @@ pub(crate) fn settings_disaster_recovery_section(
     html! {
         div.ed-rule {}
         div #disaster-recovery.ed-art-eyebrow {
-            (tr(lang, "Disaster recovery — if 192.168.0.236 burns", "Аварийное восстановление — если 192.168.0.236 сгорит"))
+            (tr(lang, "Disaster recovery — if this host is lost", "Аварийное восстановление — если этот хост потерян"))
         }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
             (tr(
                 lang,
-                "What happens when the homelab host disappears and you need to bring vpnctld back from scratch — sources of truth, what's in each bundle, the self-test status, and the 3-step recovery path. Click the button below ANY time to prove the latest snapshot is restorable BEFORE you need to do it for real.",
-                "Что произойдёт когда хост homelab пропадёт и нужно поднять vpnctld с нуля — источники истины, что в каждом архиве, статус self-test'а и трёхшаговый план восстановления. Нажми кнопку ниже ЛЮБОЕ время чтобы доказать что последний снэпшот восстанавливается ДО того как это станет нужно по-настоящему.",
+                "What happens when this host disappears and you need to bring vpnctld back from scratch — sources of truth, what's in each bundle, the self-test status, and the 3-step recovery path. Click the button below ANY time to prove the latest snapshot is restorable BEFORE you need to do it for real.",
+                "Что произойдёт когда этот хост пропадёт и нужно поднять vpnctld с нуля — источники истины, что в каждом архиве, статус self-test'а и трёхшаговый план восстановления. Нажми кнопку ниже ЛЮБОЕ время чтобы доказать что последний снэпшот восстанавливается ДО того как это станет нужно по-настоящему.",
             ))
         }
 
@@ -65,29 +80,23 @@ pub(crate) fn settings_disaster_recovery_section(
                 }
                 tr style="border-bottom: 1px dotted var(--rule);" {
                     td style="padding: 6px 8px;" { "2. LAN archive" }
-                    td style="padding: 6px 8px;" { span.ed-mono { "user@192.168.0.207:/home/user/backups/vpnctl/" } }
-                    td style="padding: 6px 8px; color: var(--mute);" { (tr(lang, "age (recipient pubkey on 236)", "age (pubkey получателя на 236)")) }
-                    td style="padding: 6px 8px; color: var(--mute);" { (tr(lang, "14 days · daily 03:04 UTC", "14 дней · ежедневно 03:04 UTC")) }
+                    td style="padding: 6px 8px;" { span.ed-mono { (lan_target) } }
+                    td style="padding: 6px 8px; color: var(--mute);" { (tr(lang, "age (recipient public key on this host)", "age (pubkey получателя на этом хосте)")) }
+                    td style="padding: 6px 8px; color: var(--mute);" { (lan_days) (tr(lang, " days · daily 03:04 UTC", " дн. · ежедневно 03:04 UTC")) }
                 }
                 tr {
                     td style="padding: 6px 8px;" { "3. off-site" }
-                    td style="padding: 6px 8px;" { span.ed-mono { "root@93.95.226.167:/root/vpnctl-backups/" } " (Iceland)" }
+                    td style="padding: 6px 8px;" { span.ed-mono { (offsite_target) } }
                     td style="padding: 6px 8px; color: var(--mute);" { (tr(lang, "age (same recipient)", "age (тот же получатель)")) }
-                    td style="padding: 6px 8px; color: var(--mute);" { (tr(lang, "30 days · daily 03:04 UTC", "30 дней · ежедневно 03:04 UTC")) }
+                    td style="padding: 6px 8px; color: var(--mute);" { (offsite_days) (tr(lang, " days · daily 03:04 UTC", " дн. · ежедневно 03:04 UTC")) }
                 }
             }
         }
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 10px 0 0;" {
             (tr(
                 lang,
-                "The age private key (",
-                "Приватный age-ключ (",
-            ))
-            span.ed-mono { "/home/user/vpnctl-backup-key.age" }
-            (tr(
-                lang,
-                ") lives on 207. If 207 also burns, tiers 2+3 become unreadable — keep a copy on a USB stick / paper / password manager.",
-                ") живёт на 207. Если 207 тоже сгорит, уровни 2+3 нерасшифровываются — храни копию на USB / бумаге / в password-manager.",
+                "The age private key is not stored on this host. If it is lost, tiers 2+3 become unreadable — keep a copy on a USB stick / paper / password manager.",
+                "Приватный age-ключ не хранится на этом хосте. Если он потерян, уровни 2+3 не расшифровать — храни копию на USB / бумаге / в password-manager.",
             ))
         }
 
@@ -104,7 +113,7 @@ pub(crate) fn settings_disaster_recovery_section(
                 span.ed-mono { (deploy_key_bundle_label) }
                 " — "
                 b { (tr(lang, "deploy SSH key", "deploy SSH-ключ")) }
-                ". " (tr(lang, "Without this a restored vpnctld can't reach ANY VPN node (CLAUDE.md «hard invariant»).", "Без него восстановленный vpnctld не достучится ни до одной VPN-ноды («жёсткий инвариант» в CLAUDE.md)."))
+                ". " (tr(lang, "Without this a restored vpnctld can't reach ANY VPN node.", "Без него восстановленный vpnctld не достучится ни до одной VPN-ноды."))
             }
             li {
                 span.ed-mono { "/var/lib/vpnctl/.ssh/known_hosts" }
@@ -187,15 +196,15 @@ pub(crate) fn settings_disaster_recovery_section(
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 8px;" {
             (tr(
                 lang,
-                "Steps 1+2 run on a NEW host (because 236 is presumed dead — there's no daemon to push buttons on). Step 3 returns to the normal Web UI on the recovered daemon.",
-                "Шаги 1+2 выполняются на НОВОМ хосте (потому что 236 предположительно мёртв — некому жать кнопки в UI). Шаг 3 возвращается к обычному Web UI на восстановленном демоне.",
+                "Steps 1+2 run on a NEW host (because the old one is presumed dead — there's no daemon to push buttons on). Step 3 returns to the normal Web UI on the recovered daemon.",
+                "Шаги 1+2 выполняются на НОВОМ хосте (потому что старый предположительно мёртв — некому жать кнопки в UI). Шаг 3 возвращается к обычному Web UI на восстановленном демоне.",
             ))
         }
         ol style="font-family: var(--serif); font-size: 13px; line-height: 1.6; margin: 8px 0 0 24px; padding: 0;" {
             li {
                 b { (tr(lang, "On the new host: decrypt + extract", "На новом хосте: расшифруй + распакуй")) }
                 " — "
-                (tr(lang, "anywhere (new VPS, restored from VM snapshot, fresh laptop install). Decrypt the latest archive from tier 3 (Iceland) with ", "где угодно (новый VPS, восстановленный VM-снэпшот, свежий ноут). Расшифруй последний архив с уровня 3 (Iceland) через "))
+                (tr(lang, "anywhere (new VPS, restored from VM snapshot, fresh laptop install). Decrypt the latest archive from tier 3 (off-site) with ", "где угодно (новый VPS, восстановленный VM-снэпшот, свежий ноут). Расшифруй последний архив с уровня 3 (off-site) через "))
                 span.ed-mono { "age -d -i /path/to/vpnctl-backup-key.age" }
                 (tr(lang, ". Extract the tar — you'll get the full ", ". Распакуй tar — получишь полный "))
                 span.ed-mono { "vpnctl-snap/" }

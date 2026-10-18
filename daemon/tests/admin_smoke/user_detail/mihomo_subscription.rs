@@ -13,6 +13,10 @@ async fn delivery_renders_mihomo_subscription_card_and_overview_omits_it() {
 
     let u0 = s.inv.get_user(&UserId("u0".into())).await.unwrap().unwrap();
     let token = u0.sub_token.expect("sub_token must be present");
+    s.inv
+        .set_public_base_url(Some("https://vpn.example.com"))
+        .await
+        .unwrap();
 
     let app = router(s);
 
@@ -24,7 +28,7 @@ async fn delivery_renders_mihomo_subscription_card_and_overview_omits_it() {
         "Delivery page must contain the Mihomo / Omarchy card label"
     );
 
-    let expected_url = format!("https://ninitux.com/api/v1/sub/{token}");
+    let expected_url = format!("https://vpn.example.com/api/v1/sub/{token}");
 
     assert!(
         html_delivery.contains(&expected_url),

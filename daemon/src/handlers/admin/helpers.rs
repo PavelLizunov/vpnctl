@@ -612,6 +612,13 @@ pub(crate) fn kernel_versions_inline(
     }
 }
 
+pub(crate) fn operator_name() -> Option<String> {
+    std::env::var("VPNCTLD_ADMIN_USER")
+        .ok()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {

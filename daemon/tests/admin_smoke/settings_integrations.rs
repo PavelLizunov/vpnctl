@@ -1877,3 +1877,139 @@ async fn backup_self_test_method_and_csrf_gates() {
         "CSRF rejection must write zero audit records"
     );
 }
+
+#[tokio::test]
+async fn admin_public_url_post_sets_audits_once_and_validates() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let app = router(s);
+    let post = |body: &str| {
+        add_same_origin(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/settings/public-url")
+                .header("content-type", "application/x-www-form-urlencoded"),
+        )
+        .body(Body::from(body.to_string()))
+        .unwrap()
+    };
+    let audit_rows = || async {
+        inv.recent_audit_paginated(50, 0, None, Some("settings.public_url.set"), None, None)
+            .await
+            .unwrap()
+            .len()
+    };
+
+    let resp = app
+        .clone()
+        .oneshot(post("public_base_url=https%3A%2F%2Fvpn.example.com%2F"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        inv.get_public_base_url().await.unwrap().as_deref(),
+        Some("https://vpn.example.com")
+    );
+    assert_eq!(audit_rows().await, 1);
+
+    let resp = app
+        .clone()
+        .oneshot(post("public_base_url=https%3A%2F%2Fvpn.example.com"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        audit_rows().await,
+        1,
+        "unchanged value must not add an audit row"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(post("public_base_url=ftp%3A%2F%2Fexample.com"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&body).starts_with("vpnctl admin: "));
+
+    let resp = app.clone().oneshot(post("public_base_url=")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(inv.get_public_base_url().await.unwrap(), None);
+    assert_eq!(audit_rows().await, 2);
+
+    let html = fetch_html(app, "/admin/settings/system").await;
+    assert!(html.contains("id=\"public-address\""));
+    assert!(html.contains("action=\"/admin/settings/public-url\""));
+}
+
+#[tokio::test]
+async fn public_credential_endpoints_are_not_cacheable() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    let token = s
+        .inv
+        .get_user(&UserId("u0".into()))
+        .await
+        .unwrap()
+        .unwrap()
+        .sub_token
+        .unwrap();
+    let app = router(s);
+    for uri in [
+        format!("/sub/{token}"),
+        format!("/api/v1/sub/{token}"),
+        "/sub/unknown-token".to_string(),
+        "/api/v1/app/config/a92b915032b48a2ed45ef72f4171e5f4".to_string(),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&uri)
+                    .header("user-agent", "Mozilla/5.0 cache-test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "{uri} must send Cache-Control: no-store (status {})",
+            resp.status()
+        );
+    }
+}
+
+#[tokio::test]
+async fn admin_public_url_post_rejects_cross_origin_without_mutation() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let resp = router(s)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/settings/public-url")
+                .header("host", "127.0.0.1:18402")
+                .header("origin", "http://evil.example")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("public_base_url=https%3A%2F%2Fevil.example"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(inv.get_public_base_url().await.unwrap(), None);
+    assert!(
+        inv.recent_audit_paginated(50, 0, None, Some("settings.public_url.set"), None, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

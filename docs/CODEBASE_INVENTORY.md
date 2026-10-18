@@ -5,10 +5,10 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 410 (276 prod / 134 test)
-- **Total Rust LOC:** 128,062 (73,579 prod / 54,483 test)
-- **Database Migrations:** 58
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 127
+- **Tracked Rust Files:** 412 (276 prod / 136 test)
+- **Total Rust LOC:** 128,858 (73,825 prod / 55,033 test)
+- **Database Migrations:** 59
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 128
 
 ## Workspace Crates & Targets
 
@@ -19,18 +19,18 @@
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,241 (12) | 0 (0) | **1,241** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 318 (1) | 125 (1) | **443** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 193 (1) | 454 (2) | **647** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 43 tests | 13,260 (52) | 16,621 (47) | **29,881** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 45 tests | 13,316 (52) | 16,924 (49) | **30,240** |
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 3 tests, 1 examples | 5,394 (13) | 676 (4) | **6,070** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 3,744 (20) | 4,431 (12) | **8,175** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,398 (4) | 1,150 (5) | **2,548** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 41,038 (147) | 29,159 (59) | **70,197** |
-| **Total** | | | | **73,579 (276)** | **54,483 (134)** | **128,062** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 41,228 (147) | 29,406 (59) | **70,634** |
+| **Total** | | | | **73,825 (276)** | **55,033 (136)** | **128,858** |
 
 ## Largest Rust Modules (Top 25)
 
 | File | LOC | Crate | Role |
 |---|---|---|---|
-| `daemon/tests/admin_smoke/settings_integrations.rs` | 1,879 | `daemon` | Test |
+| `daemon/tests/admin_smoke/settings_integrations.rs` | 2,015 | `daemon` | Test |
 | `crates/kernels/src/caddy/tests.rs` | 1,513 | `crates/kernels` | Prod |
 | `daemon/src/health_monitor/tests.rs` | 1,471 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/alerts_health.rs` | 1,452 | `daemon` | Test |
@@ -39,7 +39,7 @@
 | `crates/inventory/src/sqlite/tests.rs` | 1,218 | `crates/inventory` | Prod |
 | `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,200 | `daemon` | Test |
 | `daemon/tests/admin_smoke/dashboard.rs` | 1,158 | `daemon` | Test |
-| `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,083 | `daemon` | Test |
+| `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,119 | `daemon` | Test |
 | `crates/inventory/src/sqlite/health.rs` | 1,027 | `crates/inventory` | Prod |
 | `daemon/tests/admin_smoke/servers.rs` | 1,005 | `daemon` | Test |
 | `daemon/src/quality_poller.rs` | 992 | `daemon` | Prod |
@@ -51,12 +51,12 @@
 | `daemon/tests/admin_smoke/shell_nav/shell_assets_nav.rs` | 902 | `daemon` | Test |
 | `crates/ssh/src/subprocess.rs` | 884 | `crates/ssh` | Prod |
 | `cli/src/cmd/server.rs` | 880 | `cli` | Prod |
-| `daemon/tests/admin_smoke/users.rs` | 874 | `daemon` | Test |
+| `daemon/tests/admin_smoke/users.rs` | 875 | `daemon` | Test |
 | `daemon/src/handlers/admin/billing.rs` | 872 | `daemon` | Prod |
 | `crates/boosty-bridge/tests/sync_integration.rs` | 862 | `crates/boosty-bridge` | Test |
 | `crates/inventory/tests/spec_sub_access.rs` | 859 | `crates/inventory` | Test |
 
-## Database Migrations (58)
+## Database Migrations (59)
 
 | Version | Migration Name | File | Lines |
 |---|---|---|---|
@@ -118,8 +118,9 @@
 | `0056` | quality measurement population | `crates/inventory/migrations/0056_quality_measurement_population.sql` | 24 |
 | `0057` | server billing | `crates/inventory/migrations/0057_server_billing.sql` | 16 |
 | `0058` | currency exchange | `crates/inventory/migrations/0058_currency_exchange.sql` | 78 |
+| `0059` | public base url | `crates/inventory/migrations/0059_public_base_url.sql` | 6 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (127)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (128)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -209,6 +210,7 @@
 | `GET` | `/admin/settings/geoip/update-now` | `admin::settings_geoip_update_now_sse` |
 | `POST` | `/admin/settings/notification-language` | `admin::settings_notification_language` |
 | `GET` | `/admin/settings/notifications` | `admin::settings_notifications` |
+| `POST` | `/admin/settings/public-url` | `admin::settings_public_url_set` |
 | `GET` | `/admin/settings/system` | `admin::settings_system` |
 | `POST` | `/admin/settings/telegram` | `admin::settings_telegram` |
 | `POST` | `/admin/settings/telegram/test` | `admin::settings_telegram_test` |

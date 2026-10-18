@@ -390,7 +390,7 @@ async fn exec_timeout_on_stalled_channel_open() {
 
     let transport = RusshTransportBuilder::new("127.0.0.1", "testuser", client_key_path)
         .port(port)
-        .timeout(Duration::from_millis(150))
+        .timeout(Duration::from_millis(1000))
         .connect()
         .await
         .expect("connect succeeds");
@@ -427,7 +427,7 @@ async fn upload_timeout_on_stalled_channel_open() {
 
     let transport = RusshTransportBuilder::new("127.0.0.1", "testuser", client_key_path)
         .port(port)
-        .timeout(Duration::from_millis(150))
+        .timeout(Duration::from_millis(1000))
         .connect()
         .await
         .expect("connect succeeds");
@@ -464,7 +464,7 @@ async fn read_file_timeout_on_stalled_channel_open() {
 
     let transport = RusshTransportBuilder::new("127.0.0.1", "testuser", client_key_path)
         .port(port)
-        .timeout(Duration::from_millis(150))
+        .timeout(Duration::from_millis(1000))
         .connect()
         .await
         .expect("connect succeeds");

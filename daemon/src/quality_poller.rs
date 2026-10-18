@@ -201,7 +201,7 @@ async fn sample_server(
         }
     }
     let vantage = std::env::var("VPNCTLD_QUALITY_VANTAGE")
-        .unwrap_or_else(|_| "192.168.0.236 · vpnctld control host".to_string());
+        .unwrap_or_else(|_| "vpnctld control host".to_string());
     let sample = ServiceQualitySample {
         ts: Utc::now(),
         server_id: server.id.clone(),

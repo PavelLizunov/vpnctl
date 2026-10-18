@@ -7,3 +7,13 @@
 **Vulnerability:** File download and CSV export endpoints (such as WireGuard configurations containing user private keys, database backup snapshots containing full inventory state/secrets, and audit/access CSV logs) were missing `Cache-Control: no-store` HTTP headers, exposing private keys and sensitive logs to browser or proxy cache persistence.
 **Learning:** Returning `Content-Disposition: attachment` without explicit `Cache-Control: no-store` allows shared or browser caches to store private client configuration files, database backups, and access records.
 **Prevention:** Always include `Cache-Control: no-store` on HTTP response headers for any endpoint serving sensitive file downloads, secrets, backups, or access logs.
+
+## 2026-09-15 - Rejection of % and | Prefixes in CSV Formula Guard
+**Vulnerability:** Attempted extension of CSV formula injection neutralization to cover `%` and `|` prefixes.
+**Learning:** Indiscriminately prefixing `%` and `|` with a single quote alters legitimate CSV values without security benefit. In Excel/LibreOffice DDE formulas, `|` appears inside the expression following `=`, while standard formula triggers are strictly `=`, `+`, `-`, and `@`.
+**Prevention:** Do not add `%` or `|` to CSV formula neutralization guards unless a reproducible exploit vector is demonstrated; stick strictly to OWASP-standard `=`, `+`, `-`, and `@` triggers.
+
+## 2026-10-18 - Public credential endpoints and disabled-user downloads are fixed
+**Vulnerability:** `/sub/{token}`, `/api/v1/sub/{token}` and `/api/v1/app/config/*` were cacheable; the WireGuard `.conf` download served disabled users.
+**Learning:** Both are fixed on main: the public router sets `Cache-Control: no-store`, and the `.conf` download refuses disabled users. Tests: `public_credential_endpoints_are_not_cacheable`, `admin_user_wireguard_conf_download_refuses_disabled_user`.
+**Prevention:** Before proposing a fix, check main and open PRs for the same finding; do not open another PR for an issue that already has one.

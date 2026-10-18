@@ -100,7 +100,7 @@ async fn poll_one_wg_server(
             target = "vpnctld::wg_poller",
             server = %server.id.0,
             key = %key_path.display(),
-            "skipping: deploy SSH key not yet on the homelab host"
+            "skipping: deploy SSH key not yet on the control host"
         );
         return;
     }

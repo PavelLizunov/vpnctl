@@ -13,7 +13,7 @@ pub(crate) fn render_delivery_tab(
     _state: &AppState,
     user: &User,
     servers: &[Server],
-    ninitux_url_str: Option<&str>,
+    app_config_url_str: Option<&str>,
     sub_url_str: Option<&str>,
     sub_token: Option<&str>,
     mihomo_sub_url_str: Option<&str>,
@@ -30,7 +30,7 @@ pub(crate) fn render_delivery_tab(
     html! {
         div.ed-inbar {
             span.ed-inbar__label { (crate::i18n::tr(lang, "subscription", "подписка")) }
-            @match (ninitux_url_str, sub_url_str) {
+            @match (app_config_url_str, sub_url_str) {
                 (Some(u), _) | (None, Some(u)) => {
                     span style="font-family: var(--mono); font-size: 10px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 420px;" { (u) }
                 },
