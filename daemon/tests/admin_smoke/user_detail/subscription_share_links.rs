@@ -142,7 +142,7 @@ async fn admin_user_detail_handles_missing_sub_token() {
 }
 
 #[tokio::test]
-async fn admin_user_detail_renders_ninitux_url_as_primary_when_device_id_pinned() {
+async fn admin_user_detail_renders_public_app_config_url_as_primary_when_device_id_pinned() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 1, &[(0, 0)]).await;
@@ -150,15 +150,22 @@ async fn admin_user_detail_renders_ninitux_url_as_primary_when_device_id_pinned(
         .set_vpn_router_device_id(&UserId("u0".into()), TEST_NINITUX_DEVICE_ID)
         .await
         .unwrap();
+    s.inv
+        .set_public_base_url(Some("https://vpn.example.com"))
+        .await
+        .unwrap();
 
     let html = fetch_html(router(s), "/admin/users/u0/overview").await;
 
-    let expected_ninitux =
-        format!("https://ninitux.com/api/v1/app/config/{TEST_NINITUX_DEVICE_ID}");
+    let expected = format!("https://vpn.example.com/api/v1/app/config/{TEST_NINITUX_DEVICE_ID}");
     assert!(
-        html.contains(&expected_ninitux),
-        "ninitux production URL must be rendered as the primary subscription URL — \
-         expected substring: {expected_ninitux}"
+        html.contains(&expected),
+        "configured public app config URL must be the primary subscription URL — \
+         expected substring: {expected}"
+    );
+    assert!(
+        !html.contains("ninitux.com"),
+        "no hardcoded owner domain may appear in the subscription section"
     );
     assert!(
         html.contains(TEST_NINITUX_DEVICE_ID),
@@ -172,7 +179,7 @@ async fn admin_user_detail_renders_ninitux_url_as_primary_when_device_id_pinned(
 }
 
 #[tokio::test]
-async fn admin_user_detail_qr_encodes_ninitux_url_not_lan_url_when_device_id_pinned() {
+async fn admin_user_detail_qr_encodes_public_url_not_lan_url_when_device_id_pinned() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 1, 1, &[(0, 0)]).await;
@@ -180,19 +187,23 @@ async fn admin_user_detail_qr_encodes_ninitux_url_not_lan_url_when_device_id_pin
         .set_vpn_router_device_id(&UserId("u0".into()), TEST_NINITUX_DEVICE_ID)
         .await
         .unwrap();
+    s.inv
+        .set_public_base_url(Some("https://vpn.example.com"))
+        .await
+        .unwrap();
 
     let html = fetch_html(router(s), "/admin/users/u0/overview").await;
 
     let n_pos = html
-        .find("https://ninitux.com/api/v1/app/config/")
-        .expect("ninitux URL must appear");
+        .find("https://vpn.example.com/api/v1/app/config/")
+        .expect("public app config URL must appear");
     let lan_pos = html
         .find("/sub/")
         .expect("legacy LAN URL must appear (in collapsed fallback)");
     assert!(
         n_pos < lan_pos,
-        "ninitux URL ({n_pos}) must appear BEFORE the LAN URL ({lan_pos}) so the \
-         QR card encodes ninitux. Otherwise QR encodes the LAN URL = mobile clients break."
+        "public URL ({n_pos}) must appear BEFORE the LAN URL ({lan_pos}) so the \
+         QR card encodes it. Otherwise QR encodes the LAN URL = mobile clients break."
     );
 }
 
@@ -206,12 +217,14 @@ async fn admin_user_detail_falls_back_to_lan_url_when_no_device_id() {
 
     let html = fetch_html(router(s), "/admin/users/u0/overview").await;
     assert!(
-        !html.contains("https://ninitux.com/api/v1/app/config/"),
-        "no device_id pinned → ninitux URL must NOT render"
+        !html
+            .match_indices("/api/v1/app/config/")
+            .any(|(i, m)| html[i + m.len()..].starts_with(|c: char| c.is_ascii_hexdigit())),
+        "no device_id pinned → app config URL must NOT render"
     );
     assert!(
-        html.contains("scripts/import_from_subscription_server.py"),
-        "empty-state must point operator at the import script to pin a device_id"
+        !html.contains("scripts/import_from_subscription_server.py"),
+        "empty-state must not send the operator to a shell script"
     );
     assert!(html.contains("Subscription"));
 }
@@ -1079,5 +1092,28 @@ async fn admin_delivery_amnezia_and_awg_respect_auto_suppress_hidden_and_user_di
     assert!(
         !html_suppressed.contains("awg://"),
         "auto-suppressed server must not emit AmneziaWG awg:// link"
+    );
+}
+
+#[tokio::test]
+async fn admin_user_detail_app_config_url_falls_back_to_request_host_without_setting() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    s.inv
+        .set_vpn_router_device_id(&UserId("u0".into()), TEST_NINITUX_DEVICE_ID)
+        .await
+        .unwrap();
+    assert_eq!(s.inv.get_public_base_url().await.unwrap(), None);
+
+    let html = fetch_html(router(s), "/admin/users/u0/overview").await;
+
+    assert!(
+        html.contains(&format!("/api/v1/app/config/{TEST_NINITUX_DEVICE_ID}")),
+        "app config URL must still render without a configured public address"
+    );
+    assert!(
+        !html.contains("ninitux.com"),
+        "fresh install must not point users at a hardcoded owner domain"
     );
 }

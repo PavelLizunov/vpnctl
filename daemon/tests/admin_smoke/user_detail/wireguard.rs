@@ -432,6 +432,76 @@ async fn admin_user_wireguard_conf_download_serves_attachment() {
 }
 
 #[tokio::test]
+async fn admin_user_wireguard_conf_download_refuses_disabled_user() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.add_server(&Server {
+        id: ServerId("dlsrv".into()),
+        address: "203.0.113.11".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("wireguard".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &ServerId("dlsrv".into()),
+        "wireguard.server_public_key",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    )
+    .await
+    .unwrap();
+    inv.set_server_secret(
+        &ServerId("dlsrv".into()),
+        "wireguard.server_private_key",
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+    )
+    .await
+    .unwrap();
+    inv.add_user(&User {
+        id: UserId("dltest".into()),
+        uuid: "55555555-5555-5555-5555-555555555555".into(),
+        tuic_password: Some("tp".into()),
+        wireguard_pubkey: Some("qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=".into()),
+        wireguard_private: Some("0000000000000000000000000000000000000000000=".into()),
+        sub_token: Some("st-dltest".into()),
+        vpn_router_device_id: None,
+        disabled: false,
+    })
+    .await
+    .unwrap();
+    inv.grant(&UserId("dltest".into()), &ServerId("dlsrv".into()))
+        .await
+        .unwrap();
+
+    inv.set_user_disabled(&UserId("dltest".into()), true)
+        .await
+        .unwrap();
+
+    let app = router(s);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/users/dltest/wireguard/conf/dlsrv")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.starts_with("vpnctl admin: "), "got {text:?}");
+    assert!(text.contains("disabled"), "got {text:?}");
+}
+
+#[tokio::test]
 async fn admin_user_wireguard_conf_download_404_on_unknown_user() {
     let dir = TempDir::new().unwrap();
     let app = router(state(&dir).await);

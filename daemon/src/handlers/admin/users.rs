@@ -155,8 +155,8 @@ pub(crate) async fn users(
             }
             span.ed-tip title=(crate::i18n::tr(
                 lang,
-                "Each user has a public subscription URL at https://ninitux.com/api/v1/app/config/<device_id>; /sub/<token> remains the LAN-only fallback. Open a row for the QR you'll point a phone at.",
-                "У каждого пользователя есть публичный URL подписки https://ninitux.com/api/v1/app/config/<device_id>; /sub/<token> остаётся LAN-only fallback. Открой строку — там QR для телефона.",
+                "Each user has a public subscription URL at <public address>/api/v1/app/config/<device_id> (address in Settings → System); /sub/<token> remains the LAN-only fallback. Open a row for the QR you'll point a phone at.",
+                "У каждого пользователя есть публичный URL подписки <публичный адрес>/api/v1/app/config/<device_id> (адрес в Настройки → Система); /sub/<token> остаётся LAN-only fallback. Открой строку — там QR для телефона.",
             )) { (icon("info")) }
             @if !users_list.is_empty() {
                 div.ed-headrow__actions style="font-family: var(--mono); font-size: 11px;" {
@@ -194,7 +194,7 @@ pub(crate) async fn users(
                 }
             }
             form method="post" action="/admin/users"
-                 style="display: flex; gap: 8px; align-items: center; margin-left: auto; padding-left: 10px; border-left: 1px dashed var(--accent);" {
+                 style="display: flex; gap: 8px; align-items: center; margin-left: auto; padding-left: 10px; border-left: 1px dashed var(--acc);" {
                 span.ed-inbar__label { (crate::i18n::tr(lang, "new user", "новый пользователь")) }
                 input type="text" name="id" required="required"
                       placeholder="alice"

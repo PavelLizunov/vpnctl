@@ -12,8 +12,8 @@ use crate::handlers::admin::helpers::{
     internal_error, render_page, theme_accent_lang, user_not_found,
 };
 use crate::handlers::admin::legacy::{
-    collect_amnezia_links, collect_awg_links, collect_share_links, detail_tabs, mihomo_sub_url,
-    ninitux_url, sub_url, user_online_badge,
+    app_config_url, collect_amnezia_links, collect_awg_links, collect_share_links, detail_tabs,
+    mihomo_sub_url, public_base, sub_url, user_online_badge,
 };
 use crate::http_util::path_segment_encode;
 
@@ -170,8 +170,14 @@ pub(crate) async fn user_detail_render(
         }
     }
     let sub_token = user.sub_token.clone();
+    let configured_base = state
+        .inv
+        .get_public_base_url()
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let base = public_base(&headers, configured_base.as_deref());
     let sub_url_str = sub_token.as_deref().map(|t| sub_url(&headers, t));
-    let mihomo_sub_url_str = sub_token.as_deref().map(mihomo_sub_url);
+    let mihomo_sub_url_str = sub_token.as_deref().map(|t| mihomo_sub_url(&base, t));
     let chain_sub_url_str = if chain_routes.is_empty() {
         None
     } else {
@@ -196,8 +202,10 @@ pub(crate) async fn user_detail_render(
         chain_route_labels.push(format!("{target_name} via {entry_name}"));
     }
     let chain_route_summary = chain_route_labels.join(", ");
-    let ninitux_device_id = user.vpn_router_device_id.clone();
-    let ninitux_url_str = ninitux_device_id.as_deref().and_then(ninitux_url);
+    let app_device_id = user.vpn_router_device_id.clone();
+    let app_config_url_str = app_device_id
+        .as_deref()
+        .and_then(|id| app_config_url(&base, id));
 
     let wg_capable_granted: Vec<&vpnctl_core::ServerId> = servers
         .iter()
@@ -463,8 +471,8 @@ pub(crate) async fn user_detail_render(
             (tabs::overview::render_overview_tab(
                 &state,
                 &user,
-                &ninitux_device_id,
-                &ninitux_url_str,
+                &app_device_id,
+                &app_config_url_str,
                 &sub_token,
                 &sub_url_str,
                 &lifecycle,
@@ -482,7 +490,7 @@ pub(crate) async fn user_detail_render(
                 &state,
                 &user,
                 &servers,
-                ninitux_url_str.as_deref(),
+                app_config_url_str.as_deref(),
                 sub_url_str.as_deref(),
                 sub_token.as_deref(),
                 mihomo_sub_url_str.as_deref(),

@@ -10,8 +10,8 @@ pub(crate) use self::origins::{
 };
 pub(crate) use self::sessions::{user_sessions_section, user_top_destinations_section};
 pub(crate) use self::share_links::{
-    collect_amnezia_links, collect_awg_links, collect_share_links, mihomo_sub_url, ninitux_url,
-    qr_svg, share_link_card, sub_url,
+    app_config_url, collect_amnezia_links, collect_awg_links, collect_share_links, mihomo_sub_url,
+    public_base, qr_svg, share_link_card, sub_url,
 };
 pub(crate) use self::tasks::spawn_user_servers_redeploy;
 pub(crate) use self::traffic::{

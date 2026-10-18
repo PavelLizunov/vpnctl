@@ -6,24 +6,35 @@ use maud::{Markup, html};
 use crate::AppState;
 use crate::handlers::admin::users::mask_secret;
 
-pub(crate) fn sub_url(headers: &HeaderMap, sub_token: &str) -> String {
+fn request_base(headers: &HeaderMap) -> String {
     let host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("127.0.0.1:18402");
-    format!("http://{host}/sub/{sub_token}")
+    format!("http://{host}")
 }
 
-pub(crate) fn ninitux_url(device_id: &str) -> Option<String> {
+pub(crate) fn sub_url(headers: &HeaderMap, sub_token: &str) -> String {
+    format!("{}/sub/{sub_token}", request_base(headers))
+}
+
+pub(crate) fn public_base(headers: &HeaderMap, configured: Option<&str>) -> String {
+    match configured.map(|url| url.trim_end_matches('/')) {
+        Some(url) if !url.is_empty() => url.to_string(),
+        _ => request_base(headers),
+    }
+}
+
+pub(crate) fn app_config_url(base: &str, device_id: &str) -> Option<String> {
     if !vpnctl_crypto::is_valid_vpn_router_device_id(device_id) {
         return None;
     }
-    Some(format!("https://ninitux.com/api/v1/app/config/{device_id}"))
+    Some(format!("{base}/api/v1/app/config/{device_id}"))
 }
 
-pub(crate) fn mihomo_sub_url(sub_token: &str) -> String {
+pub(crate) fn mihomo_sub_url(base: &str, sub_token: &str) -> String {
     let encoded_token = crate::http_util::path_segment_encode(sub_token);
-    format!("https://ninitux.com/api/v1/sub/{encoded_token}")
+    format!("{base}/api/v1/sub/{encoded_token}")
 }
 
 const QR_DISPLAY_PX: u32 = 220;

@@ -15,8 +15,8 @@ use crate::i18n::Locale;
 pub(crate) async fn render_overview_tab(
     state: &AppState,
     user: &User,
-    ninitux_device_id: &Option<String>,
-    ninitux_url_str: &Option<String>,
+    app_device_id: &Option<String>,
+    app_config_url_str: &Option<String>,
     sub_token: &Option<String>,
     sub_url_str: &Option<String>,
     lifecycle: &UserLifecycle,
@@ -36,23 +36,25 @@ pub(crate) async fn render_overview_tab(
                 " "
                 span.ed-tip title=(crate::i18n::tr(
                     lang,
-                    "The QR and URL are the same ready-to-import artefact. ninitux.com is the production endpoint; the legacy token endpoint is the LAN fallback.",
-                    "QR и URL — один готовый к импорту артефакт. ninitux.com — production endpoint; старый token endpoint — LAN fallback.",
+                    "The QR and URL are the same ready-to-import artefact, built on the public address from Settings → System; the legacy token endpoint is the LAN fallback.",
+                    "QR и URL — один готовый к импорту артефакт на публичном адресе из Настройки → Система; старый token endpoint — LAN fallback.",
                 )) { (icon("info")) }
             }
-            @match (&ninitux_device_id, &ninitux_url_str, &sub_token, &sub_url_str) {
-                (Some(device_id), Some(ninitux), _, _) => {
+            @match (&app_device_id, &app_config_url_str, &sub_token, &sub_url_str) {
+                (Some(device_id), Some(app_url), _, _) => {
                     div style="padding: 12px 14px; background: var(--paper-2); border: 1px solid var(--rule); margin-top: 8px;" {
                         div style="display: flex; justify-content: center; margin-bottom: 12px;" {
-                            (qr_svg(ninitux))
+                            (qr_svg(app_url))
                         }
                         div style="font-family: var(--mono); font-size: 11px; line-height: 1.7; min-width: 0;" {
-                            div.ed-user-overview__url style="word-break: break-all; white-space: normal; font-weight: 500;" { (ninitux) }
+                            div.ed-user-overview__url style="word-break: break-all; white-space: normal; font-weight: 500;" { (app_url) }
                             div.ed-user-overview__url title=(device_id) style="color: var(--mute);" { "device " (device_id) }
                             div style="margin-top: 8px; color: var(--soft); font-family: var(--serif); font-style: italic; font-size: 11px;" {
-                                (crate::i18n::tr(lang, "Production URL served via nginx on ", "Production URL подаётся через nginx на "))
-                                span.ed-mono { "ninitux.com" }
-                                (crate::i18n::tr(lang, " → vpnctld. ", " → vpnctld. "))
+                                (crate::i18n::tr(lang, "Public address: ", "Публичный адрес: "))
+                                a href="/admin/settings/system#public-address" style="color: var(--acc);" {
+                                    (crate::i18n::tr(lang, "Settings → System", "Настройки → Система"))
+                                }
+                                ". "
                                 (crate::i18n::tr(
                                     lang,
                                     "The user's mobile app polls this URL on a fixed schedule (3600s). ",
@@ -78,8 +80,8 @@ pub(crate) async fn render_overview_tab(
                                     button type="submit"
                                            title=(crate::i18n::tr(
                                                lang,
-                                               "Mint a new sub_token. Does NOT affect the ninitux URL above — that one is keyed by device_id, which is stable.",
-                                               "Сгенерировать новый sub_token. НЕ влияет на ninitux URL выше — тот ключевой по device_id, который стабилен.",
+                                               "Mint a new sub_token. Does NOT affect the app config URL above — that one is keyed by device_id, which is stable.",
+                                               "Сгенерировать новый sub_token. НЕ влияет на URL конфигурации приложения выше — он привязан к device_id, который стабилен.",
                                            ))
                                            class="ed-abtn ed-abtn--secondary" {
                                         (icon("rotate-cw")) (crate::i18n::tr(lang, "rotate sub-token", "ротировать sub-token"))
@@ -101,12 +103,9 @@ pub(crate) async fn render_overview_tab(
                                 span.ed-mono { "vpn_router_device_id" }
                                 (crate::i18n::tr(
                                     lang,
-                                    " pinned for this user, so the production ",
-                                    ", поэтому production-URL ",
+                                    " for this user, so the public app config URL is not available.",
+                                    ", поэтому публичный URL конфигурации приложения недоступен.",
                                 ))
-                                span.ed-mono { "ninitux.com" }
-                                (crate::i18n::tr(lang, " URL is not available yet. Pin one via ", " пока недоступен. Привяжи через "))
-                                span.ed-mono { "scripts/import_from_subscription_server.py --apply" } "."
                             }
                             form method="post"
                                  action=(format!("/admin/users/{}/sub-token/regenerate", path_segment_encode(&user.id.0)))

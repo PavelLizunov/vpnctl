@@ -46,6 +46,12 @@ pub fn router(state: AppState) -> Router {
         )
         .route_layer(
             tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("no-store"),
+            ),
+        )
+        .route_layer(
+            tower_http::set_header::SetResponseHeaderLayer::if_not_present(
                 axum::http::header::X_CONTENT_TYPE_OPTIONS,
                 axum::http::HeaderValue::from_static("nosniff"),
             ),
@@ -353,6 +359,10 @@ pub(crate) fn admin_router(state: AppState) -> Router {
         .route(
             "/admin/settings/timezone",
             post(admin::settings_timezone_set),
+        )
+        .route(
+            "/admin/settings/public-url",
+            post(admin::settings_public_url_set),
         )
         .route(
             "/admin/settings/geoip/update-now",

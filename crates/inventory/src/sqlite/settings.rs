@@ -19,6 +19,62 @@ impl SqliteInventory {
         Ok(())
     }
 
+    pub async fn get_public_base_url(&self) -> Result<Option<String>> {
+        let row = sqlx::query_as::<_, (Option<String>,)>(
+            "SELECT public_base_url FROM display_settings WHERE id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|(url,)| url).filter(|url| !url.is_empty()))
+    }
+
+    pub async fn set_public_base_url(&self, url: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE display_settings SET public_base_url = ?1 WHERE id = 1")
+            .bind(url)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_public_base_url_audited(
+        &self,
+        actor: &str,
+        url: Option<&str>,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        let current = sqlx::query_as::<_, (Option<String>,)>(
+            "SELECT public_base_url FROM display_settings WHERE id = 1",
+        )
+        .fetch_optional(&mut *tx)
+        .await?
+        .and_then(|(url,)| url)
+        .filter(|url| !url.is_empty());
+        if current.as_deref() == url {
+            return Ok(false);
+        }
+        let res = sqlx::query("UPDATE display_settings SET public_base_url = ?1 WHERE id = 1")
+            .bind(url)
+            .execute(&mut *tx)
+            .await?;
+        if res.rows_affected() != 1 {
+            return Err(SqliteInventoryError::Invalid(
+                "display_settings row id=1 is missing".into(),
+            ));
+        }
+        let payload = serde_json::json!({ "from": current, "to": url });
+        sqlx::query(
+            "INSERT INTO audit_log (actor, action, target, payload) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(actor)
+        .bind("settings.public_url.set")
+        .bind("display")
+        .bind(serde_json::to_string(&payload)?)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     pub async fn get_telegram_config(&self) -> Result<Option<TelegramConfig>> {
         let row = sqlx::query_as::<
             _,

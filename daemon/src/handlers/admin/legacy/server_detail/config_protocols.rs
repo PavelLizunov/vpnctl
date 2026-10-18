@@ -111,7 +111,7 @@ pub(crate) fn server_detail_vlessws_config_section(
             }
             input type="text" name="domain" maxlength="253" required
                   value=(domain)
-                  placeholder="de.ninitux.top"
+                  placeholder="vpn.example.com"
                   style="padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
             label style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                 (tr(lang, "front port", "фронт-порт"))

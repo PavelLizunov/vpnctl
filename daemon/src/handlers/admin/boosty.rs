@@ -99,7 +99,7 @@ pub(crate) async fn boosty_page(
         .and_then(|p| p.to_str().ok())
         .unwrap_or("http");
     let admin_origin = format!("{proto}://{host}");
-    let default_blog = settings.blog_url.as_deref().unwrap_or("ninitux");
+    let default_blog = settings.blog_url.as_deref().unwrap_or("");
 
     let admin_origin_js = serde_json::to_string(&admin_origin).unwrap_or_default();
     let default_blog_js = serde_json::to_string(default_blog).unwrap_or_default();
@@ -511,7 +511,7 @@ pub(crate) async fn boosty_page(
             )) { (icon("info")) }
         }
 
-        div.ed-card style="margin: 10px 0 16px; border: 1px solid color-mix(in oklab, var(--accent) 50%, var(--rule)); background: color-mix(in oklab, var(--accent) 4%, var(--paper)); padding: 16px 20px; border-radius: 4px;" {
+        div.ed-card style="margin: 10px 0 16px; border: 1px solid color-mix(in oklab, var(--acc) 50%, var(--rule)); background: color-mix(in oklab, var(--acc) 4%, var(--paper)); padding: 16px 20px; border-radius: 4px;" {
             div.ed-card__hd {
                 (tr(lang, "1-Click Quick Connect (No DevTools / F12)", "Быстрое подключение в 1 клик (без F12 и консоли)"))
             }

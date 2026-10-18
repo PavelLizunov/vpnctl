@@ -164,8 +164,8 @@ pub fn t(loc: Locale, k: K) -> &'static str {
     use K::*;
     use Locale::*;
     match (loc, k) {
-        (En, MastSubtitle) => "— a daily report from your homelab",
-        (Ru, MastSubtitle) => "— ежедневный отчёт по твоей домашней лаборатории",
+        (En, MastSubtitle) => "— a daily report from your fleet",
+        (Ru, MastSubtitle) => "— ежедневный отчёт по твоему парку серверов",
         (En, NavDashboard) => "Dashboard",
         (Ru, NavDashboard) => "Дашборд",
         (En, NavMonitoring) => "Monitoring",
@@ -181,8 +181,8 @@ pub fn t(loc: Locale, k: K) -> &'static str {
         (En, NavSettings) => "Settings",
         (Ru, NavSettings) => "Настройки",
         (En, NavBoosty) | (Ru, NavBoosty) => "Boosty",
-        (En, NavOperator) => "homelab · operator pavel",
-        (Ru, NavOperator) => "homelab · оператор pavel",
+        (En, NavOperator) => "operator",
+        (Ru, NavOperator) => "оператор",
         (En, FootStack) => "· axum + maud",
         (Ru, FootStack) => "· axum + maud",
 

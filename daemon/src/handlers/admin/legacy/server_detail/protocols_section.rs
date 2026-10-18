@@ -38,8 +38,8 @@ pub(crate) fn server_detail_protocols_section(
                 "Что крутится на этой ноде. Протоколы — это wire-форматы; их ядра (одно или больше) выбираются выше в секции Ядра.",
             ))
         }
-        div style="padding: 6px 12px; margin: 0 0 12px; background: var(--paper); border-left: 3px solid var(--accent); font-family: var(--serif); font-size: 12px; line-height: 1.5;" {
-            b style="color: var(--accent); font-family: var(--mono); letter-spacing: 0.1em; text-transform: uppercase; font-size: 11px;" {
+        div style="padding: 6px 12px; margin: 0 0 12px; background: var(--paper); border-left: 3px solid var(--acc); font-family: var(--serif); font-size: 12px; line-height: 1.5;" {
+            b style="color: var(--acc); font-family: var(--mono); letter-spacing: 0.1em; text-transform: uppercase; font-size: 11px;" {
                 (icon("triangle-alert")) (tr(lang, "toggle here = inventory only", "тогл здесь = только инвентарь"))
             }
             (tr(lang, " — goes live on ", " — вступает в силу по "))

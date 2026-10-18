@@ -24,6 +24,11 @@ pub(crate) async fn user_wireguard_conf_download(
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
+    if user.disabled {
+        return bad_request(&format!(
+            "user '{user_id_str}' is disabled — re-enable the user before downloading a .conf"
+        ));
+    }
     if !server.enabled_protocols.iter().any(|p| p.0 == "wireguard") {
         return bad_request(&format!(
             "server '{server_id_str}' does not enable the 'wireguard' protocol — enable it on the server detail page before downloading a .conf"

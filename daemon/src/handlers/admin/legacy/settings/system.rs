@@ -119,3 +119,131 @@ pub(crate) fn settings_geoip_section(lang: crate::i18n::Locale) -> Markup {
         }
     }
 }
+
+fn echo(raw: &str) -> String {
+    raw.chars().take(80).collect()
+}
+
+pub(crate) fn normalize_public_base_url(raw: &str) -> Result<Option<String>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.len() > 512 {
+        return Err("public URL is longer than 512 characters".into());
+    }
+    let url = reqwest::Url::parse(trimmed).map_err(|e| {
+        format!(
+            "'{}' is not a valid URL ({e}); expected e.g. 'https://vpn.example.com'",
+            echo(trimmed)
+        )
+    })?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!(
+            "'{}' must start with http:// or https:// (got scheme '{}')",
+            echo(trimmed),
+            url.scheme()
+        ));
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err(format!("'{}' has no host name", echo(trimmed)));
+    }
+    if url.query().is_some()
+        || url.fragment().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(format!(
+            "'{}' must not contain user info, a query or a fragment",
+            echo(trimmed)
+        ));
+    }
+    Ok(Some(url.as_str().trim_end_matches('/').to_string()))
+}
+
+pub(crate) async fn settings_public_url_set(
+    axum::extract::State(state): axum::extract::State<crate::AppState>,
+    body: String,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let raw = crate::http_util::form_field(&body, "public_base_url").unwrap_or_default();
+    let normalized = match normalize_public_base_url(&raw) {
+        Ok(v) => v,
+        Err(msg) => return crate::handlers::admin::helpers::bad_request(&msg),
+    };
+    if let Err(e) = state
+        .inv
+        .update_public_base_url_audited("admin", normalized.as_deref())
+        .await
+    {
+        return crate::handlers::admin::helpers::internal_error(anyhow::Error::new(e));
+    }
+    axum::response::Redirect::to("/admin/settings/system#public-address").into_response()
+}
+
+pub(crate) fn settings_public_address_section(
+    current: Result<Option<&str>, &str>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    let current = match current {
+        Ok(v) => v,
+        Err(e) => {
+            return maud::html! {
+                div #public-address.ed-art-eyebrow {
+                    (tr(lang, "Public address", "Публичный адрес"))
+                }
+                p.ed-grid__mut { (tr(lang, "could not read the setting: ", "не удалось прочитать настройку: ")) (e) }
+            };
+        }
+    };
+    maud::html! {
+        div #public-address.ed-art-eyebrow {
+            (tr(lang, "Public address", "Публичный адрес"))
+        }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
+            (tr(
+                lang,
+                "The address users' apps reach this daemon at. Subscription QR codes and app config URLs are built on it. Empty: the address this page was opened at.",
+                "Адрес, по которому приложения пользователей обращаются к этому демону. На нём строятся QR-коды подписок и URL конфигурации приложений. Пусто — адрес, по которому открыта эта страница.",
+            ))
+        }
+        form method="post"
+             action="/admin/settings/public-url"
+             style="display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;" {
+            label for="public-base-url" style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-transform: uppercase; letter-spacing: 0.10em;" {
+                (tr(lang, "public URL", "публичный URL"))
+            }
+            input #public-base-url type="url" name="public_base_url"
+                  value=(current.unwrap_or(""))
+                  placeholder="https://vpn.example.com"
+                  style="padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink); min-width: 280px; max-width: 100%;";
+            button type="submit"
+                   style="padding: 4px 12px; border: 1px solid var(--acc); background: var(--acc); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                (icon("save")) (tr(lang, "save", "сохранить"))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_public_base_url;
+
+    #[test]
+    fn public_base_url_normalizes_and_rejects_bad_input() {
+        assert_eq!(normalize_public_base_url("  "), Ok(None));
+        assert_eq!(
+            normalize_public_base_url("https://vpn.example.com/"),
+            Ok(Some("https://vpn.example.com".into()))
+        );
+        assert_eq!(
+            normalize_public_base_url("https://example.com/vpn/"),
+            Ok(Some("https://example.com/vpn".into()))
+        );
+        assert!(normalize_public_base_url("ftp://example.com").is_err());
+        assert!(normalize_public_base_url("https://example.com/?a=1").is_err());
+        assert!(normalize_public_base_url("https://u:p@example.com").is_err());
+        assert!(normalize_public_base_url("not a url").is_err());
+    }
+}

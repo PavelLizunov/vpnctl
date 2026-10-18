@@ -118,7 +118,9 @@ fn topbar(active: &str, lang: crate::i18n::Locale, alerts_unacked: u64) -> Marku
                             (other.cookie_value().to_uppercase())
                         }
                     }
-                    span.ed-tb__host { " · " (t(lang, K::NavOperator)) }
+                    @if let Some(name) = crate::handlers::admin::helpers::operator_name() {
+                        span.ed-tb__host { " · " (t(lang, K::NavOperator)) " " (name) }
+                    }
                     " · "
                     form method="post" action="/admin/logout" style="display: inline; margin: 0; padding: 0;" {
                         button type="submit"
