@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${SINGBOX_VERSION:-1.14.0-vpnctl.5}"
+VERSION="${SINGBOX_VERSION:-1.14.2-vpnctl.2}"
 TARGET_ARCH="${TARGET_ARCH:-$(uname -m)}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="${OUT:-${HERE}/sing-box-${VERSION}-${TARGET_ARCH}}"
@@ -10,17 +10,17 @@ FORCE_BUILD="${FORCE_BUILD:-0}"
 case "$TARGET_ARCH" in
     x86_64|amd64)
         ASSET="sing-box-${VERSION}-linux-amd64.tar.gz"
-        EXPECTED_SHA="5f98eacc95b9ed9c1d53592605d812d9d2cb8c496fa95723cfb7c5f9447fe46e"
+        EXPECTED_SHA="095a575fb412e5520b5c16449002073a5ba587646b96e3dddd2c59473d5be2d8"
         GOARCH="amd64"
         ;;
     aarch64|arm64)
         ASSET="sing-box-${VERSION}-linux-arm64.tar.gz"
-        EXPECTED_SHA="4d3390860d406b19f53ac0be699d4b39668972abf7276539ca95df6a97ef38fa"
+        EXPECTED_SHA="2758b44eda76465281e3c6d14b91dd5e6b5e9d50f549f8e3205cdc0a31c577d3"
         GOARCH="arm64"
         ;;
     armv7*|armhf)
         ASSET="sing-box-${VERSION}-linux-armv7.tar.gz"
-        EXPECTED_SHA="bed4d3825242b7f75daab85eb920a228fa33733fc06a89a06e0bfcb76cca9a71"
+        EXPECTED_SHA="85567a8809bed3abc0b385faa04c51c3edf976445f30dc0ef935bd4cb1f08c6f"
         GOARCH="arm"
         ;;
     *)
