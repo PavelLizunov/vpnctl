@@ -2,12 +2,18 @@ use std::time::Duration;
 
 use vpnctl_inventory::SqliteInventory;
 
-use super::diff::{SINGBOX_LOG_TRIGGER_BYTES, diff_rows};
+use super::diff::{SINGBOX_LOG_TRIGGER_BYTES, diff_rows, is_one_shot_event};
 use super::fingerprint_drift::check_fingerprint_drift;
 use super::remediation::{Remediation, auto_remediate_alert};
 use super::specialized_checks::{
     check_attribution_stall, check_sub_fetch_without_traffic, check_user_traffic_limits,
 };
+
+const ONE_SHOT_PUSH_COOLDOWN: chrono::Duration = chrono::Duration::minutes(30);
+
+static LAST_ONE_SHOT_PUSH: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>>,
+> = std::sync::LazyLock::new(Default::default);
 
 pub(crate) const DEFAULT_INTERVAL_SECS: u64 = 10 * 60;
 
@@ -190,7 +196,7 @@ async fn scan_once_inner(
             if !should_insert {
                 continue;
             }
-            let insert_res = if ev.resolves.is_some() {
+            let insert_res = if ev.resolves.is_some() || is_one_shot_event(ev.kind) {
                 inv.insert_alert_acked(
                     ev.kind,
                     Some(&server.id),
@@ -265,7 +271,13 @@ async fn scan_once_inner(
                         } else {
                             false
                         };
-                        if !fixed {
+                        let throttled = is_one_shot_event(ev.kind)
+                            && !claim_one_shot_push(
+                                &LAST_ONE_SHOT_PUSH,
+                                &format!("{}\0{}", server.id.0, ev.kind),
+                                chrono::Utc::now(),
+                            );
+                        if !fixed && !throttled {
                             crate::node_probe_poller::push_alert(
                                 inv,
                                 ev.kind,
@@ -320,4 +332,22 @@ async fn scan_once_inner(
         );
     }
     Ok(())
+}
+
+pub(super) fn claim_one_shot_push(
+    last_push: &std::sync::Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>>,
+    key: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let Ok(mut map) = last_push.lock() else {
+        return true;
+    };
+    if map
+        .get(key)
+        .is_some_and(|last| now.signed_duration_since(*last) < ONE_SHOT_PUSH_COOLDOWN)
+    {
+        return false;
+    }
+    map.insert(key.to_string(), now);
+    true
 }

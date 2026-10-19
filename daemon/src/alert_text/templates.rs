@@ -371,6 +371,15 @@ pub fn render_alert(
             let counter = u(payload, "current")
                 .map(|c| code(&format!("NRestarts={c}")))
                 .unwrap_or_default();
+            let running = payload.get("active").and_then(|v| v.as_bool()) == Some(true);
+            let (running_en, running_ru) = if running {
+                (
+                    " It is running again; clients on this node lost their connection for a few seconds.",
+                    " Сервис снова работает; клиенты этой ноды на несколько секунд потеряли соединение.",
+                )
+            } else {
+                ("", "")
+            };
             (
                 pick(
                     loc,
@@ -380,16 +389,16 @@ pub fn render_alert(
                 pick(
                     loc,
                     format!(
-                        "sing-box on {subj} was restarted {delta} time(s) between health probes {counter} — it read «active» at both samples, so this is a crash/OOM that systemd auto-restarted, not a clean reload."
+                        "sing-box on {subj} crashed {delta} time(s) between health probes {counter} and systemd restarted it automatically.{running_en}"
                     ),
                     format!(
-                        "sing-box на ноде {subj} перезапустился {delta} раз(а) между проверками {counter} — на обеих пробах он был «active», значит это падение/OOM, которое systemd автоматически перезапустил, а не чистый перезапуск."
+                        "sing-box на ноде {subj} аварийно завершился {delta} раз(а) между проверками {counter}, и systemd сам его перезапустил.{running_ru}"
                     ),
                 ),
                 Some(pick(
                     loc,
-                    "Open the server page and review the recent probes — repeated restarts usually mean sing-box is running out of memory; consider growing the node's RAM.".into(),
-                    "Открой страницу сервера и посмотри свежие пробы — повторные перезапуски обычно означают нехватку памяти; подумай увеличить RAM ноды.".into())),
+                    "Nothing to do for a single crash. If it repeats, open the server page: frequent restarts with high memory point to RAM; with normal memory they point to a sing-box bug.".into(),
+                    "Разовый сбой — делать ничего не нужно. Если повторяется — открой страницу сервера: частые перезапуски при высокой памяти указывают на нехватку RAM, при нормальной — на баг sing-box.".into())),
             )
         }
         "server.fingerprint.drift" => {
