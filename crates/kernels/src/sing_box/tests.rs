@@ -112,18 +112,35 @@ fn sing_box_vpnctl_release_artifacts_and_sha256_constants_are_pinned() {
         SING_BOX_AMD64_SHA256, SING_BOX_ARM64_SHA256, SING_BOX_ARMV7_SHA256,
         SING_BOX_VPNCTL_VERSION,
     };
-    assert_eq!(SING_BOX_VPNCTL_VERSION, "1.14.0-vpnctl.5");
+    assert_eq!(SING_BOX_VPNCTL_VERSION, "1.14.2-vpnctl.2");
+    let acquisition_script = include_str!("../../../../tools/singbox-attr-patch/build.sh");
+    assert!(acquisition_script.contains(&format!("SINGBOX_VERSION:-{SING_BOX_VPNCTL_VERSION}")));
+    let acquisition_readme = include_str!("../../../../tools/singbox-attr-patch/README.md");
+    for digest in [
+        SING_BOX_AMD64_SHA256,
+        SING_BOX_ARM64_SHA256,
+        SING_BOX_ARMV7_SHA256,
+    ] {
+        assert!(
+            acquisition_script.contains(digest),
+            "release acquisition and kernel pins must agree: {digest}"
+        );
+        assert!(
+            acquisition_readme.contains(digest),
+            "documented release digests must agree: {digest}"
+        );
+    }
     assert_eq!(
         SING_BOX_AMD64_SHA256,
-        "5f98eacc95b9ed9c1d53592605d812d9d2cb8c496fa95723cfb7c5f9447fe46e"
+        "095a575fb412e5520b5c16449002073a5ba587646b96e3dddd2c59473d5be2d8"
     );
     assert_eq!(
         SING_BOX_ARM64_SHA256,
-        "4d3390860d406b19f53ac0be699d4b39668972abf7276539ca95df6a97ef38fa"
+        "2758b44eda76465281e3c6d14b91dd5e6b5e9d50f549f8e3205cdc0a31c577d3"
     );
     assert_eq!(
         SING_BOX_ARMV7_SHA256,
-        "bed4d3825242b7f75daab85eb920a228fa33733fc06a89a06e0bfcb76cca9a71"
+        "85567a8809bed3abc0b385faa04c51c3edf976445f30dc0ef935bd4cb1f08c6f"
     );
 }
 
@@ -1230,7 +1247,7 @@ async fn open_firewall_uses_effective_listen_ports() {
 fn is_artifact_up_to_date_detects_matching_and_mismatching_node_state() {
     use super::is_artifact_up_to_date;
 
-    let sb = "5f98eacc95b9ed9c1d53592605d812d9d2cb8c496fa95723cfb7c5f9447fe46e";
+    let sb = "095a575fb412e5520b5c16449002073a5ba587646b96e3dddd2c59473d5be2d8";
     let sh = "adfcc59728309f6e5bda548d402b3284fe97bdd9216b04933d1b97b4a2531ddc";
 
     let valid_output = format!(

@@ -121,8 +121,10 @@ stable across deploys; a partially stored server keypair is rejected rather than
 silently replaced. Client addresses are derived from the user public key;
 unrelated grant changes do not renumber them, and collisions fail closed.
 
-**Kernel requirement:** use the pinned `1.14.0-vpnctl.5` release, verified against
-official AmneziaWG 3.1 with real TCP/UDP transfers and security hardening. `1.14.0-vpnctl.3` accepts
+**Kernel requirement:** use the pinned `1.14.2-vpnctl.2` security release.
+Its predecessor `1.14.0-vpnctl.5` was verified against official AmneziaWG 3.1
+with real TCP/UDP transfers; that historical result does not certify a new release.
+`1.14.0-vpnctl.3` accepts
 configuration but fails AWG3 data transfer and must not be used for this integration.
 Protocol changes schedule a targeted automatic deployment using current inventory.
 If a deployment is busy or the inventory changes during preparation, the server
