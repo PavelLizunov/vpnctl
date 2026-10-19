@@ -6,7 +6,7 @@
 
 - **Workspace Crates:** 10
 - **Tracked Rust Files:** 412 (276 prod / 136 test)
-- **Total Rust LOC:** 129,297 (74,034 prod / 55,263 test)
+- **Total Rust LOC:** 129,851 (74,448 prod / 55,403 test)
 - **Database Migrations:** 59
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 128
 
@@ -23,16 +23,16 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 3 tests, 1 examples | 5,394 (13) | 676 (4) | **6,070** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 3,744 (20) | 4,431 (12) | **8,175** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,398 (4) | 1,150 (5) | **2,548** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 41,437 (147) | 29,636 (59) | **71,073** |
-| **Total** | | | | **74,034 (276)** | **55,263 (136)** | **129,297** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 41,851 (147) | 29,776 (59) | **71,627** |
+| **Total** | | | | **74,448 (276)** | **55,403 (136)** | **129,851** |
 
 ## Largest Rust Modules (Top 25)
 
 | File | LOC | Crate | Role |
 |---|---|---|---|
-| `daemon/tests/admin_smoke/settings_integrations.rs` | 2,040 | `daemon` | Test |
+| `daemon/tests/admin_smoke/settings_integrations.rs` | 2,049 | `daemon` | Test |
+| `daemon/src/health_monitor/tests.rs` | 1,541 | `daemon` | Prod |
 | `crates/kernels/src/caddy/tests.rs` | 1,513 | `crates/kernels` | Prod |
-| `daemon/src/health_monitor/tests.rs` | 1,471 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/alerts_health.rs` | 1,452 | `daemon` | Test |
 | `daemon/tests/admin_smoke/server_detail/setup_config.rs` | 1,314 | `daemon` | Test |
 | `crates/kernels/src/sing_box/tests.rs` | 1,276 | `crates/kernels` | Prod |
@@ -45,16 +45,16 @@
 | `daemon/tests/admin_smoke/servers.rs` | 1,005 | `daemon` | Test |
 | `daemon/src/quality_poller.rs` | 992 | `daemon` | Prod |
 | `crates/inventory/tests/spec_node_health.rs` | 984 | `crates/inventory` | Test |
+| `daemon/tests/admin_smoke/shell_nav/shell_assets_nav.rs` | 965 | `daemon` | Test |
+| `daemon/tests/admin_smoke/users.rs` | 943 | `daemon` | Test |
 | `daemon/src/handlers/admin/boosty.rs` | 938 | `daemon` | Prod |
 | `crates/protocols/tests/spec_amneziawg_versions.rs` | 909 | `crates/protocols` | Test |
 | `daemon/tests/sub_endpoint/mihomo.rs` | 909 | `daemon` | Test |
-| `daemon/tests/admin_smoke/shell_nav/shell_assets_nav.rs` | 902 | `daemon` | Test |
+| `daemon/src/protocol_assurance_poller.rs` | 901 | `daemon` | Prod |
 | `crates/ssh/src/subprocess.rs` | 884 | `crates/ssh` | Prod |
 | `cli/src/cmd/server.rs` | 880 | `cli` | Prod |
-| `daemon/tests/admin_smoke/users.rs` | 875 | `daemon` | Test |
 | `daemon/src/handlers/admin/billing.rs` | 872 | `daemon` | Prod |
 | `crates/boosty-bridge/tests/sync_integration.rs` | 862 | `crates/boosty-bridge` | Test |
-| `crates/inventory/tests/spec_sub_access.rs` | 859 | `crates/inventory` | Test |
 
 ## Database Migrations (59)
 

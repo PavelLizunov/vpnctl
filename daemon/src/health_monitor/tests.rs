@@ -835,6 +835,48 @@ async fn scan_once_fires_restart_alert_with_prior_down_history() {
         .find(|a| a.kind == "server.singbox.restarted")
         .expect("restart alert must fire even with prior down history");
     assert_eq!(restart_alert.severity, "warning");
+    assert!(
+        restart_alert.acked_at.is_some(),
+        "a restart is a one-shot event and must not stay open"
+    );
+    assert_eq!(
+        restart_alert
+            .payload_json
+            .as_deref()
+            .map(|p| p.contains("\"active\":true")),
+        Some(true)
+    );
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    inv.record_node_health(
+        &server.id,
+        Some(true),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(5),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    scan_once(&inv).await.unwrap();
+    let restarts = inv
+        .recent_alerts(10, true)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|a| a.kind == "server.singbox.restarted")
+        .count();
+    assert_eq!(restarts, 2, "the next crash must fire its own alert");
 }
 
 #[tokio::test]
@@ -1468,4 +1510,32 @@ async fn scan_once_new_recovery_down_pair_reopens_alert() {
         "history must have both distinct down alerts"
     );
     assert_ne!(down_alerts[0].id, down_alerts[1].id);
+}
+
+#[test]
+fn one_shot_push_cooldown_counts_from_last_push_not_last_event() {
+    use super::poller::claim_one_shot_push;
+    let map = std::sync::Mutex::new(std::collections::HashMap::new());
+    let t0 = chrono::Utc::now();
+    let at = |mins: i64| t0 + chrono::Duration::minutes(mins);
+    assert!(
+        claim_one_shot_push(&map, "srv\0k", at(0)),
+        "first crash pushes"
+    );
+    assert!(
+        !claim_one_shot_push(&map, "srv\0k", at(10)),
+        "crash inside window is throttled"
+    );
+    assert!(
+        !claim_one_shot_push(&map, "srv\0k", at(20)),
+        "still throttled"
+    );
+    assert!(
+        claim_one_shot_push(&map, "srv\0k", at(31)),
+        "a crash loop pushes again once the window since the last PUSH expires"
+    );
+    assert!(
+        claim_one_shot_push(&map, "other\0k", at(31)),
+        "servers are independent"
+    );
 }

@@ -1208,28 +1208,37 @@ async fn admin_backup_scheduler_produces_snapshot_and_audits() {
         std::time::Duration::from_millis(50),
         std::time::Duration::from_millis(50),
     );
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut scheduler_rows = 0;
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        scheduler_rows = inv
+            .recent_audit(50)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|a| {
+                a.action == "backup.snapshot"
+                    && a.payload
+                        .as_ref()
+                        .and_then(|p| p.get("trigger"))
+                        .and_then(|v| v.as_str())
+                        == Some("scheduler")
+            })
+            .count();
+        if scheduler_rows > 0 {
+            break;
+        }
+    }
     handle.abort();
 
     let snapshots = vpnctl_inventory::list_snapshots(&backup_dir).unwrap();
     assert!(
         !snapshots.is_empty(),
-        "scheduler must have produced at least one snapshot in 500ms; got 0"
+        "scheduler must have produced at least one snapshot; got 0"
     );
-    let audits = inv.recent_audit(50).await.unwrap();
-    let scheduler_rows: Vec<_> = audits
-        .iter()
-        .filter(|a| {
-            a.action == "backup.snapshot"
-                && a.payload
-                    .as_ref()
-                    .and_then(|p| p.get("trigger"))
-                    .and_then(|v| v.as_str())
-                    == Some("scheduler")
-        })
-        .collect();
     assert!(
-        !scheduler_rows.is_empty(),
+        scheduler_rows > 0,
         "scheduler must write at least one audit row with trigger=scheduler"
     );
 }
@@ -1441,7 +1450,7 @@ async fn phase3c_settings_page_carries_no_inline_script_blocks() {
         "settings must carry exactly the shell's external admin.js <script>, found {script_tags}"
     );
     assert!(
-        html.contains("src=\"/admin/assets/admin.js\""),
+        html.contains("src=\"/admin/assets/admin.js?v="),
         "the single script tag must be the external admin.js include"
     );
 }

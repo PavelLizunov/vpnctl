@@ -4,7 +4,7 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use maud::{Markup, html};
 
-use super::helpers::{internal_error, render_page, theme_accent_lang};
+use super::helpers::{humanize_bytes, internal_error, render_page, theme_accent_lang};
 use crate::AppState;
 use crate::http_util::path_segment_encode;
 
@@ -23,12 +23,14 @@ fn user_row(
     u: &vpnctl_core::User,
     grants_count: usize,
     live_conns: u32,
+    traffic_24h: u64,
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
     let sub_token_preview = u.sub_token.as_deref().map(mask_secret);
     let uuid_preview: String = u.uuid.chars().take(8).collect();
     let detail_href = format!("/admin/users/{}", path_segment_encode(&u.id.0));
+    let traffic_href = format!("/admin/users/{}/traffic", path_segment_encode(&u.id.0));
     html! {
         tr class=(if live_conns > 0 { "on-green" } else { "" }) {
             td.ed-grid__mut { (format!("{:02}", idx + 1)) }
@@ -43,6 +45,13 @@ fn user_row(
                     }
                 } @else {
                     span.ed-grid__mut { "— " (tr(lang, "offline", "офлайн")) }
+                }
+            }
+            td.num {
+                @if traffic_24h > 0 {
+                    a href=(traffic_href) style="color: var(--ink);" { b { (humanize_bytes(traffic_24h)) } }
+                } @else {
+                    span.ed-grid__mut { "—" }
                 }
             }
             td.ed-grid__sm title=(u.uuid) { (uuid_preview) "…" }
@@ -84,6 +93,19 @@ pub(crate) async fn users(
         state.inv.servers_count_per_user(),
     )
     .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let heavy = state
+        .inv
+        .top_users_by_traffic(24, u32::MAX)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "users list: 24h traffic query failed; column left empty");
+            Vec::new()
+        });
+    let traffic_24h: std::collections::HashMap<String, u64> = heavy
+        .into_iter()
+        .map(|h| (h.user_id.0, h.total_bytes))
+        .collect();
+    let traffic_of = |id: &str| traffic_24h.get(id).copied().unwrap_or(0);
 
     let mut live_conns_per_user: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
@@ -121,6 +143,11 @@ pub(crate) async fn users(
         "id-desc" => pairs.sort_by(|a, b| b.1.id.0.cmp(&a.1.id.0)),
         "servers" => pairs.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.1.id.0.cmp(&b.1.id.0))),
         "servers-desc" => pairs.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.id.0.cmp(&b.1.id.0))),
+        "traffic" => pairs.sort_by(|a, b| {
+            traffic_of(&b.1.id.0)
+                .cmp(&traffic_of(&a.1.id.0))
+                .then_with(|| a.1.id.0.cmp(&b.1.id.0))
+        }),
         _ => pairs.sort_by(|a, b| a.1.id.0.cmp(&b.1.id.0)),
     }
     let make_sort_href = |kind: &str| -> String {
@@ -162,6 +189,7 @@ pub(crate) async fn users(
                 div.ed-headrow__actions style="font-family: var(--mono); font-size: 11px;" {
                     (crate::i18n::tr(lang, "sort:", "сортировка:"))
                     (sort_link("id", "id"))
+                    (sort_link("traffic", crate::i18n::tr(lang, "traffic 24h", "трафик 24ч")))
                     @if sort_kind == "servers-desc" {
                         (sort_link("servers", crate::i18n::tr(lang, "servers", "серверы")))
                     } @else {
@@ -258,6 +286,7 @@ pub(crate) async fn users(
                         th { "№" }
                         th { (crate::i18n::tr(lang, "user", "пользователь")) }
                         th { (crate::i18n::tr(lang, "presence", "присутствие")) }
+                        th.num { (crate::i18n::tr(lang, "traffic 24h", "трафик 24ч")) }
                         th { "uuid" }
                         th { "sub-token" }
                         th.num { (crate::i18n::tr(lang, "servers", "серверы")) }
@@ -272,6 +301,7 @@ pub(crate) async fn users(
                             u,
                             *g,
                             live_conns_per_user.get(&u.id.0).copied().unwrap_or(0),
+                            traffic_of(&u.id.0),
                             lang,
                         ))
                     }

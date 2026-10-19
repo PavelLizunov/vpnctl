@@ -349,6 +349,69 @@ async fn admin_assets_admin_css_served() {
 }
 
 #[tokio::test]
+async fn admin_assets_are_versioned_preloaded_and_cacheable() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    let html = fetch_html(app.clone(), "/admin/").await;
+    assert!(
+        html.contains("href=\"/admin/assets/admin.css?v="),
+        "stylesheet URL must carry a content stamp so a new file busts the cache"
+    );
+    assert!(
+        html.contains("src=\"/admin/assets/admin.js?v="),
+        "script URL must carry a content stamp"
+    );
+    for font in [
+        "ibm-plex-sans-400-normal-cyrillic",
+        "ibm-plex-sans-400-normal-latin",
+        "ibm-plex-mono-400-normal-cyrillic",
+        "ibm-plex-mono-400-normal-latin",
+        "newsreader-300-600-normal-latin",
+        "newsreader-300-600-italic-latin",
+    ] {
+        let tag = format!(
+            "<link rel=\"preload\" as=\"font\" type=\"font/woff2\" crossorigin href=\"/admin/assets/fonts/{font}.woff2\">"
+        );
+        assert!(html.contains(&tag), "missing font preload: {tag}");
+    }
+
+    let fetch = |uri: &'static str| {
+        let app = app.clone();
+        async move {
+            let resp = app
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let cc = resp
+                .headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            (resp.status(), cc)
+        }
+    };
+    assert_eq!(
+        fetch("/admin/assets/admin.css?v=1").await,
+        (
+            StatusCode::OK,
+            Some("private, max-age=31536000, immutable".to_string())
+        )
+    );
+    assert_eq!(
+        fetch("/admin/assets/fonts/ibm-plex-sans-400-normal-latin.woff2").await,
+        (StatusCode::OK, Some("private, max-age=604800".to_string()))
+    );
+    assert_eq!(
+        fetch("/admin/assets/admin.css").await,
+        (StatusCode::OK, Some("no-cache".to_string())),
+        "an unversioned URL must always revalidate"
+    );
+    let (status, cc) = fetch("/admin/assets/missing.css?v=1").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(cc, None, "a 404 must never be cached as immutable");
+}
+
+#[tokio::test]
 async fn admin_nav_anchors_have_hrefs() {
     let dir = TempDir::new().unwrap();
     let app = router(state(&dir).await);

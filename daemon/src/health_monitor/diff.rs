@@ -17,6 +17,10 @@ pub struct AlertEvent {
     pub resolves: Option<&'static str>,
 }
 
+pub(crate) fn is_one_shot_event(kind: &str) -> bool {
+    kind == "server.singbox.restarted"
+}
+
 fn mem_used_pct(row: &NodeHealthRow) -> Option<u8> {
     let avail = row.mem_available_mib?;
     let total = row.mem_total_mib?;
@@ -168,11 +172,12 @@ pub fn diff_rows(prev: &NodeHealthRow, cur: &NodeHealthRow) -> Vec<AlertEvent> {
             resolves: None,
             severity: "warning",
             summary: format!(
-                "sing-box was restarted {} time(s) between probes (NRestarts {p} → {c}) — likely an OOM/crash; systemd auto-restarted it",
+                "sing-box crashed {} time(s) between probes (NRestarts {p} → {c}); systemd restarted it automatically",
                 c - p
             ),
             payload: serde_json::json!({
-                "prior": p, "current": c, "delta": c - p
+                "prior": p, "current": c, "delta": c - p,
+                "active": cur.sing_box_active
             }),
         });
     }

@@ -18,6 +18,8 @@ const RUNNER_TIMEOUT: Duration = Duration::from_secs(30);
 const NODE_HEALTH_MAX_AGE: chrono::Duration = chrono::Duration::minutes(20);
 const CLIENT_KIND: &str = "vpnctl-builtin";
 const ALERT_FAILURE_TICKS: u32 = 3;
+const RUNNER_HANDSHAKE_ATTEMPTS: u32 = 3;
+const RUNNER_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Serialize)]
 struct RunnerRequest<'a> {
@@ -67,6 +69,15 @@ pub fn spawn_protocol_assurance_poller(
                     continue;
                 }
             };
+            let probed: HashSet<(String, String)> = servers
+                .iter()
+                .flat_map(|server| {
+                    server
+                        .enabled_protocols
+                        .iter()
+                        .map(|protocol| (server.id.0.clone(), assurance_alert_kind(&protocol.0)))
+                })
+                .collect();
             let mut jobs = tokio::task::JoinSet::new();
             let permits = Arc::new(tokio::sync::Semaphore::new(4));
             for server in servers {
@@ -99,6 +110,9 @@ pub fn spawn_protocol_assurance_poller(
                 if let Err(error) = result {
                     tracing::warn!(target = "vpnctld::assurance", %error, "server assurance task failed");
                 }
+            }
+            if let Err(error) = resolve_unprobed_alerts(&inv, &probed).await {
+                tracing::warn!(target = "vpnctld::assurance", %error, "stale assurance alert sweep failed");
             }
         }
     })
@@ -178,10 +192,33 @@ async fn sample_protocol(
         ));
     }
 
+    let mut template_missing = false;
     let runner_attempt = if !protocol_uses_external_runner(&protocol.id().0) {
         RunnerAttempt::NotConfigured
     } else {
-        run_external_runner(server, protocol, &ports).await?
+        let mut attempt = run_external_runner(server, protocol, &ports).await?;
+        for _ in 1..RUNNER_HANDSHAKE_ATTEMPTS {
+            if !matches!(&attempt, RunnerAttempt::Result(result) if is_retryable_handshake_failure(result))
+            {
+                break;
+            }
+            tokio::time::sleep(RUNNER_RETRY_BACKOFF).await;
+            attempt = run_external_runner(server, protocol, &ports).await?;
+        }
+        match attempt {
+            RunnerAttempt::Result(result) if lacks_probe_template(&result) => {
+                template_missing = true;
+                RunnerAttempt::NotConfigured
+            }
+            other => other,
+        }
+    };
+    let unverified_code = |code: &'static str| {
+        if template_missing {
+            "probe_template_missing"
+        } else {
+            code
+        }
     };
     match runner_attempt {
         RunnerAttempt::Result(result) => {
@@ -235,7 +272,7 @@ async fn sample_protocol(
             AssuranceStage::ExternalPath,
             AssuranceState::Unknown,
             None,
-            Some("udp_path_unverified"),
+            Some(unverified_code("udp_path_unverified")),
         ));
     }
     let started = Instant::now();
@@ -284,11 +321,11 @@ async fn sample_protocol(
         AssuranceStage::ExternalPath,
         AssuranceState::Unknown,
         Some(started.elapsed().as_millis() as u64),
-        Some(if client_render_ok {
+        Some(unverified_code(if client_render_ok {
             "tcp_path_only"
         } else {
             "no_probe_identity"
-        }),
+        })),
     ))
 }
 
@@ -495,6 +532,18 @@ fn run_runner_process_with_timeout(
     }
 }
 
+fn is_retryable_handshake_failure(result: &RunnerResult) -> bool {
+    result.stage == AssuranceStage::Handshake
+        && matches!(
+            result.state,
+            AssuranceState::Blocked | AssuranceState::Degraded
+        )
+}
+
+fn lacks_probe_template(result: &RunnerResult) -> bool {
+    result.failure_code.as_deref() == Some("probe_config_missing")
+}
+
 fn protocol_uses_external_runner(protocol: &str) -> bool {
     protocol != "wireguard"
 }
@@ -512,8 +561,10 @@ fn sanitize_client_kind(value: &str) -> String {
     }
 }
 
+const ASSURANCE_ALERT_PREFIX: &str = "protocol.assurance.failed.";
+
 fn assurance_alert_kind(protocol: &str) -> String {
-    format!("protocol.assurance.failed.{protocol}")
+    format!("{ASSURANCE_ALERT_PREFIX}{protocol}")
 }
 
 async fn persist_and_alert(
@@ -576,15 +627,7 @@ async fn persist_and_alert(
             )
             .await;
         }
-    } else if has_open
-        && (sample.state == AssuranceState::Verified
-            || (sample.client_kind == CLIENT_KIND
-                && sample.state == AssuranceState::Unknown
-                && matches!(
-                    sample.failure_code.as_deref(),
-                    Some("tcp_path_only" | "udp_path_unverified" | "no_probe_identity")
-                )))
-    {
+    } else if has_open && recovers_open_alert(sample) {
         let payload = serde_json::json!({
             "protocol": sample.protocol_id.0,
             "client_kind": sample.client_kind,
@@ -608,6 +651,40 @@ async fn persist_and_alert(
             &sample.server_id,
             &kind,
             "protocol assurance recovered",
+        )
+        .await;
+    }
+    Ok(())
+}
+
+fn recovers_open_alert(sample: &ProtocolAssuranceSample) -> bool {
+    sample.state == AssuranceState::Verified
+        || (sample.client_kind == CLIENT_KIND
+            && sample.state == AssuranceState::Unknown
+            && matches!(
+                sample.failure_code.as_deref(),
+                Some("tcp_path_only" | "udp_path_unverified" | "no_probe_identity")
+            ))
+}
+
+async fn resolve_unprobed_alerts(
+    inv: &SqliteInventory,
+    probed: &HashSet<(String, String)>,
+) -> anyhow::Result<()> {
+    for alert in inv.recent_alerts(10_000, false).await? {
+        let Some(server_id) = &alert.server_id else {
+            continue;
+        };
+        if !alert.kind.starts_with(ASSURANCE_ALERT_PREFIX)
+            || probed.contains(&(server_id.0.clone(), alert.kind.clone()))
+        {
+            continue;
+        }
+        crate::node_probe_poller::auto_ack(
+            inv,
+            server_id,
+            &alert.kind,
+            "protocol no longer probed on this server",
         )
         .await;
     }
@@ -639,11 +716,25 @@ mod tests {
 
     #[test]
     fn safe_builtin_unknown_codes_are_recoverable() {
+        let builtin = |code: &str| ProtocolAssuranceSample {
+            ts: Utc::now(),
+            server_id: vpnctl_core::ServerId("s".into()),
+            protocol_id: vpnctl_core::ProtocolId("vless+reality".into()),
+            client_kind: CLIENT_KIND.into(),
+            stage: AssuranceStage::ExternalPath,
+            state: AssuranceState::Unknown,
+            latency_ms: None,
+            failure_code: Some(code.into()),
+        };
         for code in ["tcp_path_only", "udp_path_unverified", "no_probe_identity"] {
-            assert!(matches!(
-                Some(code),
-                Some("tcp_path_only" | "udp_path_unverified" | "no_probe_identity")
-            ));
+            assert!(recovers_open_alert(&builtin(code)), "{code}");
+        }
+        for code in [
+            "probe_template_missing",
+            "probe_data_stale",
+            "runner_failed",
+        ] {
+            assert!(!recovers_open_alert(&builtin(code)), "{code}");
         }
     }
 
@@ -694,5 +785,117 @@ mod tests {
         let result =
             run_runner_process_with_timeout(&runner, b"{}", Duration::from_secs(1)).unwrap();
         assert!(result.is_none());
+    }
+
+    fn runner_result(
+        stage: AssuranceStage,
+        state: AssuranceState,
+        code: Option<&str>,
+    ) -> RunnerResult {
+        RunnerResult {
+            stage,
+            state,
+            latency_ms: None,
+            failure_code: code.map(str::to_string),
+            client_kind: "xray".into(),
+        }
+    }
+
+    #[test]
+    fn only_failed_handshakes_are_retried() {
+        assert!(is_retryable_handshake_failure(&runner_result(
+            AssuranceStage::Handshake,
+            AssuranceState::Blocked,
+            Some("handshake_timeout"),
+        )));
+        assert!(!is_retryable_handshake_failure(&runner_result(
+            AssuranceStage::Transfer,
+            AssuranceState::Verified,
+            None,
+        )));
+        assert!(!is_retryable_handshake_failure(&runner_result(
+            AssuranceStage::Transfer,
+            AssuranceState::Blocked,
+            Some("transfer_failed"),
+        )));
+        assert!(!is_retryable_handshake_failure(&runner_result(
+            AssuranceStage::ClientImport,
+            AssuranceState::Blocked,
+            Some("probe_config_missing"),
+        )));
+    }
+
+    #[test]
+    fn missing_probe_template_is_not_a_protocol_failure() {
+        assert!(lacks_probe_template(&runner_result(
+            AssuranceStage::ClientImport,
+            AssuranceState::Blocked,
+            Some("probe_config_missing"),
+        )));
+        assert!(!lacks_probe_template(&runner_result(
+            AssuranceStage::ClientImport,
+            AssuranceState::Blocked,
+            Some("probe_config_unsafe"),
+        )));
+    }
+
+    fn server(id: &str) -> Server {
+        Server {
+            id: vpnctl_core::ServerId(id.into()),
+            address: "127.0.0.1".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        }
+    }
+
+    #[tokio::test]
+    async fn alerts_for_unprobed_protocols_are_resolved() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        let srv = server("srv-a");
+        inv.add_server(&srv).await.unwrap();
+        let kept = assurance_alert_kind("vless+reality");
+        let stale = assurance_alert_kind("anytls");
+        for kind in [&kept, &stale] {
+            inv.insert_alert_if_no_unacked(kind, Some(&srv.id), "warning", "failed", None)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        inv.insert_alert_if_no_unacked("server.unreachable", Some(&srv.id), "warning", "x", None)
+            .await
+            .unwrap()
+            .unwrap();
+        let probed = HashSet::from([(srv.id.0.clone(), kept.clone())]);
+
+        resolve_unprobed_alerts(&inv, &probed).await.unwrap();
+
+        let open: Vec<String> = inv
+            .recent_alerts(10, false)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|a| a.kind)
+            .collect();
+        assert!(
+            open.contains(&kept),
+            "probed protocol alert stays open: {open:?}"
+        );
+        assert!(
+            open.contains(&"server.unreachable".to_string()),
+            "non-assurance alerts untouched"
+        );
+        assert!(
+            !open.contains(&stale),
+            "unprobed protocol alert is resolved: {open:?}"
+        );
     }
 }

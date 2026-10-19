@@ -80,17 +80,21 @@ pub fn router(state: AppState) -> Router {
         .layer(trace_layer)
 }
 
-pub(crate) fn admin_router(state: AppState) -> Router {
-    use crate::handlers::admin;
-
-    let assets_dir: PathBuf = [
+pub(crate) fn admin_assets_dir() -> PathBuf {
+    [
         PathBuf::from("assets"),
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets"),
         PathBuf::from("daemon/assets"),
     ]
     .into_iter()
     .find(|p| p.exists())
-    .unwrap_or_else(|| PathBuf::from("daemon/assets"));
+    .unwrap_or_else(|| PathBuf::from("daemon/assets"))
+}
+
+pub(crate) fn admin_router(state: AppState) -> Router {
+    use crate::handlers::admin;
+
+    let assets_dir = admin_assets_dir();
 
     let with_admin = Router::new()
         .route("/admin", get(admin::dashboard))
@@ -394,7 +398,14 @@ pub(crate) fn admin_router(state: AppState) -> Router {
             state.clone(),
             admin::html_error_pages,
         ))
-        .nest_service("/admin/assets", ServeDir::new(&assets_dir))
+        .nest_service(
+            "/admin/assets",
+            tower::ServiceBuilder::new()
+                .layer(axum::middleware::from_fn(
+                    crate::handlers::admin::asset_cache_control,
+                ))
+                .service(ServeDir::new(assets_dir)),
+        )
         .with_state(state);
 
     let with_csrf = with_admin.route_layer(axum::middleware::from_fn(

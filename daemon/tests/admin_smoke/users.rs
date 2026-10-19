@@ -637,6 +637,74 @@ async fn admin_users_sort_servers_orders_by_grants_count_ascending() {
 }
 
 #[tokio::test]
+async fn admin_users_sort_traffic_orders_by_24h_bytes_and_links_traffic_tab() {
+    use vpnctl_core::{KernelId, Server, ServerId};
+    use vpnctl_inventory::VpnStatsDelta;
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .add_server(&Server {
+            id: ServerId("s1".into()),
+            address: "203.0.113.7".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    for uid in ["alice", "bob", "carol"] {
+        s.inv
+            .add_user(&User {
+                id: UserId(uid.into()),
+                uuid: format!("uuid-{uid}"),
+                tuic_password: None,
+                wireguard_pubkey: None,
+                wireguard_private: None,
+                sub_token: None,
+                vpn_router_device_id: None,
+                disabled: false,
+            })
+            .await
+            .unwrap();
+    }
+    let delta = |uid: &str, bytes: u64| VpnStatsDelta {
+        user_id: Some(UserId(uid.into())),
+        upload_bytes: 0,
+        download_bytes: bytes,
+        active_connections: 1,
+    };
+    s.inv
+        .record_vpn_stats(
+            &ServerId("s1".into()),
+            &[delta("alice", 1_000), delta("bob", 5_000_000)],
+        )
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(s), "/admin/users?sort=traffic").await;
+    let pos_alice = html.find(">alice<").expect("alice rendered");
+    let pos_bob = html.find(">bob<").expect("bob rendered");
+    let pos_carol = html.find(">carol<").expect("carol rendered");
+    assert!(
+        pos_bob < pos_alice && pos_alice < pos_carol,
+        "sort=traffic must render bob<alice<carol; got a={pos_alice} b={pos_bob} c={pos_carol}"
+    );
+    assert!(
+        html.contains("href=\"/admin/users/bob/traffic\""),
+        "traffic cell must link straight to the user's traffic tab"
+    );
+    assert!(
+        !html.contains("href=\"/admin/users/carol/traffic\""),
+        "a user without traffic shows a dash, not a link"
+    );
+}
+
+#[tokio::test]
 async fn user_disable_then_enable_round_trip_flips_flag_and_audits() {
     let dir = TempDir::new().unwrap();
     let st = state(&dir).await;

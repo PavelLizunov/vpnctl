@@ -430,7 +430,7 @@ async fn admin_server_detail_shows_deploy_button() {
         "live deploy log pane must be present"
     );
     assert!(
-        html.contains(r#"src="/admin/assets/admin.js""#),
+        html.contains(r#"src="/admin/assets/admin.js?v="#),
         "external admin.js (CSP-safe SSE wiring) must be loaded"
     );
     assert!(
