@@ -1,0 +1,49 @@
+name: Task release build
+on:
+  push:
+    branches: [build/vpnctl-release-5c1ffdc]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: 5c1ffdcc8d90129d040fb3f9bf3dd84eadf78c8c
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools cmake
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-musl
+      - name: Build exact production revision
+        env:
+          VPNCTL_BUILD_SHA: 5c1ffdc
+        run: |
+          test "$(git rev-parse HEAD)" = 5c1ffdcc8d90129d040fb3f9bf3dd84eadf78c8c
+          cargo build --release --target x86_64-unknown-linux-musl -p vpnctld -p vpnctl
+          mkdir -p release
+          cp target/x86_64-unknown-linux-musl/release/{vpnctl,vpnctld} release/
+          release/vpnctl --version | grep -F '0.9.0+5c1ffdc'
+          release/vpnctld --version | grep -F '0.9.0+5c1ffdc'
+          for binary in vpnctl vpnctld; do
+            headers=$(readelf -l "release/$binary")
+            ! grep -q INTERP <<< "$headers"
+          done
+          OUT="$PWD/release/sing-box" tools/singbox-attr-patch/build.sh
+          tools/singbox-stats-helper/build.sh "$PWD/release/singbox-stats-helper"
+          cp scripts/deploy.sh release/
+          printf '%s\n' "$(git rev-parse HEAD)" > release/REVISION
+          (cd release && sha256sum vpnctl vpnctld sing-box singbox-stats-helper deploy.sh > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vpnctl-5c1ffdc-linux-amd64
+          path: release/
+          retention-days: 3
