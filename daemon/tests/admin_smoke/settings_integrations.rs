@@ -1450,7 +1450,7 @@ async fn phase3c_settings_page_carries_no_inline_script_blocks() {
         "settings must carry exactly the shell's external admin.js <script>, found {script_tags}"
     );
     assert!(
-        html.contains("src=\"/admin/assets/admin.js\""),
+        html.contains("src=\"/admin/assets/admin.js?v="),
         "the single script tag must be the external admin.js include"
     );
 }

@@ -47,8 +47,12 @@ pub(crate) fn shell(
                 meta name="viewport" content="width=device-width, initial-scale=1" {}
                 title { "vpnctl admin" }
                 link rel="icon" type="image/svg+xml" href="/admin/assets/favicon.svg" {}
-                link rel="stylesheet" href="/admin/assets/admin.css" {}
-                script src="/admin/assets/admin.js" defer {}
+                @for font in PRELOADED_FONTS {
+                    link rel="preload" as="font" type="font/woff2" crossorigin
+                        href=(format!("/admin/assets/fonts/{font}.woff2")) {}
+                }
+                link rel="stylesheet" href=(versioned_asset("admin.css")) {}
+                script src=(versioned_asset("admin.js")) defer {}
             }
             body {
                 div class=(cls) {
@@ -61,6 +65,58 @@ pub(crate) fn shell(
             }
         }
     }
+}
+
+const PRELOADED_FONTS: [&str; 6] = [
+    "ibm-plex-sans-400-normal-cyrillic",
+    "ibm-plex-sans-400-normal-latin",
+    "ibm-plex-mono-400-normal-cyrillic",
+    "ibm-plex-mono-400-normal-latin",
+    "newsreader-300-600-normal-latin",
+    "newsreader-300-600-italic-latin",
+];
+
+const VERSIONED_ASSET: &str = "private, max-age=31536000, immutable";
+const FONT_ASSET: &str = "private, max-age=604800";
+
+fn versioned_asset(name: &str) -> String {
+    let stamp = std::fs::metadata(crate::app::routes::admin_assets_dir().join(name))
+        .ok()
+        .and_then(|meta| {
+            let modified = meta
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?;
+            Some(format!("{:x}-{:x}", meta.len(), modified.as_nanos()))
+        });
+    match stamp {
+        Some(stamp) => format!("/admin/assets/{name}?v={stamp}"),
+        None => format!("/admin/assets/{name}"),
+    }
+}
+
+pub(crate) async fn asset_cache_control(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let policy = if req
+        .uri()
+        .query()
+        .is_some_and(|q| q.split('&').any(|pair| pair.starts_with("v=")))
+    {
+        VERSIONED_ASSET
+    } else if req.uri().path().contains("/fonts/") {
+        FONT_ASSET
+    } else {
+        "no-cache"
+    };
+    let mut resp = next.run(req).await;
+    if resp.status().is_success() || resp.status() == StatusCode::NOT_MODIFIED {
+        resp.headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static(policy));
+    }
+    resp
 }
 
 pub(crate) fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
