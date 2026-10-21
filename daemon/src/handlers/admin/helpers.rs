@@ -761,7 +761,10 @@ mod tests {
             "/admin/users"
         );
         assert_eq!(sanitize_referer(Some("/admin/users")), "/admin/users");
-        assert_eq!(sanitize_referer(Some("/admin/users?tab=activity")), "/admin/users?tab=activity");
+        assert_eq!(
+            sanitize_referer(Some("/admin/users?tab=activity")),
+            "/admin/users?tab=activity"
+        );
         assert_eq!(sanitize_referer(None), "/admin/");
     }
 
