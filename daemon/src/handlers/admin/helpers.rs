@@ -700,13 +700,10 @@ pub(crate) async fn html_error_pages(
         Ok(bytes) => String::from_utf8_lossy(&bytes).trim().to_string(),
         Err(_) => error_text("request failed").trim().to_string(),
     };
-    let back = headers
+    let referer = headers
         .get(axum::http::header::REFERER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|r| r.split_once("://").map(|(_, rest)| rest))
-        .and_then(|rest| rest.find('/').map(|i| rest[i..].to_string()))
-        .filter(|path| path.starts_with("/admin") && !path.starts_with("//"))
-        .unwrap_or_else(|| "/admin/".to_string());
+        .and_then(|v| v.to_str().ok());
+    let back = sanitize_referer(referer);
     let (theme, accent, lang) = theme_accent_lang(&headers);
     let body = maud::html! {
         div.ed-art-eyebrow { (crate::i18n::tr(lang, "Action not completed", "Действие не выполнено")) }
@@ -758,7 +755,19 @@ mod tests {
             sanitize_referer(Some("http://example.com/admin/../evil")),
             "/admin/"
         );
+        assert_eq!(
+            sanitize_referer(Some("http://example.com/admin//evil")),
+            "/admin/"
+        );
+        assert_eq!(
+            sanitize_referer(Some("http://example.com/admin\\evil")),
+            "/admin/"
+        );
         assert_eq!(sanitize_referer(Some("/admin/users")), "/admin/users");
+        assert_eq!(
+            sanitize_referer(Some("http://example.com/admin/servers")),
+            "/admin/servers"
+        );
         assert_eq!(sanitize_referer(None), "/admin/");
     }
 
