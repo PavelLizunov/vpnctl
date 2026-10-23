@@ -293,6 +293,46 @@ fn deploy_guard_allows_distinct_servers_concurrently() {
 }
 
 #[tokio::test]
+async fn waiting_redeploy_reports_already_running_after_wait_limit() {
+    use tokio_stream::StreamExt;
+    let dir = tempfile::tempdir().unwrap();
+    let inv = vpnctl_inventory::SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let registry = Arc::new(crate::app::build_registry().unwrap());
+    let server = Server {
+        id: ServerId("gate-wait-redeploy".into()),
+        address: "203.0.113.8".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![],
+        enabled_protocols: vec![],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    let _held = DeployGuard::try_acquire("gate-wait-redeploy").expect("hold permit");
+    let events: Vec<BootstrapEvent> = redeploy::run_redeploy_after_wait(
+        server,
+        inv,
+        registry,
+        PathBuf::from("/nonexistent/key"),
+        std::time::Duration::from_millis(50),
+    )
+    .collect()
+    .await;
+    assert!(
+        matches!(&events[0], BootstrapEvent::Step { message, .. } if message.contains("waiting for it to finish")),
+        "first event must announce the wait: {events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(BootstrapEvent::Error { message, .. }) if message.contains("already running")),
+        "a deploy still running after the wait limit must be reported: {events:?}"
+    );
+}
+
+#[tokio::test]
 async fn run_redeploy_reports_already_running_when_locked() {
     use tokio_stream::StreamExt;
     let dir = tempfile::tempdir().unwrap();

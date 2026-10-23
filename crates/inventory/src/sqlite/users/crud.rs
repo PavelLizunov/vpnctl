@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::sqlite::base::{SqliteInventory, map_unique};
 use crate::sqlite::models::{Result, SqliteInventoryError};
 use sqlx::Row;
@@ -105,6 +107,17 @@ impl SqliteInventory {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(row_to_user).collect()
+    }
+
+    pub async fn known_user_uuids(&self) -> Result<HashSet<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT uuid FROM users
+             UNION SELECT client_uuid FROM grants WHERE client_uuid IS NOT NULL
+             UNION SELECT uuid FROM retired_user_uuids",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(uuid,)| uuid).collect())
     }
 
     pub async fn remove_user(&self, id: &UserId) -> Result<()> {

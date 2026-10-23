@@ -608,6 +608,50 @@ async fn cascade_delete_user_removes_grants() -> Result<()> {
 }
 
 #[tokio::test]
+async fn known_user_uuids_keep_disabled_revoked_and_deleted_uuids() -> Result<()> {
+    let inv = fresh().await;
+    let srv = ServerId("srv".into());
+    inv.add_server(&sample_server("srv")).await?;
+    for id in ["alice", "bob", "carol"] {
+        inv.add_user(&sample_user(id)).await?;
+        inv.grant(&UserId(id.into()), &srv).await?;
+    }
+    let bob_override = "11111111-2222-4333-8444-555555555555";
+    let carol_override = "66666666-7777-4888-9999-aaaaaaaaaaaa";
+    inv.set_grant_client_uuid(&UserId("bob".into()), &srv, bob_override)
+        .await?;
+    inv.set_grant_client_uuid(&UserId("carol".into()), &srv, carol_override)
+        .await?;
+
+    let alice_old = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+    inv.set_grant_client_uuid(&UserId("alice".into()), &srv, alice_old)
+        .await?;
+    inv.set_grant_client_uuid(
+        &UserId("alice".into()),
+        &srv,
+        "12345678-1234-4234-8234-123456789abc",
+    )
+    .await?;
+    inv.set_user_disabled(&UserId("alice".into()), true).await?;
+    inv.revoke(&UserId("bob".into()), &srv).await?;
+    inv.remove_user(&UserId("carol".into())).await?;
+
+    let known = inv.known_user_uuids().await?;
+    for uuid in [
+        "uuid-alice",
+        alice_old,
+        "uuid-bob",
+        bob_override,
+        "uuid-carol",
+        carol_override,
+    ] {
+        assert!(known.contains(uuid), "{uuid} must stay known: {known:?}");
+    }
+    assert!(!known.contains("never-seen"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn list_all_server_protocols_with_hidden_returns_full_matrix() -> Result<()> {
     let inv = fresh().await;
 
