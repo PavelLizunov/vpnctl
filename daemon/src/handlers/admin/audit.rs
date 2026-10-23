@@ -5,7 +5,8 @@ use axum::response::{IntoResponse, Response};
 use maud::{Markup, html};
 
 use super::helpers::{
-    display_tz, format_msk_iso, internal_error, render_page, theme_accent_lang, user_not_found,
+    bad_request, display_tz, format_msk_iso, internal_error, render_page, theme_accent_lang,
+    user_not_found, valid_user_id,
 };
 use crate::AppState;
 use crate::http_util::path_segment_encode;
@@ -419,6 +420,9 @@ pub(crate) async fn user_access_csv(
     State(state): State<AppState>,
     Path(user_id_str): Path<String>,
 ) -> Response {
+    if !valid_user_id(&user_id_str) {
+        return bad_request(&format!("invalid user id format '{user_id_str}'"));
+    }
     let uid = vpnctl_core::UserId(user_id_str.clone());
     match state.inv.get_user(&uid).await {
         Ok(Some(_)) => {}

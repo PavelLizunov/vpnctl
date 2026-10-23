@@ -66,6 +66,36 @@ async fn admin_server_grant_user_persists_and_redirects_to_server() {
 }
 
 #[tokio::test]
+async fn admin_server_grant_invalid_server_id_400() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let body = crate::common::body_of(
+        router(s),
+        "POST",
+        "/admin/servers/srv..01/grants/alice",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(body, "vpnctl admin: invalid server id format 'srv..01'\n");
+}
+
+#[tokio::test]
+async fn admin_server_grant_invalid_user_id_400() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let body = crate::common::body_of(
+        router(s),
+        "POST",
+        "/admin/servers/sb/grants/invalid..user",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(body, "vpnctl admin: invalid user id format 'invalid..user'\n");
+}
+
+#[tokio::test]
 async fn v2_server_grants_sort_links_render() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
