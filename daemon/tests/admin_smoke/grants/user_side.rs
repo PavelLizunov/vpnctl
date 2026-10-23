@@ -130,6 +130,54 @@ async fn admin_user_grant_unknown_user_404() {
 }
 
 #[tokio::test]
+async fn admin_user_grant_invalid_user_id_400() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[]).await;
+    let body = body_of(
+        router(s),
+        "POST",
+        "/admin/users/invalid..id/grants/s0",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(body, "vpnctl admin: invalid user id format 'invalid..id'\n");
+}
+
+#[tokio::test]
+async fn admin_user_grant_invalid_server_id_400() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[]).await;
+    let body = body_of(
+        router(s),
+        "POST",
+        "/admin/users/u0/grants/srv..01",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(body, "vpnctl admin: invalid server id format 'srv..01'\n");
+}
+
+#[tokio::test]
+async fn admin_user_access_csv_invalid_user_id_400() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[]).await;
+    let body = body_of(
+        router(s),
+        "GET",
+        "/admin/users/invalid..id/access.csv",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(body, "vpnctl admin: invalid user id format 'invalid..id'\n");
+}
+
+#[tokio::test]
 async fn admin_user_grant_unknown_server_404() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
