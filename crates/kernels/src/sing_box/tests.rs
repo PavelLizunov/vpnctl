@@ -1291,3 +1291,70 @@ fn is_artifact_up_to_date_detects_matching_and_mismatching_node_state() {
         "error output must fail safely"
     );
 }
+
+fn users_config(uuids: &[&str]) -> Vec<u8> {
+    let users: Vec<Value> = uuids
+        .iter()
+        .map(|uuid| serde_json::json!({ "uuid": uuid, "name": uuid }))
+        .collect();
+    serde_json::to_vec(&serde_json::json!({
+        "inbounds": [{ "type": "vless", "tag": "vless-in", "users": users }]
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn apply_allows_removing_uuid_known_to_inventory() {
+    let ssh = vpnctl_ssh::MockTransport::new();
+    ssh.upload(
+        "/etc/sing-box/config.json",
+        &users_config(&["keep", "disabled"]),
+    )
+    .await
+    .unwrap();
+    let new = users_config(&["keep"]);
+    let known: HashSet<String> = ["keep", "disabled"].into_iter().map(String::from).collect();
+
+    SingBox::new()
+        .apply_config_with_known_users(&ssh, &new, &known)
+        .await
+        .expect("disabling an inventory user must deploy");
+    assert_eq!(ssh.uploaded("/etc/sing-box/config.json.new"), Some(new));
+}
+
+#[tokio::test]
+async fn apply_refuses_removing_uuid_unknown_to_inventory() {
+    let ssh = vpnctl_ssh::MockTransport::new();
+    ssh.upload(
+        "/etc/sing-box/config.json",
+        &users_config(&["keep", "disabled", "foreign"]),
+    )
+    .await
+    .unwrap();
+    let new = users_config(&["keep"]);
+    let known: HashSet<String> = ["keep", "disabled"].into_iter().map(String::from).collect();
+
+    let err = SingBox::new()
+        .apply_config_with_known_users(&ssh, &new, &known)
+        .await
+        .expect_err("a UUID never known to inventory must stay protected");
+    let msg = err.to_string();
+    assert!(msg.contains("REMOVE 1 user UUID"), "{msg}");
+    assert!(msg.contains("foreign"), "{msg}");
+    assert!(!msg.contains("\"disabled\""), "{msg}");
+    assert_eq!(ssh.uploaded("/etc/sing-box/config.json.new"), None);
+}
+
+#[tokio::test]
+async fn plain_apply_keeps_strict_guard() {
+    let ssh = vpnctl_ssh::MockTransport::new();
+    ssh.upload("/etc/sing-box/config.json", &users_config(&["a", "b"]))
+        .await
+        .unwrap();
+
+    let err = SingBox::new()
+        .apply_config(&ssh, &users_config(&["a"]))
+        .await
+        .expect_err("apply_config without inventory knowledge must refuse removals");
+    assert!(err.to_string().contains("REMOVE 1 user UUID"));
+}

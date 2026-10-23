@@ -11,6 +11,8 @@ pub use scripts::{
     SING_BOX_VPNCTL_VERSION,
 };
 
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use guards::user_uuid_diff;
 use scripts::{
@@ -192,34 +194,46 @@ impl Kernel for SingBox {
     }
 
     async fn apply_config(&self, ssh: &dyn SshTransport, config: &[u8]) -> Result<()> {
+        self.apply_config_with_known_users(ssh, config, &HashSet::new())
+            .await
+    }
+
+    async fn apply_config_with_known_users(
+        &self,
+        ssh: &dyn SshTransport,
+        config: &[u8],
+        known_user_uuids: &HashSet<String>,
+    ) -> Result<()> {
         if let Ok(old_bytes) = ssh.read_file("/etc/sing-box/config.json").await {
             match user_uuid_diff(&old_bytes, config) {
-                Ok(removed) if !removed.is_empty() => {
+                Ok(removed) => {
+                    let mut unknown: Vec<String> = removed
+                        .into_iter()
+                        .filter(|uuid| !known_user_uuids.contains(uuid))
+                        .collect();
+                    unknown.sort();
                     let allow = std::env::var("VPNCTLD_ALLOW_USER_REMOVAL")
                         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                         .unwrap_or(false);
-                    if !allow {
-                        let preview: Vec<&String> = removed.iter().take(5).collect();
+                    if !unknown.is_empty() && !allow {
+                        let preview: Vec<&String> = unknown.iter().take(5).collect();
                         return Err(CoreError::Render(format!(
                             "sing-box apply_config: refusing to deploy a config that would \
                              REMOVE {} user UUID(s) from inbounds[*].users[]: {:?}{}. \
-                             These users exist on the LIVE server but are missing from vpnctld's \
-                             inventory. Either:\n  \
-                             1. Add the missing user(s) to inventory (admin UI → Add user with \
-                                the SAME UUID, then grant on this server), OR\n  \
-                             2. Set VPNCTLD_ALLOW_USER_REMOVAL=1 in /etc/vpnctl/vpnctld.env and \
-                                restart vpnctld to bypass this gate for this deploy cycle.",
-                            removed.len(),
+                             These UUIDs are live on the server but were never known to \
+                             vpnctld's inventory. To keep them, add a user with the SAME \
+                             UUID in the admin UI and grant it on this server; to drop \
+                             them, add that user and then delete it.",
+                            unknown.len(),
                             preview,
-                            if removed.len() > preview.len() {
-                                format!(" (+{} more)", removed.len() - preview.len())
+                            if unknown.len() > preview.len() {
+                                format!(" (+{} more)", unknown.len() - preview.len())
                             } else {
                                 String::new()
                             },
                         )));
                     }
                 }
-                Ok(_) => {}
                 Err(e) => {
                     eprintln!(
                         "WARN vpnctl::kernels::sing_box: pre-apply diff guard could not \

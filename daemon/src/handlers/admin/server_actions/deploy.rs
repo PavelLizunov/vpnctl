@@ -99,6 +99,10 @@ pub(crate) async fn server_deploy(
         if let Err(e) = state.inv.assert_no_uuid_collisions(&sid).await {
             return internal_error(anyhow::Error::new(e));
         }
+        let known_user_uuids = match state.inv.known_user_uuids().await {
+            Ok(k) => k,
+            Err(e) => return internal_error(anyhow::Error::new(e)),
+        };
         if state
             .inv
             .deploy_input_revision(&sid)
@@ -157,7 +161,10 @@ pub(crate) async fn server_deploy(
                 }
             }
             total_config_bytes += config.len();
-            if let Err(e) = kernel.apply_config(&ssh, &config).await {
+            if let Err(e) = kernel
+                .apply_config_with_known_users(&ssh, &config, &known_user_uuids)
+                .await
+            {
                 ssh_errors.push(format!("{}: apply_config failed: {e}", kid.0));
                 continue;
             }

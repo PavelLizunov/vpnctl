@@ -131,7 +131,7 @@ async fn deploy_all_sse_terminal_error_on_missing_deploy_key() {
 }
 
 #[tokio::test]
-async fn deploy_all_sse_lock_fails_locked_server_with_in_flight_error() {
+async fn deploy_all_sse_waits_for_in_flight_deploy() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
 
@@ -141,7 +141,11 @@ async fn deploy_all_sse_lock_fails_locked_server_with_in_flight_error() {
         .await
         .unwrap();
 
-    let _guard = DeployGuard::try_acquire(server_id).expect("must acquire deploy permit");
+    let guard = DeployGuard::try_acquire(server_id).expect("must acquire deploy permit");
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        drop(guard);
+    });
 
     let app = router(s);
     let resp = app
@@ -157,14 +161,13 @@ async fn deploy_all_sse_lock_fails_locked_server_with_in_flight_error() {
 
     assert_eq!(resp.status(), StatusCode::OK);
     let body = response_body_string(resp).await;
-
     assert!(
-        body.contains("deploy already running for server 'da-all-lock-srv'"),
-        "must report deploy already running in step lines: {body}"
+        body.contains("another deploy is running on da-all-lock-srv; waiting for it to finish"),
+        "must say it waits for the running deploy: {body}"
     );
     assert!(
-        body.contains("event: error"),
-        "terminal event must be error when a locked server cannot be deployed: {body}"
+        !body.contains("deploy already running"),
+        "must not fail while the other deploy finishes: {body}"
     );
 }
 
@@ -316,7 +319,7 @@ async fn user_deploy_pending_sse_terminal_error_when_pending_server_fails() {
 }
 
 #[tokio::test]
-async fn user_deploy_pending_sse_lock_reports_error_when_server_deploy_in_flight() {
+async fn user_deploy_pending_sse_waits_for_in_flight_deploy() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
 
@@ -347,7 +350,11 @@ async fn user_deploy_pending_sse_lock_reports_error_when_server_deploy_in_flight
         .await
         .unwrap();
 
-    let _guard = DeployGuard::try_acquire(&srv_id.0).expect("must acquire deploy permit");
+    let guard = DeployGuard::try_acquire(&srv_id.0).expect("must acquire deploy permit");
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        drop(guard);
+    });
 
     let app = router(s);
     let resp = app
@@ -363,14 +370,13 @@ async fn user_deploy_pending_sse_lock_reports_error_when_server_deploy_in_flight
 
     assert_eq!(resp.status(), StatusCode::OK);
     let body = response_body_string(resp).await;
-
     assert!(
-        body.contains("deploy already running for server 'da-srv-pend-lock'"),
-        "must report deploy in flight: {body}"
+        body.contains("another deploy is running on da-srv-pend-lock; waiting for it to finish"),
+        "must say it waits for the running deploy: {body}"
     );
     assert!(
-        body.contains("event: error"),
-        "must terminate with error event when locked: {body}"
+        !body.contains("deploy already running"),
+        "must not fail while the other deploy finishes: {body}"
     );
 }
 
@@ -560,7 +566,7 @@ async fn server_deploy_sse_refuses_cross_origin() {
 }
 
 #[tokio::test]
-async fn server_deploy_sse_lock_reports_error_when_already_in_flight() {
+async fn server_deploy_sse_waits_for_in_flight_deploy() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let srv_id = "da-srv-single-lock";
@@ -569,7 +575,11 @@ async fn server_deploy_sse_lock_reports_error_when_already_in_flight() {
         .await
         .unwrap();
 
-    let _guard = DeployGuard::try_acquire(srv_id).expect("acquire lock");
+    let guard = DeployGuard::try_acquire(srv_id).expect("acquire lock");
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        drop(guard);
+    });
 
     let app = router(s);
     let resp = app
@@ -585,8 +595,14 @@ async fn server_deploy_sse_lock_reports_error_when_already_in_flight() {
 
     assert_eq!(resp.status(), StatusCode::OK);
     let body = response_body_string(resp).await;
-    assert!(body.contains("event: error"));
-    assert!(body.contains("deploy already running for server 'da-srv-single-lock'"));
+    assert!(
+        body.contains("another deploy is running on da-srv-single-lock; waiting for it to finish"),
+        "must say it waits for the running deploy: {body}"
+    );
+    assert!(
+        !body.contains("deploy already running"),
+        "must not fail while the other deploy finishes: {body}"
+    );
 }
 
 #[tokio::test]

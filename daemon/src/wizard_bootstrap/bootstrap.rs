@@ -272,6 +272,10 @@ async fn bootstrap_pipeline(
         Ok(u) => u,
         Err(e) => fail!("install", "users_for_server: {e}"),
     };
+    let known_user_uuids = match inv.known_user_uuids().await {
+        Ok(k) => k,
+        Err(e) => fail!("install", "known_user_uuids: {e}"),
+    };
     if inv
         .deploy_input_revision(&server.id)
         .await
@@ -347,7 +351,10 @@ async fn bootstrap_pipeline(
             kid.0,
             config.len()
         );
-        if let Err(e) = kernel.apply_config(&ssh, &config).await {
+        if let Err(e) = kernel
+            .apply_config_with_known_users(&ssh, &config, &known_user_uuids)
+            .await
+        {
             fail!("apply", "{}: apply_config: {e}", kid.0);
         }
         send_step!("apply", "{}: ok — service running with new config.", kid.0);

@@ -120,7 +120,7 @@ pub(crate) async fn server_deploy_sse(
     };
 
     let key_path = crate::app::deploy_key_path();
-    let raw = crate::wizard_bootstrap::run_redeploy(
+    let raw = crate::wizard_bootstrap::run_redeploy_when_idle(
         server,
         state.inv.clone(),
         std::sync::Arc::clone(&state.registry),

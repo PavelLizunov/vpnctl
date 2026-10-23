@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use futures_core::Stream;
 use tokio::sync::mpsc;
@@ -42,6 +43,67 @@ pub fn run_redeploy(
             });
         }
     }
+    ReceiverStream::new(rx)
+}
+
+const DEPLOY_SLOT_WAIT: Duration = Duration::from_secs(300);
+const DEPLOY_SLOT_POLL: Duration = Duration::from_millis(500);
+
+pub fn run_redeploy_when_idle(
+    server: Server,
+    inv: SqliteInventory,
+    registry: Arc<Registry>,
+    deploy_key_path: PathBuf,
+) -> impl Stream<Item = BootstrapEvent> + Send + 'static {
+    run_redeploy_after_wait(server, inv, registry, deploy_key_path, DEPLOY_SLOT_WAIT)
+}
+
+pub(super) fn run_redeploy_after_wait(
+    server: Server,
+    inv: SqliteInventory,
+    registry: Arc<Registry>,
+    deploy_key_path: PathBuf,
+    wait_limit: Duration,
+) -> impl Stream<Item = BootstrapEvent> + Send + 'static {
+    let (tx, rx) = mpsc::channel::<BootstrapEvent>(64);
+    tokio::spawn(async move {
+        let sid = server.id.0.clone();
+        let deadline = Instant::now() + wait_limit;
+        let mut announced = false;
+        let guard = loop {
+            if let Some(guard) = DeployGuard::try_acquire(&sid) {
+                break guard;
+            }
+            if Instant::now() >= deadline {
+                let _ = tx
+                    .send(BootstrapEvent::Error {
+                        phase: "deploy",
+                        message: format!(
+                            "{DEPLOY_ALREADY_RUNNING_PREFIX} for server '{sid}' — wait for it to finish, then retry"
+                        ),
+                    })
+                    .await;
+                return;
+            }
+            if !announced {
+                announced = true;
+                let _ = tx
+                    .send(BootstrapEvent::Step {
+                        phase: "wait",
+                        message: format!(
+                            "another deploy is running on {sid}; waiting for it to finish…"
+                        ),
+                    })
+                    .await;
+            }
+            if tx.is_closed() {
+                return;
+            }
+            tokio::time::sleep(DEPLOY_SLOT_POLL).await;
+        };
+        redeploy_pipeline(server, inv, registry, deploy_key_path, tx).await;
+        drop(guard);
+    });
     ReceiverStream::new(rx)
 }
 
@@ -91,7 +153,12 @@ async fn deploy_all_pipeline(
                     message: format!("── deploying {sid} ──"),
                 })
                 .await;
-            let mut stream = Box::pin(run_redeploy(server, inv, registry, deploy_key_path));
+            let mut stream = Box::pin(run_redeploy_when_idle(
+                server,
+                inv,
+                registry,
+                deploy_key_path,
+            ));
             let mut had_error = false;
             while let Some(ev) = stream.next().await {
                 match ev {
@@ -340,6 +407,10 @@ async fn redeploy_pipeline(
     if let Err(e) = inv.assert_no_uuid_collisions(&server.id).await {
         fail!("deploy", "{e}");
     }
+    let known_user_uuids = match inv.known_user_uuids().await {
+        Ok(k) => k,
+        Err(e) => fail!("deploy", "known user UUID lookup failed: {e}"),
+    };
     let ctx = RenderCtx::new(&server, &secrets);
 
     for kid in &server.kernels {
@@ -395,7 +466,10 @@ async fn redeploy_pipeline(
         }
         total_config_bytes += config.len();
         send_step!("apply", "{}: applying config + restart…", kid.0);
-        if let Err(e) = kernel.apply_config(&ssh, &config).await {
+        if let Err(e) = kernel
+            .apply_config_with_known_users(&ssh, &config, &known_user_uuids)
+            .await
+        {
             ssh_errors.push(format!("{}: apply_config failed: {e}", kid.0));
             send_step!("apply", "✗ {} apply failed: {e}", kid.0);
             continue;

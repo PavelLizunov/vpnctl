@@ -93,6 +93,7 @@ pub(crate) async fn run(
     }
 
     let ctx = RenderCtx::new(&server, &secrets);
+    let known_user_uuids = inv.known_user_uuids().await?;
 
     let mut total_config_bytes = 0usize;
     let mut rendered_kernels: Vec<String> = Vec::new();
@@ -131,7 +132,8 @@ pub(crate) async fn run(
             k.id(),
             config.len()
         );
-        k.apply_config(&ssh, &config).await?;
+        k.apply_config_with_known_users(&ssh, &config, &known_user_uuids)
+            .await?;
         if let Err(e) = k.open_firewall(&ssh, &ctx, &protocols_for_k).await {
             println!("⚠ firewall step skipped for {}: {e}", k.id());
         }

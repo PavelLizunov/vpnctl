@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fmt;
 
 use crate::error::Result;
@@ -29,6 +30,15 @@ pub trait Kernel: fmt::Debug + Send + Sync {
     ) -> Result<Vec<u8>>;
 
     async fn apply_config(&self, ssh: &dyn SshTransport, config: &[u8]) -> Result<()>;
+
+    async fn apply_config_with_known_users(
+        &self,
+        ssh: &dyn SshTransport,
+        config: &[u8],
+        _known_user_uuids: &HashSet<String>,
+    ) -> Result<()> {
+        self.apply_config(ssh, config).await
+    }
 
     async fn open_firewall(
         &self,
