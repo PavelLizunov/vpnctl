@@ -92,7 +92,10 @@ async fn admin_server_grant_invalid_user_id_400() {
         None,
     )
     .await;
-    assert_eq!(body, "vpnctl admin: invalid user id format 'invalid..user'\n");
+    assert_eq!(
+        body,
+        "vpnctl admin: invalid user id format 'invalid..user'\n"
+    );
 }
 
 #[tokio::test]
