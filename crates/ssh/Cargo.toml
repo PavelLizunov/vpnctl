@@ -18,7 +18,7 @@ async-trait = { workspace = true }
 base64 = "0.22"
 tempfile = "3"
 
-russh = { version = "0.60", optional = true }
+russh = { version = "0.64", optional = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "io-util"] }
 tracing = "0.1"
 zeroize = { version = "1", features = ["derive"], optional = true }

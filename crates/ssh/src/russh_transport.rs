@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use russh::ChannelMsg;
 use russh::client::{self, Handler};
-use russh::keys::ssh_key::{HashAlg, PublicKey};
-use russh::keys::{PrivateKeyWithHashAlg, load_secret_key};
+use russh::keys::ssh_key::HashAlg;
+use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate, load_secret_key};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,9 +24,17 @@ impl Handler for VerifyHandler {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &PublicKey,
+        server_public_key: &PublicKeyOrCertificate,
     ) -> std::result::Result<bool, Self::Error> {
-        let fp = server_public_key.fingerprint(HashAlg::Sha256).to_string();
+        // A host certificate is pinned by the host key it certifies, which is
+        // what ssh-keyscan records.
+        let fp = match server_public_key {
+            PublicKeyOrCertificate::PublicKey { key, .. } => key.fingerprint(HashAlg::Sha256),
+            PublicKeyOrCertificate::Certificate(cert) => {
+                cert.public_key().fingerprint(HashAlg::Sha256)
+            }
+        }
+        .to_string();
         *self.observed_fingerprint.lock().await = Some(fp.clone());
 
         match &self.trusted_fingerprint {
