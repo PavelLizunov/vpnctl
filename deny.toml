@@ -9,6 +9,8 @@ ignore = [
     "RUSTSEC-2023-0071",
     "RUSTSEC-2025-0134", # rustls-pemfile unmaintained, transitively via bollard→testcontainers
     "RUSTSEC-2025-0111", # tokio-tar PAX header parsing — file-smuggling on untrusted tar reads;
+    "RUSTSEC-2026-0387", # crypto-bigint timing variability in constant-time ops
+    "RUSTSEC-2026-0386", # tokio AsyncFd constructors violate I/O safety
 ]
 
 [licenses]
