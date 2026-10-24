@@ -114,6 +114,66 @@ async fn admin_user_revoke_server_happy_path() {
 }
 
 #[tokio::test]
+async fn admin_user_grant_invalid_user_or_server_id_400() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[]).await;
+
+    let body_invalid_user = body_of(
+        router(s.clone()),
+        "POST",
+        "/admin/users/../grants/s0",
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        body_invalid_user.contains("invalid user id"),
+        "invalid user_id must return 400 Bad Request"
+    );
+
+    let body_invalid_server =
+        body_of(router(s), "POST", "/admin/users/u0/grants/..", None, None).await;
+    assert!(
+        body_invalid_server.contains("invalid server id"),
+        "invalid server_id must return 400 Bad Request"
+    );
+}
+
+#[tokio::test]
+async fn admin_user_revoke_invalid_user_or_server_id_400() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+
+    let body_invalid_user = body_of(
+        router(s.clone()),
+        "POST",
+        "/admin/users/../grants/s0/revoke",
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        body_invalid_user.contains("invalid user id"),
+        "invalid user_id must return 400 Bad Request"
+    );
+
+    let body_invalid_server = body_of(
+        router(s),
+        "POST",
+        "/admin/users/u0/grants/../revoke",
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        body_invalid_server.contains("invalid server id"),
+        "invalid server_id must return 400 Bad Request"
+    );
+}
+
+#[tokio::test]
 async fn admin_user_grant_unknown_user_404() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;

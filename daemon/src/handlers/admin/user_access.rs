@@ -1,7 +1,9 @@
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Redirect, Response};
 
-use super::helpers::{bad_request, internal_error, not_found, user_not_found};
+use super::helpers::{
+    bad_request, internal_error, not_found, user_not_found, valid_server_id, valid_user_id,
+};
 use super::legacy::spawn_user_servers_redeploy;
 use crate::AppState;
 use crate::http_util::path_segment_encode;
@@ -10,6 +12,13 @@ pub(crate) async fn user_grant_server(
     State(state): State<AppState>,
     Path((user_id_str, server_id_str)): Path<(String, String)>,
 ) -> Response {
+    if !valid_user_id(&user_id_str) {
+        return bad_request(&format!("invalid user id '{user_id_str}'"));
+    }
+    if !valid_server_id(&server_id_str) {
+        return bad_request(&format!("invalid server id '{server_id_str}'"));
+    }
+
     let uid = vpnctl_core::UserId(user_id_str.clone());
     let sid = vpnctl_core::ServerId(server_id_str.clone());
 
@@ -71,6 +80,13 @@ pub(crate) async fn user_revoke_server(
     State(state): State<AppState>,
     Path((user_id_str, server_id_str)): Path<(String, String)>,
 ) -> Response {
+    if !valid_user_id(&user_id_str) {
+        return bad_request(&format!("invalid user id '{user_id_str}'"));
+    }
+    if !valid_server_id(&server_id_str) {
+        return bad_request(&format!("invalid server id '{server_id_str}'"));
+    }
+
     let uid = vpnctl_core::UserId(user_id_str.clone());
     let sid = vpnctl_core::ServerId(server_id_str.clone());
 
