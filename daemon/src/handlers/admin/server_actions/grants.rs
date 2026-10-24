@@ -267,15 +267,17 @@ pub(crate) async fn server_revoke_all_users(
         Ok(None) => return not_found(&format!("no such server '{server_id_str}'")),
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
-    let granted = match state.inv.users_for_server(&sid).await {
-        Ok(v) => v,
+    // Every grant, including disabled users': `users_for_server` hides them,
+    // and a kept grant silently returns access when the user is re-enabled.
+    let granted: Vec<vpnctl_core::UserId> = match state.inv.grant_dates_for_server(&sid).await {
+        Ok(v) => v.into_iter().map(|(uid, _)| uid).collect(),
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
     let total_was = granted.len();
     let mut revoked: u32 = 0;
     let mut failed: u32 = 0;
-    for u in &granted {
-        match state.inv.revoke(&u.id, &sid).await {
+    for uid in &granted {
+        match state.inv.revoke(uid, &sid).await {
             Ok(()) => {
                 revoked += 1;
                 if let Err(e) = state
@@ -283,7 +285,7 @@ pub(crate) async fn server_revoke_all_users(
                     .audit(
                         "admin",
                         "user.revoke",
-                        Some(&u.id.0),
+                        Some(&uid.0),
                         Some(&serde_json::json!({
                             "server": server_id_str,
                             "source": "server-detail.bulk",
@@ -294,7 +296,7 @@ pub(crate) async fn server_revoke_all_users(
                     tracing::warn!(
                         target = "vpnctld::admin",
                         server = %server_id_str,
-                        user = %u.id,
+                        user = %uid,
                         error = %e,
                         "audit write failed for user.revoke (bulk) — mutation already committed"
                     );
@@ -305,7 +307,7 @@ pub(crate) async fn server_revoke_all_users(
                 tracing::warn!(
                     target = "vpnctld::admin",
                     server = %server_id_str,
-                    user = %u.id,
+                    user = %uid,
                     error = %e,
                     "bulk-revoke: per-user revoke failed; continuing"
                 );

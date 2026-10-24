@@ -1,6 +1,26 @@
 (function () {
   "use strict";
 
+  function withTicket(url, onReady, onFail) {
+    var path = url.split("?")[0];
+    fetch("/admin/sse-ticket", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: "path=" + encodeURIComponent(path)
+    })
+      .then(function (r) {
+        if (!r.ok) throw new Error("start ticket refused (HTTP " + r.status + ")");
+        return r.text();
+      })
+      .then(function (t) {
+        onReady(url + (url.indexOf("?") < 0 ? "?" : "&") + "ticket=" + encodeURIComponent(t.trim()));
+      })
+      .catch(function (e) {
+        onFail(e && e.message ? e.message : String(e));
+      });
+  }
+
   function wireSse(btn) {
     var url = btn.getAttribute("data-sse-url");
     if (!url) return;
@@ -29,60 +49,68 @@
         log.scrollTop = log.scrollHeight;
       }
 
-      var es = new EventSource(url);
-
-      es.addEventListener("step", function (ev) {
-        try {
-          var d = JSON.parse(ev.data);
-          var color = d.stream === "stderr" ? "var(--acc-bad, #97233f)" : null;
-          line((d.phase ? "[" + d.phase + "] " : "") + d.message, color);
-        } catch (_) {
-          line(ev.data);
-        }
-      });
-
-      es.addEventListener("ok", function (ev) {
-        done = true;
-        var redirect = null;
-        var okMsg = null;
-        try {
-          var okd = JSON.parse(ev.data);
-          redirect = okd.redirect;
-          okMsg = okd.message;
-        } catch (_) {}
-        line("✓ " + (okMsg || "complete."), "var(--acc-good, #2c5f2d)");
-        es.close();
-        label.textContent = document.documentElement.lang === "ru" ? "готово — перезагрузка…" : "done — reloading…";
-        var iconUse = btn.querySelector(".ed-icon use");
-        if (iconUse) iconUse.setAttribute("href", "/admin/assets/icons.svg#check");
-        var reloadSelf = btn.getAttribute("data-reload-self");
-        setTimeout(function () {
-          window.location = reloadSelf ? window.location.href : redirect || window.location.href;
-        }, 1200);
-      });
-
-      es.addEventListener("error", function (ev) {
-        if (done) return;
-        if (ev && ev.data) {
-          done = true;
-          var msg = "deploy failed";
-          try {
-            msg = JSON.parse(ev.data).message || msg;
-          } catch (_) {}
-          if (msg.indexOf("deploy already running") !== -1) {
-            line("ℹ " + (document.documentElement.lang === "ru" ? "деплой уже выполняется — ожидаем завершения…" : "deploy is already in progress — waiting for completion…"), "var(--ink)");
-            es.close();
-            setTimeout(function () { window.location.reload(); }, 2000);
-            return;
-          }
-          line("✗ " + msg, "var(--acc-bad, #97233f)");
-        } else {
-          line("✗ connection lost — please retry", "var(--acc-bad, #97233f)");
-        }
-        es.close();
+      withTicket(url, start, function (msg) {
+        line("✗ " + msg, "var(--acc-bad, #97233f)");
         btn.disabled = false;
         label.textContent = btn.getAttribute("data-retry-label") || idleLabel;
       });
+
+      function start(ticketedUrl) {
+        var es = new EventSource(ticketedUrl);
+
+        es.addEventListener("step", function (ev) {
+          try {
+            var d = JSON.parse(ev.data);
+            var color = d.stream === "stderr" ? "var(--acc-bad, #97233f)" : null;
+            line((d.phase ? "[" + d.phase + "] " : "") + d.message, color);
+          } catch (_) {
+            line(ev.data);
+          }
+        });
+
+        es.addEventListener("ok", function (ev) {
+          done = true;
+          var redirect = null;
+          var okMsg = null;
+          try {
+            var okd = JSON.parse(ev.data);
+            redirect = okd.redirect;
+            okMsg = okd.message;
+          } catch (_) {}
+          line("✓ " + (okMsg || "complete."), "var(--acc-good, #2c5f2d)");
+          es.close();
+          label.textContent = document.documentElement.lang === "ru" ? "готово — перезагрузка…" : "done — reloading…";
+          var iconUse = btn.querySelector(".ed-icon use");
+          if (iconUse) iconUse.setAttribute("href", "/admin/assets/icons.svg#check");
+          var reloadSelf = btn.getAttribute("data-reload-self");
+          setTimeout(function () {
+            window.location = reloadSelf ? window.location.href : redirect || window.location.href;
+          }, 1200);
+        });
+
+        es.addEventListener("error", function (ev) {
+          if (done) return;
+          if (ev && ev.data) {
+            done = true;
+            var msg = "deploy failed";
+            try {
+              msg = JSON.parse(ev.data).message || msg;
+            } catch (_) {}
+            if (msg.indexOf("deploy already running") !== -1) {
+              line("ℹ " + (document.documentElement.lang === "ru" ? "деплой уже выполняется — ожидаем завершения…" : "deploy is already in progress — waiting for completion…"), "var(--ink)");
+              es.close();
+              setTimeout(function () { window.location.reload(); }, 2000);
+              return;
+            }
+            line("✗ " + msg, "var(--acc-bad, #97233f)");
+          } else {
+            line("✗ connection lost — please retry", "var(--acc-bad, #97233f)");
+          }
+          es.close();
+          btn.disabled = false;
+          label.textContent = btn.getAttribute("data-retry-label") || idleLabel;
+        });
+      }
     });
   }
 
@@ -358,6 +386,11 @@
     wireBoostyQuickConnect();
     var nodes = document.querySelectorAll("[data-sse-url]");
     for (var i = 0; i < nodes.length; i++) wireSse(nodes[i]);
+    var reloads = document.querySelectorAll("[data-reload-after]");
+    if (reloads.length) {
+      var secs = parseInt(reloads[0].getAttribute("data-reload-after"), 10) || 5;
+      setTimeout(function () { window.location.reload(); }, secs * 1000);
+    }
     var autos = document.querySelectorAll("[data-sse-autostart]");
     for (var a = 0; a < autos.length; a++) wireAutoSse(autos[a]);
     var confirms = document.querySelectorAll("[data-confirm]");

@@ -76,10 +76,11 @@ impl Protocol for Naive {
             "server_port": NAIVE_PORT,
             "username": user.id.0,
             "password": pw,
+            // No `utls`: sing-box's naive outbound rejects it ("uTLS is not
+            // supported on naive outbound") and the whole config fails to load.
             "tls": {
                 "enabled": true,
-                "server_name": domain,
-                "utls": { "enabled": true, "fingerprint": "chrome" }
+                "server_name": domain
             }
         }))
     }
@@ -195,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn client_config_targets_domain_with_utls_chrome() {
+    fn client_config_targets_domain_without_utls() {
         let s = server();
         let sec = secrets();
         let ctx = RenderCtx::new(&s, &sec);
@@ -209,7 +210,11 @@ mod tests {
         assert_eq!(cfg["username"], "alice");
         assert_eq!(cfg["password"], "pw-a");
         assert_eq!(cfg["tls"]["server_name"], "cdn.example.com");
-        assert_eq!(cfg["tls"]["utls"]["fingerprint"], "chrome");
+        assert_eq!(
+            cfg["tls"],
+            serde_json::json!({ "enabled": true, "server_name": "cdn.example.com" }),
+            "naive TLS must carry no utls block — sing-box refuses it"
+        );
     }
 
     #[test]

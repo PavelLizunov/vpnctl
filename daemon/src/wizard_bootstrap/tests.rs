@@ -133,6 +133,39 @@ async fn bootstrap_secrets_mints_then_is_idempotent() {
 }
 
 #[tokio::test]
+async fn bootstrap_mints_reality_identity_for_an_xray_only_xhttp_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("inv.db");
+    let inv = vpnctl_inventory::SqliteInventory::open(&db).await.unwrap();
+    let registry = crate::app::build_registry().unwrap();
+    let server = Server {
+        id: ServerId("xray-only".into()),
+        address: "203.0.113.10".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("xray".into())],
+        enabled_protocols: vec![vpnctl_core::ProtocolId("vless+xhttp".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&server).await.unwrap();
+
+    let (secrets, _minted) = bootstrap_server_secrets(&inv, &server, &registry)
+        .await
+        .unwrap();
+    let ctx = RenderCtx::new(&server, &secrets);
+    let proto = registry
+        .protocol(&vpnctl_core::ProtocolId("vless+xhttp".into()))
+        .unwrap();
+    assert!(
+        proto.server_inbound(&ctx, &[]).is_ok(),
+        "xray-only vless+xhttp must render after bootstrap: {secrets:?}"
+    );
+}
+
+#[tokio::test]
 async fn bootstrap_mints_every_secret_each_enabled_protocol_needs_to_render() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("inv.db");

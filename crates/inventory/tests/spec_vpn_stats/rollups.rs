@@ -335,3 +335,33 @@ async fn planted_mutation_monthly_daily_rollup_fails_if_unweighted() {
         "planted mutation: unweighted daily monthly sum (1M) must not match weighted result (2M)"
     );
 }
+
+#[tokio::test]
+async fn rollup_survives_raw_rows_of_a_deleted_user() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server("s1")).await.unwrap();
+    for u in ["alice", "bob"] {
+        inv.add_user(&user(u)).await.unwrap();
+    }
+    inv.record_vpn_stats(
+        &ServerId("s1".into()),
+        &[ud(Some("alice"), 10, 20, 1), ud(Some("bob"), 30, 40, 1)],
+    )
+    .await
+    .unwrap();
+    inv.remove_user(&UserId("alice".into())).await.unwrap();
+
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let upserted = inv
+        .rollup_vpn_user_daily(&today)
+        .await
+        .expect("a deleted user's raw rows must not abort the whole day's rollup");
+    assert_eq!(upserted, 1, "only bob is rolled up");
+    let bob = inv
+        .vpn_user_daily_for_user(&UserId("bob".into()), 7)
+        .await
+        .unwrap();
+    assert_eq!(bob.len(), 1);
+    assert_eq!(bob[0].upload_bytes, 30);
+}

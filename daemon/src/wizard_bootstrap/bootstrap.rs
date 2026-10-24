@@ -9,7 +9,6 @@ use super::types::{BootstrapEvent, BootstrapPlan};
 use super::util::ssh_password_run;
 use crate::http_util::path_segment_encode;
 use crate::ssh_subprocess::SubprocessSshTransport;
-use vpnctl_core::shell::single_quote as shell_single_quote;
 use vpnctl_core::{KernelId, ProtocolId, Registry, RenderCtx, Server, ServerId, SshTransport};
 use vpnctl_inventory::{SqliteInventory, bootstrap_server_secrets};
 
@@ -132,14 +131,7 @@ async fn bootstrap_pipeline(
         "push-key",
         "appending deploy pubkey to ~/.ssh/authorized_keys (idempotent)…"
     );
-    let push_cmd = format!(
-        "set -eu; \
-         mkdir -p ~/.ssh && chmod 0700 ~/.ssh; \
-         touch ~/.ssh/authorized_keys && chmod 0600 ~/.ssh/authorized_keys; \
-         grep -qxF {pk_q} ~/.ssh/authorized_keys || echo {pk_q} >> ~/.ssh/authorized_keys; \
-         echo done",
-        pk_q = shell_single_quote(&deploy_pubkey),
-    );
+    let push_cmd = super::authorized_key_push_cmd(&deploy_pubkey);
     match ssh_password_run(
         &plan.address,
         plan.ssh_port,

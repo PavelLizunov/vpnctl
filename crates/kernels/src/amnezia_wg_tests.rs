@@ -426,3 +426,66 @@ fn render_config_uses_egress_placeholder_not_hardcoded_eth0() {
         "both PostUp and PostDown must reference the placeholder: {text}"
     );
 }
+
+#[test]
+fn apply_script_failed_reload_rolls_back_even_if_old_interface_stays_active() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    let bin = root.join("bin");
+    let conf_dir = root.join("etc/amnezia/amneziawg");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&conf_dir).unwrap();
+    std::fs::write(conf_dir.join("awg0.conf"), "OLD\n").unwrap();
+    std::fs::write(conf_dir.join("awg0.conf.new"), "NEW\n").unwrap();
+    // reload fails while the old interface keeps reporting active.
+    let stubs = [
+        (
+            "systemctl",
+            "case \"$1\" in reload-or-restart) exit 1;; is-active) echo active;; esac; exit 0",
+        ),
+        ("awg-quick", "exit 0"),
+        ("ip", "exit 0"),
+        ("sysctl", "exit 0"),
+        ("chown", "exit 0"),
+        ("journalctl", "exit 0"),
+        ("sleep", "exit 0"),
+    ];
+    for (name, body) in stubs {
+        let path = bin.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+    }
+    let script = awg_apply_script().replace("/etc/", &format!("{}/etc/", root.display()));
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&script)
+        .env("PATH", path)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert_eq!(
+        std::fs::read_to_string(conf_dir.join("awg0.conf")).unwrap(),
+        "OLD\n",
+        "a failed reload must restore the previous config"
+    );
+}
+
+#[test]
+fn apply_script_restart_failure_reaches_rollback() {
+    let s = awg_apply_script();
+    let restart = s
+        .find("systemctl reload-or-restart awg-quick@awg0")
+        .expect("restart step");
+    let line = s[restart..].lines().next().unwrap_or_default();
+    assert!(
+        line.trim_end().ends_with("|| restart_rc=$?"),
+        "under set -eu a failed restart must not skip the .bak rollback: {line}"
+    );
+}

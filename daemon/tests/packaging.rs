@@ -185,6 +185,7 @@ fn deploy_script_functional_all_artifacts_land() {
         .env("VPNCTL_SING_BOX_ARTIFACT", bash_path(&destinations[2]))
         .env("VPNCTL_STATS_HELPER_ARTIFACT", bash_path(&destinations[3]))
         .env("VPNCTL_INSTALL_OWNER", "")
+        .env("VPNCTL_SKIP_ASSETS", "1")
         .status()
         .expect("spawn bash deploy.sh");
     assert!(
@@ -233,6 +234,7 @@ fn deploy_script_rolls_back_every_injected_swap_failure() {
             .env("VPNCTL_STATS_HELPER_ARTIFACT", bash_path(&destinations[3]))
             .env("VPNCTL_FAIL_AFTER_SWAP", fail_after.to_string())
             .env("VPNCTL_INSTALL_OWNER", "")
+            .env("VPNCTL_SKIP_ASSETS", "1")
             .status()
             .unwrap();
         assert!(!status.success(), "failure {fail_after} must abort");
@@ -276,6 +278,7 @@ fn deploy_script_missing_cli_never_half_upgrades() {
         .env("VPNCTL_DAEMON_DST", bash_path(&daemon_dst))
         .env("VPNCTL_CLI_DST", bash_path(&cli_dst))
         .env("VPNCTL_INSTALL_OWNER", "")
+        .env("VPNCTL_SKIP_ASSETS", "1")
         .status()
         .expect("spawn bash deploy.sh");
     assert!(
@@ -289,4 +292,126 @@ fn deploy_script_missing_cli_never_half_upgrades() {
         "daemon must stay untouched when the CLI source is missing"
     );
     assert_eq!(std::fs::read(&cli_dst).unwrap(), b"OLD_CLI");
+}
+
+fn run_deploy_with_assets(root: &Path, fail_after_assets: bool) -> std::process::ExitStatus {
+    let sources: Vec<_> = (0..4).map(|i| root.join(format!("new-{i}"))).collect();
+    let destinations: Vec<_> = (0..4).map(|i| root.join(format!("live-{i}"))).collect();
+    for source in &sources {
+        std::fs::write(source, b"NEW").unwrap();
+    }
+    for destination in &destinations {
+        std::fs::write(destination, b"OLD").unwrap();
+    }
+    let mut cmd = Command::new("bash");
+    cmd.arg(bash_path(&scripts_dir().join("deploy.sh")))
+        .args(sources.iter().map(|path| bash_path(path)))
+        .env("VPNCTL_DAEMON_DST", bash_path(&destinations[0]))
+        .env("VPNCTL_CLI_DST", bash_path(&destinations[1]))
+        .env("VPNCTL_SING_BOX_ARTIFACT", bash_path(&destinations[2]))
+        .env("VPNCTL_STATS_HELPER_ARTIFACT", bash_path(&destinations[3]))
+        .env("VPNCTL_ASSETS_SRC", bash_path(&root.join("assets-new")))
+        .env("VPNCTL_ASSETS_DST", bash_path(&root.join("assets")))
+        .env("VPNCTL_INSTALL_OWNER", "");
+    if fail_after_assets {
+        cmd.env("VPNCTL_FAIL_AFTER_ASSETS", "1");
+    }
+    cmd.status().unwrap()
+}
+
+fn seed_assets(root: &Path) {
+    std::fs::create_dir_all(root.join("assets")).unwrap();
+    std::fs::write(root.join("assets/admin.js"), b"OLD_JS").unwrap();
+    std::fs::write(root.join("assets/stale.css"), b"OLD_CSS").unwrap();
+    std::fs::create_dir_all(root.join("assets-new")).unwrap();
+    std::fs::write(root.join("assets-new/admin.js"), b"NEW_JS").unwrap();
+}
+
+#[test]
+fn deploy_script_ships_admin_assets_from_the_same_revision() {
+    if !bash_available() {
+        eprintln!("skip: no bash on PATH (functional deploy.sh check)");
+        return;
+    }
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    seed_assets(root);
+    assert!(run_deploy_with_assets(root, false).success());
+    assert_eq!(
+        std::fs::read(root.join("assets/admin.js")).unwrap(),
+        b"NEW_JS"
+    );
+    assert!(
+        !root.join("assets/stale.css").exists(),
+        "assets must be replaced as a set, not merged"
+    );
+    let litter: Vec<_> = std::fs::read_dir(root)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".stage.") || name.contains(".rollback."))
+        .collect();
+    assert!(litter.is_empty(), "temp litter left: {litter:?}");
+}
+
+#[test]
+fn deploy_script_rolls_back_assets_with_binaries() {
+    if !bash_available() {
+        eprintln!("skip: no bash on PATH (functional deploy.sh check)");
+        return;
+    }
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    seed_assets(root);
+    assert!(!run_deploy_with_assets(root, true).success());
+    assert_eq!(
+        std::fs::read(root.join("assets/admin.js")).unwrap(),
+        b"OLD_JS"
+    );
+    assert_eq!(
+        std::fs::read(root.join("assets/stale.css")).unwrap(),
+        b"OLD_CSS"
+    );
+    for i in 0..4 {
+        assert_eq!(
+            std::fs::read(root.join(format!("live-{i}"))).unwrap(),
+            b"OLD"
+        );
+    }
+}
+
+#[test]
+fn deploy_script_refuses_prebuilt_artifacts_without_assets() {
+    if !bash_available() {
+        eprintln!("skip: no bash on PATH (functional deploy.sh check)");
+        return;
+    }
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    let sources: Vec<_> = (0..4).map(|i| root.join(format!("new-{i}"))).collect();
+    let destinations: Vec<_> = (0..4).map(|i| root.join(format!("live-{i}"))).collect();
+    for (source, destination) in sources.iter().zip(&destinations) {
+        std::fs::write(source, b"NEW").unwrap();
+        std::fs::write(destination, b"OLD").unwrap();
+    }
+    let status = Command::new("bash")
+        .arg(bash_path(&scripts_dir().join("deploy.sh")))
+        .args(sources.iter().map(|path| bash_path(path)))
+        .env("VPNCTL_DAEMON_DST", bash_path(&destinations[0]))
+        .env("VPNCTL_CLI_DST", bash_path(&destinations[1]))
+        .env("VPNCTL_SING_BOX_ARTIFACT", bash_path(&destinations[2]))
+        .env("VPNCTL_STATS_HELPER_ARTIFACT", bash_path(&destinations[3]))
+        .env("VPNCTL_ASSETS_DST", bash_path(&root.join("assets")))
+        .env_remove("VPNCTL_ASSETS_SRC")
+        .env_remove("VPNCTL_SKIP_ASSETS")
+        .env("VPNCTL_INSTALL_OWNER", "")
+        .status()
+        .unwrap();
+    assert!(
+        !status.success(),
+        "new binaries with the previous admin.js would break every SSE button"
+    );
+    for destination in &destinations {
+        assert_eq!(std::fs::read(destination).unwrap(), b"OLD");
+    }
 }

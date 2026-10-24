@@ -147,16 +147,22 @@ fn xray_apply_script() -> String {
             mv {staging_path} {config_path}
             chown xray:xray {config_path}
             chmod 0640 {config_path}
-            systemctl reload-or-restart xray
+            # A failed reload/restart goes straight to the rollback below: under
+            # set -eu it would otherwise exit first, and an old process that is
+            # still active must not pass for the new config.
+            restart_rc=0
+            systemctl reload-or-restart xray || restart_rc=$?
 
-            for i in 1 2 3 4 5 6 7 8; do
-                state=$(systemctl is-active xray || true)
-                if [ "$state" = "active" ]; then
-                    rm -f {config_path}.bak
-                    exit 0
-                fi
-                sleep 1
-            done
+            if [ "$restart_rc" -eq 0 ]; then
+                for i in 1 2 3 4 5 6 7 8; do
+                    state=$(systemctl is-active xray || true)
+                    if [ "$state" = "active" ]; then
+                        rm -f {config_path}.bak
+                        exit 0
+                    fi
+                    sleep 1
+                done
+            fi
 
             echo "xray did not become active. Last 20 log lines:" >&2
             journalctl -u xray --no-pager -n 20 >&2 || true
@@ -288,6 +294,19 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use vpnctl_core::{Server, ServerId};
+
+    #[test]
+    fn apply_script_restart_failure_reaches_rollback() {
+        let s = xray_apply_script();
+        let restart = s
+            .find("systemctl reload-or-restart xray")
+            .expect("restart step");
+        let line = s[restart..].lines().next().unwrap_or_default();
+        assert!(
+            line.trim_end().ends_with("|| restart_rc=$?"),
+            "under set -eu a failed restart must not skip the .bak rollback: {line}"
+        );
+    }
 
     fn dummy_server() -> Server {
         Server {

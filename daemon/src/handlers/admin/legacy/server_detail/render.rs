@@ -511,9 +511,9 @@ pub(super) async fn server_detail_render(
         }
         @if is_deploying {
             pre id="deploy-log"
-                data-sse-autostart=(format!("/admin/servers/{}/deploy/sse", path_segment_encode(&server.id.0)))
+                data-reload-after="5"
                 style="margin: 0 0 12px; padding: 10px 12px; background: var(--paper-tint); border: 1px solid var(--rule); font-family: var(--mono); font-size: 11px; line-height: 1.5; max-height: 320px; overflow-y: auto; white-space: pre-wrap;" {
-                (crate::i18n::tr(lang, "connecting to live deployment stream…", "подключаюсь к живому потоку деплоя…"))
+                (crate::i18n::tr(lang, "a deploy is running on this server — this page refreshes until it finishes…", "на сервере идёт деплой — страница обновляется, пока он не завершится…"))
             }
         } @else {
             pre id="deploy-log" hidden

@@ -37,14 +37,9 @@ async fn deploy_all_sse_terminal_ok_on_empty_inventory() {
     let s = state(&dir).await;
     let app = router(s);
 
+    let sse_uri = ticketed_sse_uri(&app, "/admin/servers/deploy-all/sse").await;
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/admin/servers/deploy-all/sse")
-                .header("sec-fetch-site", "same-origin")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(sse_uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
 
@@ -94,14 +89,9 @@ async fn deploy_all_sse_terminal_error_on_missing_deploy_key() {
         .unwrap();
 
     let app = router(s);
+    let sse_uri = ticketed_sse_uri(&app, "/admin/servers/deploy-all/sse").await;
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/admin/servers/deploy-all/sse")
-                .header("sec-fetch-site", "same-origin")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(sse_uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
 
@@ -148,14 +138,9 @@ async fn deploy_all_sse_waits_for_in_flight_deploy() {
     });
 
     let app = router(s);
+    let sse_uri = ticketed_sse_uri(&app, "/admin/servers/deploy-all/sse").await;
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/admin/servers/deploy-all/sse")
-                .header("sec-fetch-site", "same-origin")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(sse_uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
 
@@ -172,7 +157,7 @@ async fn deploy_all_sse_waits_for_in_flight_deploy() {
 }
 
 #[tokio::test]
-async fn deploy_all_sse_refuses_cross_origin_trigger() {
+async fn deploy_all_sse_refuses_unticketed_trigger() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let app = router(s);
@@ -181,7 +166,6 @@ async fn deploy_all_sse_refuses_cross_origin_trigger() {
         .oneshot(
             Request::builder()
                 .uri("/admin/servers/deploy-all/sse")
-                .header("sec-fetch-site", "cross-site")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -191,8 +175,64 @@ async fn deploy_all_sse_refuses_cross_origin_trigger() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     let body = response_body_string(resp).await;
     assert!(
-        body.contains("cross-origin deploy trigger refused"),
+        body.contains("start ticket missing or expired"),
         "forbidden response body must state reason: {body}"
+    );
+}
+
+#[tokio::test]
+async fn sse_ticket_issue_is_csrf_checked_and_single_use() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    let cross = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/sse-ticket")
+                .header("host", SAME_ORIGIN_HOST)
+                .header("origin", "http://attacker.example")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("path=/admin/servers/deploy-all/sse"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        cross.status(),
+        StatusCode::FORBIDDEN,
+        "a foreign Origin must not obtain a start ticket"
+    );
+
+    let other_path = body_of(
+        app.clone(),
+        "POST",
+        "/admin/sse-ticket",
+        Some("application/x-www-form-urlencoded"),
+        Some("path=/admin/users"),
+    )
+    .await;
+    assert!(
+        other_path.contains("not a ticketed admin action"),
+        "only operation SSE paths get tickets: {other_path}"
+    );
+
+    let uri = ticketed_sse_uri(&app, "/admin/servers/deploy-all/sse").await;
+    let first = app
+        .clone()
+        .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let replay = app
+        .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        replay.status(),
+        StatusCode::FORBIDDEN,
+        "a ticket must start one operation only"
     );
 }
 
@@ -216,14 +256,9 @@ async fn user_deploy_pending_sse_terminal_ok_when_nothing_pending() {
         .unwrap();
 
     let app = router(s);
+    let sse_uri = ticketed_sse_uri(&app, "/admin/users/da-user-nopending/deploy-pending/sse").await;
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/admin/users/da-user-nopending/deploy-pending/sse")
-                .header("sec-fetch-site", "same-origin")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(sse_uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
 
@@ -290,14 +325,9 @@ async fn user_deploy_pending_sse_terminal_error_when_pending_server_fails() {
     assert_eq!(pending, vec![srv_id.clone()]);
 
     let app = router(s);
+    let sse_uri = ticketed_sse_uri(&app, "/admin/users/da-user-pend-err/deploy-pending/sse").await;
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/admin/users/da-user-pend-err/deploy-pending/sse")
-                .header("sec-fetch-site", "same-origin")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(sse_uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
 
@@ -357,14 +387,9 @@ async fn user_deploy_pending_sse_waits_for_in_flight_deploy() {
     });
 
     let app = router(s);
+    let sse_uri = ticketed_sse_uri(&app, "/admin/users/da-user-pend-lock/deploy-pending/sse").await;
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/admin/users/da-user-pend-lock/deploy-pending/sse")
-                .header("sec-fetch-site", "same-origin")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(sse_uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
 
@@ -435,14 +460,9 @@ async fn user_deploy_pending_sse_idempotent_after_server_deploy() {
     );
 
     let app1 = router(s.clone());
+    let sse_uri = ticketed_sse_uri(&app1, "/admin/users/da-user-idemp/deploy-pending/sse").await;
     let resp1 = app1
-        .oneshot(
-            Request::builder()
-                .uri("/admin/users/da-user-idemp/deploy-pending/sse")
-                .header("sec-fetch-site", "same-origin")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(sse_uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(resp1.status(), StatusCode::OK);
@@ -451,14 +471,9 @@ async fn user_deploy_pending_sse_idempotent_after_server_deploy() {
     assert!(body1.contains("nothing pending"));
 
     let app2 = router(s);
+    let sse_uri = ticketed_sse_uri(&app2, "/admin/users/da-user-idemp/deploy-pending/sse").await;
     let resp2 = app2
-        .oneshot(
-            Request::builder()
-                .uri("/admin/users/da-user-idemp/deploy-pending/sse")
-                .header("sec-fetch-site", "same-origin")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(sse_uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(resp2.status(), StatusCode::OK);
@@ -473,14 +488,9 @@ async fn user_deploy_pending_sse_unknown_user_404s() {
     let s = state(&dir).await;
     let app = router(s);
 
+    let sse_uri = ticketed_sse_uri(&app, "/admin/users/no-such-user-999/deploy-pending/sse").await;
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/admin/users/no-such-user-999/deploy-pending/sse")
-                .header("sec-fetch-site", "same-origin")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(sse_uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
 
@@ -511,7 +521,6 @@ async fn user_deploy_pending_sse_refuses_cross_origin_trigger() {
         .oneshot(
             Request::builder()
                 .uri("/admin/users/da-user-csrf/deploy-pending/sse")
-                .header("sec-fetch-site", "cross-site")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -527,14 +536,9 @@ async fn server_deploy_sse_unknown_server_404s() {
     let s = state(&dir).await;
     let app = router(s);
 
+    let sse_uri = ticketed_sse_uri(&app, "/admin/servers/no-such-srv/deploy/sse").await;
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/admin/servers/no-such-srv/deploy/sse")
-                .header("sec-fetch-site", "same-origin")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(sse_uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
 
@@ -555,7 +559,6 @@ async fn server_deploy_sse_refuses_cross_origin() {
         .oneshot(
             Request::builder()
                 .uri("/admin/servers/da-srv-csrf/deploy/sse")
-                .header("sec-fetch-site", "cross-site")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -582,14 +585,9 @@ async fn server_deploy_sse_waits_for_in_flight_deploy() {
     });
 
     let app = router(s);
+    let sse_uri = ticketed_sse_uri(&app, &format!("/admin/servers/{srv_id}/deploy/sse")).await;
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/admin/servers/{srv_id}/deploy/sse"))
-                .header("sec-fetch-site", "same-origin")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(sse_uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
 
@@ -611,14 +609,10 @@ async fn server_update_kernels_sse_unknown_server_404s() {
     let s = state(&dir).await;
     let app = router(s);
 
+    let sse_uri =
+        ticketed_sse_uri(&app, "/admin/servers/no-such-server-uk/update-kernels/sse").await;
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/admin/servers/no-such-server-uk/update-kernels/sse")
-                .header("sec-fetch-site", "same-origin")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(sse_uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
 
@@ -639,7 +633,6 @@ async fn server_update_kernels_sse_refuses_cross_origin() {
         .oneshot(
             Request::builder()
                 .uri("/admin/servers/da-uk-csrf/update-kernels/sse")
-                .header("sec-fetch-site", "cross-site")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -662,14 +655,10 @@ async fn server_update_kernels_sse_lock_reports_error_when_deploy_or_update_in_f
     let _guard = DeployGuard::try_acquire(srv_id).expect("must acquire deploy permit");
 
     let app = router(s);
+    let sse_uri =
+        ticketed_sse_uri(&app, &format!("/admin/servers/{srv_id}/update-kernels/sse")).await;
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/admin/servers/{srv_id}/update-kernels/sse"))
-                .header("sec-fetch-site", "same-origin")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(sse_uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
 
@@ -685,14 +674,9 @@ async fn servers_update_kernels_all_sse_terminal_ok_on_empty_fleet() {
     let s = state(&dir).await;
     let app = router(s);
 
+    let sse_uri = ticketed_sse_uri(&app, "/admin/servers/update-kernels-all/sse").await;
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/admin/servers/update-kernels-all/sse")
-                .header("sec-fetch-site", "same-origin")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(sse_uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
 
@@ -728,14 +712,9 @@ async fn servers_update_kernels_all_sse_reports_failures_in_stream_steps() {
         .unwrap();
 
     let app = router(s);
+    let sse_uri = ticketed_sse_uri(&app, "/admin/servers/update-kernels-all/sse").await;
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/admin/servers/update-kernels-all/sse")
-                .header("sec-fetch-site", "same-origin")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(sse_uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
 
@@ -764,14 +743,9 @@ async fn servers_update_kernels_all_sse_lock_reports_error_when_server_locked() 
     let _guard = DeployGuard::try_acquire(srv_id).expect("must acquire deploy permit");
 
     let app = router(s);
+    let sse_uri = ticketed_sse_uri(&app, "/admin/servers/update-kernels-all/sse").await;
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/admin/servers/update-kernels-all/sse")
-                .header("sec-fetch-site", "same-origin")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(sse_uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
 
@@ -793,7 +767,6 @@ async fn servers_update_kernels_all_sse_refuses_cross_origin() {
         .oneshot(
             Request::builder()
                 .uri("/admin/servers/update-kernels-all/sse")
-                .header("sec-fetch-site", "cross-site")
                 .body(Body::empty())
                 .unwrap(),
         )

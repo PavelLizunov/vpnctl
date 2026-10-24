@@ -569,7 +569,6 @@ async fn servers_update_kernels_all_sse_cross_site_is_403() {
         .oneshot(
             Request::builder()
                 .uri("/admin/servers/update-kernels-all/sse")
-                .header("sec-fetch-site", "cross-site")
                 .body(Body::empty())
                 .unwrap(),
         )

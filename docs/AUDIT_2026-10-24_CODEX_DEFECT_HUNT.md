@@ -104,3 +104,10 @@ settings form states the interval applies after a daemon restart.
 rejected, 4 duplicates merged. Suggested first fix wave (small, local, high
 impact): CDX-01, 03, 08, 12, 15, 24, 35, 39, 47, 49, 53, plus CDX-26/45 (SSE
 start-on-GET) as one design change.
+
+## Fix status
+
+Wave 1 (branch `fix/codex-wave1-20261024`): CDX-01, 03, 08, 12, 15, 24, 26,
+35, 39, 45, 47, 49, 53 fixed with regression tests; SSE start tickets are
+specified in `docs/specs/sse-start-tickets.md`. Not deployed. All other IDs
+remain open.

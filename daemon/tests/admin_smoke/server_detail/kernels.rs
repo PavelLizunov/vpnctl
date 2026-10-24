@@ -270,7 +270,6 @@ async fn server_update_kernels_sse_cross_site_is_403() {
         .oneshot(
             Request::builder()
                 .uri("/admin/servers/uksse/update-kernels/sse")
-                .header("sec-fetch-site", "cross-site")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -287,14 +286,9 @@ async fn server_update_kernels_sse_cross_site_is_403() {
 async fn server_update_kernels_sse_unknown_server_is_404() {
     let dir = TempDir::new().unwrap();
     let app = router(state(&dir).await);
+    let sse_uri = ticketed_sse_uri(&app, "/admin/servers/no-such/update-kernels/sse").await;
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/admin/servers/no-such/update-kernels/sse")
-                .header("sec-fetch-site", "same-origin")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(sse_uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);

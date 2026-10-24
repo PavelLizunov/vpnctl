@@ -386,3 +386,17 @@ pub(crate) fn release_quality_sample(
         icmp_rtt_ms: None,
     }
 }
+
+/// Fetches a start ticket the way `admin.js` does and returns the ticketed
+/// SSE URI.
+pub(crate) async fn ticketed_sse_uri(app: &axum::Router, path: &str) -> String {
+    let ticket = body_of(
+        app.clone(),
+        "POST",
+        "/admin/sse-ticket",
+        Some("application/x-www-form-urlencoded"),
+        Some(&format!("path={path}")),
+    )
+    .await;
+    format!("{path}?ticket={}", ticket.trim())
+}
