@@ -303,14 +303,7 @@ pub(crate) async fn server_push_deploy_key(
             }
         };
 
-        let push_cmd = format!(
-            "set -eu; \
-         mkdir -p ~/.ssh && chmod 0700 ~/.ssh; \
-         touch ~/.ssh/authorized_keys && chmod 0600 ~/.ssh/authorized_keys; \
-         grep -qxF {pk_q} ~/.ssh/authorized_keys || echo {pk_q} >> ~/.ssh/authorized_keys; \
-         echo done",
-            pk_q = vpnctl_core::shell::single_quote(&pubkey),
-        );
+        let push_cmd = crate::wizard_bootstrap::authorized_key_push_cmd(&pubkey);
 
         let mut method = "sshpass";
         if jump.is_some() && !try_reference {

@@ -695,3 +695,22 @@ async fn unidentified_legacy_samples_remain_raw_not_current_quality() {
     assert_eq!(current.len(), 1);
     assert_eq!(current[0].successes, 3);
 }
+
+#[tokio::test]
+async fn protocol_setting_changes_mark_the_server_pending() {
+    let (_dir, inv, sid) = fixture().await;
+    for action in [
+        "server.reality.set",
+        "server.naive.set",
+        "server.vlessws.set",
+        "server.secret.set",
+    ] {
+        applied(&inv, &sid).await;
+        assert!(!inv.server_pending_deploy(&sid).await.unwrap());
+        inv.audit("spec", action, Some(&sid.0), None).await.unwrap();
+        assert!(
+            inv.server_pending_deploy(&sid).await.unwrap(),
+            "{action} changes render inputs and must show as pending until deployed"
+        );
+    }
+}

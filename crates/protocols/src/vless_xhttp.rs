@@ -63,10 +63,20 @@ impl Protocol for VlessXhttp {
     }
 
     fn server_secret_specs(&self) -> Vec<vpnctl_core::ServerSecretSpec> {
-        vec![vpnctl_core::ServerSecretSpec::Password {
-            key: "vlessxhttp.path",
-            entropy_bytes: 16,
-        }]
+        use vpnctl_core::ServerSecretSpec::{Password, ShortId, X25519Keypair};
+        vec![
+            X25519Keypair {
+                private_key: "vless.private_key",
+                public_key: "vless.public_key",
+            },
+            ShortId {
+                key: "vless.short_id",
+            },
+            Password {
+                key: "vlessxhttp.path",
+                entropy_bytes: 16,
+            },
+        ]
     }
 
     fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value> {

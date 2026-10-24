@@ -1,11 +1,19 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use super::*;
+use russh::keys::ssh_key::PublicKey;
 
 const SAMPLE_PUBKEY_A: &str =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL7MjcaRD4KtDbHYhu6KPY44nClRcIHQ1EQ9HRrEcORy test@vpnctl";
 const SAMPLE_PUBKEY_B: &str =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA other@vpnctl";
+
+fn host_key(pk: &PublicKey) -> russh::keys::PublicKeyOrCertificate {
+    russh::keys::PublicKeyOrCertificate::PublicKey {
+        key: pk.clone(),
+        hash_alg: None,
+    }
+}
 
 #[tokio::test]
 async fn verify_handler_accepts_canonical_unpadded_fingerprint() {
@@ -17,7 +25,7 @@ async fn verify_handler_accepts_canonical_unpadded_fingerprint() {
         observed_fingerprint: Arc::clone(&observed),
     };
 
-    let res = handler.check_server_key(&pk).await;
+    let res = handler.check_server_key(&host_key(&pk)).await;
     assert!(res.is_ok());
     assert_eq!(*observed.lock().await, Some(canonical_fp));
 }
@@ -33,7 +41,7 @@ async fn verify_handler_accepts_padded_fingerprint() {
         observed_fingerprint: Arc::clone(&observed),
     };
 
-    let res = handler.check_server_key(&pk).await;
+    let res = handler.check_server_key(&host_key(&pk)).await;
     assert!(res.is_ok());
     assert_eq!(*observed.lock().await, Some(canonical_fp));
 }
@@ -50,13 +58,13 @@ async fn verify_handler_accepts_url_safe_and_url_safe_padded_fingerprint() {
         trusted_fingerprint: Some(url_safe_fp),
         observed_fingerprint: Arc::clone(&observed),
     };
-    assert!(handler1.check_server_key(&pk).await.is_ok());
+    assert!(handler1.check_server_key(&host_key(&pk)).await.is_ok());
 
     let mut handler2 = VerifyHandler {
         trusted_fingerprint: Some(url_safe_padded_fp),
         observed_fingerprint: Arc::clone(&observed),
     };
-    assert!(handler2.check_server_key(&pk).await.is_ok());
+    assert!(handler2.check_server_key(&host_key(&pk)).await.is_ok());
 }
 
 #[tokio::test]
@@ -70,7 +78,7 @@ async fn verify_handler_rejects_mismatched_key_fingerprint() {
         observed_fingerprint: Arc::clone(&observed),
     };
 
-    let res = handler.check_server_key(&pk_a).await;
+    let res = handler.check_server_key(&host_key(&pk_a)).await;
     assert!(matches!(res, Err(russh::Error::UnknownKey)));
 }
 
@@ -83,7 +91,7 @@ async fn verify_handler_rejects_malformed_fingerprint() {
         observed_fingerprint: Arc::clone(&observed),
     };
 
-    let res = handler.check_server_key(&pk).await;
+    let res = handler.check_server_key(&host_key(&pk)).await;
     assert!(matches!(res, Err(russh::Error::UnknownKey)));
 }
 
@@ -97,7 +105,7 @@ async fn verify_handler_tofu_records_and_accepts() {
         observed_fingerprint: Arc::clone(&observed),
     };
 
-    let res = handler.check_server_key(&pk).await;
+    let res = handler.check_server_key(&host_key(&pk)).await;
     assert!(res.is_ok());
     assert_eq!(*observed.lock().await, Some(canonical_fp));
 }
@@ -337,12 +345,14 @@ impl russh::server::Handler for StalledChannelHandler {
     async fn channel_open_session(
         &mut self,
         _channel: russh::Channel<russh::server::Msg>,
+        reply: russh::server::ChannelOpenHandle,
         _session: &mut russh::server::Session,
-    ) -> std::result::Result<bool, Self::Error> {
+    ) -> std::result::Result<(), Self::Error> {
         if self.stall_channel_open {
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
-        Ok(true)
+        reply.accept().await;
+        Ok(())
     }
 }
 

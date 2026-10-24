@@ -181,9 +181,10 @@ pub(crate) async fn user_detail_render(
     let chain_sub_url_str = if chain_routes.is_empty() {
         None
     } else {
-        sub_url_str
-            .as_ref()
-            .map(|url| format!("{url}?format=sing-box"))
+        // Public base, not the request Host: the QR is scanned off-LAN.
+        sub_token
+            .as_deref()
+            .map(|t| format!("{}?format=sing-box", mihomo_sub_url(&base, t)))
     };
     let mut chain_route_labels = Vec::with_capacity(chain_routes.len());
     for (target, entry) in &chain_routes {

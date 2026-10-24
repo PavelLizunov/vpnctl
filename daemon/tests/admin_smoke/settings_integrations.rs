@@ -1332,13 +1332,10 @@ async fn phase3c_geoip_update_now_sse_endpoint_returns_text_event_stream() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
 
-    let resp = router(s)
-        .oneshot(
-            Request::builder()
-                .uri("/admin/settings/geoip/update-now")
-                .body(Body::empty())
-                .unwrap(),
-        )
+    let app = router(s);
+    let sse_uri = ticketed_sse_uri(&app, "/admin/settings/geoip/update-now").await;
+    let resp = app
+        .oneshot(Request::builder().uri(sse_uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
 
@@ -1360,13 +1357,10 @@ async fn phase3c_geoip_update_now_fire_writes_audit_row() {
     let s = state(&dir).await;
     let inv = s.inv.clone();
 
-    let _ = router(s)
-        .oneshot(
-            Request::builder()
-                .uri("/admin/settings/geoip/update-now")
-                .body(Body::empty())
-                .unwrap(),
-        )
+    let app = router(s);
+    let sse_uri = ticketed_sse_uri(&app, "/admin/settings/geoip/update-now").await;
+    let _ = app
+        .oneshot(Request::builder().uri(sse_uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
 
@@ -1380,7 +1374,7 @@ async fn phase3c_geoip_update_now_fire_writes_audit_row() {
 }
 
 #[tokio::test]
-async fn phase3c_geoip_update_now_rejects_cross_site_sec_fetch() {
+async fn phase3c_geoip_update_now_rejects_request_without_ticket() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
@@ -1420,18 +1414,14 @@ async fn phase3c_geoip_update_now_rejects_cross_site_sec_fetch() {
 }
 
 #[tokio::test]
-async fn phase3c_geoip_update_now_accepts_same_origin_sec_fetch() {
+async fn phase3c_geoip_update_now_accepts_ticketed_request() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
 
-    let resp = router(s)
-        .oneshot(
-            Request::builder()
-                .uri("/admin/settings/geoip/update-now")
-                .header("sec-fetch-site", "same-origin")
-                .body(Body::empty())
-                .unwrap(),
-        )
+    let app = router(s);
+    let sse_uri = ticketed_sse_uri(&app, "/admin/settings/geoip/update-now").await;
+    let resp = app
+        .oneshot(Request::builder().uri(sse_uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
 

@@ -247,6 +247,10 @@ async fn singbox_subscription_omits_target_when_entry_is_not_granted() {
             .all(|outbound| outbound["server"] != "198.51.100.50"),
         "S5 must not fall back to a direct outbound"
     );
+    assert_eq!(
+        config["route"]["final"], "direct",
+        "with no proxy outbound left, route.final must not name a missing `proxy` tag"
+    );
 }
 
 #[tokio::test]

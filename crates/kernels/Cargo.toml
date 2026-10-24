@@ -19,6 +19,7 @@ tokio = { version = "1", features = ["rt"] }
 vpnctl-protocols = { path = "../protocols" }
 vpnctl-ssh = { path = "../ssh" }
 tokio = { version = "1", features = ["macros", "rt"] }
+tempfile = "3"
 
 [lints]
 workspace = true

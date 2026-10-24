@@ -71,3 +71,22 @@ async fn delivery_omits_chain_artefact_without_chained_servers() {
     assert!(!html.contains("format=sing-box"));
     assert!(!html.contains("Sing-box chain subscription"));
 }
+
+#[tokio::test]
+async fn delivery_chain_url_uses_configured_public_base() {
+    let dir = TempDir::new().unwrap();
+    let (state, token) = state_with_chain(&dir, true).await;
+    state
+        .inv
+        .set_public_base_url(Some("https://vpn.example.com"))
+        .await
+        .unwrap();
+    let html = fetch_html(router(state), "/admin/users/u0/delivery").await;
+
+    assert!(
+        html.contains(&format!(
+            "https://vpn.example.com/api/v1/sub/{token}?format=sing-box"
+        )),
+        "chain QR must point at the public base, not the request Host: {html}"
+    );
+}

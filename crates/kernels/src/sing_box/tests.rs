@@ -1358,3 +1358,16 @@ async fn plain_apply_keeps_strict_guard() {
         .expect_err("apply_config without inventory knowledge must refuse removals");
     assert!(err.to_string().contains("REMOVE 1 user UUID"));
 }
+
+#[test]
+fn apply_script_restart_failure_reaches_rollback() {
+    let s = sing_box_apply_script();
+    let restart = s
+        .find("systemctl reload-or-restart sing-box")
+        .expect("restart step");
+    let line = s[restart..].lines().next().unwrap_or_default();
+    assert!(
+        line.trim_end().ends_with("|| restart_rc=$?"),
+        "under set -eu a failed restart must not skip the .bak rollback: {line}"
+    );
+}

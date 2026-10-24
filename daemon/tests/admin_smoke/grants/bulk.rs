@@ -435,3 +435,70 @@ async fn server_detail_revoke_all_uses_data_confirm_prompt_not_inline_js() {
         "revoke-all must not use an inline onsubmit handler"
     );
 }
+
+#[tokio::test]
+async fn revoke_all_also_removes_disabled_users_grants() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    st.inv
+        .add_server(&Server {
+            id: ServerId("srv".into()),
+            address: "203.0.113.22".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    for (id, uuid, disabled) in [
+        ("alice", "00000000-0000-0000-0000-0000000000a1", false),
+        ("bob", "00000000-0000-0000-0000-0000000000b1", true),
+    ] {
+        st.inv
+            .add_user(&User {
+                id: UserId(id.into()),
+                uuid: uuid.into(),
+                tuic_password: None,
+                wireguard_pubkey: None,
+                wireguard_private: None,
+                sub_token: None,
+                vpn_router_device_id: None,
+                disabled,
+            })
+            .await
+            .unwrap();
+        st.inv
+            .grant(&UserId(id.into()), &ServerId("srv".into()))
+            .await
+            .unwrap();
+    }
+
+    let resp = router(st.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/servers/srv/grants/_revoke-all")
+                .header("Origin", "http://127.0.0.1")
+                .header("Host", "127.0.0.1")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("confirm=srv"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let left = st
+        .inv
+        .grant_dates_for_server(&ServerId("srv".into()))
+        .await
+        .unwrap();
+    assert!(
+        left.is_empty(),
+        "a disabled user's grant must not survive revoke-all: {left:?}"
+    );
+}

@@ -151,19 +151,25 @@ fn awg_apply_script() -> String {
             chmod 0600 /etc/amnezia/amneziawg/awg0.conf
 
             systemctl enable awg-quick@awg0 >/dev/null 2>&1 || true
-            systemctl reload-or-restart awg-quick@awg0
+            # A failed reload/restart goes straight to the rollback below: under
+            # set -eu it would otherwise exit first, and an old interface that is
+            # still active must not pass for the new config.
+            restart_rc=0
+            systemctl reload-or-restart awg-quick@awg0 || restart_rc=$?
 
             # Wait up to 8 seconds for the service to settle. systemd's
             # auto-restart back-off kicks in every 10s, so 8s is past
             # the first attempt — not "active" by then = crash loop.
-            for i in 1 2 3 4 5 6 7 8; do
-                state=$(systemctl is-active awg-quick@awg0 || true)
-                if [ "$state" = "active" ]; then
-                    rm -f /etc/amnezia/amneziawg/awg0.conf.bak
-                    exit 0
-                fi
-                sleep 1
-            done
+            if [ "$restart_rc" -eq 0 ]; then
+                for i in 1 2 3 4 5 6 7 8; do
+                    state=$(systemctl is-active awg-quick@awg0 || true)
+                    if [ "$state" = "active" ]; then
+                        rm -f /etc/amnezia/amneziawg/awg0.conf.bak
+                        exit 0
+                    fi
+                    sleep 1
+                done
+            fi
 
             # Failed to come up. Dump diagnostics, then ROLL BACK.
             echo "awg-quick@awg0 did not become active. Last 20 log lines:" >&2

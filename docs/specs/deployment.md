@@ -39,6 +39,12 @@ daemon + CLI + managed sing-box + node-side stats helper, exports
 (`vpnctl_core::build_version`, `option_env!`, no git at runtime), validates all
 four sources before installing any, stages all four, installs node artifacts
 first and daemon last, and rolls every prior path back on an interrupted swap.
+Admin UI assets are served from `/opt/vpnctl/assets/`, so they are replaced as
+one set in the same transaction: a checkout build ships its `daemon/assets`,
+prebuilt artifacts must pass theirs in `VPNCTL_ASSETS_SRC`, or set
+`VPNCTL_SKIP_ASSETS=1` to keep the live set deliberately; otherwise the script
+refuses before touching anything (new markup with an old `admin.js` breaks the
+deploy buttons).
 The Go artifacts are static linux/amd64 builds; managed sing-box must report the
 `with_v2ray_api` tag. For the accounting migration, install artifacts first,
 deploy every sing-box node while the old daemon still polls Clash, verify the

@@ -2,7 +2,7 @@
 
 use tempfile::TempDir;
 use vpnctl_core::{KernelId, Server, ServerId, User, UserId};
-use vpnctl_inventory::{BoostySettings, SqliteInventory};
+use vpnctl_inventory::{BoostySettings, ServerRole, SqliteInventory};
 
 async fn open(dir: &TempDir) -> SqliteInventory {
     SqliteInventory::open(&dir.path().join("inv.db"))
@@ -283,4 +283,29 @@ async fn clear_boosty_access_token_cas_guard() {
         audit.is_some(),
         "audit row must be recorded on access token clear"
     );
+}
+
+#[tokio::test]
+async fn boosty_user_creation_skips_workload_only_servers() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server("de")).await.unwrap();
+    inv.add_server(&server("ci")).await.unwrap();
+    inv.set_server_role(&ServerId("ci".into()), ServerRole::WorkloadOnly)
+        .await
+        .unwrap();
+
+    let grants = inv
+        .add_boosty_user(&user("boosty-7"), 7)
+        .await
+        .expect("a workload-only server must not abort Boosty auto-create");
+    assert_eq!(grants, 1);
+    let granted: Vec<String> = inv
+        .servers_for_user(&UserId("boosty-7".into()))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id.0)
+        .collect();
+    assert_eq!(granted, vec!["de".to_string()]);
 }
