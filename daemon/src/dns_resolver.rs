@@ -197,10 +197,4 @@ mod tests {
         assert!(resolve_one("rm -rf /").await.is_none());
         assert!(resolve_one("foo bar").await.is_none());
     }
-
-    #[tokio::test]
-    async fn resolve_one_accepts_valid_ipv4_chars_only() {
-        let _ = resolve_one("8.8.8.8").await;
-        let _ = resolve_one("2606:4700:4700::1111").await;
-    }
 }

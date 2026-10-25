@@ -127,7 +127,7 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<(Router, tokio::task:
 
     drop(spawn_backup_scheduler(
         inv.clone(),
-        std::path::PathBuf::from(vpnctl_inventory::DEFAULT_BACKUP_DIR),
+        vpnctl_inventory::backup_dir_from_env(),
     ));
 
     match inv.get_display_timezone().await {

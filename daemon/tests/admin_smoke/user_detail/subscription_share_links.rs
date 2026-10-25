@@ -10,6 +10,51 @@ use vpnctld::router;
 use crate::common::*;
 
 #[tokio::test]
+async fn admin_delivery_tip_distinguishes_sub_token_and_app_config_links_in_both_languages() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    let uid = UserId("u0".into());
+    let token = s.inv.regenerate_sub_token(&uid).await.unwrap();
+
+    for has_app_config in [false, true] {
+        if has_app_config {
+            s.inv
+                .set_vpn_router_device_id(&uid, TEST_NINITUX_DEVICE_ID)
+                .await
+                .unwrap();
+        }
+        let shown_path = if has_app_config {
+            format!("/api/v1/app/config/{TEST_NINITUX_DEVICE_ID}")
+        } else {
+            format!("/sub/{token}")
+        };
+        for (cookie, tip) in [
+            (
+                "vpnctl_lang=en",
+                "The mobile app polls this URL on a fixed schedule. Rotating the sub-token immediately invalidates links that use it; app-config links use device_id and remain unchanged.",
+            ),
+            (
+                "vpnctl_lang=ru",
+                "Приложение опрашивает этот URL по расписанию. Ротация sub-token мгновенно делает ссылки с ним недействительными; ссылки app-config используют device_id и остаются без изменений.",
+            ),
+        ] {
+            let html =
+                fetch_html_with_cookie(router(s.clone()), "/admin/users/u0/delivery", cookie).await;
+            let recap = html
+                .split_once(r#"class="ed-inbar""#)
+                .unwrap()
+                .1
+                .split_once("</div>")
+                .unwrap()
+                .0;
+            assert!(recap.contains(&shown_path));
+            assert!(recap.contains(&format!("title=\"{tip}\"")));
+        }
+    }
+}
+
+#[tokio::test]
 async fn admin_user_detail_renders_qr_grants_and_share_links() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;

@@ -952,6 +952,102 @@ async fn admin_servers_billing_page_and_actions() {
 }
 
 #[tokio::test]
+async fn admin_billing_flags_spend_without_matching_payment_snapshots() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let inv = s.inv.clone();
+    let sid = ServerId("s0".into());
+    inv.set_server_billing(
+        &sid,
+        &vpnctl_inventory::ServerBillingInput {
+            due_date: "2026-11-15".into(),
+            billing_cycle: vpnctl_inventory::BillingCycle::Monthly,
+            amount_cents: 1000,
+            currency: "EUR".into(),
+            auto_renew: false,
+            billing_url: None,
+            notes: None,
+            initial_payments_count: None,
+        },
+    )
+    .await
+    .unwrap();
+    let app = router(s);
+    let empty = fetch_html(app.clone(), "/admin/servers/billing").await;
+    assert!(!empty.contains("Incomplete Total Spend"));
+
+    let mut payment = vpnctl_inventory::ServerPaymentInput {
+        amount_minor: 1000,
+        currency: "EUR".into(),
+        cycle: vpnctl_inventory::BillingCycle::Monthly,
+        notes: None,
+    };
+    inv.record_server_payment(&sid, &payment).await.unwrap();
+    let complete = fetch_html(app.clone(), "/admin/servers/billing").await;
+    assert!(!complete.contains("Incomplete Total Spend"));
+    assert!(complete.contains("10.00 €"));
+
+    inv.set_currency_settings(&vpnctl_inventory::CurrencySettingsInput {
+        display_currency: Some("RUB".into()),
+        default_markup_bps: None,
+        markup_overrides: None,
+        rate_overrides: None,
+        auto_refresh: None,
+    })
+    .await
+    .unwrap();
+    let switched = fetch_html(app.clone(), "/admin/servers/billing").await;
+    assert!(switched.contains("Incomplete Total Spend"));
+    assert!(switched.contains("1 recorded payments"));
+
+    payment.currency = "USD".into();
+    let missing = inv.record_server_payment(&sid, &payment).await.unwrap();
+    assert_eq!(missing.converted_minor, None);
+    let mut rate = vpnctl_inventory::CurrencyRate {
+        base_currency: "EUR".into(),
+        target_currency: "RUB".into(),
+        rate_micros: 100_000_000,
+        source: "test".into(),
+        fetched_at: "2026-10-25T00:00:00Z".into(),
+    };
+    inv.upsert_currency_rate(&rate).await.unwrap();
+    payment.currency = "EUR".into();
+    inv.record_server_payment(&sid, &payment).await.unwrap();
+    rate.rate_micros = 200_000_000;
+    inv.upsert_currency_rate(&rate).await.unwrap();
+
+    let html = fetch_html(app.clone(), "/admin/servers/billing").await;
+    assert!(html.contains(
+        "Incomplete Total Spend. Payments without a stored snapshot in RUB are excluded. Servers: s0"
+    ));
+    assert!(html.contains(r#"class="ed-alert ed-alert--warn" role="alert""#));
+    let spend_card = html
+        .split_once("Total Spend (To Date)")
+        .unwrap()
+        .1
+        .split_once("Attention status")
+        .unwrap()
+        .0;
+    assert!(spend_card.contains("1070.00 ₽"));
+    assert!(!spend_card.contains("2140.00 ₽"));
+    assert!(spend_card.contains("3 recorded payments"));
+    assert!(spend_card.contains("Incomplete"));
+    assert!(html.contains("<b>1070.00 ₽</b>"));
+    assert_eq!(
+        inv.get_fleet_billing_summary()
+            .await
+            .unwrap()
+            .total_spend_minor,
+        107_000
+    );
+
+    let ru = fetch_html_with_cookie(app, "/admin/servers/billing", "vpnctl_lang=ru").await;
+    assert!(ru.contains("Неполный итог выплат"));
+    assert!(ru.contains("Платежи без сохранённого снимка в RUB исключены. Серверы: s0"));
+}
+
+#[tokio::test]
 async fn admin_server_billing_boosty_income_and_pl_overview() {
     use vpnctl_core::{KernelId, Server, ServerId};
     let dir = TempDir::new().unwrap();

@@ -5,58 +5,58 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 415 (277 prod / 138 test)
-- **Total Rust LOC:** 135,068 (77,387 prod / 57,681 test)
-- **Database Migrations:** 60
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 129
+- **Tracked Rust Files:** 419 (279 prod / 140 test)
+- **Total Rust LOC:** 136,996 (77,847 prod / 59,149 test)
+- **Database Migrations:** 61
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 130
 
 ## Workspace Crates & Targets
 
 | Crate | Path | Version | Targets | Prod LOC (Files) | Test LOC (Files) | Total LOC |
 |---|---|---|---|---|---|---|
-| `vpnctl` | `cli` | 0.9.0 | bin, 1 test | 5,897 (20) | 945 (2) | **6,842** |
+| `vpnctl` | `cli` | 0.9.0 | bin, 2 tests | 5,898 (20) | 986 (3) | **6,884** |
 | `vpnctl-boosty-bridge` | `crates/boosty-bridge` | 0.9.0 | lib, 2 tests | 1,313 (6) | 1,012 (2) | **2,325** |
-| `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,277 (12) | 0 (0) | **1,277** |
+| `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,332 (13) | 0 (0) | **1,332** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 318 (1) | 125 (1) | **443** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 193 (1) | 454 (2) | **647** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 46 tests | 14,020 (52) | 17,512 (50) | **31,532** |
-| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 5,964 (13) | 929 (5) | **6,893** |
-| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 3,810 (20) | 4,494 (12) | **8,304** |
-| `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,449 (4) | 1,160 (5) | **2,609** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 43,146 (148) | 31,050 (59) | **74,196** |
-| **Total** | | | | **77,387 (277)** | **57,681 (138)** | **135,068** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 46 tests | 14,271 (52) | 17,947 (50) | **32,218** |
+| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 6,132 (14) | 977 (5) | **7,109** |
+| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 3,854 (20) | 4,501 (12) | **8,355** |
+| `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,474 (4) | 1,121 (5) | **2,595** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 43,062 (148) | 32,026 (60) | **75,088** |
+| **Total** | | | | **77,847 (279)** | **59,149 (140)** | **136,996** |
 
 ## Largest Rust Modules (Top 25)
 
 | File | LOC | Crate | Role |
 |---|---|---|---|
-| `daemon/tests/admin_smoke/settings_integrations.rs` | 2,046 | `daemon` | Test |
-| `crates/kernels/src/caddy/tests.rs` | 1,668 | `crates/kernels` | Prod |
+| `daemon/tests/admin_smoke/settings_integrations.rs` | 2,197 | `daemon` | Test |
+| `crates/kernels/src/caddy/tests.rs` | 1,708 | `crates/kernels` | Prod |
 | `daemon/src/health_monitor/tests.rs` | 1,616 | `daemon` | Prod |
 | `crates/kernels/src/sing_box/tests.rs` | 1,481 | `crates/kernels` | Prod |
 | `daemon/tests/admin_smoke/alerts_health.rs` | 1,452 | `daemon` | Test |
 | `crates/inventory/src/sqlite/tests.rs` | 1,349 | `crates/inventory` | Prod |
 | `daemon/tests/admin_smoke/server_detail/setup_config.rs` | 1,318 | `daemon` | Test |
 | `daemon/tests/admin_smoke/dashboard.rs` | 1,227 | `daemon` | Test |
+| `daemon/tests/admin_smoke/servers.rs` | 1,215 | `daemon` | Test |
 | `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,200 | `daemon` | Test |
-| `daemon/tests/admin_smoke/servers.rs` | 1,119 | `daemon` | Test |
-| `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,119 | `daemon` | Test |
-| `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,033 | `daemon` | Prod |
+| `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,164 | `daemon` | Test |
+| `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,034 | `daemon` | Prod |
 | `crates/inventory/src/sqlite/health.rs` | 1,027 | `crates/inventory` | Prod |
 | `daemon/src/quality_poller.rs` | 992 | `daemon` | Prod |
 | `crates/inventory/tests/spec_node_health.rs` | 984 | `crates/inventory` | Test |
+| `daemon/src/handlers/admin/billing.rs` | 968 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/shell_nav/shell_assets_nav.rs` | 965 | `daemon` | Test |
+| `daemon/tests/admin_smoke/user_detail/wireguard.rs` | 959 | `daemon` | Test |
 | `crates/boosty-bridge/tests/sync_integration.rs` | 952 | `crates/boosty-bridge` | Test |
 | `daemon/src/protocol_assurance_poller.rs` | 952 | `daemon` | Prod |
-| `daemon/tests/admin_smoke/user_detail/wireguard.rs` | 949 | `daemon` | Test |
 | `daemon/tests/admin_smoke/users.rs` | 943 | `daemon` | Test |
 | `daemon/src/handlers/admin/boosty.rs` | 932 | `daemon` | Prod |
 | `crates/ssh/src/subprocess.rs` | 927 | `crates/ssh` | Prod |
 | `daemon/tests/admin_smoke/user_detail/traffic_activity.rs` | 920 | `daemon` | Test |
 | `daemon/src/handlers/auth.rs` | 917 | `daemon` | Prod |
-| `cli/src/cmd/server.rs` | 911 | `cli` | Prod |
 
-## Database Migrations (60)
+## Database Migrations (61)
 
 | Version | Migration Name | File | Lines |
 |---|---|---|---|
@@ -120,8 +120,9 @@
 | `0058` | currency exchange | `crates/inventory/migrations/0058_currency_exchange.sql` | 78 |
 | `0059` | public base url | `crates/inventory/migrations/0059_public_base_url.sql` | 6 |
 | `0060` | retired user uuids | `crates/inventory/migrations/0060_retired_user_uuids.sql` | 38 |
+| `0061` | audit payload server name | `crates/inventory/migrations/0061_audit_payload_server_name.sql` | 4 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (129)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (130)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -183,6 +184,7 @@
 | `POST` | `/admin/servers/{id}/grants` | `admin::server_grant_user_form` |
 | `POST` | `/admin/servers/{id}/grants/_grant-all` | `admin::server_grant_all_users` |
 | `POST` | `/admin/servers/{id}/grants/_revoke-all` | `admin::server_revoke_all_users` |
+| `POST` | `/admin/servers/{id}/hysteria2-obfs-rotate` | `admin::server_rotate_hysteria2_obfs` |
 | `POST` | `/admin/servers/{id}/kernels/{kernel}/disable` | `admin::server_disable_kernel` |
 | `POST` | `/admin/servers/{id}/kernels/{kernel}/enable` | `admin::server_enable_kernel` |
 | `POST` | `/admin/servers/{id}/naive-config` | `admin::server_set_naive_config` |

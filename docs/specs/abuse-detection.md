@@ -15,16 +15,18 @@
 | Layer | Source | Catches | Misses |
 |---|---|---|---|
 | 1. Sub-fetch log | vpnctld access log → `sub_access_log` | URL leaked/shared (many ASNs per user), scrapers on tight loops, UA fingerprinting | real-time connections; devices behind NAT |
-| 2. VPN protocol stats | clash-api on each node, polled via SSH → `vpn_connection_stats` | active connections, up/down traffic | NAT; SSH polling overhead |
+| 2. VPN protocol stats | cumulative V2Ray Stats + Clash live metadata, polled via SSH → `vpn_connection_stats` (AmneziaWG polled independently) | active connections, up/down traffic | NAT; SSH polling overhead |
 | 3. UA fingerprint | UA + IP/time/ASN clustering on layer-1 data | same-device roaming vs many-device sharing heuristic | never exact; UA-less clients invisible |
 
 A device count behind NAT is roughly impossible server-side without client
 cooperation; layer 3 is the best available signal.
 
-Known upstream gate (NOT fixable in vpnctl): sing-box's clash-api tracker
-omits `User` from its JSON, so `vpn_connection_stats.user_id` stays NULL until
-the upstream patch lands (SagerNet/sing-box#4159 — emit `"user"` in
-`TrackerMetadata.MarshalJSON`). Server-wide dashboard totals work meanwhile.
+The managed sing-box build includes the Clash `user` attribution patch, so
+live metadata can be associated with users. Cumulative V2Ray Stats supplies
+per-user byte counters through the node helper; `vpn_connection_stats.user_id`
+is populated for attributed users and remains NULL for server-wide totals.
+Missing Clash user metadata limits live attribution, not the separate
+cumulative byte source. See [traffic accounting](traffic-accounting-v2.md).
 
 Related contracts: `/api/v1/app/config` rate-limiting is per-`device_id`
 (post-resolve — not spoofable) with per-IP anti-flood only for non-egress IPs

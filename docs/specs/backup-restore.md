@@ -23,12 +23,24 @@
   stays authoritative if the copy fails.
 - Inventory restore rejects SQLite snapshots without `_sqlx_migrations`,
   `users`, and `servers` tables before replacing the destination.
-- Restore: `vpnctl restore <bundle>` on a recovered host; web self-test
-  (`POST /admin/backup/self-test`) copies a snapshot, migrates it, and checks
-  invariants (tables, FKs, counts, schema version, integrity PRAGMA).
+- Inventory restore: `vpnctl restore <snapshot>` takes a decrypted SQLite
+  snapshot (`inv.db` or an hourly `inv.db.<timestamp>.bak`), never an encrypted
+  `.tar.zst.age` bundle. Keep vpnctld stopped until recovery is complete.
+- Bundle recovery: run `scripts/vpnctl-restore.sh <archive.tar.zst.age>
+  <age-private-key-file>` on the recovered host. It decrypts, unpacks and
+  verifies the bundle in a scratch directory; it does not install files.
+  Pass the extracted `vpnctl-snap/inv.db` to `vpnctl restore <snapshot>`, then
+  restore env, assets, deploy key, known_hosts, GeoIP, systemd units and
+  firewall rules to their configured paths, preserving ownership and
+  permissions. Start vpnctld only after these files are in place.
+- Web self-test (`POST /admin/backup/self-test`) copies a snapshot, runs
+  `PRAGMA integrity_check` (exactly one `ok` row) and `PRAGMA foreign_key_check`
+  (no rows) on that isolated copy before migration replay, then checks counts
+  and schema version. Any violation or query error makes the overall result
+  FAIL; the original snapshot and live inventory remain untouched.
 - CI: `daemon/tests/restore_e2e.rs` — seed → snapshot → mutate → restore to a
   second DB → diff `/api/v1/app/config/<id>` (pre ≠ post, pre == restored).
-- Operator documentation lives in-product: `/admin/settings`
+- Operator documentation lives in-product: `/admin/settings/backups`
   `#disaster-recovery` (3-tier backup table + 3-step procedure; steps 1–2 run
   on a NEW host because the old one is dead, step 3 returns to the recovered
   daemon's web UI).
@@ -38,6 +50,7 @@
 - [ ] Backup bundle contains the deploy key (hard invariant — verify in the
       archive listing, not just the script).
 - [ ] Self-test returns PASS on prod after any backup-path change.
+- [ ] Broken foreign keys and integrity-check violations make self-test FAIL.
 - [ ] `restore_e2e` green: byte-stability of the subscription endpoint after
       restore is CI-protected.
 - [ ] Off-site copy freshness checked; restore procedure readable by someone

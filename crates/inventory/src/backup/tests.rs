@@ -172,8 +172,7 @@ async fn restore_rejects_non_sqlite_file() {
     );
 }
 
-#[tokio::test]
-async fn verify_snapshot_reports_ok_on_freshly_minted_snapshot() {
+async fn populated_snapshot() -> (tempfile::TempDir, std::path::PathBuf) {
     use vpnctl_core::{KernelId, ProtocolId, Server, ServerId, User, UserId};
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("inv.db");
@@ -212,7 +211,16 @@ async fn verify_snapshot_reports_ok_on_freshly_minted_snapshot() {
         .unwrap();
 
     let snap = snapshot_now(&inv, dir.path()).await.unwrap();
+    (dir, snap)
+}
+
+#[tokio::test]
+async fn verify_snapshot_reports_ok_on_freshly_minted_snapshot() {
+    let (_dir, snap) = populated_snapshot().await;
     let report = verify_snapshot(&snap).await.unwrap();
+    for name in ["integrity_check", "foreign_key_check"] {
+        assert!(report.checks.iter().any(|c| c.name == name));
+    }
 
     assert_eq!(report.overall, CheckStatus::Ok, "{report:?}");
     assert_eq!(report.user_count, 1);
@@ -422,5 +430,103 @@ async fn restore_rejects_foreign_sqlite_without_replacing_target() {
         assert!(err.to_string().contains("not a vpnctl backup"), "{err}");
         assert_eq!(std::fs::read(&target).unwrap(), b"original target");
         assert!(!dir.path().join("inv.db.restore.tmp").exists());
+    }
+}
+
+#[tokio::test]
+async fn verify_snapshot_fails_on_foreign_key_violations_without_changing_snapshot() {
+    for column in ["user_id", "server_id"] {
+        let (_dir, snap) = populated_snapshot().await;
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(&snap)
+                    .foreign_keys(false),
+            )
+            .await
+            .unwrap();
+        sqlx::query(&format!("UPDATE grants SET {column} = 'missing-parent'"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        let before = std::fs::read(&snap).unwrap();
+
+        let report = verify_snapshot(&snap).await.unwrap();
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.name == "foreign_key_check")
+            .expect("foreign_key_check must be present");
+        assert_eq!(check.status, CheckStatus::Fail, "{report:?}");
+        assert_eq!(report.overall, CheckStatus::Fail, "{report:?}");
+        assert_eq!(report.user_count, 1);
+        assert_eq!(report.server_count, 1);
+        assert_eq!(report.grant_count, 1);
+        assert_eq!(std::fs::read(&snap).unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn verify_snapshot_fails_on_integrity_violation_without_changing_snapshot() {
+    let (_dir, snap) = populated_snapshot().await;
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&snap))
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "CREATE TABLE integrity_probe (value INTEGER CHECK (value > 0));
+         PRAGMA ignore_check_constraints = ON;
+         INSERT INTO integrity_probe VALUES (-1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    let before = std::fs::read(&snap).unwrap();
+
+    let report = verify_snapshot(&snap).await.unwrap();
+    let check = report
+        .checks
+        .iter()
+        .find(|c| c.name == "integrity_check")
+        .expect("integrity_check must be present");
+    assert_eq!(check.status, CheckStatus::Fail, "{report:?}");
+    assert_eq!(report.overall, CheckStatus::Fail, "{report:?}");
+    assert_eq!(report.user_count, 1);
+    assert_eq!(report.server_count, 1);
+    assert_eq!(std::fs::read(&snap).unwrap(), before);
+}
+
+#[test]
+fn backup_dir_from_env_honors_override_and_default() {
+    const EXPECTED: &str = "VPNCTL_TEST_EXPECTED_BACKUP_DIR";
+    if let Some(expected) = std::env::var_os(EXPECTED) {
+        assert_eq!(backup_dir_from_env(), std::path::PathBuf::from(expected));
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let custom = dir.path().join("custom backups");
+    for value in [
+        None,
+        Some(custom.as_os_str()),
+        Some(std::ffi::OsStr::new("")),
+    ] {
+        let expected = value.unwrap_or_else(|| std::ffi::OsStr::new(DEFAULT_BACKUP_DIR));
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "backup::tests::backup_dir_from_env_honors_override_and_default",
+                "--nocapture",
+            ])
+            .env(EXPECTED, expected);
+        match value {
+            Some(value) => child.env("VPNCTLD_BACKUP_DIR", value),
+            None => child.env_remove("VPNCTLD_BACKUP_DIR"),
+        };
+        assert!(child.status().unwrap().success());
     }
 }

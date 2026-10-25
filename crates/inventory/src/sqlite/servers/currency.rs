@@ -599,19 +599,15 @@ impl SqliteInventory {
         let count = rows.len() as i64;
         let mut total_spend = 0i64;
 
-        for (amount, curr, conv_opt, disp_opt) in rows {
-            if disp_opt.as_deref() == Some(display_currency) {
-                if let Some(conv) = conv_opt {
-                    total_spend = total_spend.saturating_add(conv);
-                    continue;
-                }
-            }
-            if curr == display_currency {
-                total_spend = total_spend.saturating_add(amount);
-                continue;
-            }
-            if let Ok(Some(c)) = self.convert_amount(amount, &curr, display_currency).await {
-                total_spend = total_spend.saturating_add(c.amount_minor);
+        for (amount, currency, converted, snapshot_currency) in rows {
+            if let Some(spend) = crate::sqlite::models::historical_spend_in(
+                amount,
+                &currency,
+                converted,
+                snapshot_currency.as_deref(),
+                display_currency,
+            ) {
+                total_spend = total_spend.saturating_add(spend);
             }
         }
 
@@ -636,10 +632,13 @@ impl SqliteInventory {
              LEFT JOIN server_billing b ON b.server_id = s.id
              LEFT JOIN (
                  SELECT server_id,
-                        SUM(converted_minor) AS total_spend,
+                        SUM(CASE
+                                WHEN display_currency = ?1 AND converted_minor IS NOT NULL
+                                    THEN converted_minor
+                                WHEN currency = ?1 THEN amount_minor
+                            END) AS total_spend,
                         COUNT(*) AS payment_count
                  FROM server_payments
-                 WHERE display_currency = ?1
                  GROUP BY server_id
              ) p ON p.server_id = s.id
              ORDER BY s.id",
@@ -733,6 +732,22 @@ impl SqliteInventory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn currency_settings_has_no_minor_units_column() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('currency_settings') WHERE name = 'minor_units'",
+        )
+        .fetch_one(inv.pool())
+        .await
+        .unwrap();
+        assert_eq!(count, 0);
+    }
 
     #[test]
     fn convert_minor_identity() {

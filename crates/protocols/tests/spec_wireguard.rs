@@ -219,7 +219,7 @@ fn wg_client_config_amneziawg_block_present_when_all_obfs_secrets_set() {
 }
 
 #[test]
-fn wg_client_config_amneziawg_block_omitted_when_any_obfs_secret_missing() {
+fn wg_client_config_amneziawg_partial_set_uses_the_server_defaults() {
     let s = srv();
     let mut secrets = server_secrets();
     for k in [
@@ -238,9 +238,16 @@ fn wg_client_config_amneziawg_block_omitted_when_any_obfs_secret_missing() {
     let v = WireGuard::new()
         .client_config(&ctx, &user("alice", Some(PUBKEY_A)))
         .unwrap();
-    assert!(
-        v.pointer("/interface/amneziawg").is_none(),
-        "all-or-nothing: missing h4 means no amneziawg block; got {v}"
+    // The AWG server fills a missing key with its default (H4 = 4); the client
+    // must carry the same value or the handshake never matches.
+    assert_eq!(
+        v.pointer("/interface/amneziawg/h4"),
+        Some(&serde_json::json!("4")),
+        "got {v}"
+    );
+    assert_eq!(
+        v.pointer("/interface/amneziawg/h3"),
+        Some(&serde_json::json!("42"))
     );
 }
 

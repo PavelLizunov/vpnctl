@@ -1427,6 +1427,10 @@ async fn caddy_restart_executes_restart_command() {
     ssh.expect(&caddy_restart_command(), "");
 
     Caddy::new().restart(&ssh).await.expect("restart ok");
+    assert_eq!(
+        ssh.executed_commands().expect("command log"),
+        vec![caddy_restart_command()]
+    );
 }
 
 #[tokio::test]
@@ -1439,6 +1443,13 @@ async fn caddy_apply_naive_executes_script_retiring_vlessws() {
         .apply_config(&ssh, config)
         .await
         .expect("naive apply ok");
+    assert_eq!(
+        ssh.executed_commands().expect("command log"),
+        vec![
+            "install -o root -g root -m 0600 /dev/null /etc/caddy/Caddyfile.new".to_string(),
+            naive_apply_script(),
+        ]
+    );
     assert_eq!(
         ssh.uploaded("/etc/caddy/Caddyfile.new"),
         Some(config.to_vec())
@@ -1457,6 +1468,13 @@ async fn caddy_apply_vlessws_executes_bundle_apply_script() {
         .apply_config(&ssh, &config)
         .await
         .expect("vlessws apply ok");
+    assert_eq!(
+        ssh.executed_commands().expect("command log"),
+        vec![
+            "install -o root -g root -m 0600 /dev/null /etc/caddy/.vlessws-bundle.new".to_string(),
+            vlessws_apply_script(),
+        ]
+    );
     assert_eq!(ssh.uploaded("/etc/caddy/.vlessws-bundle.new"), Some(config));
 }
 
@@ -1539,6 +1557,28 @@ fn cacheless_presence_requires_pinned_version_and_forward_proxy() {
             .unwrap();
         assert!(out.status.success());
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), expected);
+    }
+}
+
+#[test]
+fn registry_rejects_naive_and_vlessws_before_secrets_are_minted() {
+    let mut registry = vpnctl_core::Registry::new();
+    registry.register_kernel(Box::new(Caddy::new())).unwrap();
+    registry
+        .register_kernel(Box::new(crate::SingBox::new()))
+        .unwrap();
+    let mut server = dummy_server();
+    server.kernels.push(KernelId("sing-box".into()));
+    for protocols in [["naive", "vless-ws"], ["vless-ws", "naive"]] {
+        server.enabled_protocols = protocols.iter().map(|p| ProtocolId((*p).into())).collect();
+        let err = registry.validate_server_support(&server).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("naive") && message.contains("vless-ws"));
+        assert!(message.contains("disable one protocol"));
+    }
+    for protocol in ["naive", "vless-ws"] {
+        server.enabled_protocols = vec![ProtocolId(protocol.into())];
+        assert!(registry.validate_server_support(&server).is_ok());
     }
 }
 

@@ -9,8 +9,9 @@
   rate projections.
 - **Invariants:**
   - No hardcoded currencies or exchange rates — any ISO 4217 code accepted.
-  - All monetary values stored as integer minor-units (cents/kopecks) to
-    eliminate floating-point precision loss.
+  - All monetary values stored as integer hundredths (amount × 100) for every
+    currency, regardless of its ISO 4217 exponent, to eliminate floating-point
+    precision loss.
   - Exchange rates stored as integer micros (6 implicit decimal places);
     markup coefficients as integer basis points (4 implicit decimal places).
   - `i128` intermediate arithmetic prevents overflow for large amounts.
@@ -48,10 +49,10 @@
 | `id` | INTEGER PK | Auto-increment |
 | `server_id` | TEXT FK | → `servers(id)` ON DELETE CASCADE |
 | `paid_at` | TEXT | ISO-8601 UTC, defaults to now |
-| `amount_minor` | INTEGER | Source amount in minor units |
+| `amount_minor` | INTEGER | Source amount × 100 for every currency |
 | `currency` | TEXT | Source ISO 4217 |
 | `cycle` | TEXT | `monthly`/`quarterly`/`semi-annual`/`annual` |
-| `converted_minor` | INTEGER | Snapshot of display-currency value at payment time |
+| `converted_minor` | INTEGER | Snapshot of display-currency amount × 100 at payment time |
 | `display_currency` | TEXT | Target ISO 4217 at time of payment |
 | `rate_micros_used` | INTEGER | Audit: rate applied |
 | `markup_bps_used` | INTEGER | Audit: markup applied |
@@ -60,8 +61,14 @@
 ### 2.2 Financial Precision
 
 **Storage format:**
-- Monetary amounts: integer minor-units (cents, kopecks). Currencies with
-  0 decimal places (JPY, KRW) store unit values directly.
+- Monetary amounts: integer hundredths for every currency, including JPY and
+  KRW: 100 JPY is stored as `10000`, just as 100 EUR is stored as `10000`.
+  The `_minor` and `_cents` field suffixes both use this fixed scale.
+  There is no `minor_units` column or per-currency exponent handling.
+  The opening comment in migration `0058_currency_exchange.sql` incorrectly
+  describes direct unit storage for JPY/KRW and a `minor_units` column in
+  `currency_settings`; its actual schema and implementation use the fixed
+  hundredths scale documented here. The migration is left unchanged.
 - Exchange rates: `rate_micros` = rate × 1 000 000 (6 decimal precision).
 - Markup coefficients: `markup_bps` = coefficient × 10 000 (basis-point
   precision). 1.07 → `10700`. 1.00 (no markup) → `10000`.
@@ -91,9 +98,18 @@ to nearest (half-up).
 
 | Metric | Source | Mutability |
 |---|---|---|
-| **Total Spend** | `SUM(server_payments.converted_minor)` — actual payments made | Immutable snapshots; never shifts with rate changes |
+| **Total Spend** | `converted_minor` of snapshots matching the selected display currency; a payment made in that currency counts its own `amount_minor` | Immutable; never shifts with rate changes |
 | **Monthly Burn** | Each server's `billing.amount_cents` normalised to monthly, converted at current rates + markup | Recalculated live from current rates |
 | **Annual Burn** | `monthly_burn × 12` | Derived |
+
+A payment made in the selected display currency counts at its paid amount
+(no conversion is involved, so legacy rows without a snapshot stay exact).
+Other payments without a non-null snapshot for that currency are excluded from
+Total Spend (`ServerPayment::historical_spend_in` is the one rule). The web UI
+marks the subtotal incomplete and lists the affected servers. Switching the
+display currency selects its stored snapshots; it never converts older payments
+at current rates. Both summary paths count all recorded payments independently
+of snapshot availability.
 
 ### 2.4 Rust Domain Models (`crates/inventory/src/sqlite/models.rs`)
 
@@ -147,6 +163,9 @@ ServerBillingSummaryItem  // Per-server line in summary
   and final amount.
 - **Payment history:** per-server table of immutable payment records with
   original + converted amounts.
+- **Incomplete Total Spend:** use the existing warning style when payments lack
+  snapshots for the selected display currency; mark fleet and per-server spend
+  subtotals incomplete without adding live estimates to historical totals.
 - **Missing rates:** monthly and annual fleet totals are marked incomplete,
   with a warning listing the missing source currencies. Profit and cost
   coverage remain unavailable until every configured cost can be converted.
@@ -157,7 +176,7 @@ ServerBillingSummaryItem  // Per-server line in summary
       cascade on server delete, singleton row seeded.
 - [x] `convert_minor()` pure function handles identity, zero, large amounts,
       and rejects invalid rates — 10 unit tests pass.
-- [x] All monetary arithmetic uses integer minor-units with `i128`
+- [x] All monetary arithmetic uses integer hundredths with `i128`
       intermediates — no floating-point anywhere in the conversion path.
 - [x] Same-currency conversions return identity (no markup applied).
 - [x] `CurrencySettings` supports patch-semantics update with audit logging.

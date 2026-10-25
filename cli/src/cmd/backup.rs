@@ -23,8 +23,8 @@
 //! `VPNCTLD_BACKUP_DIR` env var, falling back to
 //! `vpnctl_inventory::DEFAULT_BACKUP_DIR`. The daemon's systemd unit
 //! sets the env var when there's a non-default install layout; the
-//! CLI honours it so the operator's `vpnctl restore` lands in the
-//! same place the daemon was writing.
+//! CLI honours it so backup commands see the same snapshots as the
+//! daemon and web UI.
 
 use std::path::PathBuf;
 
@@ -33,7 +33,9 @@ use clap::Subcommand;
 use crate::OutputFormat;
 use crate::ui;
 use vpnctl_core::humanize::format_size_bytes;
-use vpnctl_inventory::{SqliteInventory, list_snapshots, prune_snapshots, snapshot_now};
+use vpnctl_inventory::{
+    SqliteInventory, backup_dir_from_env, list_snapshots, prune_snapshots, snapshot_now,
+};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum BackupCmd {
@@ -161,20 +163,71 @@ pub(crate) async fn run_restore(
     Ok(())
 }
 
-/// Resolve the backup directory: env var override, otherwise the
-/// shipped default. Mirrors the daemon's resolution order so the CLI
-/// + daemon agree on the same dir even in non-standard installs.
-fn backup_dir_from_env() -> PathBuf {
-    std::env::var("VPNCTLD_BACKUP_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(vpnctl_inventory::DEFAULT_BACKUP_DIR))
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn restore_docs_distinguish_snapshots_from_encrypted_bundles() {
+        for doc in [
+            include_str!("../../../README.md"),
+            include_str!("../../../docs/specs/backup-restore.md"),
+        ] {
+            assert!(doc.contains("vpnctl restore <snapshot>"));
+            assert!(!doc.contains("vpnctl restore <bundle>"));
+            assert!(doc.contains("scripts/vpnctl-restore.sh <archive.tar.zst.age>"));
+            assert!(doc.contains("vpnctl-snap/inv.db"));
+        }
+    }
+
+    #[tokio::test]
+    async fn run_restore_rejects_encrypted_bundle_without_replacing_inventory() {
+        let dir = TempDir::new().unwrap();
+        let bundle = dir.path().join("archive.tar.zst.age");
+        std::fs::write(&bundle, b"age-encryption.org/v1\nnot a SQLite snapshot").unwrap();
+        let db = dir.path().join("inv.db");
+        std::fs::write(&db, b"unchanged inventory").unwrap();
+
+        assert!(
+            run_restore(bundle, Some(db.clone()), OutputFormat::Json)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(db).unwrap(), b"unchanged inventory");
+    }
+
+    #[tokio::test]
+    async fn run_snapshot_honors_backup_directory_override() {
+        const CHILD: &str = "VPNCTL_BACKUP_CLI_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let dir = TempDir::new().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "cmd::backup::tests::run_snapshot_honors_backup_directory_override",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("VPNCTLD_BACKUP_DIR", dir.path().join("custom backups"))
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let dir = TempDir::new().unwrap();
+        run(
+            BackupCmd::Snapshot,
+            Some(dir.path().join("inv.db")),
+            OutputFormat::Json,
+        )
+        .await
+        .unwrap();
+        let snapshots = list_snapshots(&backup_dir_from_env()).unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert!(snapshots[0].path.exists());
+    }
 
     #[tokio::test]
     async fn run_snapshot_and_restore_uses_resolved_db_path() {

@@ -40,14 +40,8 @@ pub(crate) fn server_detail_protocols_section(
         }
         div style="padding: 6px 12px; margin: 0 0 12px; background: var(--paper); border-left: 3px solid var(--acc); font-family: var(--serif); font-size: 12px; line-height: 1.5;" {
             b style="color: var(--acc); font-family: var(--mono); letter-spacing: 0.1em; text-transform: uppercase; font-size: 11px;" {
-                (icon("triangle-alert")) (tr(lang, "toggle here = inventory only", "тогл здесь = только инвентарь"))
+                (icon("triangle-alert")) (tr(lang, "Changes are saved and applied automatically to the node.", "Изменения сохраняются и автоматически применяются на ноде."))
             }
-            (tr(lang, " — goes live on ", " — вступает в силу по "))
-            a href="#deploy-button"
-              style="color: var(--ink); border-bottom: 1px dotted var(--ink); text-decoration: none; font-weight: 500;" {
-                span.ed-mono { (icon("rocket")) (t(lang, K::BtnDeploy)) }
-            }
-            (tr(lang, " (details in the note under Kernels).", " (подробности — в заметке под Ядрами)."))
         }
         ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px; line-height: 1.8;" {
             @for pid in &all_protocols {
@@ -103,8 +97,8 @@ pub(crate) fn server_detail_protocols_section(
                              data-confirm=(crate::i18n::tr(lang, "Disable this protocol on the server for every user?", "Отключить этот протокол на сервере для всех пользователей?"))
                              style="margin: 0; padding: 0;" {
                             @let dis_proto_title = match lang {
-                                crate::i18n::Locale::En => format!("Remove {} from {}.enabled_protocols. Takes effect on next deploy.", pid.0, server.id.0),
-                                crate::i18n::Locale::Ru => format!("Убрать {} из {}.enabled_protocols. Применится при следующем деплое.", pid.0, server.id.0),
+                                crate::i18n::Locale::En => format!("Remove {} from {}.enabled_protocols. Applied automatically to the node.", pid.0, server.id.0),
+                                crate::i18n::Locale::Ru => format!("Убрать {} из {}.enabled_protocols. Применяется автоматически на ноде.", pid.0, server.id.0),
                             };
                             button type="submit"
                                    title=(dis_proto_title)
@@ -153,8 +147,8 @@ pub(crate) fn server_detail_protocols_section(
                              action=(format!("/admin/servers/{}/protocols/{}/enable", sid_enc, path_segment_encode(&pid.0)))
                              style="margin: 0; padding: 0;" {
                             @let en_proto_title = match lang {
-                                crate::i18n::Locale::En => format!("Add {} to {}.enabled_protocols. Takes effect on next deploy.", pid.0, server.id.0),
-                                crate::i18n::Locale::Ru => format!("Добавить {} в {}.enabled_protocols. Применится при следующем деплое.", pid.0, server.id.0),
+                                crate::i18n::Locale::En => format!("Add {} to {}.enabled_protocols. Applied automatically to the node.", pid.0, server.id.0),
+                                crate::i18n::Locale::Ru => format!("Добавить {} в {}.enabled_protocols. Применяется автоматически на ноде.", pid.0, server.id.0),
                             };
                             button type="submit"
                                    title=(en_proto_title)

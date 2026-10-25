@@ -375,3 +375,129 @@ async fn wireguard_private_roundtrips_through_inventory_verbatim() {
         Some(priv_b64.as_str())
     );
 }
+
+#[tokio::test]
+async fn audited_server_secret_batch_changes_only_and_never_logs_values() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let srv = server("audited");
+    inv.add_server(&srv).await.unwrap();
+    let values = [
+        ("vless.sni", "example.org"),
+        ("hysteria2.obfs.password", "fixture-secret"),
+    ];
+    let before = inv.recent_audit(100).await.unwrap().len();
+    assert!(
+        inv.set_server_secrets_audited(&srv.id, "admin", "server.secret.set", &values)
+            .await
+            .unwrap()
+    );
+    let audit = inv.recent_audit(100).await.unwrap();
+    assert_eq!(audit.len(), before + 1);
+    assert_eq!(audit[0].actor, "admin");
+    assert_eq!(audit[0].action, "server.secret.set");
+    assert_eq!(audit[0].target.as_deref(), Some("audited"));
+    assert_eq!(
+        audit[0].payload,
+        Some(json!({"keys": ["vless.sni", "hysteria2.obfs.password"]}))
+    );
+    for (key, value) in values {
+        assert_eq!(
+            inv.get_server_secret(&srv.id, key)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(value)
+        );
+    }
+    assert!(
+        !inv.set_server_secrets_audited(&srv.id, "admin", "server.secret.set", &values)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !inv.set_server_secrets_audited(&srv.id, "admin", "server.secret.set", &[])
+            .await
+            .unwrap()
+    );
+    assert_eq!(inv.recent_audit(100).await.unwrap().len(), before + 1);
+    assert!(
+        inv.set_server_secrets_audited(
+            &ServerId("missing".into()),
+            "admin",
+            "server.secret.set",
+            &values
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(inv.recent_audit(100).await.unwrap().len(), before + 1);
+}
+
+#[tokio::test]
+async fn concurrent_equal_server_secret_saves_emit_one_audit() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let srv = server("concurrent");
+    inv.add_server(&srv).await.unwrap();
+    let before = inv.recent_audit(100).await.unwrap().len();
+    let values = [("vless.sni", "example.org")];
+    let (first, second) = tokio::join!(
+        inv.set_server_secrets_audited(&srv.id, "admin", "server.reality.set", &values),
+        inv.set_server_secrets_audited(&srv.id, "admin", "server.reality.set", &values)
+    );
+    assert_ne!(first.unwrap(), second.unwrap());
+    assert_eq!(inv.recent_audit(100).await.unwrap().len(), before + 1);
+}
+
+#[tokio::test]
+async fn audited_server_secret_batch_rolls_back_when_audit_fails() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let srv = server("rollback");
+    inv.add_server(&srv).await.unwrap();
+    inv.set_server_secret(&srv.id, "vless.sni", "before.example.org")
+        .await
+        .unwrap();
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(db_path(&dir)))
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER reject_setting_audit BEFORE INSERT ON audit_log
+         WHEN NEW.action = 'server.reality.set'
+         BEGIN SELECT RAISE(ABORT, 'fixture audit failure'); END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let before = inv.recent_audit(100).await.unwrap().len();
+    assert!(
+        inv.set_server_secrets_audited(
+            &srv.id,
+            "admin",
+            "server.reality.set",
+            &[
+                ("vless.sni", "after.example.org"),
+                ("vless.listen_port", "8443")
+            ]
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        inv.get_server_secret(&srv.id, "vless.sni")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("before.example.org")
+    );
+    assert_eq!(
+        inv.get_server_secret(&srv.id, "vless.listen_port")
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(inv.recent_audit(100).await.unwrap().len(), before);
+}

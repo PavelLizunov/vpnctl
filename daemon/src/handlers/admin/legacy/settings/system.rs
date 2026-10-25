@@ -95,8 +95,8 @@ pub(crate) fn settings_geoip_section(lang: crate::i18n::Locale) -> Markup {
             span.ed-mono { (tr(lang, "update now", "обновить сейчас")) }
             (tr(
                 lang,
-                " button below. It downloads DB-IP Lite (CC-BY 4.0, no signup) and atomic-renames the .mmdb files into this dir, then reloads the DB.",
-                " ниже. Она скачивает DB-IP Lite (CC-BY 4.0, без регистрации) и атомарно подменяет .mmdb-файлы в этой папке, затем перезагружает БД.",
+                " button below. It downloads DB-IP Lite (CC-BY 4.0, no signup) and atomic-renames the .mmdb files into this dir. The new databases are used after vpnctld restarts.",
+                " ниже. Она скачивает DB-IP Lite (CC-BY 4.0, без регистрации) и атомарно подменяет .mmdb-файлы в этой папке. Новые базы используются после перезапуска vpnctld.",
             ))
         }
         div style="margin: 14px 0;" {

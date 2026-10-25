@@ -12,7 +12,7 @@ use tower::ServiceExt;
 use vpnctl_core::{KernelId, ProtocolId, Registry, Server, ServerId, User, UserId};
 use vpnctl_inventory::SqliteInventory;
 use vpnctl_kernels::SingBox;
-use vpnctl_protocols::{VlessReality, VlessXhttp};
+use vpnctl_protocols::{Hysteria2, Naive, TuicV5, VlessReality, VlessWs, VlessXhttp};
 use vpnctld::{AppState, router};
 
 async fn seed(dir: &TempDir, grant_entry: bool) -> (AppState, String, JoinHandle<()>) {
@@ -27,6 +27,14 @@ async fn seed(dir: &TempDir, grant_entry: bool) -> (AppState, String, JoinHandle
     registry
         .register_protocol(Box::new(VlessXhttp::new()))
         .unwrap();
+    registry.register_protocol(Box::new(Naive::new())).unwrap();
+    registry
+        .register_protocol(Box::new(VlessWs::new()))
+        .unwrap();
+    registry
+        .register_protocol(Box::new(Hysteria2::new()))
+        .unwrap();
+    registry.register_protocol(Box::new(TuicV5::new())).unwrap();
 
     for (id, address) in [("is", "198.51.100.10"), ("s5", "198.51.100.50")] {
         let server = Server {
@@ -53,7 +61,7 @@ async fn seed(dir: &TempDir, grant_entry: bool) -> (AppState, String, JoinHandle
     let user = User {
         id: UserId("alice".into()),
         uuid: "11111111-2222-3333-4444-555555555555".into(),
-        tuic_password: None,
+        tuic_password: Some("pw-alice".into()),
         wireguard_pubkey: None,
         wireguard_private: None,
         sub_token: None,
@@ -100,6 +108,241 @@ async fn get_sub_at(state: AppState, uri: &str, user_agent: Option<&str>) -> (St
 
 async fn get_sub(state: AppState, token: &str, user_agent: Option<&str>) -> (StatusCode, Vec<u8>) {
     get_sub_at(state, &format!("/sub/{token}"), user_agent).await
+}
+
+async fn set_protocols(state: &AppState, server_id: &str, protocols: &[&str]) {
+    let sid = ServerId(server_id.into());
+    let server = state.inv.get_server(&sid).await.unwrap().unwrap();
+    for pid in &server.enabled_protocols {
+        state.inv.remove_server_protocol(&sid, pid).await.unwrap();
+    }
+    for pid in protocols {
+        state
+            .inv
+            .add_server_protocol(&sid, &ProtocolId((*pid).into()))
+            .await
+            .unwrap();
+    }
+    for (key, value) in [
+        ("naive.domain", "entry.example.com"),
+        ("vlessws.domain", "entry.example.com"),
+        ("vlessws.path", "testpath"),
+        ("vlessxhttp.path", "testpath"),
+    ] {
+        state.inv.set_server_secret(&sid, key, value).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn udp_targets_skip_tcp_only_entries_and_never_fall_back_direct() {
+    for target_pid in ["hysteria2", "tuic-v5"] {
+        for entry_pid in ["naive"] {
+            let dir = TempDir::new().unwrap();
+            let (state, token, _writer) = seed(&dir, true).await;
+            set_protocols(&state, "s5", &[target_pid]).await;
+            set_protocols(&state, "is", &[entry_pid, "vless+reality"]).await;
+            let (status, body) = get_sub(state.clone(), &token, None).await;
+            assert_eq!(status, StatusCode::OK);
+            let config: Value = serde_json::from_slice(&body).unwrap();
+            let outbounds = config["outbounds"].as_array().unwrap();
+            assert!(
+                outbounds
+                    .iter()
+                    .any(|o| o["tag"]
+                        == format!("Iceland {} ~alice", entry_pid.to_ascii_uppercase()))
+            );
+            let target = outbounds
+                .iter()
+                .find(|o| o["server"] == "198.51.100.50")
+                .unwrap();
+            assert_eq!(target["detour"], "Iceland VLESS ~alice");
+
+            set_protocols(&state, "is", &[entry_pid]).await;
+            let (status, omitted) = get_sub(state.clone(), &token, None).await;
+            assert_eq!(status, StatusCode::OK);
+            let config: Value = serde_json::from_slice(&omitted).unwrap();
+            assert!(
+                !config["outbounds"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|o| { o["server"] == "198.51.100.50" })
+            );
+            state
+                .inv
+                .set_server_protocol_hidden(
+                    &ServerId("s5".into()),
+                    &ProtocolId(target_pid.into()),
+                    true,
+                )
+                .await
+                .unwrap();
+            let (_, hidden) = get_sub(state.clone(), &token, None).await;
+            assert_eq!(
+                omitted, hidden,
+                "omitted target must not affect any response bytes"
+            );
+
+            set_protocols(&state, "s5", &["vless+reality"]).await;
+            let (_, body) = get_sub(state, &token, None).await;
+            let config: Value = serde_json::from_slice(&body).unwrap();
+            let target = config["outbounds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|o| o["server"] == "198.51.100.50")
+                .unwrap();
+            assert_eq!(
+                target["detour"],
+                format!("Iceland {} ~alice", entry_pid.to_ascii_uppercase())
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn udp_targets_accept_vless_over_ws_and_xhttp_entries() {
+    for entry_pid in ["vless-ws", "vless+xhttp"] {
+        let dir = TempDir::new().unwrap();
+        let (state, token, _writer) = seed(&dir, true).await;
+        set_protocols(&state, "s5", &["hysteria2"]).await;
+        set_protocols(&state, "is", &[entry_pid]).await;
+        let (status, body) = get_sub(state, &token, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let config: Value = serde_json::from_slice(&body).unwrap();
+        let target = config["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["server"] == "198.51.100.50")
+            .unwrap_or_else(|| panic!("{entry_pid} entry must carry the UDP target"));
+        assert_eq!(
+            target["detour"],
+            format!("Iceland {} ~alice", entry_pid.to_ascii_uppercase())
+        );
+    }
+}
+
+#[tokio::test]
+async fn udp_entry_keeps_every_byte_except_the_target_detour() {
+    for entry_pid in ["hysteria2", "tuic-v5"] {
+        let dir = TempDir::new().unwrap();
+        let (state, token, _writer) = seed(&dir, true).await;
+        set_protocols(&state, "is", &[entry_pid]).await;
+        set_protocols(&state, "s5", &["hysteria2"]).await;
+        let target_id = ServerId("s5".into());
+        state
+            .inv
+            .set_client_detour_via_as("test", &target_id, None)
+            .await
+            .unwrap();
+        let (_, direct) = get_sub(state.clone(), &token, None).await;
+        let mut expected: Value = serde_json::from_slice(&direct).unwrap();
+        let tag = if entry_pid == "hysteria2" {
+            "Iceland HY2 ~alice"
+        } else {
+            "Iceland TUIC ~alice"
+        };
+        let target = expected["outbounds"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|o| o["server"] == "198.51.100.50")
+            .unwrap();
+        target["detour"] = serde_json::json!(tag);
+        state
+            .inv
+            .set_client_detour_via_as("test", &target_id, Some(&ServerId("is".into())))
+            .await
+            .unwrap();
+        let (status, chained) = get_sub(state, &token, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(chained, expected.to_string().as_bytes());
+    }
+}
+
+#[tokio::test]
+async fn compatible_udp_detour_keeps_legacy_response_byte_equal() {
+    for target_pid in ["hysteria2", "tuic-v5"] {
+        let dir = TempDir::new().unwrap();
+        let (state, token, _writer) = seed(&dir, true).await;
+        set_protocols(&state, "s5", &[target_pid]).await;
+        let (_, body) = get_sub(state.clone(), &token, None).await;
+        let (status, stock) =
+            get_sub_at(state, &format!("/sub/{token}?format=sing-box"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, stock);
+        let (tag, target) = if target_pid == "hysteria2" {
+            (
+                "S5 HY2 ~alice",
+                serde_json::json!({
+                    "type": "hysteria2", "tag": "S5 HY2 ~alice",
+                    "server": "198.51.100.50", "server_port": 8444, "password": "pw-alice",
+                    "tls": {"enabled": true, "insecure": true, "alpn": ["h3"]},
+                    "detour": "Iceland VLESS ~alice"
+                }),
+            )
+        } else {
+            (
+                "S5 TUIC ~alice",
+                serde_json::json!({
+                    "type": "tuic", "tag": "S5 TUIC ~alice",
+                    "server": "198.51.100.50", "server_port": 8443, "password": "pw-alice",
+                    "uuid": "11111111-2222-3333-4444-555555555555",
+                    "congestion_control": "bbr", "udp_relay_mode": "native",
+                    "tls": {"enabled": true, "insecure": true, "alpn": ["h3"]},
+                    "detour": "Iceland VLESS ~alice"
+                }),
+            )
+        };
+        let expected = serde_json::json!({
+            "log": {"level": "info", "timestamp": true},
+            "outbounds": [
+                {"type": "selector", "tag": "proxy", "outbounds": ["Iceland VLESS ~alice", tag],
+                 "default": "Iceland VLESS ~alice"},
+                {
+                    "type": "vless", "tag": "Iceland VLESS ~alice",
+                    "server": "198.51.100.10", "server_port": 443,
+                    "uuid": "11111111-2222-3333-4444-555555555555",
+                    "flow": "xtls-rprx-vision", "packet_encoding": "xudp",
+                    "tls": {
+                        "enabled": true, "server_name": "yahoo.com",
+                        "utls": {"enabled": true, "fingerprint": "randomized"},
+                        "reality": {"enabled": true, "public_key": "PUB_is", "short_id": "12345678"}
+                    }
+                }, target,
+                {"type": "direct", "tag": "direct"}, {"type": "block", "tag": "block"}
+            ],
+            "route": {"rules": [{"protocol": "dns", "outbound": "direct"}],
+                      "final": "proxy", "auto_detect_interface": true}
+        });
+        assert_eq!(body, expected.to_string().as_bytes());
+    }
+}
+
+#[tokio::test]
+async fn mihomo_udp_detour_ignores_tcp_only_entry_byte_equal() {
+    let dir = TempDir::new().unwrap();
+    let (state, token, _writer) = seed(&dir, true).await;
+    set_protocols(&state, "s5", &["hysteria2"]).await;
+    let uri = format!("/sub/{token}?format=mihomo");
+    let (status, original) = get_sub_at(state.clone(), &uri, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let config: Value = serde_saphyr::from_str(std::str::from_utf8(&original).unwrap()).unwrap();
+    let target = config["proxies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["server"] == "198.51.100.50")
+        .unwrap();
+    assert_eq!(target["dialer-proxy"], "Iceland VLESS ~alice");
+    set_protocols(&state, "is", &["vless+xhttp", "vless+reality"]).await;
+    let (_, actual) = get_sub_at(state.clone(), &uri, None).await;
+    assert_eq!(actual, original);
+    set_protocols(&state, "is", &["vless+xhttp"]).await;
+    let (_, body) = get_sub_at(state, &uri, None).await;
+    let config: Value = serde_saphyr::from_str(std::str::from_utf8(&body).unwrap()).unwrap();
+    assert!(config["proxies"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]

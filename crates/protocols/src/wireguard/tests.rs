@@ -269,6 +269,60 @@ fn fake_secrets_awg() -> HashMap<String, String> {
 }
 
 #[test]
+fn complete_awg_client_outputs_stay_byte_equal() {
+    let server = fake_server();
+    let secrets = fake_secrets_awg();
+    let ctx = RenderCtx::new(&server, &secrets);
+    let user = fake_user();
+    let expected_link = concat!(
+        "awg://Qhh7nQwL+0fH3iZ8VAEcvVNlEMU8r9SiH3LzAh6Kj3o=@198.51.100.42:51820?",
+        "private_key=0000000000000000000000000000000000000000000=",
+        "&address=10.66.0.2/32&keepalive=25&jc=7&jmin=60&jmax=140",
+        "&s1=30&s2=90&s3=0&s4=0&h1=1111111111&h2=2022222222&h3=333333333&h4=444444444#alex"
+    );
+    assert_eq!(
+        awg_share_link(&ctx, &user).unwrap().as_bytes(),
+        expected_link.as_bytes()
+    );
+    let expected_conf = concat!(
+        "# vpnctl-rendered AmneziaWG client config.\n",
+        "# Private key was server-generated for alex — import this file as-is.\n\n",
+        "[Interface]\nPrivateKey = 0000000000000000000000000000000000000000000=\n",
+        "Address = 10.66.0.2/32\nDNS = 1.1.1.1\n",
+        "Jc = 7\nJmin = 60\nJmax = 140\nS1 = 30\nS2 = 90\n",
+        "H1 = 1111111111\nH2 = 2022222222\nH3 = 333333333\nH4 = 444444444\n\n",
+        "[Peer]\nPublicKey = Qhh7nQwL+0fH3iZ8VAEcvVNlEMU8r9SiH3LzAh6Kj3o=\n",
+        "Endpoint = 198.51.100.42:51820\nAllowedIPs = 0.0.0.0/0, ::/0\nPersistentKeepalive = 25\n"
+    );
+    assert_eq!(
+        super::render::render_client_conf(&ctx, &user)
+            .unwrap()
+            .as_bytes(),
+        expected_conf.as_bytes()
+    );
+    let expected_json = serde_json::json!({
+        "type": "wireguard",
+        "interface": {
+            "private_key": "0000000000000000000000000000000000000000000=",
+            "address_cidr": "10.66.0.2/32", "dns": ["1.1.1.1"],
+            "amneziawg": {
+                "jc": "7", "jmin": "60", "jmax": "140", "s1": "30", "s2": "90",
+                "h1": "1111111111", "h2": "2022222222", "h3": "333333333", "h4": "444444444"
+            }
+        },
+        "peer": {
+            "public_key": "Qhh7nQwL+0fH3iZ8VAEcvVNlEMU8r9SiH3LzAh6Kj3o=",
+            "endpoint": "198.51.100.42:51820", "allowed_ips": "0.0.0.0/0,::/0",
+            "persistent_keepalive": 25
+        }
+    });
+    assert_eq!(
+        serde_json::to_vec(&WireGuard::new().client_config(&ctx, &user).unwrap()).unwrap(),
+        serde_json::to_vec(&expected_json).unwrap()
+    );
+}
+
+#[test]
 fn awg_share_link_matches_operator_schema() {
     let server = fake_server();
     let secrets = fake_secrets_awg();

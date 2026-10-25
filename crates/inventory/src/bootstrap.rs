@@ -28,9 +28,21 @@ pub async fn bootstrap_server_secrets(
     }
 
     let needs_amnezia_obfs = server.kernels.iter().any(|k| k.0 == "amneziawg");
-    if needs_amnezia_obfs && !secrets.contains_key("amneziawg.h1") {
+    let effective_obfs: Vec<_> = vpnctl_core::amneziawg::effective_params(&secrets)
+        .into_iter()
+        .map(|(key, value)| {
+            (
+                format!("amneziawg.{}", key.to_ascii_lowercase()),
+                value.to_string(),
+            )
+        })
+        .collect();
+    let has_obfs = effective_obfs
+        .iter()
+        .any(|(key, _)| secrets.contains_key(key));
+    if needs_amnezia_obfs && !has_obfs {
         let o = vpnctl_crypto::gen_amnezia_obfs().map_err(|e| format!("gen_amnezia_obfs: {e}"))?;
-        for (k, val) in [
+        let candidates: Vec<_> = [
             ("amneziawg.jc", o.jc),
             ("amneziawg.jmin", o.jmin),
             ("amneziawg.jmax", o.jmax),
@@ -40,14 +52,34 @@ pub async fn bootstrap_server_secrets(
             ("amneziawg.h2", o.h2),
             ("amneziawg.h3", o.h3),
             ("amneziawg.h4", o.h4),
-        ] {
-            let v = val.to_string();
-            inv.set_server_secret(&server.id, k, &v)
-                .await
-                .map_err(|e| format!("set_server_secret {k}: {e}"))?;
-            secrets.insert(k.to_string(), v);
+        ]
+        .into_iter()
+        .map(|(key, value)| (key, value.to_string()))
+        .collect();
+        let (stored, did_mint) = inv
+            .initialize_server_secret_set(&server.id, &candidates)
+            .await
+            .map_err(|e| format!("initialize amneziawg obfs params: {e}"))?;
+        secrets.extend(stored);
+        if did_mint {
+            minted.push("amneziawg obfs params");
         }
-        minted.push("amneziawg obfs params");
+    } else if needs_amnezia_obfs {
+        let mut did_mint_any = false;
+        for (key, value) in effective_obfs {
+            if secrets.contains_key(&key) {
+                continue;
+            }
+            let (stored, did_mint) = inv
+                .initialize_server_secret_set(&server.id, &[(key.as_str(), value)])
+                .await
+                .map_err(|e| format!("initialize {key}: {e}"))?;
+            secrets.extend(stored);
+            did_mint_any |= did_mint;
+        }
+        if did_mint_any {
+            minted.push("amneziawg obfs params");
+        }
     }
 
     Ok((secrets, minted))

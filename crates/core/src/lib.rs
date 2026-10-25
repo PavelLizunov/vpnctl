@@ -1,3 +1,4 @@
+pub mod amneziawg;
 pub mod humanize;
 pub mod shell;
 pub mod url_host;

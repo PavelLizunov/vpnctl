@@ -153,6 +153,55 @@ impl SqliteInventory {
         Ok(())
     }
 
+    pub async fn set_server_secrets_audited(
+        &self,
+        id: &ServerId,
+        actor: &str,
+        action: &str,
+        values: &[(&str, &str)],
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM servers WHERE id = ?1)")
+            .bind(&id.0)
+            .fetch_one(&mut *tx)
+            .await?;
+        if !exists {
+            return Err(SqliteInventoryError::Invalid(format!(
+                "no such server '{}'",
+                id.0
+            )));
+        }
+        let mut changed = Vec::new();
+        for (key, value) in values {
+            let result = sqlx::query(
+                "INSERT INTO server_secrets (server_id, key, value) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(server_id, key) DO UPDATE SET value = excluded.value
+                 WHERE server_secrets.value != excluded.value",
+            )
+            .bind(&id.0)
+            .bind(key)
+            .bind(value)
+            .execute(&mut *tx)
+            .await?;
+            if result.rows_affected() != 0 {
+                changed.push(*key);
+            }
+        }
+        if !changed.is_empty() {
+            sqlx::query(
+                "INSERT INTO audit_log (actor, action, target, payload) VALUES (?1, ?2, ?3, ?4)",
+            )
+            .bind(actor)
+            .bind(action)
+            .bind(&id.0)
+            .bind(serde_json::json!({ "keys": changed }).to_string())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(!changed.is_empty())
+    }
+
     pub(crate) async fn initialize_server_secret_set(
         &self,
         id: &ServerId,

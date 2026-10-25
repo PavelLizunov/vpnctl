@@ -589,6 +589,35 @@ pub struct ServerPayment {
     pub notes: Option<String>,
 }
 
+impl ServerPayment {
+    /// This payment's historical spend in `display_currency`, or `None` when it
+    /// has no stored snapshot for that currency (never re-converted at today's
+    /// rates). A payment made in `display_currency` itself counts as paid.
+    pub fn historical_spend_in(&self, display_currency: &str) -> Option<i64> {
+        historical_spend_in(
+            self.amount_minor,
+            &self.currency,
+            self.converted_minor,
+            self.display_currency.as_deref(),
+            display_currency,
+        )
+    }
+}
+
+pub(crate) fn historical_spend_in(
+    amount_minor: i64,
+    currency: &str,
+    converted_minor: Option<i64>,
+    snapshot_currency: Option<&str>,
+    display_currency: &str,
+) -> Option<i64> {
+    match converted_minor {
+        Some(converted) if snapshot_currency == Some(display_currency) => Some(converted),
+        _ if currency == display_currency => Some(amount_minor),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerPaymentInput {
     pub amount_minor: i64,

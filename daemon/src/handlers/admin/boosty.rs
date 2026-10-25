@@ -626,15 +626,15 @@ pub(crate) async fn boosty_page(
                 }
                 div style="margin-top: 14px;" {
                     div style="display: flex; flex-wrap: wrap; gap: 24px; margin: 0 0 12px; font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                        span { (tr(lang, "access fallback ", "резервный access ")) span style="color: var(--ink);" { (boosty_mask_secret(settings.access_token.as_deref())) } }
-                        span { (tr(lang, "refresh preferred ", "основной refresh ")) span style="color: var(--ink);" { (boosty_mask_secret(settings.refresh_token.as_deref())) } }
+                        span { (tr(lang, "access first ", "сначала access ")) span style="color: var(--ink);" { (boosty_mask_secret(settings.access_token.as_deref())) } }
+                        span { (tr(lang, "refresh renewal ", "обновление через refresh ")) span style="color: var(--ink);" { (boosty_mask_secret(settings.refresh_token.as_deref())) } }
                         span { (tr(lang, "device · with refresh ", "device · для refresh ")) span style="color: var(--ink);" { (boosty_mask_secret(settings.device_id.as_deref())) } }
                     }
                     p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 0 0 12px;" {
                         (tr(
                             lang,
-                            "Preferred: refresh token + device id (renewed automatically). Access token is a short-lived fallback used only when that pair is incomplete.",
-                            "Основной способ: refresh token + device id (обновляются автоматически). Access token — короткоживущий резерв, он используется только если пара заполнена не полностью.",
+                            "A non-empty access token is used first. A non-empty refresh token + device id pair is used when no access token is set, or to retry after an authentication failure.",
+                            "Сначала используется непустой access token. Непустая пара refresh token + device id используется, когда access token не задан, или для повторной попытки после ошибки авторизации.",
                         ))
                     }
                     div style="display: grid; grid-template-columns: 200px 1fr; gap: 10px 14px; align-items: center; max-width: 720px;" {
@@ -646,13 +646,13 @@ pub(crate) async fn boosty_page(
                               placeholder="boosty.to/yourblog";
 
                         label for="boosty_access" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                            (tr(lang, "access token · fallback", "access token · резервный"))
+                            (tr(lang, "access token · used first", "access token · используется первым"))
                         }
                         input id="boosty_access" type="password" name="access_token" autocomplete="off"
                               placeholder=(tr(lang, "blank = keep existing", "пусто = оставить как есть"));
 
                         label for="boosty_refresh" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                            (tr(lang, "refresh token · preferred", "refresh token · основной"))
+                            (tr(lang, "refresh token · renewal", "refresh token · обновление"))
                         }
                         input id="boosty_refresh" type="password" name="refresh_token" autocomplete="off"
                               placeholder=(tr(lang, "blank = keep existing", "пусто = оставить как есть"));

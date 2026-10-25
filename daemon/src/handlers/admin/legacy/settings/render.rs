@@ -101,7 +101,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
         .get_public_base_url()
         .await
         .map_err(|e| e.to_string());
-    let backup_dir = std::path::PathBuf::from(crate::app::DEFAULT_BACKUP_DIR);
+    let backup_dir = vpnctl_inventory::backup_dir_from_env();
     let snapshots = vpnctl_inventory::list_snapshots(&backup_dir).map_err(|e| e.to_string());
 
     let last_self_test = state
@@ -233,7 +233,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                 (crate::i18n::tr(lang, "vpnctld snapshots ", "vpnctld делает снэпшоты "))
                 span.ed-mono { "/var/lib/vpnctl/inv.db" }
                 (crate::i18n::tr(lang, " hourly into ", " ежечасно в "))
-                span.ed-mono { (crate::app::DEFAULT_BACKUP_DIR) }
+                span.ed-mono { (backup_dir.display()) }
                 (crate::i18n::tr(
                     lang,
                     " (24 hourly + 30 daily + 12 monthly retained). ",
@@ -274,8 +274,8 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                 span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
                     (crate::i18n::tr(
                         lang,
-                        "Restore-in-place is a CLI command (the daemon's restore subcommand — it can't replace its own open DB). The self-test above proves the snapshot WOULD restore, without touching the live DB.",
-                        "Восстановление поверх живой БД — это CLI-команда (подкоманда restore демона — он не может заменить свою же открытую БД). Self-test выше доказывает что снэпшот ВОССТАНОВИТСЯ, не трогая живую БД.",
+                        "Inventory restore requires a decrypted SQLite snapshot and a stopped daemon; follow the recovery procedure below. The self-test checks an isolated copy without touching the live DB.",
+                        "Для восстановления нужны расшифрованный SQLite-снэпшот и остановленный демон; следуй процедуре восстановления ниже. Self-test проверяет отдельную копию, не трогая живую БД.",
                     ))
                 }
             }
@@ -366,7 +366,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                 Err(e) => {
                     p style="font-family: var(--serif); font-style: italic; color: var(--red); font-size: 12px;" {
                         (crate::i18n::tr(lang, "Can't list snapshots in ", "Не удалось перечислить снэпшоты в "))
-                        span.ed-mono { (crate::app::DEFAULT_BACKUP_DIR) }
+                        span.ed-mono { (backup_dir.display()) }
                         ": " (e)
                         (crate::i18n::tr(
                             lang,

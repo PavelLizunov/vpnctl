@@ -324,21 +324,20 @@ async fn server_billing_initial_payments_and_advance_snapshot() {
 }
 
 #[tokio::test]
-async fn server_spend_and_count_dynamically_converts_across_currency_switch() {
+async fn server_spend_and_count_uses_only_snapshots_for_display_currency() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     let s = srv("s2", "hetzner");
     inv.add_server(&s).await.unwrap();
 
-    inv.upsert_currency_rate(&vpnctl_inventory::CurrencyRate {
+    let mut rate = vpnctl_inventory::CurrencyRate {
         base_currency: "EUR".into(),
         target_currency: "RUB".into(),
         rate_micros: 100_000_000,
         source: "test".into(),
         fetched_at: "2026-09-16T12:00:00Z".into(),
-    })
-    .await
-    .unwrap();
+    };
+    inv.upsert_currency_rate(&rate).await.unwrap();
 
     let input = ServerBillingInput {
         due_date: "2026-10-10".into(),
@@ -361,7 +360,153 @@ async fn server_spend_and_count_dynamically_converts_across_currency_switch() {
         count_rub, 2,
         "count must never drop to 0 on currency switch"
     );
-    assert!(spend_rub > 0, "spend must dynamically convert to RUB");
+    assert_eq!(spend_rub, 0, "EUR snapshots must not be re-converted");
+
+    let mut settings = vpnctl_inventory::CurrencySettingsInput {
+        display_currency: Some("RUB".into()),
+        default_markup_bps: None,
+        markup_overrides: None,
+        rate_overrides: None,
+        auto_refresh: None,
+    };
+    inv.set_currency_settings(&settings).await.unwrap();
+    let summary = inv.get_fleet_billing_summary().await.unwrap();
+    assert_eq!(summary.total_spend_minor, spend_rub);
+    assert_eq!(summary.servers[0].payment_count, count_rub);
+
+    inv.advance_server_billing_cycle(&s.id).await.unwrap();
+    let payments = inv.list_server_payments(&s.id).await.unwrap();
+    let rub_snapshot = payments
+        .iter()
+        .find(|p| p.display_currency.as_deref() == Some("RUB"))
+        .unwrap()
+        .converted_minor
+        .unwrap();
+    assert_eq!(rub_snapshot, 107_000);
+
+    rate.rate_micros = 200_000_000;
+    inv.upsert_currency_rate(&rate).await.unwrap();
+    let (spend, count) = inv.server_spend_and_count(&s.id, "RUB").await.unwrap();
+    assert_eq!((spend, count), (rub_snapshot, 3));
+    assert_eq!(inv.server_total_spend(&s.id, "RUB").await.unwrap(), spend);
+    let summary = inv.get_fleet_billing_summary().await.unwrap();
+    assert_eq!(summary.total_spend_minor, spend);
+    assert_eq!(summary.servers[0].total_spend_minor, spend);
+    assert_eq!(summary.servers[0].payment_count, count);
+    assert_eq!(summary.monthly_burn_minor, 214_000);
+
+    settings.display_currency = Some("EUR".into());
+    inv.set_currency_settings(&settings).await.unwrap();
+    // The RUB-snapshotted payment was paid in EUR, so it counts at its EUR
+    // amount; nothing is converted at today's rates.
+    let (spend, count) = inv.server_spend_and_count(&s.id, "EUR").await.unwrap();
+    assert_eq!((spend, count), (3000, 3));
+    let summary = inv.get_fleet_billing_summary().await.unwrap();
+    assert_eq!(summary.total_spend_minor, spend);
+    assert_eq!(summary.servers[0].payment_count, count);
+}
+
+#[tokio::test]
+async fn server_spend_does_not_backfill_missing_snapshots_when_rates_appear() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let s = srv("missing-snapshot", "generic");
+    inv.add_server(&s).await.unwrap();
+    let payment = inv
+        .record_server_payment(
+            &s.id,
+            &vpnctl_inventory::ServerPaymentInput {
+                amount_minor: 1234,
+                currency: "USD".into(),
+                cycle: BillingCycle::Monthly,
+                notes: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(payment.converted_minor, None);
+    inv.upsert_currency_rate(&vpnctl_inventory::CurrencyRate {
+        base_currency: "USD".into(),
+        target_currency: "EUR".into(),
+        rate_micros: 900_000,
+        source: "test".into(),
+        fetched_at: "2026-10-25T00:00:00Z".into(),
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        inv.server_spend_and_count(&s.id, "EUR").await.unwrap(),
+        (0, 1)
+    );
+    assert_eq!(
+        inv.server_spend_and_count(&s.id, "USD").await.unwrap(),
+        (1234, 1),
+        "a payment made in the display currency counts at its paid amount"
+    );
+    let summary = inv.get_fleet_billing_summary().await.unwrap();
+    assert_eq!(summary.total_spend_minor, 0);
+    assert_eq!(summary.servers[0].total_spend_minor, 0);
+    assert_eq!(summary.servers[0].payment_count, 1);
+    assert_eq!(
+        inv.list_server_payments(&s.id).await.unwrap(),
+        vec![payment]
+    );
+}
+
+#[tokio::test]
+async fn payment_storage_uses_hundredths_for_zero_decimal_currencies() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let s = srv("hundredths", "generic");
+    inv.add_server(&s).await.unwrap();
+
+    for currency in ["JPY", "KRW"] {
+        inv.set_currency_settings(&vpnctl_inventory::CurrencySettingsInput {
+            display_currency: Some(currency.into()),
+            default_markup_bps: None,
+            markup_overrides: None,
+            rate_overrides: None,
+            auto_refresh: None,
+        })
+        .await
+        .unwrap();
+        let payment = inv
+            .record_server_payment(
+                &s.id,
+                &vpnctl_inventory::ServerPaymentInput {
+                    amount_minor: 10_000,
+                    currency: currency.into(),
+                    cycle: BillingCycle::Monthly,
+                    notes: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(payment.amount_minor, 10_000);
+        assert_eq!(payment.converted_minor, Some(10_000));
+        inv.upsert_currency_rate(&vpnctl_inventory::CurrencyRate {
+            base_currency: currency.into(),
+            target_currency: "EUR".into(),
+            rate_micros: 10_000,
+            source: "test".into(),
+            fetched_at: "2026-10-25T00:00:00Z".into(),
+        })
+        .await
+        .unwrap();
+        let converted = inv
+            .convert_amount_spot(payment.amount_minor, currency, "EUR")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(converted.amount_minor, 100);
+        assert!(
+            inv.list_server_payments(&s.id)
+                .await
+                .unwrap()
+                .contains(&payment)
+        );
+    }
 }
 
 #[tokio::test]

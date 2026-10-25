@@ -192,17 +192,35 @@ async fn render_singbox_with(
 
     let mut first_tag_by_server: std::collections::HashMap<ServerId, String> =
         std::collections::HashMap::new();
-    for (server_id, _, tag) in &rendered {
+    let mut first_udp_tag_by_server: std::collections::HashMap<ServerId, String> =
+        std::collections::HashMap::new();
+    for (server_id, value, tag) in &rendered {
+        if !value.is_object() {
+            continue;
+        }
         first_tag_by_server
             .entry(server_id.clone())
             .or_insert_with(|| tag.clone());
+        if outbound_supports_udp(value) {
+            first_udp_tag_by_server
+                .entry(server_id.clone())
+                .or_insert_with(|| tag.clone());
+        }
     }
 
     let mut outbounds: Vec<Value> = Vec::with_capacity(rendered.len());
     let mut tags: Vec<String> = Vec::with_capacity(rendered.len());
     for (server_id, mut value, tag) in rendered {
         if let Some(Some(entry_id)) = detours.get(&server_id) {
-            let Some(entry_tag) = first_tag_by_server.get(entry_id) else {
+            let entry_tags = if matches!(
+                value.get("type").and_then(Value::as_str),
+                Some("hysteria2" | "tuic" | "wireguard")
+            ) {
+                &first_udp_tag_by_server
+            } else {
+                &first_tag_by_server
+            };
+            let Some(entry_tag) = entry_tags.get(entry_id) else {
                 tracing::warn!(
                     target = "vpnctld::sub",
                     user = %user.id,
@@ -229,6 +247,16 @@ async fn render_singbox_with(
 
     let cfg = build_client_envelope(user, outbounds, &tags);
     Ok((user_id, cfg))
+}
+
+fn outbound_supports_udp(value: &Value) -> bool {
+    match value.get("type").and_then(Value::as_str) {
+        // VLESS carries UDP (xudp) over every transport, including WS/XHTTP.
+        Some(
+            "vless" | "hysteria2" | "tuic" | "shadowsocks" | "trojan" | "anytls" | "wireguard",
+        ) => true,
+        _ => false,
+    }
 }
 
 fn protocol_display_name(protocol_id: &str) -> String {

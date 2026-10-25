@@ -82,6 +82,14 @@ backup, install, health-check, and rollback path.
   `X-Real-IP` — so every proxy block targeting vpnctld must authoritatively
   `header_up X-Real-IP {client_addr}`, and the site config must strip any
   client-supplied `X-Real-IP` before routing.
+- **Inventory snapshot directory.** The CLI backup commands, daemon hourly
+  scheduler and Web snapshot creation, listing, download and self-test use
+  `vpnctl_inventory::backup_dir_from_env()`: `VPNCTLD_BACKUP_DIR` overrides
+  `vpnctl_inventory::DEFAULT_BACKUP_DIR` (`/var/lib/vpnctl/backups`). Set the
+  override in `/etc/vpnctl/vpnctld.env` and in the CLI environment to use the
+  same directory; the daemon user needs write access. The separate encrypted
+  bundle script uses `BACKUP_DIR`; set it too if those archives should share
+  the custom directory.
 - **WgTurn and DNS Tunnel decommission and node cleanup gate.** The WgTurn and
   DNS Tunnel removal release must **NOT** be deployed to production until legacy
   `wgturn.service`, `wg-quick@wgturn-be`, `dns-tunnel.service`, and

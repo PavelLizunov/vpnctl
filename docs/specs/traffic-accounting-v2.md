@@ -39,13 +39,15 @@ impl SqliteInventory {
 ```
 - The node helper queries `127.0.0.1:10085`, uses a bounded timeout, never resets upstream counters, rejects malformed/negative/unknown counter names, and emits deterministic JSON.
 - Server baselines persist one-tick pending/ahead reconciliation; user baselines are keyed by `(server_id, user_id)`, and both cascade with owners.
+- Cumulative counters for users missing from inventory are skipped inside the accounting transaction: no per-user rows or baselines are written for them, including on the first observation. Their bytes remain in the server remainder and become unattributed traffic through the existing one-tick reconciliation; known-user and server baselines still advance atomically.
 - `ServerLiveActivity::active_now` is `Option<u32>` (`None` means no fresh sample). `server_live_activity` and `all_servers_live_activity` take `max_age_secs` separately from the historical byte window.
 
 ## 3. Verification Checklist (Definition of Done)
 - [ ] A connection that opens and closes between Clash polls is counted from cumulative stats.
 - [ ] First observation stores a baseline without inventing historical traffic.
 - [ ] Monotonic counters produce exact deltas; lower counters produce reset-safe deltas.
-- [ ] Empty, duplicate, unknown-user, and failed-transaction cases do not corrupt or advance baselines.
+- [ ] Empty and unknown-user ticks preserve server totals; unknown users never create per-user rows or baselines or block known-user accounting, including on the first observation.
+- [ ] Duplicate-user and failed-transaction cases do not advance any baselines.
 - [ ] Daemon restart continues from persisted baselines without loss or duplication.
 - [ ] sing-box config exposes V2Ray Stats only on loopback and includes every enabled rendered user.
 - [ ] Helper timeout, malformed response, and unavailable API fail closed without resetting counters.

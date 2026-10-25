@@ -47,22 +47,36 @@ pub(crate) async fn servers_billing(
     let mut fleet_monthly_converted_minor: i64 = 0;
     let mut fleet_total_spend_converted_minor: i64 = 0;
     let mut total_payments_count: i64 = 0;
+    let mut incomplete_spend_servers = BTreeSet::new();
 
     struct ComputedServerItem<'a> {
         item: &'a ServerBillingItem,
         converted_monthly: Option<i64>,
         total_spend: i64,
         payment_count: i64,
+        spend_complete: bool,
     }
 
     let mut computed_items = Vec::with_capacity(items.len());
 
     for item in &items {
-        let (spend, pcount) = state
+        let payments = state
             .inv
-            .server_spend_and_count(&item.server_id, display_cur)
+            .list_server_payments(&item.server_id)
             .await
-            .unwrap_or((0, 0));
+            .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+        let pcount = payments.len() as i64;
+        let mut spend = 0i64;
+        let mut spend_complete = true;
+        for payment in &payments {
+            match payment.historical_spend_in(display_cur.as_str()) {
+                Some(amount) => spend = spend.saturating_add(amount),
+                None => spend_complete = false,
+            }
+        }
+        if !spend_complete {
+            incomplete_spend_servers.insert(item.server_id.0.clone());
+        }
 
         fleet_total_spend_converted_minor = fleet_total_spend_converted_minor.saturating_add(spend);
         total_payments_count = total_payments_count.saturating_add(pcount);
@@ -109,6 +123,7 @@ pub(crate) async fn servers_billing(
             converted_monthly: conv_monthly,
             total_spend: spend,
             payment_count: pcount,
+            spend_complete,
         });
     }
 
@@ -253,6 +268,21 @@ pub(crate) async fn servers_billing(
             }
         }
 
+        @if !incomplete_spend_servers.is_empty() {
+            div.ed-alert.ed-alert--warn role="alert" style="margin: 12px 0 16px;" {
+                (crate::i18n::tr(lang,
+                    "Incomplete Total Spend. Payments without a stored snapshot in ",
+                    "Неполный итог выплат. Платежи без сохранённого снимка в ",
+                ))
+                (display_cur)
+                (crate::i18n::tr(lang,
+                    " are excluded. Servers: ",
+                    " исключены. Серверы: ",
+                ))
+                (incomplete_spend_servers.iter().cloned().collect::<Vec<_>>().join(", "))
+            }
+        }
+
         @if let Some(inc) = boosty_income {
             div.ed-rule style="margin: 12px 0 16px;" {}
             div.ed-headrow {
@@ -324,6 +354,11 @@ pub(crate) async fn servers_billing(
                         " · "
                         (crate::i18n::tr(lang, "total spend: ", "всего расход: "))
                         (format_amount(fleet_total_spend_converted_minor, display_cur))
+                        @if !incomplete_spend_servers.is_empty() {
+                            " · " span style="color: var(--warm);" {
+                                (crate::i18n::tr(lang, "Incomplete", "Неполный итог"))
+                            }
+                        }
                     }
                 }
 
@@ -513,6 +548,11 @@ pub(crate) async fn servers_billing(
                     } @else {
                         (crate::i18n::tr(lang, "via +1 cycle or edit form", "через +1 цикл или форму"))
                     }
+                    @if !incomplete_spend_servers.is_empty() {
+                        " · " span style="color: var(--warm);" {
+                            (crate::i18n::tr(lang, "Incomplete", "Неполный итог"))
+                        }
+                    }
                 }
             }
 
@@ -618,6 +658,11 @@ pub(crate) async fn servers_billing(
                                         } @else {
                                             span.ed-grid__mut { "0 " (currency_symbol(display_cur)) }
                                         }
+                                        @if !comp.spend_complete {
+                                            " · " span style="color: var(--warm);" {
+                                                (crate::i18n::tr(lang, "Incomplete", "Неполный итог"))
+                                            }
+                                        }
                                     }
                                     td.ed-grid__sm {
                                         @if b.auto_renew {
@@ -722,6 +767,11 @@ pub(crate) async fn servers_billing(
                                 span style="color: var(--mute); font-weight: 400; margin-left: 8px;" {
                                     "· " (crate::i18n::tr(lang, "Total spend: ", "Всего оплачено: "))
                                     (format_amount(comp.total_spend, display_cur))
+                                }
+                            }
+                            @if !comp.spend_complete {
+                                " · " span style="color: var(--warm);" {
+                                    (crate::i18n::tr(lang, "Incomplete Total Spend", "Неполный итог выплат"))
                                 }
                             }
                         } @else {
@@ -902,5 +952,17 @@ fn truncate_str(s: &str, max_len: usize) -> String {
         format!("{}…", s.chars().take(max_len).collect::<String>())
     } else {
         s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_amount_uses_hundredths_for_every_currency() {
+        assert_eq!(format_amount(12_345, "EUR"), "123.45 €");
+        assert_eq!(format_amount(12_345, "JPY"), "123.45 JPY");
+        assert_eq!(format_amount(12_345, "KRW"), "123.45 KRW");
     }
 }
