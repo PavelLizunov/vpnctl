@@ -652,23 +652,32 @@ async fn admin_server_delete_client_entry_returns_conflict_with_targets() {
             .unwrap();
     }
     let before = s.inv.recent_audit(100).await.unwrap().len();
-    let resp = router(s.clone())
-        .oneshot(
-            add_same_origin(
-                Request::builder()
-                    .method("POST")
-                    .uri("/admin/servers/s0/delete")
-                    .header("content-type", "application/x-www-form-urlencoded"),
+    // The deploy guard is process-wide and other tests in this binary deploy
+    // "s0" too; retry while one of them holds it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let body = loop {
+        let resp = router(s.clone())
+            .oneshot(
+                add_same_origin(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/admin/servers/s0/delete")
+                        .header("content-type", "application/x-www-form-urlencoded"),
+                )
+                .body(Body::from("confirm=s0"))
+                .unwrap(),
             )
-            .body(Body::from("confirm=s0"))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::CONFLICT);
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let body = std::str::from_utf8(&body).unwrap();
-    assert!(body.contains("s1, s2"));
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        if !body.contains("deploy in flight") || std::time::Instant::now() > deadline {
+            break body;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert!(body.contains("s1, s2"), "{body}");
     assert!(s.inv.get_server(&entry).await.unwrap().is_some());
     assert_eq!(s.inv.users_for_server(&entry).await.unwrap().len(), 1);
     assert_eq!(s.inv.recent_audit(100).await.unwrap().len(), before);
