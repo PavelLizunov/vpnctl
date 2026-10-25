@@ -81,6 +81,14 @@ pub(crate) fn spawn_retention_purger(inv: SqliteInventory) -> tokio::task::JoinH
     const TICK_INTERVAL: Duration = Duration::from_secs(3600);
 
     tokio::spawn(async move {
+        // Days missed while the daemon was down are rolled up before any purge.
+        if let Err(e) = inv.catch_up_vpn_daily_rollups().await {
+            tracing::warn!(
+                target = "vpnctld::retention",
+                error = %e,
+                "daily rollup catch-up failed; the purge still rolls up days before deleting them"
+            );
+        }
         let mut tick = interval(TICK_INTERVAL);
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         tick.tick().await;
@@ -294,31 +302,6 @@ pub(crate) fn spawn_retention_purger(inv: SqliteInventory) -> tokio::task::JoinH
                     "dns_ptr_cache purge failed; will retry next tick"
                 ),
             }
-
-            for date_offset in &["now", "-1 day"] {
-                let date_utc = chrono::Utc::now();
-                let target_date = if *date_offset == "-1 day" {
-                    (date_utc - chrono::Duration::days(1))
-                        .format("%Y-%m-%d")
-                        .to_string()
-                } else {
-                    date_utc.format("%Y-%m-%d").to_string()
-                };
-                match inv.rollup_vpn_user_daily(&target_date).await {
-                    Ok(n) => tracing::debug!(
-                        target = "vpnctld::retention",
-                        date = %target_date,
-                        rolled_rows = n,
-                        "vpn_user_daily rollup tick"
-                    ),
-                    Err(e) => tracing::warn!(
-                        target = "vpnctld::retention",
-                        date = %target_date,
-                        error = %e,
-                        "vpn_user_daily rollup failed; will retry next tick"
-                    ),
-                }
-            }
         }
     })
 }
@@ -334,7 +317,7 @@ pub(crate) fn spawn_backup_scheduler(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerifyGate {
-    pub prune_ok: bool,
+    pub verified: bool,
     pub verify_err: Option<String>,
 }
 
@@ -346,23 +329,65 @@ pub(crate) fn decide_prune_after_verify(
 ) -> VerifyGate {
     match verify {
         Err(e) => VerifyGate {
-            prune_ok: false,
+            verified: false,
             verify_err: Some(format!("self-test could not run: {e}")),
         },
         Ok(report) => match report.overall {
             vpnctl_inventory::CheckStatus::Fail => VerifyGate {
-                prune_ok: false,
+                verified: false,
                 verify_err: Some(format!(
-                    "snapshot self-test FAILED ({} checks); prune skipped to preserve prior good snapshot",
+                    "snapshot self-test FAILED ({} checks); last verified snapshot preserved during retention",
                     report.checks.len()
                 )),
             },
             vpnctl_inventory::CheckStatus::Ok | vpnctl_inventory::CheckStatus::Warn => VerifyGate {
-                prune_ok: true,
+                verified: true,
                 verify_err: None,
             },
         },
     }
+}
+
+async fn prune_backup_snapshots(
+    backup_dir: &std::path::Path,
+    verified_path: Option<&std::path::Path>,
+    policy: vpnctl_inventory::Retention,
+) -> Result<u64, vpnctl_inventory::SqliteInventoryError> {
+    let protected = backup_dir.join("last-verified.db");
+    let mut candidate = verified_path.map(std::path::Path::to_path_buf);
+    if candidate.is_none() && !protected.exists() {
+        // Bootstrap protection for snapshots made before the pin was introduced.
+        for snapshot in vpnctl_inventory::list_snapshots(backup_dir)? {
+            if let Ok(report) = vpnctl_inventory::verify_snapshot(&snapshot.path).await
+                && report.checks.iter().all(|check| {
+                    check.name == "snapshot_freshness"
+                        || check.status != vpnctl_inventory::CheckStatus::Fail
+                })
+            {
+                candidate = Some(snapshot.path);
+                break;
+            }
+        }
+    }
+    if let Some(path) = candidate {
+        let tmp = backup_dir.join("last-verified.db.tmp");
+        let pin = || -> std::io::Result<()> {
+            match std::fs::remove_file(&tmp) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+            std::fs::hard_link(path, &tmp)?;
+            std::fs::rename(&tmp, &protected)
+        };
+        pin().map_err(|e| {
+            vpnctl_inventory::SqliteInventoryError::Invalid(format!(
+                "preserve last verified snapshot {}: {e}",
+                protected.display()
+            ))
+        })?;
+    }
+    vpnctl_inventory::prune_snapshots(backup_dir, policy)
 }
 
 pub(crate) fn spawn_backup_scheduler_with(
@@ -388,31 +413,27 @@ pub(crate) fn spawn_backup_scheduler_with(
                 Err(_) => None,
             };
 
-            let should_prune = verify_gate.as_ref().map(|g| g.prune_ok).unwrap_or(false);
+            let verified_path = snapshot_result
+                .as_ref()
+                .ok()
+                .filter(|_| verify_gate.as_ref().is_some_and(|gate| gate.verified));
             let verify_err: Option<String> =
                 verify_gate.as_ref().and_then(|g| g.verify_err.clone());
 
-            let prune_result = if should_prune {
-                Some(vpnctl_inventory::prune_snapshots(
-                    &backup_dir,
-                    vpnctl_inventory::Retention::default(),
-                ))
-            } else {
-                None
-            };
+            let prune_result = prune_backup_snapshots(
+                &backup_dir,
+                verified_path.map(PathBuf::as_path),
+                vpnctl_inventory::Retention::default(),
+            )
+            .await;
             let snapshot_path: Option<String> = snapshot_result
                 .as_ref()
                 .ok()
                 .map(|p| p.display().to_string());
             let snapshot_err: Option<String> =
                 snapshot_result.as_ref().err().map(|e| e.to_string());
-            let pruned: u64 = prune_result
-                .as_ref()
-                .map(|r| *r.as_ref().unwrap_or(&0))
-                .unwrap_or(0);
-            let prune_err: Option<String> = prune_result
-                .as_ref()
-                .and_then(|r| r.as_ref().err().map(|e| e.to_string()));
+            let pruned = *prune_result.as_ref().unwrap_or(&0);
+            let prune_err = prune_result.as_ref().err().map(ToString::to_string);
             match (&snapshot_err, &verify_err, &prune_err) {
                 (None, None, None) => tracing::info!(
                     target = "vpnctld::backup",
@@ -458,7 +479,7 @@ pub(crate) fn spawn_backup_scheduler_with(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod backup_verify_gate_tests {
-    use super::decide_prune_after_verify;
+    use super::{decide_prune_after_verify, prune_backup_snapshots};
     use vpnctl_inventory::{CheckResult, CheckStatus, SelfTestReport, SqliteInventoryError};
 
     fn report(overall: CheckStatus) -> SelfTestReport {
@@ -487,9 +508,12 @@ mod backup_verify_gate_tests {
     }
 
     #[test]
-    fn backup_scheduler_skips_prune_on_failed_verify() {
+    fn backup_scheduler_does_not_pin_failed_verify() {
         let gate = decide_prune_after_verify(&Ok(report(CheckStatus::Fail)));
-        assert!(!gate.prune_ok, "FAIL verify must skip prune");
+        assert!(
+            !gate.verified,
+            "FAIL verify must not replace the verified snapshot"
+        );
         assert!(
             gate.verify_err.is_some(),
             "FAIL verify must surface an error string"
@@ -497,11 +521,14 @@ mod backup_verify_gate_tests {
     }
 
     #[test]
-    fn backup_scheduler_skips_prune_when_verify_cannot_run() {
+    fn backup_scheduler_does_not_pin_when_verify_cannot_run() {
         let err: std::result::Result<SelfTestReport, SqliteInventoryError> =
             Err(SqliteInventoryError::Invalid("stat snapshot: nope".into()));
         let gate = decide_prune_after_verify(&err);
-        assert!(!gate.prune_ok, "un-runnable verify must skip prune");
+        assert!(
+            !gate.verified,
+            "un-runnable verify must not replace the verified snapshot"
+        );
         let reason = gate.verify_err.expect("must carry a reason");
         assert!(
             reason.starts_with("self-test could not run:"),
@@ -516,14 +543,118 @@ mod backup_verify_gate_tests {
     #[test]
     fn backup_scheduler_prunes_on_passing_verify() {
         let gate = decide_prune_after_verify(&Ok(report(CheckStatus::Ok)));
-        assert!(gate.prune_ok, "OK verify must prune");
+        assert!(gate.verified, "OK verify must pin the snapshot");
         assert!(gate.verify_err.is_none());
     }
 
     #[test]
     fn backup_scheduler_prunes_on_warn_verify() {
         let gate = decide_prune_after_verify(&Ok(report(CheckStatus::Warn)));
-        assert!(gate.prune_ok, "WARN verify must still prune");
+        assert!(gate.verified, "WARN verify must pin the snapshot");
         assert!(gate.verify_err.is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_snapshots_are_bounded_while_last_verified_snapshot_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = vpnctl_inventory::Retention {
+            keep_hourly: 2,
+            keep_daily: 2,
+            keep_monthly: 2,
+        };
+        let good = dir.path().join("inv.db.2020-01-01T00-00-00.000Z.bak");
+        std::fs::write(&good, b"last verified snapshot").unwrap();
+        prune_backup_snapshots(dir.path(), Some(&good), policy)
+            .await
+            .unwrap();
+        for month in 1..=12 {
+            let failed = dir
+                .path()
+                .join(format!("inv.db.2026-{month:02}-01T00-00-00.000Z.bak"));
+            std::fs::write(&failed, b"invalid SQLite").unwrap();
+            let gate = decide_prune_after_verify(&vpnctl_inventory::verify_snapshot(&failed).await);
+            assert!(!gate.verified);
+            prune_backup_snapshots(dir.path(), None, policy)
+                .await
+                .unwrap();
+            assert!(vpnctl_inventory::list_snapshots(dir.path()).unwrap().len() <= 7);
+            assert_eq!(
+                std::fs::read(dir.path().join("last-verified.db")).unwrap(),
+                b"last verified snapshot"
+            );
+        }
+        assert!(
+            good.exists(),
+            "retention must preserve the last verified snapshot"
+        );
+        let next_good = dir.path().join("inv.db.2027-01-01T00-00-00.000Z.bak");
+        std::fs::write(&next_good, b"next verified snapshot").unwrap();
+        prune_backup_snapshots(dir.path(), Some(&next_good), policy)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join("last-verified.db")).unwrap(),
+            b"next verified snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn retention_bootstraps_a_recoverable_old_snapshot_before_pruning() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = vpnctl_inventory::SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        let good = dir.path().join("inv.db.2020-01-01T00-00-00.000Z.bak");
+        vpnctl_inventory::snapshot_to(&inv, &good).await.unwrap();
+        let bytes = std::fs::read(&good).unwrap();
+        let failed = dir.path().join("inv.db.2026-01-01T00-00-00.000Z.bak");
+        std::fs::write(&failed, b"invalid SQLite").unwrap();
+        let removed = prune_backup_snapshots(
+            dir.path(),
+            None,
+            vpnctl_inventory::Retention {
+                keep_hourly: 0,
+                keep_daily: 0,
+                keep_monthly: 0,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(
+            std::fs::read(dir.path().join("last-verified.db")).unwrap(),
+            bytes
+        );
+        inv.close().await;
+    }
+
+    #[tokio::test]
+    async fn retention_bounds_failures_without_any_verified_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        for day in 1..=10 {
+            std::fs::write(
+                dir.path()
+                    .join(format!("inv.db.2026-01-{day:02}T00-00-00.000Z.bak")),
+                b"invalid SQLite",
+            )
+            .unwrap();
+        }
+        let removed = prune_backup_snapshots(
+            dir.path(),
+            None,
+            vpnctl_inventory::Retention {
+                keep_hourly: 2,
+                keep_daily: 0,
+                keep_monthly: 0,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(removed, 8);
+        assert_eq!(
+            vpnctl_inventory::list_snapshots(dir.path()).unwrap().len(),
+            2
+        );
+        assert!(!dir.path().join("last-verified.db").exists());
     }
 }

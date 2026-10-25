@@ -73,13 +73,13 @@ pub(crate) enum UserCmd {
         yes: bool,
     },
 
-    /// Disable a user (revokes node access without deleting the user).
+    /// Disable a user in inventory. Deploy the listed servers to revoke node access.
     Disable {
         /// User id.
         id: String,
     },
 
-    /// Enable a previously disabled user.
+    /// Enable a user in inventory. Deploy the listed servers to restore node access.
     Enable {
         /// User id.
         id: String,
@@ -164,6 +164,11 @@ pub(crate) async fn run(
             wireguard_pubkey,
             gen_wireguard,
         } => {
+            if !vpnctl_core::valid_user_id(&id) {
+                anyhow::bail!(
+                    "invalid user id '{id}' (allowed: 2-32 chars of a-z 0-9 . _ -; must start and end with a-z 0-9; no consecutive dots)"
+                );
+            }
             if let Some(ref pk) = wireguard_pubkey
                 && !vpnctl_protocols::is_valid_wg_pubkey(pk)
             {
@@ -324,10 +329,11 @@ pub(crate) async fn run(
                     })),
                 )
                 .await?;
-                println!("user '{id}' disabled");
+                println!("user '{id}' disabled in inventory");
             } else {
-                println!("user '{id}' is already disabled");
+                println!("user '{id}' is already disabled in inventory");
             }
+            print_pending_deploys(&inv, &uid).await?;
             Ok(())
         }
 
@@ -344,10 +350,11 @@ pub(crate) async fn run(
                     })),
                 )
                 .await?;
-                println!("user '{id}' enabled");
+                println!("user '{id}' enabled in inventory");
             } else {
-                println!("user '{id}' is already enabled");
+                println!("user '{id}' is already enabled in inventory");
             }
+            print_pending_deploys(&inv, &uid).await?;
             Ok(())
         }
 
@@ -482,6 +489,23 @@ pub(crate) async fn run(
             Ok(())
         }
     }
+}
+
+async fn print_pending_deploys(inv: &SqliteInventory, uid: &UserId) -> anyhow::Result<()> {
+    let granted: Vec<ServerId> = inv
+        .servers_for_user(uid)
+        .await?
+        .into_iter()
+        .map(|server| server.id)
+        .collect();
+    let pending = inv.servers_pending_deploy_for_user(uid, &granted).await?;
+    if !pending.is_empty() {
+        println!("Node access changes require deploy on these servers:");
+        for server in pending {
+            println!("  vpnctl deploy {server}");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

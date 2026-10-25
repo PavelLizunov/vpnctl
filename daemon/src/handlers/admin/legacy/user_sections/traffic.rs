@@ -72,6 +72,28 @@ pub(in crate::handlers::admin::legacy) fn pick_vpn_sparkline_window(
         .unwrap_or(VPN_SPARKLINE_WINDOWS[0])
 }
 
+pub(in crate::handlers::admin::legacy) fn fit_vpn_sparkline_window(
+    mut window: VpnSparklineWindow,
+    rows: &[vpnctl_inventory::VpnStatsRow],
+) -> VpnSparklineWindow {
+    if window.slug == "all" {
+        let bucket_seconds = i64::from(window.bucket_hours) * 3600;
+        if let Ok(now) = Utc::now().duration_trunc(TimeDelta::seconds(bucket_seconds)) {
+            // Truncate like vpn_traffic_trend_series does, or the oldest row
+            // lands one bucket past the last cell.
+            let oldest = rows
+                .iter()
+                .map(|row| row.ts)
+                .min()
+                .and_then(|ts| ts.duration_trunc(TimeDelta::seconds(bucket_seconds)).ok())
+                .unwrap_or(now);
+            let cells = (now - oldest).num_seconds().max(0) / bucket_seconds + 1;
+            window.cells = window.cells.max(u32::try_from(cells).unwrap_or(u32::MAX));
+        }
+    }
+    window
+}
+
 fn nice_byte_ceiling(n: u64) -> u64 {
     const KIB: u64 = 1024;
     const MIB: u64 = 1024 * KIB;
@@ -559,7 +581,11 @@ pub(crate) async fn live_vpn_stats_section(
     lang: Locale,
 ) -> Markup {
     let window = pick_vpn_sparkline_window(window_slug);
-    let since_hours = window.cells * window.bucket_hours;
+    let since_hours = if window.slug == "all" {
+        u32::MAX
+    } else {
+        window.cells * window.bucket_hours
+    };
     let rows = match state.inv.recent_vpn_stats_for_user(uid, since_hours).await {
         Ok(v) => v,
         Err(e) => {
@@ -593,6 +619,7 @@ pub(crate) async fn live_vpn_stats_section(
         };
     }
 
+    let window = fit_vpn_sparkline_window(window, &rows);
     let mut total_up: u64 = 0;
     let mut total_dn: u64 = 0;
     let mut peak_conns: u32 = 0;
@@ -703,5 +730,32 @@ pub(crate) async fn live_vpn_stats_section(
                 " за последние 24 часа. Строки автоудаляются через 32 дня.",
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_window_includes_the_oldest_retained_bucket() {
+        let rows = vec![vpnctl_inventory::VpnStatsRow {
+            ts: Utc::now() - chrono::Duration::days(1500),
+            server_id: vpnctl_core::ServerId("s1".into()),
+            user_id: None,
+            upload_bytes: 100,
+            download_bytes: 200,
+            active_connections: 1,
+        }];
+        let all = fit_vpn_sparkline_window(pick_vpn_sparkline_window(Some("all")), &rows);
+        assert!(
+            all.cells > 30,
+            "all must expand beyond the old thirty-month cap"
+        );
+        let trend = vpn_traffic_trend_series(&rows, all);
+        assert!(trend.iter().any(|value| *value > 0.0));
+        let bounded = fit_vpn_sparkline_window(pick_vpn_sparkline_window(Some("24h")), &rows);
+        assert_eq!(bounded.cells, 24);
+        assert_eq!(bounded.bucket_hours, 1);
     }
 }

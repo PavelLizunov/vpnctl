@@ -165,7 +165,7 @@ fn is_lan_alert_allowed(device_class: Option<&str>) -> bool {
 
 fn is_trusted_reverse_proxy(ip_str: &str) -> bool {
     match ip_str.parse::<std::net::IpAddr>() {
-        Ok(ip) => crate::real_ip::trusted_proxies().contains(&ip),
+        Ok(ip) => crate::real_ip::is_trusted_proxy(ip),
         Err(_) => false,
     }
 }

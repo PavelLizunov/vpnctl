@@ -735,3 +735,62 @@ async fn user_wireguard_conf_validations_and_export() {
     assert!(conf_content.contains("Endpoint = 203.0.113.10:51820"));
     assert!(conf_content.contains("PublicKey = SERVERPUBKEY12345678901234567890123456789="));
 }
+
+#[tokio::test]
+async fn user_add_rejects_invalid_ids_before_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("inv.db");
+    for id in [
+        "",
+        "a",
+        "Alice",
+        ".alice",
+        "alice-",
+        "alice..pc",
+        "alice/pc",
+        "alice\n[Peer]",
+        "алиса",
+        " alice ",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ] {
+        let error = run(
+            UserCmd::Add {
+                id: id.into(),
+                uuid: None,
+                tuic_password: None,
+                wireguard_pubkey: None,
+                gen_wireguard: true,
+            },
+            Some(db_path.clone()),
+            OutputFormat::Text,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("invalid user id"), "{error}");
+    }
+    let inv = SqliteInventory::open(&db_path).await.unwrap();
+    assert!(inv.list_users().await.unwrap().is_empty());
+    assert!(inv.recent_audit(10).await.unwrap().is_empty());
+    for id in [
+        "a1",
+        "user.123",
+        "user_name",
+        "u-1",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ] {
+        run(
+            UserCmd::Add {
+                id: id.into(),
+                uuid: None,
+                tuic_password: None,
+                wireguard_pubkey: None,
+                gen_wireguard: false,
+            },
+            Some(db_path.clone()),
+            OutputFormat::Text,
+        )
+        .await
+        .unwrap();
+        assert!(inv.get_user(&UserId(id.into())).await.unwrap().is_some());
+    }
+}

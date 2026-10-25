@@ -315,3 +315,104 @@ async fn user_last_seen_isolates_between_users_and_ignores_server_wide_rows() {
         "alice must see her own traffic, but not the newer NULL-user row"
     );
 }
+
+#[tokio::test]
+async fn user_last_seen_survives_purge_of_each_activity_source() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let pool = raw_pool(&dir).await;
+    inv.add_server(&server("srv-1")).await.unwrap();
+    for id in ["sub-only", "vpn-only", "session-only", "quiet", "fresh"] {
+        inv.add_user(&user(id)).await.unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO sub_access_log (ts, user_id, ip, status, bytes)
+         VALUES ('2000-01-01T11:12:13.456Z', 'sub-only', '192.0.2.1', 200, 100)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO vpn_connection_stats
+         (ts, server_id, user_id, upload_bytes, download_bytes, active_connections)
+         VALUES ('2000-01-02T12:13:14.567Z', 'srv-1', 'vpn-only', 0, 0, 1),
+                ('2000-01-03T00:00:00.000Z', 'srv-1', 'quiet', 0, 0, 0),
+                ('2000-01-04T00:00:00.000Z', 'srv-1', NULL, 100, 200, 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO vpn_user_sessions
+         (user_id, server_id, started_at, last_seen, conn_count_peak, total_bytes)
+         VALUES ('session-only', 'srv-1', '2000-01-01T00:00:00.000Z',
+                 '2000-01-03T13:14:15.678Z', 1, 100)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (id, expected) in [
+        ("sub-only", "2000-01-01T11:12:13.456Z"),
+        ("vpn-only", "2000-01-02T12:13:14.567Z"),
+        ("session-only", "2000-01-03T13:14:15.678Z"),
+    ] {
+        let uid = UserId(id.into());
+        let before = inv.user_last_seen(&uid).await.unwrap().unwrap();
+        assert_eq!(
+            before.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
+            expected
+        );
+    }
+
+    assert_eq!(inv.purge_sub_access_older_than(30).await.unwrap(), 1);
+    assert_eq!(inv.purge_vpn_stats_older_than(32).await.unwrap(), 3);
+    assert_eq!(inv.purge_user_sessions_older_than(30).await.unwrap(), 1);
+    for (id, expected) in [
+        ("sub-only", "2000-01-01T11:12:13.456Z"),
+        ("vpn-only", "2000-01-02T12:13:14.567Z"),
+        ("session-only", "2000-01-03T13:14:15.678Z"),
+    ] {
+        let uid = UserId(id.into());
+        let after = inv.user_last_seen(&uid).await.unwrap().unwrap();
+        assert_eq!(after.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(), expected);
+    }
+    for id in ["quiet", "fresh"] {
+        assert!(
+            inv.user_last_seen(&UserId(id.into()))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    let audits: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'user.last_activity'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(audits, 3, "only actual last-activity updates are audited");
+
+    // An older deletion must never move persisted last activity backwards.
+    sqlx::query(
+        "INSERT INTO sub_access_log (ts, user_id, ip, status, bytes)
+         VALUES ('1999-01-01T00:00:00.000Z', 'sub-only', '192.0.2.1', 200, 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    inv.purge_sub_access_older_than(30).await.unwrap();
+    let audits_after: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'user.last_activity'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(audits_after, audits);
+    let last_seen = inv
+        .user_last_seen(&UserId("sub-only".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        last_seen.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
+        "2000-01-01T11:12:13.456Z"
+    );
+}

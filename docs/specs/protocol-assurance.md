@@ -22,6 +22,7 @@ pub struct ProtocolAssuranceSample {
 ```
 
 ### Alert hygiene
+- Listener checks use the latest inserted node health sample. Only timestamps from now back through 20 minutes are fresh; older or future timestamps yield `Unknown` with `probe_data_stale`.
 - A failed external handshake is retried up to 3 times in one tick (2 s apart), the way a real client reconnects. With `fp=randomized` a single xray REALITY handshake fails about 10% of the time; a real outage fails every attempt. Only a failed tick counts towards the 3-tick alert threshold.
 - `probe_config_missing` from the runner means "no probe template for this server/protocol". It is not a protocol failure. The poller falls back to the built-in TCP path check and records the result as `Unknown` with `probe_template_missing`. That code neither opens nor recovers an alert, so losing templates never fakes a recovery. An alert opened earlier by a real failure stays open until a verified recovery or the operator acks it.
 - Only `Verified` recovers an open assurance failure. All `Unknown` results, including `tcp_path_only`, `udp_path_unverified`, and `no_probe_identity`, preserve the open alert because they cannot disprove a definitive handshake failure.
@@ -35,6 +36,7 @@ pub struct ProtocolAssuranceSample {
 - [ ] XHTTP uses Xray/sing-box-lx client compatibility.
 - [ ] Provider-closed-port and missing-listener failures classify differently.
 - [ ] Failure dedupes to one open alert; recovery closes/edits it.
+- [ ] A backwards clock step makes a future-dated health sample stale; freshness includes the exact zero-age and 20-minute boundaries.
 - [ ] Admin UI shows latest state, failure layer and age.
 - [ ] Subscription rendering remains available but marks unverified/degraded protocols.
 - [ ] No credentials/config bodies stored in samples, alerts or logs.

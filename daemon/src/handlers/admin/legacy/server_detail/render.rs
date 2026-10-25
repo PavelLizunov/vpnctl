@@ -19,7 +19,9 @@ use crate::handlers::admin::legacy::dashboard::{
     humanize_age, kernel_floor_rollup, server_detail_assurance_section,
     server_detail_kernel_inventory_section, server_detail_quality_section,
 };
-use crate::handlers::admin::legacy::user_sections::pick_vpn_sparkline_window;
+use crate::handlers::admin::legacy::user_sections::{
+    fit_vpn_sparkline_window, pick_vpn_sparkline_window,
+};
 use crate::handlers::admin::servers::fp_short;
 use crate::http_util::path_segment_encode;
 
@@ -304,8 +306,12 @@ pub(super) async fn server_detail_render(
         });
 
     let traffic_window = pick_vpn_sparkline_window(query.vpn_window.as_deref());
-    let traffic_since_hours = traffic_window.cells * traffic_window.bucket_hours;
-    let traffic_rows = state
+    let traffic_since_hours = if traffic_window.slug == "all" {
+        u32::MAX
+    } else {
+        traffic_window.cells * traffic_window.bucket_hours
+    };
+    let traffic_rows: Vec<vpnctl_inventory::VpnStatsRow> = state
         .inv
         .recent_vpn_stats_fleet(traffic_since_hours, traffic_window.bucket_hours)
         .await
@@ -318,6 +324,8 @@ pub(super) async fn server_detail_render(
             tracing::warn!(target = "vpnctld::admin", server = %sid, error = %e, "server traffic rollup query failed");
             Vec::new()
         });
+
+    let traffic_window = fit_vpn_sparkline_window(traffic_window, &traffic_rows);
 
     let server_audit = state
         .inv

@@ -1046,6 +1046,89 @@ async fn settings_telegram_test_send_when_disabled_returns_400() {
 }
 
 #[tokio::test]
+async fn settings_telegram_test_error_uses_localized_field_labels() {
+    const CHILD: &str = "VPNCTL_TELEGRAM_ERROR_I18N_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin = TempDir::new().unwrap();
+        let curl = bin.path().join("curl");
+        std::fs::write(
+            &curl,
+            "#!/bin/bash\n/bin/cat >/dev/null\nprintf '%s\\n' 'curl test failure' >&2\nexit 7\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "settings_integrations::settings_telegram_test_error_uses_localized_field_labels",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin.path().display(),
+                    std::env::var("PATH").unwrap_or_default(),
+                ),
+            )
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    s.inv
+        .set_telegram_config(Some("1234567890:ABCDEFghijklmn"), Some("987654321"), None)
+        .await
+        .unwrap();
+    let app = router(s);
+    for (language, label, prefix) in [
+        ("en", "egress", "test-send failed"),
+        ("ru", "выход", "не удалось отправить тестовое сообщение"),
+    ] {
+        let cookie = format!("vpnctl_lang={language}");
+        let settings =
+            fetch_html_with_cookie(app.clone(), "/admin/settings/notifications", &cookie).await;
+        let field = settings
+            .split_once(r#"<label for="proxy_via_server_id""#)
+            .unwrap()
+            .1
+            .split_once("</label>")
+            .unwrap()
+            .0;
+        assert!(field.ends_with(&format!(">{label}")));
+        let response = app
+            .clone()
+            .oneshot(
+                add_same_origin(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/admin/settings/telegram/test")
+                        .header("cookie", cookie),
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let error = std::str::from_utf8(&bytes).unwrap();
+        assert!(error.contains(prefix));
+        assert!(error.contains("curl test failure"));
+        assert!(error.contains(&format!("«{label}»")));
+        assert!(error.contains("/admin/settings/notifications"));
+        if language == "ru" {
+            assert!(!error.contains("«egress»"));
+        }
+    }
+}
+
+#[tokio::test]
 async fn settings_telegram_partial_config_renders_red_warning() {
     let dir = TempDir::new().unwrap();
     let st = state(&dir).await;
@@ -1168,9 +1251,10 @@ async fn admin_recovery_instructions_restore_decrypted_inventory_after_unpacking
             .find("scripts/vpnctl-restore.sh /path/to/archive.tar.zst.age /path/to/vpnctl-backup-key.age")
             .expect("recovery must explain bundle decryption and extraction");
         let restore = html
-            .find("vpnctl restore /path/to/inv.db")
+            .find("vpnctl --db /var/lib/vpnctl/inv.db restore /path/to/inv.db")
             .expect("restore must take the extracted SQLite snapshot");
         assert!(unpack < restore);
+        assert!(!html.contains("vpnctl restore /path/to/inv.db"));
         assert!(!html.contains("vpnctl restore /path/to/archive.tar.zst.age"));
         assert!(html.contains(if lang == "en" {
             "keep the daemon stopped"

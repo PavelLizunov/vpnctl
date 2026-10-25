@@ -446,3 +446,32 @@ async fn pr_user_info_cards_headlines_ru() {
         );
     }
 }
+
+#[tokio::test]
+async fn user_detail_loads_other_users_credentials_only_for_delivery() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 2, &[(0, 0), (1, 0)]).await;
+    // Fail decoding a peer's credential without changing the displayed user.
+    let status = std::process::Command::new("python3")
+        .args(["-c", "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE users SET uuid = x'ff' WHERE id = 'u1'\"); c.commit(); c.close()"])
+        .arg(dir.path().join("inv.db"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let app = router(s);
+    for tab in ["overview", "access", "activity", "traffic"] {
+        let html = fetch_html(app.clone(), &format!("/admin/users/u0/{tab}")).await;
+        assert!(html.contains("u0"));
+    }
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/users/u0/delivery")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}

@@ -181,6 +181,7 @@ pub(crate) async fn server_delete_confirm(
     State(state): State<AppState>,
     Path(server_id_str): Path<String>,
 ) -> Result<Markup, Response> {
+    use crate::i18n::tr;
     let (theme, accent, lang) = theme_accent_lang(&headers);
     let sid = vpnctl_core::ServerId(server_id_str.clone());
     let server = match state.inv.get_server(&sid).await {
@@ -217,53 +218,53 @@ pub(crate) async fn server_delete_confirm(
     let back = format!("/admin/servers/{}", path_segment_encode(&server_id_str));
     let body = html! {
         div.ed-art-eyebrow {
-            a href=(back) style="color: var(--mute); text-decoration: none;" { (icon("arrow-left")) "back to server" }
-            "  ·  delete"
+            a href=(back) style="color: var(--mute); text-decoration: none;" { (icon("arrow-left")) (tr(lang, "back to server", "назад к серверу")) }
+            (tr(lang, "  ·  delete", "  ·  удаление"))
         }
-        h1.ed-art-h1 { "delete " em { (server_id_str) } " — really?" }
+        h1.ed-art-h1 { (tr(lang, "delete ", "удалить ")) em { (server_id_str) } (tr(lang, " — really?", " — точно?")) }
         p.ed-art-deck {
-            "Drops the server (" span.ed-mono { (server.address) } ") from the inventory. "
+            (tr(lang, "Drops the server (", "Удаляет сервер (")) span.ed-mono { (server.address) } (tr(lang, ") from the inventory. ", ") из инвентаря. "))
             b {
                 @match grant_count {
-                    Some(n) => { (n) " grant(s)" },
-                    None => { "an unknown number of grants (inventory read failed — reload to retry)" },
+                    Some(n) => { (n) (tr(lang, " grant(s)", " разрешений доступа")) },
+                    None => { (tr(lang, "an unknown number of grants (inventory read failed — reload to retry)", "неизвестное число разрешений доступа (не удалось прочитать инвентарь — обнови страницу для повторной попытки)")) },
                 }
             }
-            " cascade-delete — those users lose this server from their subscription on the next pull. "
-            b { "Secrets" }
-            " (REALITY keypair, short_id, obfs passwords) are deleted — re-adding the server later generates BRAND-NEW ones. "
-            "Protocols, kernels, probe history + alerts also cascade. If another server uses this one as a ProxyJump host, that link is cleared. "
-            b { "The sing-box on the node itself is NOT touched" }
-            " — stop/wipe it on the host separately if the VPS lives on."
+            (tr(lang, " cascade-delete — those users lose this server from their subscription on the next pull. ", " удаляются каскадно — эти пользователи потеряют сервер в подписке при следующем обновлении. "))
+            b { (tr(lang, "Secrets", "Секреты")) }
+            (tr(lang, " (REALITY keypair, short_id, obfs passwords) are deleted — re-adding the server later generates BRAND-NEW ones. ", " (пара ключей REALITY, short_id, пароли obfs) удаляются — при повторном добавлении сервера будут созданы НОВЫЕ. "))
+            (tr(lang, "Protocols, kernels, probe history + alerts also cascade. If another server uses this one as a ProxyJump host, that link is cleared. ", "Протоколы, ядра, история проверок и алерты тоже удаляются. Если другой сервер использует этот как ProxyJump, эта связь будет сброшена. "))
+            b { (tr(lang, "The sing-box on the node itself is NOT touched", "Сам sing-box на ноде НЕ затрагивается")) }
+            (tr(lang, " — if the VPS stays running, stop or remove sing-box through the hosting provider's console.", " — если VPS продолжает работать, останови или удали sing-box через консоль хостера."))
         }
         @if is_telegram_proxy {
             p style="font-family: var(--mono); font-size: 11px; color: var(--acc); border: 1px solid var(--acc); padding: 8px 12px; margin: 10px 0;" {
-                b { "This server is the Telegram alert relay" }
-                " (settings → notifications → proxy-via). Deleting it silently breaks every alert send until you pick another relay or clear the setting."
+                b { (tr(lang, "This server is the Telegram alert relay", "Этот сервер пересылает алерты в Telegram")) }
+                (tr(lang, " (Settings → Notifications → egress). Deleting it breaks every alert send until you pick another relay or clear the setting.", " (Настройки → Уведомления → выход). После удаления отправка всех алертов перестанет работать, пока ты не выберешь другой сервер или не очистишь настройку."))
             }
         }
         p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 8px 0;" {
-            "Type the server-id "
+            (tr(lang, "Type the server-id ", "Введи ID сервера "))
             span.ed-mono { (server_id_str) }
-            " in the box below to confirm. Exact match — copy/paste counts."
+            (tr(lang, " in the box below to confirm. Exact match — copy/paste counts.", " в поле ниже для подтверждения. Нужно точное совпадение — можно скопировать и вставить."))
         }
         form method="post"
              action=(format!("/admin/servers/{}/delete", path_segment_encode(&server_id_str)))
              style="display: flex; gap: 10px; align-items: baseline; padding: 14px 16px; border: 1px solid var(--rule); margin: 16px 0;" {
             label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
-                "confirm id"
+                (tr(lang, "confirm id", "подтверди ID"))
             }
             input type="text" name="confirm" required="required"
                   autocomplete="off"
                   style="flex: 1; max-width: 280px; padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink);";
             button type="submit"
-                   title=(format!("Delete server {server_id_str} from the inventory permanently"))
+                   title=(format!("{} {server_id_str} {}", tr(lang, "Delete server", "Удалить сервер"), tr(lang, "from the inventory permanently", "из инвентаря навсегда")))
                    class="ed-abtn ed-abtn--danger-solid" {
-                (icon("trash-2")) "delete forever"
+                (icon("trash-2")) (tr(lang, "delete forever", "удалить навсегда"))
             }
             a href=(back)
               class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
-                (icon("x")) "cancel"
+                (icon("x")) (tr(lang, "cancel", "отмена"))
             }
         }
     };

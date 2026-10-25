@@ -1,5 +1,5 @@
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 
 use crate::AppState;
@@ -152,7 +152,12 @@ pub(crate) async fn settings_telegram(State(state): State<AppState>, body: Strin
     Redirect::to("/admin/settings/notifications#telegram-notifications").into_response()
 }
 
-pub(crate) async fn settings_telegram_test(State(state): State<AppState>) -> Response {
+pub(crate) async fn settings_telegram_test(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    use crate::i18n::{Locale, tr};
+    let lang = Locale::from_request(&headers);
     let sink = match crate::node_probe_poller::build_alert_sink(&state.inv).await {
         Ok(Some(s)) => s,
         Ok(None) => {
@@ -211,18 +216,29 @@ pub(crate) async fn settings_telegram_test(State(state): State<AppState>) -> Res
         }
         Err(e) => {
             let raw = e.to_string();
+            let prefix = tr(
+                lang,
+                "test-send failed",
+                "не удалось отправить тестовое сообщение",
+            );
             let msg = if raw.contains("ssh-then-curl") {
-                format!("test-send failed: {e}")
+                format!("{prefix}: {e}")
             } else {
                 format!(
-                    "test-send failed: {e} — common causes: \
-                     chat-id wrong (Telegram returns 'chat not found'), \
-                     token revoked, \
-                     bot never started conversation with you \
-                     (open the bot in Telegram + tap Start), \
-                     api.telegram.org blocked (use the «egress» dropdown \
-                     on /admin/settings to route via an inventory server, \
-                     or set VPNCTLD_HTTPS_PROXY env)"
+                    "{prefix}: {e} — {}",
+                    tr(
+                        lang,
+                        "common causes: chat-id wrong (Telegram returns 'chat not found'), \
+                         token revoked, bot never started conversation with you \
+                         (open the bot in Telegram + tap Start), api.telegram.org blocked \
+                         (use the «egress» dropdown on /admin/settings/notifications to route \
+                         via an inventory server, or set VPNCTLD_HTTPS_PROXY env)",
+                        "частые причины: неверный chat-id (Telegram возвращает 'chat not found'), \
+                         токен отозван, диалог с ботом не начат (открой бота в Telegram и нажми Start), \
+                         api.telegram.org заблокирован (выбери сервер в поле «выход» \
+                         на /admin/settings/notifications для отправки через него \
+                         или задай переменную окружения VPNCTLD_HTTPS_PROXY)",
+                    ),
                 )
             };
             error_resp(StatusCode::BAD_GATEWAY, &msg)

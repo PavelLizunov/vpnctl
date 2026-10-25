@@ -20,12 +20,18 @@
     atomically without credential values; no-op writes add no audit entry.
   - Manual sync and Quick Connect keep sync, report handling, alert acknowledgement,
     and redeploy queuing in one task that survives cancellation of the HTTP request.
+  - Inventory-backed sync renews its 600-second cross-process lease every 200
+    seconds and before the first poll of sync work. Renewal requires the current
+    owner and an unexpired lease; loss or renewal failure aborts sync. Acquire, renewal and
+    release changes are audited atomically; no-op renewal/release adds no audit.
   - Reconcile enables/disables a user only if the same Boosty subscriber link and
     the expected opposite disabled state still match. The conditional update and
     its audit row commit in one transaction. Stale decisions add neither an audit
     row nor an enabled/disabled report entry or redeploy request.
   - Резервный спойлер: ручная форма настройки токенов скрыта под спойлером (`details.ed-spoiler`), основным интерфейсом остаётся 1-Click подключение.
-  - Все финансовые расчёты производятся в целочисленных копейках/центах (`i64` minor units) с банковским округлением через валютный движок ЦБ; никаких `f64` в балансе.
+  - Financial amounts use integer hundredths (`i64` minor units); conversion and
+    rounding follow the owning [currency-exchange.md §2.2](currency-exchange.md#22-financial-precision)
+    contract. No floating-point arithmetic in balances.
 
 ## 2. Interface / Data Contract
 - Bridge API (`vpnctl-boosty-bridge`):
@@ -48,6 +54,10 @@
 - Inventory API: `set_boosty_user_disabled(&self, user: &UserId, subscriber_id: i64,
   disabled: bool) -> Result<bool>` returns whether the conditional update committed;
   missing, unlinked, relinked, or already-matching users return `false`.
+- Inventory API: `renew_boosty_sync_lease(&self, owner: &str, ttl_secs: i64)
+  -> Result<bool>` extends only the named owner's unexpired lease; `false` means
+  ownership was lost or the lease expired. An unchanged expiry returns `true`
+  without writing an audit row.
 - Web Surfaces:
   - `/admin/boosty`:
     - Статус-полоса доходов: `доход в месяц (MRR)`, `всего собрано (To Date)`, `плательщиков / всего`.
@@ -61,6 +71,9 @@
       - Карточка 3: Чистая прибыль (Net Margin P&L) и коэффициент покрытия расходов (`покрытие расходов: X% (Y×)`).
 
 ## 3. Verification Checklist (Definition of Done)
+- [ ] Injected-time lease tests cover renewal beyond the original expiry,
+  takeover at expiry, stale owners and audit rollback. Sync tests cover renewal
+  before work and cancellation before stale results can be applied.
 - [ ] Cancelling a manual sync after a user flip still acknowledges sync-failure
   alerts and queues redeploy for that user.
 - [ ] Unlinking/relinking between reconcile and apply skips the stale status change

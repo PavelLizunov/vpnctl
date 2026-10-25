@@ -255,7 +255,7 @@ fn render_self_test_report(
                         td style=(format!("padding: 6px 8px; font-weight: 500; color: {color};")) {
                             (c.status.label().to_uppercase())
                         }
-                        td style="padding: 6px 8px;" { (c.detail) }
+                        td style="padding: 6px 8px;" { (self_test_check_detail(c, lang)) }
                     }
                 }
             }
@@ -275,6 +275,80 @@ fn render_self_test_report(
     }
 }
 
+fn self_test_check_detail(
+    check: &vpnctl_inventory::CheckResult,
+    lang: crate::i18n::Locale,
+) -> String {
+    use crate::i18n::tr;
+    if check.status != vpnctl_inventory::CheckStatus::Warn {
+        return check.detail.clone();
+    }
+    let detail = check.detail.as_str();
+    match check.name {
+        "grants_present" if detail == "0 grants" => {
+            return tr(lang, "0 grants", "0 разрешений доступа").to_string();
+        }
+        "users_have_sub_tokens" => {
+            if let Some(counts) = detail.strip_suffix(" users have sub_token") {
+                return format!(
+                    "{counts} {}",
+                    tr(
+                        lang,
+                        "users have sub_token",
+                        "пользователей имеют sub_token"
+                    )
+                );
+            }
+        }
+        "schema_migrations_match_binary" => {
+            if let Some((applied, expected)) = detail
+                .strip_prefix("snapshot has ")
+                .and_then(|s| s.strip_suffix(" (snapshot from older/newer vpnctld?)"))
+                .and_then(|s| s.split_once(" migrations, binary expects "))
+            {
+                return format!(
+                    "{} {applied}{} {expected} {}",
+                    tr(lang, "snapshot has", "Миграций в снэпшоте:"),
+                    tr(lang, " migrations, binary expects", ", программа ожидает"),
+                    tr(
+                        lang,
+                        "(snapshot from older/newer vpnctld?)",
+                        "(снэпшот от другой версии vpnctld?)",
+                    ),
+                );
+            }
+        }
+        "snapshot_freshness" => {
+            if let Some(seconds) = detail
+                .strip_prefix("snapshot timestamp is ")
+                .and_then(|s| s.strip_suffix(" seconds in the future (clock skew?)"))
+            {
+                return format!(
+                    "{} {seconds} {}",
+                    tr(lang, "snapshot timestamp is", "Время снэпшота на"),
+                    tr(
+                        lang,
+                        "seconds in the future (clock skew?)",
+                        "секунд в будущем (сбой часов?)"
+                    ),
+                );
+            }
+            if let Some(hours) = detail
+                .strip_prefix("snapshot is ")
+                .and_then(|s| s.strip_suffix(" hours old"))
+            {
+                return format!(
+                    "{} {hours} {}",
+                    tr(lang, "snapshot is", "Возраст снэпшота:"),
+                    tr(lang, "hours old", "часов"),
+                );
+            }
+        }
+        _ => {}
+    }
+    check.detail.clone()
+}
+
 fn is_safe_snapshot_name(name: &str) -> bool {
     if name.is_empty() || name.len() > 128 {
         return false;
@@ -286,4 +360,70 @@ fn is_safe_snapshot_name(name: &str) -> bool {
         return false;
     }
     vpnctl_inventory::parse_snapshot_filename(name).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_self_test_report;
+    use crate::i18n::Locale;
+    use vpnctl_inventory::{CheckResult, CheckStatus, SelfTestReport};
+
+    #[test]
+    fn self_test_report_translates_all_warning_reasons() {
+        let cases = [
+            ("grants_present", "0 grants", "0 разрешений доступа"),
+            (
+                "users_have_sub_tokens",
+                "1/3 users have sub_token",
+                "1/3 пользователей имеют sub_token",
+            ),
+            (
+                "schema_migrations_match_binary",
+                "snapshot has 42 migrations, binary expects 43 (snapshot from older/newer vpnctld?)",
+                "Миграций в снэпшоте: 42, программа ожидает 43 (снэпшот от другой версии vpnctld?)",
+            ),
+            (
+                "snapshot_freshness",
+                "snapshot timestamp is 120 seconds in the future (clock skew?)",
+                "Время снэпшота на 120 секунд в будущем (сбой часов?)",
+            ),
+            (
+                "snapshot_freshness",
+                "snapshot is 26 hours old",
+                "Возраст снэпшота: 26 часов",
+            ),
+            ("future_check", "unknown diagnostic", "unknown diagnostic"),
+        ];
+        let report = SelfTestReport {
+            snapshot_path: "/tmp/inv.db.bak".into(),
+            snapshot_size_bytes: 4096,
+            snapshot_age_seconds: Some(26 * 3600),
+            schema_migrations_applied: 42,
+            user_count: 3,
+            server_count: 1,
+            grant_count: 0,
+            users_with_sub_token: 1,
+            started_at: chrono::Utc::now(),
+            duration_ms: 1,
+            overall: CheckStatus::Warn,
+            checks: cases
+                .iter()
+                .map(|&(name, detail, _)| CheckResult {
+                    name,
+                    status: CheckStatus::Warn,
+                    detail: detail.into(),
+                })
+                .collect(),
+        };
+        let en = render_self_test_report(&report, Locale::En).into_string();
+        let ru = render_self_test_report(&report, Locale::Ru).into_string();
+        assert!(ru.contains("ПРОЙДЕНО · с предупреждениями"));
+        for (name, detail, translated) in cases {
+            assert!(en.contains(detail), "English reason changed for {name}");
+            assert!(ru.contains(translated), "missing Russian reason for {name}");
+            if detail != translated {
+                assert!(!ru.contains(detail), "untranslated reason for {name}");
+            }
+        }
+    }
 }

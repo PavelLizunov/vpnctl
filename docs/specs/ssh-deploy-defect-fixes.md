@@ -20,8 +20,11 @@
 - The wizard pins the host key recorded by its first successful password login
   before any further connection, including the non-root sudo probe. A later
   keyscan only supplies a key matching that pin; it never establishes trust.
-  Missing or ambiguous local known_hosts entries stop the wizard before another
-  password is sent. Hashed entries and non-default ports are supported.
+  Missing local known_hosts entries stop the wizard before another password is
+  sent. With several accepted keys, pin the currently presented key only if its
+  canonical fingerprint is already in that accepted set; a missing match or
+  keyscan failure stops the wizard. Hashed entries and non-default ports are
+  supported. This is the owning wizard host-key selection contract.
 - Before registration, the wizard skips protocols whose default TCP listener
   collides with the connected SSH port and emits a progress note for each.
   UDP listeners using the same numeric port remain enabled.
@@ -61,6 +64,8 @@ cannot discard it.
 - [ ] Wizard keyscan mismatch prevents a second password login for root and
       non-root users; key authentication retains the first-login pin. Missing
       accepted keys fail closed; matching plain/hashed entries retain TOFU.
+- [ ] Several accepted key types select the presented, already accepted key;
+      an unaccepted presented key fails closed.
 - [ ] Wizard skips REALITY on SSH 443 and other TCP port collisions before
       registration, reports the skipped protocol, and preserves UDP defaults.
 - [ ] Rendered fail2ban script includes the connected and all configured ports,

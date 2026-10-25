@@ -215,7 +215,7 @@ pub(crate) fn settings_disaster_recovery_section(
                 b { (tr(lang, "On the new host: restore inv.db + start the daemon", "На новом хосте: восстанови inv.db + запусти демон")) }
                 " — "
                 (tr(lang, "install vpnctld and vpnctl, keep the daemon stopped, then restore the decrypted SQLite snapshot: ", "установи vpnctld и vpnctl, оставь демон остановленным и восстанови расшифрованный SQLite-снэпшот: "))
-                span.ed-mono { "vpnctl restore /path/to/inv.db" }
+                span.ed-mono { "vpnctl --db /var/lib/vpnctl/inv.db restore /path/to/inv.db" }
                 (tr(lang, ". Use the extracted inv.db, never the encrypted archive. Restore env, assets, deploy key, known_hosts, GeoIP, systemd units and firewall rules to their configured paths, preserving ownership and permissions; ", ". Передай распакованный inv.db, а не зашифрованный архив. Восстанови env, assets, deploy-ключ, known_hosts, GeoIP, systemd units и правила firewall на настроенные пути, сохраняя владельцев и права; "))
                 span.ed-mono { "systemctl restart vpnctld" }
                 "."

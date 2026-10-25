@@ -655,3 +655,48 @@ async fn phase5c_session_observe_equal_last_seen_picks_highest_id() {
         "session_observe must pick the highest id on equal last_seen"
     );
 }
+
+#[tokio::test]
+async fn session_retention_uses_last_seen_and_preserves_active_session_identity() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let pool = raw_pool(&dir).await;
+    inv.add_server(&server("s1")).await.unwrap();
+    inv.add_user(&user("alice")).await.unwrap();
+    inv.add_user(&user("bob")).await.unwrap();
+    sqlx::query(
+        "INSERT INTO vpn_user_sessions
+         (user_id, server_id, started_at, last_seen, conn_count_peak, total_bytes)
+         VALUES ('alice', 's1', '2000-01-01T00:00:00.000Z',
+                 strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 2, 100),
+                ('bob', 's1', '2000-01-01T00:00:00.000Z',
+                 '2000-01-02T00:00:00.000Z', 1, 50)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let uid = UserId("alice".into());
+    let before = inv.recent_sessions_for_user(&uid, 10).await.unwrap();
+    assert_eq!(inv.purge_user_sessions_older_than(30).await.unwrap(), 1);
+    assert_eq!(
+        inv.recent_sessions_for_user(&uid, 10).await.unwrap(),
+        before
+    );
+    assert_eq!(inv.purge_user_sessions_older_than(0).await.unwrap(), 0);
+    assert!(
+        inv.recent_sessions_for_user(&UserId("bob".into()), 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let id = inv
+        .session_observe(&uid, &ServerId("s1".into()), chrono::Utc::now(), 15, 10, 3)
+        .await
+        .unwrap();
+    assert_eq!(id, before[0].id, "active session must continue in place");
+    let after = inv.recent_sessions_for_user(&uid, 10).await.unwrap();
+    assert_eq!(after[0].total_bytes, 110);
+    let audits = inv.recent_audit(100).await.unwrap().len();
+    assert_eq!(inv.purge_user_sessions_older_than(30).await.unwrap(), 0);
+    assert_eq!(inv.recent_audit(100).await.unwrap().len(), audits);
+}

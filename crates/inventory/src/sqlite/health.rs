@@ -185,7 +185,7 @@ impl SqliteInventory {
              FROM node_health
              WHERE server_id = ?1
                AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
-             ORDER BY ts DESC, sample_seq DESC",
+             ORDER BY sample_seq DESC",
         )
         .bind(&server_id.0)
         .bind(format!("-{since_hours} hours"))
@@ -204,7 +204,7 @@ impl SqliteInventory {
                     sing_box_nrestarts
              FROM node_health
              WHERE server_id = ?1
-             ORDER BY ts DESC, sample_seq DESC
+             ORDER BY sample_seq DESC
              LIMIT 1",
         )
         .bind(&server_id.0)
@@ -215,23 +215,11 @@ impl SqliteInventory {
 
     pub async fn latest_node_health_fleet(&self) -> Result<HashMap<ServerId, NodeHealthRow>> {
         let rows = sqlx::query(
-            "WITH ranked AS (
-                SELECT sample_seq, sample_id, ts, server_id, sing_box_active, fail2ban_active,
-                       disk_used_mib, disk_total_mib,
-                       mem_available_mib, mem_total_mib,
-                       load_1min_x100, listening_ports_json, sing_box_log_bytes,
-                       kernel_versions_json, nic_iface, nic_rx_bytes, nic_tx_bytes,
-                       sing_box_nrestarts,
-                       ROW_NUMBER() OVER (PARTITION BY server_id ORDER BY ts DESC, sample_seq DESC) as rn
-                FROM node_health
-             )
-             SELECT sample_seq, sample_id, ts, server_id, sing_box_active, fail2ban_active,
-                    disk_used_mib, disk_total_mib,
-                    mem_available_mib, mem_total_mib,
-                    load_1min_x100, listening_ports_json, sing_box_log_bytes,
-                    kernel_versions_json, nic_iface, nic_rx_bytes, nic_tx_bytes,
-                    sing_box_nrestarts
-             FROM ranked WHERE rn = 1",
+            "SELECT nh.*
+             FROM servers s
+             JOIN node_health nh ON nh.sample_seq = (
+                 SELECT MAX(sample_seq) FROM node_health WHERE server_id = s.id
+             )",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -255,7 +243,7 @@ impl SqliteInventory {
              WHERE server_id = ?1
                AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
                AND nic_rx_bytes IS NOT NULL AND nic_tx_bytes IS NOT NULL
-             ORDER BY ts ASC, sample_seq ASC",
+             ORDER BY sample_seq ASC",
         )
         .bind(&server_id.0)
         .bind(format!("-{since_hours} hours"))
@@ -304,16 +292,20 @@ impl SqliteInventory {
         window_hours: u32,
     ) -> Result<UptimeStat> {
         let row = sqlx::query(
-            "SELECT
+            "WITH samples AS (
+                SELECT sample_seq, ts, sing_box_active FROM node_health
+                WHERE server_id = ?1
+                  AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
+             )
+             SELECT
                 COUNT(*) AS total,
                 SUM(CASE WHEN sing_box_active = 1 THEN 1 ELSE 0 END) AS up_count,
                 SUM(CASE WHEN sing_box_active = 0 THEN 1 ELSE 0 END) AS down_count,
                 SUM(CASE WHEN sing_box_active IS NULL THEN 1 ELSE 0 END) AS unknown_count,
-                MAX(CASE WHEN sing_box_active = 0 THEN ts ELSE NULL END) AS last_outage,
-                MAX(ts) AS last_probe
-             FROM node_health
-             WHERE server_id = ?1
-               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)",
+                (SELECT ts FROM samples WHERE sing_box_active = 0
+                 ORDER BY sample_seq DESC LIMIT 1) AS last_outage,
+                (SELECT ts FROM samples ORDER BY sample_seq DESC LIMIT 1) AS last_probe
+             FROM samples",
         )
         .bind(&server_id.0)
         .bind(format!("-{window_hours} hours"))

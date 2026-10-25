@@ -363,20 +363,34 @@ impl SqliteInventory {
         Ok(u64::try_from(deltas.len()).unwrap_or(u64::MAX))
     }
 
+    // u32::MAX selects all retained history, including daily rows after raw purge.
     pub async fn recent_vpn_stats_for_user(
         &self,
         user_id: &UserId,
         since_hours: u32,
     ) -> Result<Vec<VpnStatsRow>> {
+        let cutoff = (since_hours != u32::MAX).then(|| format!("-{since_hours} hours"));
         let rows = sqlx::query(
             "SELECT ts, server_id, user_id, upload_bytes, download_bytes, active_connections
              FROM vpn_connection_stats
              WHERE user_id = ?1
-               AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
+               AND ts > CASE WHEN ?2 IS NULL THEN ''
+                             ELSE strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2) END
+             UNION ALL
+             SELECT d.date || 'T00:00:00.000Z' AS ts, d.server_id, d.user_id,
+                    d.upload_bytes, d.download_bytes, d.active_connections_peak AS active_connections
+             FROM vpn_user_daily d
+             WHERE d.user_id = ?1 AND ?2 IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM vpn_connection_stats s
+                   WHERE s.user_id = d.user_id AND s.server_id = d.server_id
+                     AND s.ts >= d.date || 'T00:00:00.000Z'
+                     AND s.ts < date(d.date, '+1 day') || 'T00:00:00.000Z'
+               )
              ORDER BY ts DESC",
         )
         .bind(&user_id.0)
-        .bind(format!("-{since_hours} hours"))
+        .bind(cutoff)
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(row_to_vpn_stats).collect()
@@ -410,6 +424,7 @@ impl SqliteInventory {
             .checked_mul(3600)
             .filter(|seconds| *seconds > 0)
             .ok_or_else(|| SqliteInventoryError::Invalid("bucket_hours must be > 0".into()))?;
+        let cutoff = (since_hours != u32::MAX).then(|| format!("-{since_hours} hours"));
         let rows = sqlx::query(
             "SELECT
                 MAX(last_sample_ts) AS ts,
@@ -419,11 +434,12 @@ impl SqliteInventory {
                 COALESCE(SUM(download_bytes), 0) AS download_bytes,
                 COALESCE(MAX(active_connections_peak), 0) AS active_connections
              FROM vpn_server_hourly
-             WHERE hour >= strftime('%Y-%m-%dT%H:00:00.000Z', 'now', ?1)
+             WHERE hour >= CASE WHEN ?1 IS NULL THEN ''
+                                ELSE strftime('%Y-%m-%dT%H:00:00.000Z', 'now', ?1) END
              GROUP BY CAST(strftime('%s', hour) AS INTEGER) / ?2, server_id
              ORDER BY ts DESC, server_id",
         )
-        .bind(format!("-{since_hours} hours"))
+        .bind(cutoff)
         .bind(bucket_seconds)
         .fetch_all(&self.pool)
         .await?;

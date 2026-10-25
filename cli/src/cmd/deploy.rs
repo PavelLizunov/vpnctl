@@ -76,7 +76,7 @@ pub(crate) async fn run(
     } else if jump.is_none() {
         let observed =
             vpnctl_host_fingerprint::fetch_via_keyscan(&server.address, server.ssh_port)?;
-        inv.update_trusted_fingerprint(&sid, &observed).await?;
+        crate::cmd::server::save_fingerprint(&inv, &server, &observed, "ssh-keyscan").await?;
         println!("  TOFU: stored host fingerprint {observed}");
         Some(observed)
     } else {

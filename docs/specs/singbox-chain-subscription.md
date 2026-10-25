@@ -11,6 +11,10 @@
 - Flowpool is out of scope and must not be touched.
 - Verdict: **Extend — existing sing-box renderer — separate URL without changing working subscriptions.**
 
+Role and grant requirements are owned by [client-detour.md](client-detour.md).
+The historical [workload-only S5 proposal](s5-google-flow-hop.md) does not apply
+to this client VPN chain.
+
 ## 2. Interface / Data Contract
 ```http
 GET /sub/{token}

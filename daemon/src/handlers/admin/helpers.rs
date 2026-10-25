@@ -473,25 +473,7 @@ pub(crate) fn sanitize_referer(referer: Option<&str>) -> String {
     }
 }
 
-pub(crate) fn valid_user_id(id: &str) -> bool {
-    let len = id.len();
-    if !(2..=32).contains(&len) {
-        return false;
-    }
-    let bytes = id.as_bytes();
-    if !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit() {
-        return false;
-    }
-    if !bytes[len - 1].is_ascii_lowercase() && !bytes[len - 1].is_ascii_digit() {
-        return false;
-    }
-    if id.contains("..") {
-        return false;
-    }
-    bytes
-        .iter()
-        .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-'))
-}
+pub(crate) use vpnctl_core::valid_user_id;
 
 pub(crate) fn valid_server_id(id: &str) -> bool {
     let len = id.len();

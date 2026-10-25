@@ -317,3 +317,47 @@ async fn vpn_router_cleared_suppression_returns_server() {
         "cleared suppression returns de to the subscription"
     );
 }
+
+#[tokio::test]
+async fn vpn_router_multiple_servers_config_is_byte_equal() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state(&dir).await;
+    state
+        .inv
+        .set_grant_client_uuid(
+            &UserId("tester-1".into()),
+            &ServerId("de".into()),
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        )
+        .await
+        .unwrap();
+    // The existing fixture includes two usable servers and one without secrets.
+    let expected = concat!(
+        "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@de.example.com:443?encryption=none&type=tcp&security=reality&pbk=PUB_de&fp=randomized&sni=yahoo.com&sid=12345678&spx=%2F&flow=xtls-rprx-vision&packetEncoding=xudp#Germany%20VLESS%20~tester-1\n",
+        "vless://11111111-2222-3333-4444-555555555555@is.example.com:443?encryption=none&type=tcp&security=reality&pbk=PUB_is&fp=randomized&sni=yahoo.com&sid=12345678&spx=%2F&flow=xtls-rprx-vision&packetEncoding=xudp#Iceland%20VLESS%20~tester-1",
+    );
+    let app = router(state);
+    for ua in ["v2rayN/6.62", "Mozilla/5.0", "VPNRouter/2.4.1"] {
+        let (status, body, _) = get(
+            app.clone(),
+            &format!("/api/v1/app/config/{TEST_DEVICE_ID}"),
+            ua,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let encoded = if ua.starts_with("v2rayN") {
+            String::from_utf8(body).unwrap()
+        } else {
+            let json: Value = serde_json::from_slice(&body).unwrap();
+            json["config"].as_str().unwrap().to_owned()
+        };
+        assert_eq!(
+            encoded.as_bytes(),
+            BASE64_STANDARD.encode(expected).as_bytes()
+        );
+        assert_eq!(
+            BASE64_STANDARD.decode(encoded).unwrap(),
+            expected.as_bytes()
+        );
+    }
+}

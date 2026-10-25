@@ -346,29 +346,88 @@ impl SqliteInventory {
     }
 
     pub async fn acquire_boosty_sync_lease(&self, owner: &str, ttl_secs: i64) -> Result<bool> {
+        self.update_boosty_sync_lease_at(owner, ttl_secs, chrono::Utc::now().timestamp(), false)
+            .await
+    }
+
+    pub async fn renew_boosty_sync_lease(&self, owner: &str, ttl_secs: i64) -> Result<bool> {
+        self.update_boosty_sync_lease_at(owner, ttl_secs, chrono::Utc::now().timestamp(), true)
+            .await
+    }
+
+    async fn update_boosty_sync_lease_at(
+        &self,
+        owner: &str,
+        ttl_secs: i64,
+        now: i64,
+        renew: bool,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let result = sqlx::query(
             "UPDATE boosty_settings
                 SET sync_lease_owner = ?1,
-                    sync_lease_until = CAST(strftime('%s', 'now') AS INTEGER) + ?2
+                    sync_lease_until = ?2
               WHERE id = 1
-                AND sync_lease_until <= CAST(strftime('%s', 'now') AS INTEGER)",
+                AND ((?4 = 0 AND sync_lease_until <= ?3)
+                     OR (?4 = 1 AND sync_lease_owner = ?1 AND sync_lease_until > ?3))
+                AND (sync_lease_owner IS NOT ?1 OR sync_lease_until IS NOT ?2)",
         )
         .bind(owner)
-        .bind(ttl_secs)
-        .execute(&self.pool)
+        .bind(now.saturating_add(ttl_secs))
+        .bind(now)
+        .bind(i64::from(renew))
+        .execute(&mut *tx)
         .await?;
-        Ok(result.rows_affected() == 1)
+        let changed = result.rows_affected() == 1;
+        if changed {
+            sqlx::query(
+                "INSERT INTO audit_log (actor, action, target, payload)
+                 VALUES ('boosty-bridge', ?1, 'boosty_settings', NULL)",
+            )
+            .bind(if renew {
+                "boosty.sync_lease.renewed"
+            } else {
+                "boosty.sync_lease.acquired"
+            })
+            .execute(&mut *tx)
+            .await?;
+        }
+        // A renewal in the same second can retain the exact expiry without a write.
+        let held = if !changed && renew {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM boosty_settings
+                  WHERE id = 1 AND sync_lease_owner = ?1 AND sync_lease_until > ?2)",
+            )
+            .bind(owner)
+            .bind(now)
+            .fetch_one(&mut *tx)
+            .await?
+        } else {
+            changed
+        };
+        tx.commit().await?;
+        Ok(held)
     }
 
     pub async fn release_boosty_sync_lease(&self, owner: &str) -> Result<()> {
-        sqlx::query(
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let result = sqlx::query(
             "UPDATE boosty_settings
                 SET sync_lease_owner = NULL, sync_lease_until = 0
               WHERE id = 1 AND sync_lease_owner = ?1",
         )
         .bind(owner)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        if result.rows_affected() == 1 {
+            sqlx::query(
+                "INSERT INTO audit_log (actor, action, target, payload)
+                 VALUES ('boosty-bridge', 'boosty.sync_lease.released', 'boosty_settings', NULL)",
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -416,5 +475,140 @@ impl SqliteInventory {
             Some((Some(json), Some(ts))) => Some((json, ts)),
             _ => None,
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sync_lease_renewal_excludes_other_connections_past_original_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inv.db");
+        let first = SqliteInventory::open(&path).await.unwrap();
+        let second = SqliteInventory::open(&path).await.unwrap();
+        assert!(
+            first
+                .update_boosty_sync_lease_at("a", 10, 100, false)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !second
+                .update_boosty_sync_lease_at("b", 10, 109, false)
+                .await
+                .unwrap()
+        );
+        assert!(
+            first
+                .update_boosty_sync_lease_at("a", 10, 109, true)
+                .await
+                .unwrap()
+        );
+        let audits = first.recent_audit(20).await.unwrap();
+        assert_eq!(audits.len(), 2);
+        assert!(
+            audits
+                .iter()
+                .any(|row| row.action == "boosty.sync_lease.renewed")
+        );
+
+        assert!(
+            first
+                .update_boosty_sync_lease_at("a", 10, 109, true)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !second
+                .update_boosty_sync_lease_at("b", 10, 110, false)
+                .await
+                .unwrap()
+        );
+        assert_eq!(first.recent_audit(20).await.unwrap().len(), audits.len());
+        assert!(
+            second
+                .update_boosty_sync_lease_at("b", 10, 119, false)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_sync_lease_cannot_be_renewed_or_release_successor() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        assert!(
+            inv.update_boosty_sync_lease_at("a", 10, 100, false)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !inv.update_boosty_sync_lease_at("a", 10, 110, true)
+                .await
+                .unwrap()
+        );
+        assert!(
+            inv.update_boosty_sync_lease_at("b", 10, 110, false)
+                .await
+                .unwrap()
+        );
+        let audits_before = inv.recent_audit(20).await.unwrap().len();
+
+        assert!(
+            !inv.update_boosty_sync_lease_at("a", 10, 111, true)
+                .await
+                .unwrap()
+        );
+        inv.release_boosty_sync_lease("a").await.unwrap();
+        assert!(
+            !inv.update_boosty_sync_lease_at("c", 10, 119, false)
+                .await
+                .unwrap()
+        );
+        assert_eq!(inv.recent_audit(20).await.unwrap().len(), audits_before);
+        inv.release_boosty_sync_lease("b").await.unwrap();
+        assert_eq!(inv.recent_audit(20).await.unwrap().len(), audits_before + 1);
+        assert!(
+            inv.update_boosty_sync_lease_at("c", 10, 119, false)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_lease_audit_failure_rolls_back_renewal() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        assert!(
+            inv.update_boosty_sync_lease_at("a", 10, 100, false)
+                .await
+                .unwrap()
+        );
+        sqlx::query(
+            "CREATE TRIGGER reject_lease_renewal_audit BEFORE INSERT ON audit_log
+             WHEN NEW.action = 'boosty.sync_lease.renewed'
+             BEGIN SELECT RAISE(ABORT, 'reject renewal audit'); END",
+        )
+        .execute(&inv.pool)
+        .await
+        .unwrap();
+        assert!(
+            inv.update_boosty_sync_lease_at("a", 10, 109, true)
+                .await
+                .is_err()
+        );
+        assert!(
+            inv.update_boosty_sync_lease_at("b", 10, 110, false)
+                .await
+                .unwrap()
+        );
+        assert_eq!(inv.recent_audit(20).await.unwrap().len(), 2);
     }
 }

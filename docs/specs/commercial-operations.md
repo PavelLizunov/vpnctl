@@ -87,7 +87,8 @@ sing-box проверяет множество UUID пользователей i
 ## 3. Автоматические задания и фиксация версий
 
 В исходниках есть следующие **шаблоны**, а не доказательство включённого runtime:
-- backup timer: `00:00 UTC` / `03:00 Europe/Moscow`, задержка до 300 секунд;
+- backup timer: schedule and retention are defined in the
+  [backup/restore contract](backup-restore.md#daily-encrypted-disaster-recovery-bundles);
 - kernel-update timer: `00:30 UTC` / `03:30 Europe/Moscow`, задержка до 600 секунд,
   `Persistent=true`, запуск `update-kernels --all`;
 - unit updater не перезагружает хост и не делает config apply, но обновление
@@ -162,25 +163,17 @@ restore; превышение согласованной паузы; невоз�
    EnvFile, unit/override, правила сети, необходимые assets, согласованные версии
    четырёх артефактов и способ восстановления нод. Хранить в защищённом виде,
    не в Git, тикете или чате. Проверить содержимое и возможность расшифровки.
-   The script requires a nonempty, readable regular deploy key, not a symlink;
-   a missing, empty, unreadable or symlinked key exits 13. Public key and
-   known_hosts are included when present; verify the full DR bundle separately.
+   Bundle contents and required-key checks are defined in the
+   [backup/restore contract](backup-restore.md#daily-encrypted-disaster-recovery-bundles).
 3. **Независимое хранение и drill:** проверенная внешняя копия вне общего домена
    отказа питания/диска/провайдера; возраст, целостность и доступ к ключу
    расшифровки. На изолированном восстановлении проверить БД/FK/идентичности,
    прежний тестовый профиль и восстановление управления нодами по согласованной
    процедуре. Локальный Web self-test не проверяет этот полный путь.
 
-Локальный scheduler снимков БД и отдельный encrypted bundle timer — разные
-механизмы; не выводить периодичность полного архива из наличия часовых снимков.
-The script uses `zstd -3`. Primary delivery failure exits 11. When off-site
-is enabled, an unreadable off-site key or a failed transfer exits 14. Retention
-failure exits 15; a simultaneous off-site transfer and local retention failure
-preserves exit 14. Delivery failures preserve the local archive.
-`OFFSITE_HOST=""` explicitly disables off-site delivery: a successful job in this
-mode does not prove an off-site copy. Validate `TimeoutStartSec=300` against the
-actual archive size. Closing a recorded timeout requires a successful scheduled
-job and verified delivery, not just one manually created archive.
+Snapshot and bundle schedules, retention, delivery failures and the recovery
+procedure are defined separately in the [backup/restore contract](backup-restore.md).
+A local Web self-test does not verify encrypted bundle delivery or a full DR drill.
 
 **Порядок возврата выбирается по типу изменения:**
 - бинарник без изменения схемы: восстановить проверенный согласованный комплект

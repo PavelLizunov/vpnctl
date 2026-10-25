@@ -368,10 +368,10 @@ impl SqliteInventory {
         let rows = sqlx::query(
             "SELECT nh.server_id AS server_id,
                     nh.kernel_versions_json AS kernel_versions_json
-             FROM node_health nh
-             WHERE nh.ts = (SELECT MAX(nh2.ts)
-                            FROM node_health nh2
-                            WHERE nh2.server_id = nh.server_id)
+             FROM servers s
+             JOIN node_health nh ON nh.sample_seq = (
+                 SELECT MAX(sample_seq) FROM node_health WHERE server_id = s.id
+             )
              ORDER BY nh.server_id",
         )
         .fetch_all(&self.pool)

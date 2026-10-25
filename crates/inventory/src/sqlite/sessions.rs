@@ -170,14 +170,27 @@ impl SqliteInventory {
     }
 
     pub async fn purge_user_sessions_older_than(&self, days: u32) -> Result<u64> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let res = sqlx::query(
             "DELETE FROM vpn_user_sessions
-             WHERE started_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)",
+             WHERE last_seen < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
+               AND last_seen < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-15 minutes')",
         )
         .bind(format!("-{days} days"))
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        Ok(res.rows_affected())
+        let removed = res.rows_affected();
+        if removed > 0 {
+            sqlx::query(
+                "INSERT INTO audit_log (actor, action, payload)
+                 VALUES ('system', 'sessions.purge', json_object('rows', ?1))",
+            )
+            .bind(i64::try_from(removed).unwrap_or(i64::MAX))
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(removed)
     }
 
     pub async fn record_user_destinations(&self, pairs: &[(UserId, String)]) -> Result<()> {

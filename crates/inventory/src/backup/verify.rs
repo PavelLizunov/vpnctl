@@ -181,7 +181,7 @@ pub async fn verify_snapshot(snapshot_path: &Path) -> Result<SelfTestReport, Sql
             detail: format!("foreign_key_check query failed: {e}"),
         }),
     }
-    let migration_ok = crate::sqlite::migrator().run(&migrate_pool).await;
+    let migration_ok = crate::sqlite::run_migrations(&migrate_pool).await;
     let expected_migrations = embedded_migration_count();
     let mut schema_migrations_applied: i64 = 0;
     match migration_ok {
@@ -264,14 +264,14 @@ pub async fn verify_snapshot(snapshot_path: &Path) -> Result<SelfTestReport, Sql
         if n > 0 {
             CheckStatus::Ok
         } else {
-            CheckStatus::Fail
+            CheckStatus::Warn
         }
     });
     push_count_check(&mut checks, "servers_present", &server_count, |n| {
         if n > 0 {
             CheckStatus::Ok
         } else {
-            CheckStatus::Fail
+            CheckStatus::Warn
         }
     });
     push_count_check(&mut checks, "grants_present", &grant_count, |n| {

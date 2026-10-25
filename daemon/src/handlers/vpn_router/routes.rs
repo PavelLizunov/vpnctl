@@ -177,15 +177,18 @@ pub(crate) async fn get_config(
         return empty_response(want_raw, now);
     }
 
-    let mut uris = match collect_vless_uris_for_user(&state, &user.id, &user.id.0, has_detour_cap)
+    let inputs = match state
+        .inv
+        .subscription_render_inputs(&user.id, is_vpnrouter_client_ua(ua))
         .await
     {
-        Ok(u) => u,
+        Ok(inputs) => inputs,
         Err(e) => {
-            tracing::warn!(target = "vpnctld::vpn_router", user = %user.id, error = %e, "uri collection failed");
+            tracing::warn!(target = "vpnctld::vpn_router", user = %user.id, error = %e, "subscription render inputs failed");
             return empty_response(want_raw, now);
         }
     };
+    let mut uris = collect_vless_uris_for_user(&inputs, &user.id.0, has_detour_cap);
 
     const EXTRA_PROTOCOLS: &[(&str, &str, Option<&str>)] = &[
         ("naive", "NAIVE", Some("naive.domain")),
@@ -194,31 +197,27 @@ pub(crate) async fn get_config(
     ];
     for (pid_str, label_tag, require_secret) in EXTRA_PROTOCOLS {
         let pid = vpnctl_core::ProtocolId((*pid_str).to_string());
-        match collect_extra_protocol_uris(&state, &user, &pid, label_tag, *require_secret).await {
-            Ok(extra) => uris.extend(extra),
-            Err(e) => {
-                tracing::warn!(target = "vpnctld::vpn_router", user = %user.id, protocol = %pid_str, error = %e, "extra-protocol uri collection failed; skipping");
-            }
-        }
+        uris.extend(collect_extra_protocol_uris(
+            &state,
+            &inputs,
+            &user,
+            &pid,
+            label_tag,
+            *require_secret,
+        ));
     }
 
     if is_vpnrouter_client_ua(ua) {
-        uris.extend(collect_awg_subscription_uris(&state, &user).await);
+        uris.extend(collect_awg_subscription_uris(&inputs, &user));
         let xhttp_pid = vpnctl_core::ProtocolId("vless+xhttp".to_string());
-        match collect_extra_protocol_uris(
+        uris.extend(collect_extra_protocol_uris(
             &state,
+            &inputs,
             &user,
             &xhttp_pid,
             "XHTTP",
             Some("vlessxhttp.path"),
-        )
-        .await
-        {
-            Ok(extra) => uris.extend(extra),
-            Err(e) => {
-                tracing::warn!(target = "vpnctld::vpn_router", user = %user.id, error = %e, "vless+xhttp uri collection failed; skipping");
-            }
-        }
+        ));
     }
 
     let Some(config) = make_config_blob(&uris) else {

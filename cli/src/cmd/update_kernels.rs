@@ -208,7 +208,7 @@ async fn update_one_server(
         .collect::<anyhow::Result<_>>()?;
 
     let key_path = crate::cmd::deploy::resolve_key_path(ssh_key.clone())?;
-    println!(
+    eprintln!(
         "→ connecting to {}@{}:{} (key {})",
         server.ssh_user,
         server.address,
@@ -221,9 +221,8 @@ async fn update_one_server(
     } else if jump.is_none() {
         let observed =
             vpnctl_host_fingerprint::fetch_via_keyscan(&server.address, server.ssh_port)?;
-        inv.update_trusted_fingerprint(&server.id, &observed)
-            .await?;
-        println!("  TOFU: stored host fingerprint {observed}");
+        crate::cmd::server::save_fingerprint(inv, server, &observed, "ssh-keyscan").await?;
+        eprintln!("  TOFU: stored host fingerprint {observed}");
         Some(observed)
     } else {
         None
@@ -236,7 +235,7 @@ async fn update_one_server(
     let mut rows: Vec<KernelUpdate> = Vec::with_capacity(kernels.len());
     for k in &kernels {
         let kid = k.id().0;
-        println!("→ upgrading kernel '{kid}' (ensure_installed; config untouched)");
+        eprintln!("→ upgrading kernel '{kid}' (ensure_installed; config untouched)");
 
         let (before, status_before_error) = match k.status(&ssh).await {
             Ok(status) => (status.version, None),

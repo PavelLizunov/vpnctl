@@ -765,7 +765,7 @@ pub async fn ensure_deploy_key(path: &Path) -> std::io::Result<()> {
 
 fn ensure_deploy_key_sync(path: &Path) -> std::io::Result<()> {
     if path.exists() {
-        return Ok(());
+        return validate_deploy_key_sync(path);
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -781,6 +781,7 @@ fn ensure_deploy_key_sync(path: &Path) -> std::io::Result<()> {
         .args([
             "-t",
             "ed25519",
+            "-q",
             "-N",
             "",
             "-C",
@@ -795,6 +796,50 @@ fn ensure_deploy_key_sync(path: &Path) -> std::io::Result<()> {
             path.display(),
             status.code()
         )));
+    }
+    validate_deploy_key_sync(path)
+}
+
+fn validate_deploy_key_sync(path: &Path) -> std::io::Result<()> {
+    let output = Command::new("ssh-keygen")
+        .args(["-y", "-P", "", "-f"])
+        .arg(path)
+        .stdin(Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "cannot derive deploy public key from {}: ssh-keygen exit={:?}",
+            path.display(),
+            output.status.code()
+        )));
+    }
+    let derived = String::from_utf8(output.stdout)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.utf8_error()))?;
+    let pub_path = public_key_path(path);
+    match std::fs::read_to_string(&pub_path) {
+        Ok(public) => {
+            if public.trim().lines().count() != 1
+                || !public
+                    .split_whitespace()
+                    .take(2)
+                    .eq(derived.split_whitespace().take(2))
+            {
+                return Err(std::io::Error::other(format!(
+                    "deploy public key {} does not match private key {}",
+                    pub_path.display(),
+                    path.display()
+                )));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&pub_path)?;
+            file.write_all(derived.as_bytes())?;
+        }
+        Err(e) => return Err(e),
     }
     Ok(())
 }
@@ -815,6 +860,77 @@ pub fn read_public_key(private_path: &Path) -> std::io::Result<String> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ensure_deploy_key_restores_missing_public_half_without_changing_private_key() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("deploy.key");
+        ensure_deploy_key(&path).await.unwrap();
+        let private = std::fs::read(&path).unwrap();
+        let public = read_public_key(&path).unwrap();
+        std::fs::remove_file(public_key_path(&path)).unwrap();
+
+        ensure_deploy_key(&path).await.unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), private);
+        let restored = read_public_key(&path).unwrap();
+        assert_eq!(
+            restored.split_whitespace().take(2).collect::<Vec<_>>(),
+            public.split_whitespace().take(2).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_deploy_key_rejects_mismatched_public_half_without_overwriting_it() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("deploy");
+        let other = dir.path().join("other");
+        ensure_deploy_key(&path).await.unwrap();
+        ensure_deploy_key(&other).await.unwrap();
+        let private = std::fs::read(&path).unwrap();
+        let wrong_public = read_public_key(&other).unwrap();
+        std::fs::write(public_key_path(&path), &wrong_public).unwrap();
+
+        let err = ensure_deploy_key(&path).await.unwrap_err().to_string();
+
+        assert!(err.contains("does not match private key"));
+        assert_eq!(std::fs::read(&path).unwrap(), private);
+        assert_eq!(read_public_key(&path).unwrap(), wrong_public);
+    }
+
+    #[tokio::test]
+    async fn ensure_deploy_key_accepts_matching_key_with_a_different_comment() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("deploy");
+        ensure_deploy_key(&path).await.unwrap();
+        let public = read_public_key(&path).unwrap();
+        let key = public
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let public = format!("{key} custom comment\n");
+        std::fs::write(public_key_path(&path), &public).unwrap();
+
+        ensure_deploy_key(&path).await.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(public_key_path(&path)).unwrap(),
+            public
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_deploy_key_rejects_invalid_private_key_even_with_public_half() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("deploy");
+        ensure_deploy_key(&path).await.unwrap();
+        std::fs::write(&path, "not a private key\n").unwrap();
+
+        let err = ensure_deploy_key(&path).await.unwrap_err().to_string();
+
+        assert!(err.contains("cannot derive deploy public key"));
+    }
 
     const FP_A: &str = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     const FP_B: &str = "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";

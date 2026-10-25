@@ -71,73 +71,98 @@ pub(crate) async fn user_detail_render(
         std::collections::HashMap<vpnctl_core::ProtocolId, bool>,
     > = std::collections::HashMap::new();
     for s in &servers {
-        let secrets = state
-            .inv
-            .list_server_secrets(&s.id)
-            .await
-            .map_err(|e| internal_error(anyhow::Error::new(e)))?;
-        secrets_per_server.insert(s.id.clone(), secrets);
-        let peers = state
-            .inv
-            .users_for_server(&s.id)
-            .await
-            .map_err(|e| internal_error(anyhow::Error::new(e)))?;
-        peers_per_server.insert(s.id.clone(), peers);
-        let hidden = state
-            .inv
-            .list_server_protocols_with_hidden(&s.id)
-            .await
-            .map_err(|e| internal_error(anyhow::Error::new(e)))?;
-        hidden_per_server.insert(s.id.clone(), hidden);
+        if tab == UserTab::Delivery {
+            let secrets = state
+                .inv
+                .list_server_secrets(&s.id)
+                .await
+                .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+            secrets_per_server.insert(s.id.clone(), secrets);
+            let peers = state
+                .inv
+                .users_for_server(&s.id)
+                .await
+                .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+            peers_per_server.insert(s.id.clone(), peers);
+        }
+        if tab == UserTab::Access {
+            let hidden = state
+                .inv
+                .list_server_protocols_with_hidden(&s.id)
+                .await
+                .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+            hidden_per_server.insert(s.id.clone(), hidden);
+        }
     }
     let mut direct_link_servers = Vec::with_capacity(servers.len());
     let mut chain_routes = Vec::new();
-    for server in &servers {
-        match state
-            .inv
-            .client_detour_via(&server.id)
-            .await
-            .map_err(|e| internal_error(anyhow::Error::new(e)))?
-        {
-            Some(entry) => {
-                if granted_ids.contains(&entry) {
-                    chain_routes.push((server.id.clone(), entry));
+    if tab == UserTab::Delivery {
+        for server in &servers {
+            match state
+                .inv
+                .client_detour_via(&server.id)
+                .await
+                .map_err(|e| internal_error(anyhow::Error::new(e)))?
+            {
+                Some(entry) => {
+                    if granted_ids.contains(&entry) {
+                        chain_routes.push((server.id.clone(), entry));
+                    }
                 }
+                None => direct_link_servers.push(server.clone()),
             }
-            None => direct_link_servers.push(server.clone()),
         }
     }
 
-    let user_overrides = state
-        .inv
-        .list_protocol_overrides_for_user(&uid)
-        .await
-        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let user_overrides = if tab == UserTab::Access {
+        state
+            .inv
+            .list_protocol_overrides_for_user(&uid)
+            .await
+            .map_err(|e| internal_error(anyhow::Error::new(e)))?
+    } else {
+        Default::default()
+    };
 
-    let share_links = collect_share_links(
-        &state,
-        &user,
-        &direct_link_servers,
-        &secrets_per_server,
-        &peers_per_server,
-    )
-    .await;
-    let amnezia_links = collect_amnezia_links(
-        &state,
-        &user,
-        &direct_link_servers,
-        &secrets_per_server,
-        &peers_per_server,
-    )
-    .await;
-    let awg_links = collect_awg_links(
-        &state,
-        &user,
-        &direct_link_servers,
-        &secrets_per_server,
-        &peers_per_server,
-    )
-    .await;
+    let share_links = if tab == UserTab::Delivery {
+        collect_share_links(
+            &state,
+            &user,
+            &direct_link_servers,
+            &secrets_per_server,
+            &peers_per_server,
+        )
+        .await
+    } else {
+        Default::default()
+    };
+
+    let amnezia_links = if tab == UserTab::Delivery {
+        collect_amnezia_links(
+            &state,
+            &user,
+            &direct_link_servers,
+            &secrets_per_server,
+            &peers_per_server,
+        )
+        .await
+    } else {
+        Default::default()
+    };
+
+    let awg_links = if tab == UserTab::Delivery {
+        collect_awg_links(
+            &state,
+            &user,
+            &direct_link_servers,
+            &secrets_per_server,
+            &peers_per_server,
+        )
+        .await
+    } else {
+        Default::default()
+    };
+
     let mut amnezia_files = Vec::new();
     if tab == UserTab::Delivery {
         for server in &servers {
@@ -170,11 +195,16 @@ pub(crate) async fn user_detail_render(
         }
     }
     let sub_token = user.sub_token.clone();
-    let configured_base = state
-        .inv
-        .get_public_base_url()
-        .await
-        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let configured_base = if matches!(tab, UserTab::Overview | UserTab::Delivery) {
+        state
+            .inv
+            .get_public_base_url()
+            .await
+            .map_err(|e| internal_error(anyhow::Error::new(e)))?
+    } else {
+        Default::default()
+    };
+
     let base = public_base(&headers, configured_base.as_deref());
     let sub_url_str = sub_token.as_deref().map(|t| sub_url(&headers, t));
     let mihomo_sub_url_str = sub_token.as_deref().map(|t| mihomo_sub_url(&base, t));
@@ -219,73 +249,115 @@ pub(crate) async fn user_detail_render(
         .map(|s| &s.id)
         .collect();
 
-    let access_aggregates = state
+    let last_seen_result = state.inv.user_last_seen(&uid).await;
+    let access_aggregates = if matches!(tab, UserTab::Overview | UserTab::Activity)
+        || !last_seen_result.as_ref().is_ok_and(Option::is_some)
+    {
+        state
         .inv
         .sub_access_aggregates_for_user(&uid, 30)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "sub_access_aggregates_for_user failed");
             vpnctl_inventory::SubAccessAggregates::default()
-        });
+        })
+    } else {
+        vpnctl_inventory::SubAccessAggregates::default()
+    };
 
-    let traffic_by_server = state
+    let traffic_by_server = if tab == UserTab::Overview {
+        state
         .inv
         .user_traffic_by_server(&uid, 24)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "user_traffic_by_server failed");
             Vec::new()
-        });
-    let ua_clusters = state.inv.ua_clusters_for_user(&uid, 24).await.unwrap_or_else(|e| {
+        })
+    } else {
+        Default::default()
+    };
+
+    let ua_clusters = if tab == UserTab::Overview {
+        state.inv.ua_clusters_for_user(&uid, 24).await.unwrap_or_else(|e| {
         tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "ua_clusters_for_user (verdict) failed");
         Vec::new()
-    });
+    })
+    } else {
+        Default::default()
+    };
+
     const ORIGINS_WINDOW_DAYS: u32 = 30;
     const ORIGINS_ASN_LIMIT: u32 = 10;
     const ORIGINS_IP_LIMIT: u32 = 15;
-    let origins_by_country = state
+    let origins_by_country = if tab == UserTab::Activity {
+        state
         .inv
         .sub_access_by_country(&uid, ORIGINS_WINDOW_DAYS)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "sub_access_by_country failed");
             Vec::new()
-        });
-    let origins_by_asn = state
+        })
+    } else {
+        Default::default()
+    };
+
+    let origins_by_asn = if tab == UserTab::Activity {
+        state
         .inv
         .sub_access_by_asn(&uid, ORIGINS_WINDOW_DAYS, ORIGINS_ASN_LIMIT)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "sub_access_by_asn failed");
             Vec::new()
-        });
-    let origins_by_ip = state
+        })
+    } else {
+        Default::default()
+    };
+
+    let origins_by_ip = if tab == UserTab::Activity {
+        state
         .inv
         .sub_access_by_ip(&uid, ORIGINS_WINDOW_DAYS, ORIGINS_IP_LIMIT)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "sub_access_by_ip failed");
             Vec::new()
-        });
-    let origins_device_fp = state
+        })
+    } else {
+        Default::default()
+    };
+
+    let origins_device_fp = if tab == UserTab::Activity {
+        state
         .inv
         .sub_access_device_fingerprint(&uid, ORIGINS_WINDOW_DAYS)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "sub_access_device_fingerprint failed");
             vpnctl_inventory::SubDeviceFp::default()
-        });
+        })
+    } else {
+        Default::default()
+    };
+
     const SOURCE_IPS_WINDOW_DAYS: u32 = 30;
     const SOURCE_IPS_LIMIT: u32 = 20;
-    let source_ips = state
+    let source_ips = if tab == UserTab::Activity {
+        state
         .inv
         .top_source_ips_for_user(&uid, SOURCE_IPS_WINDOW_DAYS, SOURCE_IPS_LIMIT)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "top_source_ips_for_user failed");
             Vec::new()
-        });
-    let source_ip_geo = {
+        })
+    } else {
+        Default::default()
+    };
+
+    let source_ip_geo = if tab == UserTab::Activity {
         let ips: Vec<String> = source_ips.iter().map(|r| r.source_ip.clone()).collect();
         let mut map = state.inv.geo_labels_for_ips(&ips).await.unwrap_or_else(|e| {
             tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "geo_labels_for_ips failed");
@@ -309,15 +381,27 @@ pub(crate) async fn user_detail_render(
             }
         }
         map
+    } else {
+        Default::default()
     };
-    let lifecycle = state.inv.user_lifecycle(&uid).await.unwrap_or_else(|e| {
+
+    let lifecycle = if tab == UserTab::Overview {
+        state.inv.user_lifecycle(&uid).await.unwrap_or_else(|e| {
         tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "user_lifecycle failed");
         vpnctl_inventory::UserLifecycle {
             created_at: chrono::Utc::now(),
             last_sub_fetch: access_aggregates.last_seen,
             age_days: 0,
         }
-    });
+    })
+    } else {
+        vpnctl_inventory::UserLifecycle {
+            created_at: chrono::Utc::now(),
+            last_sub_fetch: None,
+            age_days: 0,
+        }
+    };
+
     let presence_server_ids: Vec<vpnctl_core::ServerId> = {
         let mut seen: HashSet<vpnctl_core::ServerId> = HashSet::new();
         let mut out = Vec::new();
@@ -328,10 +412,7 @@ pub(crate) async fn user_detail_render(
         }
         out
     };
-    let true_last_seen = state
-        .inv
-        .user_last_seen(&uid)
-        .await
+    let true_last_seen = last_seen_result
         .unwrap_or_else(|e| {
             tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "user_last_seen failed");
             access_aggregates.last_seen

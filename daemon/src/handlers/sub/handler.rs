@@ -327,9 +327,13 @@ pub(super) struct SubIps {
 }
 
 fn resolve_sub_ips(headers: &header::HeaderMap, peer_ip: Option<std::net::IpAddr>) -> SubIps {
-    resolve_sub_ips_with(headers, peer_ip, crate::real_ip::trusted_proxies())
+    SubIps {
+        log_ip: peer_ip.map(|p| crate::real_ip::resolve_real_ip(headers, p)),
+        sec_ip: peer_ip.map(|p| crate::real_ip::resolve_peer_real_ip(headers, p)),
+    }
 }
 
+#[cfg(test)]
 pub(super) fn resolve_sub_ips_with(
     headers: &header::HeaderMap,
     peer_ip: Option<std::net::IpAddr>,

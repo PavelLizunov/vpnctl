@@ -12,6 +12,52 @@ pub(crate) fn migrator() -> &'static Migrator {
     &MIGRATOR
 }
 
+pub(crate) async fn run_migrations(pool: &SqlitePool) -> Result<()> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let tables: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'
+         AND name IN ('_sqlx_migrations', 'admin_alerts')",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if tables == 2 {
+        let applied: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 13 AND success = 1",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if applied == 0 {
+            let changed = sqlx::query(
+                "UPDATE admin_alerts SET acked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE id IN (
+                     SELECT id FROM (
+                         SELECT id, ROW_NUMBER() OVER (
+                             PARTITION BY kind, COALESCE(server_id, '__GLOBAL__')
+                             ORDER BY created_at DESC, id DESC
+                         ) AS position
+                         FROM admin_alerts WHERE acked_at IS NULL
+                     ) WHERE position > 1
+                 )",
+            )
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            if changed > 0 {
+                sqlx::query(
+                    "INSERT INTO audit_log (actor, action, payload)
+                     VALUES ('system', 'migration.admin_alerts.deduplicate', ?1)",
+                )
+                .bind(serde_json::json!({ "acked": changed }).to_string())
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+    }
+    tx.commit().await?;
+    MIGRATOR.run(pool).await?;
+    Ok(())
+}
+
 pub(crate) fn map_unique<T>(
     res: std::result::Result<T, sqlx::Error>,
     what: impl std::fmt::Display,
@@ -99,7 +145,7 @@ impl SqliteInventory {
             .connect_with(opts)
             .await?;
 
-        MIGRATOR.run(&pool).await?;
+        run_migrations(&pool).await?;
 
         backfill_sub_tokens(&pool).await?;
 

@@ -21,5 +21,6 @@ pub(crate) use self::traffic::{
 #[cfg(test)]
 pub(super) use self::origins::classify_reserved_ip;
 pub(super) use self::traffic::{
-    VpnSparklineWindow, pick_vpn_sparkline_window, vpn_traffic_chart, window_picker_section,
+    VpnSparklineWindow, fit_vpn_sparkline_window, pick_vpn_sparkline_window, vpn_traffic_chart,
+    window_picker_section,
 };

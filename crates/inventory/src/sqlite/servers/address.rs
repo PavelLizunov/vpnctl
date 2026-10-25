@@ -368,4 +368,63 @@ impl SqliteInventory {
         .await?;
         Ok(())
     }
+
+    /// Pin `fp` and write its audit row in one transaction; a no-op (same
+    /// fingerprint already pinned) writes nothing and returns `false`.
+    pub async fn update_trusted_fingerprint_audited(
+        &self,
+        id: &ServerId,
+        fp: &str,
+        actor: &str,
+        source: &str,
+    ) -> Result<bool> {
+        if !vpnctl_host_fingerprint::validate_shape(fp) {
+            return Err(SqliteInventoryError::Invalid(format!(
+                "fingerprint must look like 'SHA256:<base64-43>', got {fp:?}"
+            )));
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let previous: Option<Option<String>> =
+            sqlx::query_scalar("SELECT trusted_host_fingerprint FROM servers WHERE id = ?1")
+                .bind(&id.0)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some(previous) = previous else {
+            return Err(SqliteInventoryError::Invalid(format!(
+                "no such server '{}'",
+                id.0
+            )));
+        };
+        if previous.as_deref() == Some(fp) {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        sqlx::query(
+            "UPDATE servers SET trusted_host_fingerprint = ?1,
+                                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?2",
+        )
+        .bind(fp)
+        .bind(&id.0)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO audit_log (actor, action, target, payload)
+             VALUES (?1, 'server.fingerprint.set', ?2, ?3)",
+        )
+        .bind(actor)
+        .bind(&id.0)
+        .bind(
+            serde_json::json!({
+                "fingerprint": fp,
+                "previous": previous,
+                "source": source,
+            })
+            .to_string(),
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
 }

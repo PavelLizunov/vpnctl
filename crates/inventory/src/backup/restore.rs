@@ -69,7 +69,7 @@ pub async fn restore_from(
             let _ = std::fs::remove_file(&tmp_path);
             SqliteInventoryError::Invalid(format!("open tmp restore {}: {e}", tmp_path.display()))
         })?;
-    if let Err(e) = crate::sqlite::migrator().run(&migrate_pool).await {
+    if let Err(e) = crate::sqlite::run_migrations(&migrate_pool).await {
         migrate_pool.close().await;
         let _ = std::fs::remove_file(&tmp_path);
         return Err(SqliteInventoryError::Invalid(format!(
@@ -82,6 +82,24 @@ pub async fn restore_from(
         let tmp_path = tmp_path.clone();
         let db_path = db_path.to_path_buf();
         move || {
+            match std::fs::metadata(&db_path) {
+                Ok(metadata) => {
+                    use std::os::unix::fs::{MetadataExt, chown};
+                    chown(&tmp_path, Some(metadata.uid()), Some(metadata.gid()))?;
+                    std::fs::set_permissions(&tmp_path, metadata.permissions())?;
+                }
+                // No previous DB: give the file to whoever owns its directory
+                // (the service user owns /var/lib/vpnctl), so a restore run as
+                // root still leaves a DB the daemon can open.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    use std::os::unix::fs::{MetadataExt, chown};
+                    if let Some(parent) = db_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                        let dir = std::fs::metadata(parent)?;
+                        chown(&tmp_path, Some(dir.uid()), Some(dir.gid()))?;
+                    }
+                }
+                Err(e) => return Err(e),
+            }
             if let Ok(f) = std::fs::OpenOptions::new().read(true).open(&tmp_path) {
                 let _ = f.sync_all();
             }
@@ -93,7 +111,7 @@ pub async fn restore_from(
     .map_err(|e| {
         let _ = std::fs::remove_file(&tmp_path);
         SqliteInventoryError::Invalid(format!(
-            "rename {} -> {}: {e}",
+            "preserve metadata / rename {} -> {}: {e}",
             tmp_path.display(),
             db_path.display()
         ))

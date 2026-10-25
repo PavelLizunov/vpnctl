@@ -212,3 +212,274 @@ fn missing_entities_are_reported_as_errors() {
         );
     }
 }
+
+async fn setup_granted_server(
+    temp: &TempDir,
+    protocols: &[&str],
+) -> vpnctl_inventory::SqliteInventory {
+    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId, User, UserId};
+    let inv = vpnctl_inventory::SqliteInventory::open(&temp.path().join("inventory.db"))
+        .await
+        .unwrap();
+    inv.add_server(&Server {
+        id: ServerId("node".into()),
+        address: "203.0.113.10".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: protocols
+            .iter()
+            .map(|id| ProtocolId((*id).into()))
+            .collect(),
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    inv.add_user(&User {
+        id: UserId("alice".into()),
+        uuid: "uuid-alice".into(),
+        tuic_password: Some("test-password".into()),
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        sub_token: None,
+        vpn_router_device_id: None,
+        disabled: false,
+    })
+    .await
+    .unwrap();
+    inv.grant(&UserId("alice".into()), &ServerId("node".into()))
+        .await
+        .unwrap();
+    inv
+}
+
+#[tokio::test]
+async fn user_disable_enable_reports_only_pending_granted_deploys() {
+    use vpnctl_core::{ServerId, UserId};
+    let temp = TempDir::new("pending-deploys");
+    let inv = setup_granted_server(&temp, &["trojan"]).await;
+    let mut second = inv
+        .get_server(&ServerId("node".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    second.id = ServerId("second".into());
+    second.address = "203.0.113.11".into();
+    inv.add_server(&second).await.unwrap();
+    inv.grant(&UserId("alice".into()), &second.id)
+        .await
+        .unwrap();
+    let mut unrelated = second.clone();
+    unrelated.id = ServerId("unrelated".into());
+    unrelated.address = "203.0.113.12".into();
+    inv.add_server(&unrelated).await.unwrap();
+
+    for (action, disabled) in [("disable", true), ("enable", false)] {
+        let help = command(&temp, ["user", action, "--help"]).output().unwrap();
+        assert!(help.status.success(), "{}", text(&help));
+        assert!(text(&help).contains("Deploy the listed servers"));
+        let output = command(&temp, ["user", action, "alice"]).output().unwrap();
+        assert!(output.status.success(), "{}", text(&output));
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("in inventory"), "{stdout}");
+        assert!(
+            stdout.contains("Node access changes require deploy"),
+            "{stdout}"
+        );
+        assert!(stdout.lines().any(|line| line == "  vpnctl deploy node"));
+        assert!(stdout.lines().any(|line| line == "  vpnctl deploy second"));
+        assert!(!stdout.contains("vpnctl deploy unrelated"));
+        assert_eq!(
+            inv.get_user(&UserId("alice".into()))
+                .await
+                .unwrap()
+                .unwrap()
+                .disabled,
+            disabled
+        );
+        let audit_count = inv.recent_audit(100).await.unwrap().len();
+        let retry = command(&temp, ["user", action, "alice"]).output().unwrap();
+        assert!(retry.status.success(), "{}", text(&retry));
+        assert!(text(&retry).contains("vpnctl deploy node"));
+        assert_eq!(inv.recent_audit(100).await.unwrap().len(), audit_count);
+
+        inv.audit("cli", "server.deploy", Some("node"), None)
+            .await
+            .unwrap();
+        let retry = command(&temp, ["user", action, "alice"]).output().unwrap();
+        assert!(retry.status.success(), "{}", text(&retry));
+        assert!(!text(&retry).contains("vpnctl deploy node"));
+        assert!(text(&retry).contains("vpnctl deploy second"));
+        inv.audit("cli", "server.deploy", Some("second"), None)
+            .await
+            .unwrap();
+        let deployed = command(&temp, ["user", action, "alice"]).output().unwrap();
+        assert!(deployed.status.success(), "{}", text(&deployed));
+        assert!(!text(&deployed).contains("vpnctl deploy"));
+    }
+}
+
+fn prepare_failing_ssh(temp: &TempDir) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let fingerprint = format!("SHA256:{}", "A".repeat(43));
+    for (name, script) in [
+        ("ssh", "#!/bin/bash\nexit 1\n".to_string()),
+        (
+            "ssh-keyscan",
+            "#!/bin/bash\nprintf '%s\\n' 'node.example ssh-ed25519 AAAATEST'\n".to_string(),
+        ),
+        (
+            "ssh-keygen",
+            format!(
+                "#!/bin/bash\ncat >/dev/null\nprintf '%s\\n' '256 {fingerprint} node.example (ED25519)'\n"
+            ),
+        ),
+    ] {
+        let path = bin.join(name);
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let key = temp.path().join("id_test");
+    fs::write(&key, "test key placeholder").unwrap();
+    key
+}
+
+fn ssh_command<I, S>(temp: &TempDir, args: I) -> Command
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut command = command(temp, args);
+    command
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", temp.path().join("bin").display()),
+        )
+        .env("VPNCTLD_NODE_LOCK_DIR", temp.path().join("locks"));
+    command
+}
+
+#[tokio::test]
+async fn update_kernels_json_stdout_contains_only_json() {
+    let temp = TempDir::new("update-json");
+    let _inv = setup_granted_server(&temp, &["trojan"]).await;
+    let key = prepare_failing_ssh(&temp);
+    let output = ssh_command(
+        &temp,
+        [
+            "update-kernels",
+            "node",
+            "--key",
+            key.to_str().unwrap(),
+            "--output",
+            "json",
+        ],
+    )
+    .output()
+    .unwrap();
+    assert!(!output.status.success(), "mock SSH failure must propagate");
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("stdout is not JSON: {error}; {}", text(&output)));
+    assert_eq!(payload[0]["server"], "node");
+    assert_eq!(payload[0]["kernels"][0]["kernel"], "sing-box");
+    assert!(payload[0]["kernels"][0]["error"].is_string());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    for progress in [
+        "→ connecting",
+        "TOFU: stored host fingerprint",
+        "→ upgrading",
+    ] {
+        assert!(stderr.contains(progress), "{stderr}");
+    }
+}
+
+#[tokio::test]
+async fn tofu_save_is_audited_for_deploy_and_update_kernels() {
+    for action in ["deploy", "update-kernels"] {
+        let temp = TempDir::new("tofu-audit");
+        let inv = setup_granted_server(&temp, &["trojan"]).await;
+        let key = prepare_failing_ssh(&temp);
+        let run = || {
+            ssh_command(&temp, [action, "node", "--key", key.to_str().unwrap()])
+                .output()
+                .unwrap()
+        };
+        let output = run();
+        assert!(!output.status.success(), "mock SSH failure must propagate");
+        let fingerprint = format!("SHA256:{}", "A".repeat(43));
+        assert_eq!(
+            inv.get_server(&vpnctl_core::ServerId("node".into()))
+                .await
+                .unwrap()
+                .unwrap()
+                .trusted_host_fingerprint
+                .as_deref(),
+            Some(fingerprint.as_str())
+        );
+        let output = run();
+        assert!(!output.status.success(), "mock SSH failure must propagate");
+        let audits = inv.recent_audit(100).await.unwrap();
+        let pins: Vec<_> = audits
+            .iter()
+            .filter(|row| row.action == "server.fingerprint.set")
+            .collect();
+        assert_eq!(pins.len(), 1, "{action} must audit the first pin only");
+        assert_eq!(pins[0].actor, "cli");
+        assert_eq!(pins[0].target.as_deref(), Some("node"));
+        assert_eq!(
+            pins[0].payload,
+            Some(serde_json::json!({
+                "fingerprint": fingerprint,
+                "previous": null,
+                "source": "ssh-keyscan",
+            }))
+        );
+    }
+}
+
+#[tokio::test]
+async fn subscription_generation_errors_exit_nonzero() {
+    let temp = TempDir::new("sub-error");
+    let _inv = setup_granted_server(&temp, &["vless+reality"]).await;
+    for flags in [&[][..], &["--output", "json"][..]] {
+        let output = command(
+            &temp,
+            ["sub", "alice"].into_iter().chain(flags.iter().copied()),
+        )
+        .output()
+        .unwrap();
+        assert!(!output.status.success(), "{}", text(&output));
+        assert!(
+            output.stdout.is_empty(),
+            "must not emit a partial subscription"
+        );
+        assert!(text(&output).contains("cannot build link for node/vless+reality"));
+    }
+}
+
+#[tokio::test]
+async fn successful_subscription_output_stays_byte_equal() {
+    let temp = TempDir::new("sub-bytes");
+    let _inv = setup_granted_server(&temp, &["trojan"]).await;
+    let link = "trojan://test-password@203.0.113.10:8643?sni=203.0.113.10&allowInsecure=1#alice";
+    let output = command(&temp, ["sub", "alice"]).output().unwrap();
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(
+        output.stdout,
+        format!("# node via trojan\n{link}\n\n").as_bytes()
+    );
+    let output = command(&temp, ["sub", "alice", "--output", "json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(
+        output.stdout,
+        format!("[{{\"server\":\"node\",\"protocol\":\"trojan\",\"link\":\"{link}\"}}]\n")
+            .as_bytes()
+    );
+}

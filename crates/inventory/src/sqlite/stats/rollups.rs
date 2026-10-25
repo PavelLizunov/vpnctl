@@ -1,4 +1,4 @@
-use sqlx::Row;
+use sqlx::{Row, Sqlite, Transaction};
 use vpnctl_core::{ServerId, UserId};
 
 use crate::sqlite::base::SqliteInventory;
@@ -24,71 +24,94 @@ fn row_to_vpn_user_daily(r: sqlx::sqlite::SqliteRow) -> Result<VpnUserDailyRow> 
     })
 }
 
+async fn rollup_daily(tx: &mut Transaction<'_, Sqlite>, lower: &str, upper: &str) -> Result<u64> {
+    // Legacy retention may already have deleted part of an otherwise complete day.
+    let res = sqlx::query(
+        "INSERT INTO vpn_user_daily
+            (date, user_id, server_id, upload_bytes, download_bytes,
+             active_connections_peak, distinct_source_ips, last_rolled_up_at)
+         SELECT substr(ts, 1, 10), user_id, server_id,
+                MAX(SUM(upload_bytes), 0), MAX(SUM(download_bytes), 0),
+                MAX(MAX(active_connections), 0), 0,
+                strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         FROM vpn_connection_stats
+         WHERE user_id IN (SELECT id FROM users) AND ts >= ?1 AND ts <= ?2
+         GROUP BY user_id, server_id, substr(ts, 1, 10)
+         ON CONFLICT(user_id, server_id, date) DO UPDATE SET
+             upload_bytes = MAX(vpn_user_daily.upload_bytes, excluded.upload_bytes),
+             download_bytes = MAX(vpn_user_daily.download_bytes, excluded.download_bytes),
+             active_connections_peak = MAX(vpn_user_daily.active_connections_peak,
+                                           excluded.active_connections_peak),
+             last_rolled_up_at = excluded.last_rolled_up_at
+         WHERE vpn_user_daily.upload_bytes < excluded.upload_bytes
+            OR vpn_user_daily.download_bytes < excluded.download_bytes
+            OR vpn_user_daily.active_connections_peak < excluded.active_connections_peak",
+    )
+    .bind(lower)
+    .bind(upper)
+    .execute(&mut **tx)
+    .await?;
+    let changed = res.rows_affected();
+    if changed > 0 {
+        sqlx::query(
+            "INSERT INTO audit_log (actor, action, payload)
+             VALUES ('system', 'stats.daily_rollup', json_object('rows', ?1))",
+        )
+        .bind(i64::try_from(changed).unwrap_or(i64::MAX))
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(changed)
+}
+
 impl SqliteInventory {
     pub async fn purge_vpn_stats_older_than(&self, days: u32) -> Result<u64> {
-        let res = sqlx::query(
-            "DELETE FROM vpn_connection_stats
-             WHERE ts < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)",
+        let cutoff_day = chrono::Utc::now().date_naive() - chrono::Days::new(u64::from(days));
+        let cutoff = format!("{}T00:00:00.000Z", cutoff_day.format("%Y-%m-%d"));
+        let last_purged_day = cutoff_day - chrono::Days::new(1);
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        // Complete the rollup of exactly the days whose raw ticks are deleted
+        // below (including days missed during downtime); retained days are
+        // rolled up by the scheduler and read from raw rows meanwhile.
+        rollup_daily(
+            &mut tx,
+            "",
+            &format!("{}T23:59:59.999Z", last_purged_day.format("%Y-%m-%d")),
         )
-        .bind(format!("-{days} days"))
-        .execute(&self.pool)
         .await?;
-        Ok(res.rows_affected())
+        let res = sqlx::query("DELETE FROM vpn_connection_stats WHERE ts < ?1")
+            .bind(&cutoff)
+            .execute(&mut *tx)
+            .await?;
+        let removed = res.rows_affected();
+        if removed > 0 {
+            sqlx::query(
+                "INSERT INTO audit_log (actor, action, payload)
+                 VALUES ('system', 'stats.purge', json_object('rows', ?1))",
+            )
+            .bind(i64::try_from(removed).unwrap_or(i64::MAX))
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(removed)
+    }
+
+    /// Recompute the daily rollup of every retained raw day. Days are only
+    /// missed while the daemon is down, so the daemon runs this once at start
+    /// instead of on every hourly purge.
+    pub async fn catch_up_vpn_daily_rollups(&self) -> Result<u64> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let upserted = rollup_daily(&mut tx, "", "9999-12-31T23:59:59.999Z").await?;
+        tx.commit().await?;
+        Ok(upserted)
     }
 
     pub async fn rollup_vpn_user_daily(&self, date_utc: &str) -> Result<u64> {
         let lower = format!("{date_utc}T00:00:00.000Z");
         let upper = format!("{date_utc}T23:59:59.999Z");
-
-        let rows = sqlx::query(
-            "SELECT
-                user_id,
-                server_id,
-                COALESCE(SUM(upload_bytes), 0)        AS up_total,
-                COALESCE(SUM(download_bytes), 0)      AS dn_total,
-                COALESCE(MAX(active_connections), 0)  AS peak_conns
-             FROM vpn_connection_stats
-             WHERE user_id IN (SELECT id FROM users)
-               AND ts >= ?1
-               AND ts <= ?2
-             GROUP BY user_id, server_id",
-        )
-        .bind(&lower)
-        .bind(&upper)
-        .fetch_all(&self.pool)
-        .await?;
-
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let mut upserted: u64 = 0;
-        for r in rows {
-            let user_id: String = r.try_get("user_id")?;
-            let server_id: String = r.try_get("server_id")?;
-            let up_total: i64 = r.try_get("up_total")?;
-            let dn_total: i64 = r.try_get("dn_total")?;
-            let peak_conns: i64 = r.try_get("peak_conns")?;
-            let res = sqlx::query(
-                "INSERT INTO vpn_user_daily
-                    (date, user_id, server_id, upload_bytes,
-                     download_bytes, active_connections_peak,
-                     distinct_source_ips, last_rolled_up_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0,
-                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                 ON CONFLICT(user_id, server_id, date) DO UPDATE SET
-                     upload_bytes              = excluded.upload_bytes,
-                     download_bytes            = excluded.download_bytes,
-                     active_connections_peak   = excluded.active_connections_peak,
-                     last_rolled_up_at         = excluded.last_rolled_up_at",
-            )
-            .bind(date_utc)
-            .bind(&user_id)
-            .bind(&server_id)
-            .bind(up_total.max(0))
-            .bind(dn_total.max(0))
-            .bind(peak_conns.max(0))
-            .execute(&mut *tx)
-            .await?;
-            upserted = upserted.saturating_add(res.rows_affected());
-        }
+        let upserted = rollup_daily(&mut tx, &lower, &upper).await?;
         tx.commit().await?;
         Ok(upserted)
     }
@@ -120,7 +143,7 @@ impl SqliteInventory {
         days: u32,
         limit: u32,
     ) -> Result<Vec<HeavyUser>> {
-        let cutoff = format!("-{} days", days.saturating_sub(1));
+        let cutoff = (days != u32::MAX).then(|| format!("-{} days", days.saturating_sub(1)));
         let rows = sqlx::query(
             "SELECT d.user_id AS user_id,
                     CAST(SUM(d.upload_bytes
@@ -129,7 +152,8 @@ impl SqliteInventory {
                              * COALESCE(sv.usage_coefficient, 1.0)) AS INTEGER) AS down_b
              FROM vpn_user_daily d
              JOIN servers sv ON sv.id = d.server_id
-             WHERE d.date >= strftime('%Y-%m-%d', 'now', ?1)
+             WHERE d.date >= CASE WHEN ?1 IS NULL THEN ''
+                                 ELSE strftime('%Y-%m-%d', 'now', ?1) END
              GROUP BY d.user_id
              ORDER BY SUM((d.upload_bytes + d.download_bytes)
                           * COALESCE(sv.usage_coefficient, 1.0)) DESC
