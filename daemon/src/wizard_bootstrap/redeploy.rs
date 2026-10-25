@@ -306,6 +306,9 @@ async fn redeploy_pipeline(
         Err(e) => fail!("secrets", "secret bootstrap failed: {e}"),
     };
 
+    if let Err(e) = inv.wg_octets_for_server(&server.id).await {
+        fail!("deploy", "WireGuard address assignment failed: {e}");
+    }
     let deploy_revision = match inv.deploy_input_revision(&server.id).await {
         Ok(revision) => revision,
         Err(e) => fail!("deploy", "cannot snapshot deploy inputs: {e}"),
@@ -384,6 +387,10 @@ async fn redeploy_pipeline(
         Ok(u) => u,
         Err(e) => fail!("deploy", "users_for_server failed: {e}"),
     };
+    let wg_octets = match inv.wg_octets_for_server(&server.id).await {
+        Ok(octets) => octets,
+        Err(e) => fail!("deploy", "WireGuard address assignment failed: {e}"),
+    };
     if inv
         .deploy_input_revision(&server.id)
         .await
@@ -411,7 +418,7 @@ async fn redeploy_pipeline(
         Ok(k) => k,
         Err(e) => fail!("deploy", "known user UUID lookup failed: {e}"),
     };
-    let ctx = RenderCtx::new(&server, &secrets);
+    let ctx = RenderCtx::with_peers(&server, &secrets, &users).with_wg_octets(wg_octets);
 
     match inv.retired_server_kernels(&server.id).await {
         Ok(retired) => {
@@ -495,6 +502,15 @@ async fn redeploy_pipeline(
         if let Err(e) = kernel.open_firewall(&ssh, &ctx, &protocols).await {
             ssh_errors.push(format!("{}: open_firewall failed: {e}", kid.0));
             send_step!("apply", "✗ {} firewall failed: {e}", kid.0);
+            continue;
+        }
+        if let Err(e) = vpnctl_inventory::bootstrap::refresh_deployed_server_secrets(
+            &inv, kernel, &ssh, &ctx, "admin",
+        )
+        .await
+        {
+            ssh_errors.push(format!("{}: {e}", kid.0));
+            send_step!("apply", "✗ {}: {e}", kid.0);
         }
     }
 

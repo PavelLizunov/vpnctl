@@ -187,12 +187,104 @@ impl SqliteInventory {
         alert_id: i64,
         message_id: &str,
     ) -> Result<()> {
-        sqlx::query("UPDATE admin_alerts SET telegram_message_id = ?2 WHERE id = ?1")
-            .bind(alert_id)
-            .bind(message_id)
-            .execute(&self.pool)
-            .await?;
+        self.record_alert_telegram_delivery(alert_id, Some(message_id))
+            .await
+    }
+
+    /// Reserve a delivery round for five minutes, including across daemon restarts.
+    /// The initial round may send acknowledged one-shot events; later rounds may not.
+    pub async fn claim_alert_telegram_delivery(
+        &self,
+        alert_id: i64,
+        now: DateTime<Utc>,
+        retry: bool,
+    ) -> Result<Option<i64>> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            "UPDATE admin_alerts
+             SET telegram_attempts = telegram_attempts + 1,
+                 telegram_next_attempt_at = ?2
+             WHERE id = ?1 AND telegram_delivered_at IS NULL AND telegram_gave_up_at IS NULL
+               AND ((?3 = 0 AND telegram_attempts = 0)
+                 OR (?3 = 1 AND acked_at IS NULL
+                     AND julianday(created_at) > julianday(?4, '-24 hours')
+                     AND julianday(COALESCE(telegram_next_attempt_at,
+                         strftime('%Y-%m-%dT%H:%M:%fZ', created_at, '+5 minutes'))) <= julianday(?4)))
+             RETURNING telegram_attempts",
+        )
+        .bind(alert_id)
+        .bind((now + chrono::Duration::minutes(5)).to_rfc3339())
+        .bind(retry)
+        .bind(now.to_rfc3339())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(attempts,)| attempts))
+    }
+
+    pub async fn pending_alert_telegram_deliveries(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<AdminAlert>> {
+        let rows = sqlx::query(
+            "SELECT id, created_at, kind, server_id, severity, summary, payload_json, acked_at
+             FROM admin_alerts
+             WHERE acked_at IS NULL AND telegram_delivered_at IS NULL AND telegram_gave_up_at IS NULL
+               AND julianday(created_at) > julianday(?1, '-24 hours')
+               AND julianday(COALESCE(telegram_next_attempt_at,
+                   strftime('%Y-%m-%dT%H:%M:%fZ', created_at, '+5 minutes'))) <= julianday(?1)
+             ORDER BY COALESCE(telegram_next_attempt_at, created_at), id
+             LIMIT 20",
+        )
+        .bind(now.to_rfc3339())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_admin_alert).collect()
+    }
+
+    pub async fn record_alert_telegram_delivery(
+        &self,
+        alert_id: i64,
+        message_id: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE admin_alerts
+             SET telegram_delivered_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                 telegram_message_id = COALESCE(?2, telegram_message_id),
+                 telegram_next_attempt_at = NULL
+             WHERE id = ?1 AND telegram_delivered_at IS NULL",
+        )
+        .bind(alert_id)
+        .bind(message_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
+    }
+
+    pub async fn defer_alert_telegram_delivery(
+        &self,
+        alert_id: i64,
+        next_attempt_at: DateTime<Utc>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE admin_alerts SET telegram_next_attempt_at = ?2
+             WHERE id = ?1 AND telegram_delivered_at IS NULL AND telegram_gave_up_at IS NULL",
+        )
+        .bind(alert_id)
+        .bind(next_attempt_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn expire_alert_telegram_deliveries(&self, now: DateTime<Utc>) -> Result<u64> {
+        let res = sqlx::query(
+            "UPDATE admin_alerts SET telegram_gave_up_at = ?1, telegram_next_attempt_at = NULL
+             WHERE acked_at IS NULL AND telegram_delivered_at IS NULL AND telegram_gave_up_at IS NULL
+               AND julianday(created_at) <= julianday(?1, '-24 hours')",
+        )
+        .bind(now.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
     }
 
     pub async fn latest_alert_message_id(

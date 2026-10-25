@@ -963,3 +963,123 @@ async fn redeploy_firewall_failure_records_failed_audit_and_keeps_server_pending
     assert_eq!(payload["configs_applied"], 1);
     assert!(inv.server_pending_deploy(&server.id).await.unwrap());
 }
+
+#[tokio::test]
+async fn redeploy_persists_observed_certificate_only_on_change_and_propagates_errors() {
+    #[derive(Debug)]
+    struct PinnedKernel(Arc<std::sync::Mutex<Option<String>>>);
+
+    #[async_trait::async_trait]
+    impl vpnctl_core::Kernel for PinnedKernel {
+        fn id(&self) -> KernelId {
+            KernelId("tls-test".into())
+        }
+        fn supported_protocols(&self) -> Vec<ProtocolId> {
+            vec![ProtocolId("trojan".into())]
+        }
+        async fn ensure_installed(
+            &self,
+            _: &dyn vpnctl_core::SshTransport,
+        ) -> vpnctl_core::Result<()> {
+            Ok(())
+        }
+        fn render_config(
+            &self,
+            _: &RenderCtx<'_>,
+            _: &[vpnctl_core::User],
+            _: &[&dyn vpnctl_core::Protocol],
+        ) -> vpnctl_core::Result<Vec<u8>> {
+            Ok(b"{}".to_vec())
+        }
+        async fn apply_config(
+            &self,
+            _: &dyn vpnctl_core::SshTransport,
+            _: &[u8],
+        ) -> vpnctl_core::Result<()> {
+            Ok(())
+        }
+        async fn deployed_server_secrets(
+            &self,
+            _: &dyn vpnctl_core::SshTransport,
+            _: &RenderCtx<'_>,
+        ) -> vpnctl_core::Result<Vec<(String, String)>> {
+            match self.0.lock().unwrap().as_ref() {
+                Some(pin) => Ok(vec![("tls.cert_sha256".into(), pin.clone())]),
+                None => Err(vpnctl_core::CoreError::Transport(
+                    "certificate read failed".into(),
+                )),
+            }
+        }
+        async fn restart(&self, _: &dyn vpnctl_core::SshTransport) -> vpnctl_core::Result<()> {
+            panic!("redeploy uses apply_config")
+        }
+        async fn status(
+            &self,
+            _: &dyn vpnctl_core::SshTransport,
+        ) -> vpnctl_core::Result<vpnctl_core::KernelStatus> {
+            panic!("redeploy must not need status")
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let inv = vpnctl_inventory::SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let observed = Arc::new(std::sync::Mutex::new(Some("ab".repeat(32))));
+    let mut registry = vpnctl_core::Registry::new();
+    registry
+        .register_kernel(Box::new(PinnedKernel(Arc::clone(&observed))))
+        .unwrap();
+    registry
+        .register_protocol(Box::new(vpnctl_protocols::Trojan::new()))
+        .unwrap();
+    let registry = Arc::new(registry);
+    let mut server = redeploy_test_server("redeploy-tls-pin", vec![ProtocolId("trojan".into())]);
+    server.kernels = vec![KernelId("tls-test".into())];
+    inv.add_server(&server).await.unwrap();
+    inv.set_reserved_ports(&server.id, &[12345]).await.unwrap();
+    let key = dir.path().join("unused-deploy-key");
+    std::fs::write(&key, "fixture: kernel methods do not invoke SSH").unwrap();
+    for (pin, expected_count) in [(Some("ab"), 1), (Some("ab"), 1), (Some("cd"), 2), (None, 2)] {
+        *observed.lock().unwrap() = pin.map(|pin| pin.repeat(32));
+        let events = collect_redeploy_bounded(
+            server.clone(),
+            inv.clone(),
+            Arc::clone(&registry),
+            key.clone(),
+        )
+        .await;
+        if pin.is_some() {
+            assert!(matches!(events.last(), Some(BootstrapEvent::Ok { .. })));
+            assert!(!inv.server_pending_deploy(&server.id).await.unwrap());
+        } else {
+            assert!(terminal_error(&events).contains("certificate read failed"));
+        }
+        let audits = inv.audit_for_server(&server.id.0, 100).await.unwrap();
+        assert_eq!(
+            audits
+                .iter()
+                .filter(|a| a.action == "server.deployed_secrets.set")
+                .count(),
+            expected_count
+        );
+        let deploy = audits
+            .iter()
+            .find(|a| a.action.starts_with("server.deploy"))
+            .unwrap();
+        assert_eq!(
+            deploy.action,
+            if pin.is_some() {
+                "server.deploy"
+            } else {
+                "server.deploy.failed"
+            }
+        );
+    }
+    assert_eq!(
+        inv.get_server_secret(&server.id, "tls.cert_sha256")
+            .await
+            .unwrap(),
+        Some("cd".repeat(32))
+    );
+}

@@ -182,25 +182,25 @@ async fn poll_one_server(
         .into_iter()
         .map(|(u, ip)| (vpnctl_core::UserId(u), ip))
         .collect();
-    if !dest_pairs.is_empty() {
-        if let Err(e) = inv.record_user_destinations(&dest_pairs).await {
-            tracing::warn!(
-                target = "vpnctld::poller",
-                server = %server.id.0,
-                error = %e,
-                "record_user_destinations failed (will retry next tick)"
-            );
-        }
+    if !dest_pairs.is_empty()
+        && let Err(e) = inv.record_user_destinations(&dest_pairs).await
+    {
+        tracing::warn!(
+            target = "vpnctld::poller",
+            server = %server.id.0,
+            error = %e,
+            "record_user_destinations failed (will retry next tick)"
+        );
     }
-    if !source_ip_pairs.is_empty() {
-        if let Err(e) = inv.record_user_source_ips(&source_ip_pairs).await {
-            tracing::warn!(
-                target = "vpnctld::poller",
-                server = %server.id.0,
-                error = %e,
-                "record_user_source_ips failed (will retry next tick)"
-            );
-        }
+    if !source_ip_pairs.is_empty()
+        && let Err(e) = inv.record_user_source_ips(&source_ip_pairs).await
+    {
+        tracing::warn!(
+            target = "vpnctld::poller",
+            server = %server.id.0,
+            error = %e,
+            "record_user_source_ips failed (will retry next tick)"
+        );
     }
 
     {
@@ -217,15 +217,15 @@ async fn poll_one_server(
             .into_iter()
             .map(|(u, nets)| (vpnctl_core::UserId(u), nets.len() as u32))
             .collect();
-        if !peaks.is_empty() {
-            if let Err(e) = inv.record_user_ip_concurrency(&peaks).await {
-                tracing::warn!(
-                    target = "vpnctld::poller",
-                    server = %server.id.0,
-                    error = %e,
-                    "record_user_ip_concurrency failed (will retry next tick)"
-                );
-            }
+        if !peaks.is_empty()
+            && let Err(e) = inv.record_user_ip_concurrency(&peaks).await
+        {
+            tracing::warn!(
+                target = "vpnctld::poller",
+                server = %server.id.0,
+                error = %e,
+                "record_user_ip_concurrency failed (will retry next tick)"
+            );
         }
     }
 
@@ -277,6 +277,7 @@ async fn poll_one_server(
         server_upload_total: cumulative.server_upload_total,
         server_download_total: cumulative.server_download_total,
         uptime_seconds: cumulative.uptime_seconds,
+        generation: cumulative.generation,
         active_connections: u32::try_from(snapshot.connections.len()).unwrap_or(u32::MAX),
         users: cumulative.users,
     };

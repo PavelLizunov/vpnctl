@@ -91,10 +91,10 @@ pub(crate) async fn server_disable_kernel(
 
     let mut after = server.clone();
     after.kernels.retain(|k| k != &kid);
-    if after.kernels.len() != server.kernels.len() {
-        if let Some(msg) = unsupported_change(&state.registry, &server, &after) {
-            return bad_request(&format!("cannot disable kernel '{kernel_id_str}': {msg}"));
-        }
+    if after.kernels.len() != server.kernels.len()
+        && let Some(msg) = unsupported_change(&state.registry, &server, &after)
+    {
+        return bad_request(&format!("cannot disable kernel '{kernel_id_str}': {msg}"));
     }
 
     let removed = match state.inv.remove_server_kernel(&sid, &kid).await {

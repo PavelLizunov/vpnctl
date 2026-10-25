@@ -491,7 +491,7 @@ async fn singbox_subscription_omits_target_when_entry_is_not_granted() {
         "S5 must not fall back to a direct outbound"
     );
     assert_eq!(
-        config["route"]["final"], "direct",
+        config["route"]["final"], "block",
         "with no proxy outbound left, route.final must not name a missing `proxy` tag"
     );
 }
@@ -691,7 +691,7 @@ async fn duplicate_display_names_keep_tags_and_references_unique_byte_equal() {
 async fn unique_singbox_tags_keep_legacy_response_byte_equal() {
     let dir = TempDir::new().unwrap();
     let (state, token, _writer) = seed(&dir, true).await;
-    let (status, actual) = get_sub(state, &token, None).await;
+    let (status, actual) = get_sub(state.clone(), &token, None).await;
     assert_eq!(status, StatusCode::OK);
     let expected = serde_json::json!({
         "log": {"level": "info", "timestamp": true},
@@ -733,6 +733,9 @@ async fn unique_singbox_tags_keep_legacy_response_byte_equal() {
         }
     });
     assert_eq!(actual, expected.to_string().as_bytes());
+    let (status, stock) = get_sub_at(state, &format!("/sub/{token}?format=sing-box"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stock, expected.to_string().as_bytes());
 }
 
 #[tokio::test]

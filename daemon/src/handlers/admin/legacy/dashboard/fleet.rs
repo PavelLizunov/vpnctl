@@ -135,10 +135,10 @@ pub(in crate::handlers::admin::legacy) fn kernel_floor_rollup(
     use crate::i18n::{K, t, tr};
     let mut versioned: Vec<(u64, u64, u64)> = Vec::new();
     for (_, json) in kernel_versions {
-        if let Some(v) = sing_box_version_of(json.as_deref()) {
-            if let Some(tuple) = parse_version_tuple(&v) {
-                versioned.push(tuple);
-            }
+        if let Some(v) = sing_box_version_of(json.as_deref())
+            && let Some(tuple) = parse_version_tuple(&v)
+        {
+            versioned.push(tuple);
         }
     }
     let reporting = versioned.len();

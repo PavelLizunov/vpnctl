@@ -49,11 +49,9 @@ pub(crate) async fn user_online_badge(
                         .first()
                         .map(|(u, _)| u.0.as_str() == uid.0.as_str())
                         .unwrap_or(false);
-                    if owner_is_user {
-                        if let Some(servers) = unresolved.get(ip) {
-                            for s in servers {
-                                *conns_per_server.entry(s.clone()).or_insert(0) += 1;
-                            }
+                    if owner_is_user && let Some(servers) = unresolved.get(ip) {
+                        for s in servers {
+                            *conns_per_server.entry(s.clone()).or_insert(0) += 1;
                         }
                     }
                 }

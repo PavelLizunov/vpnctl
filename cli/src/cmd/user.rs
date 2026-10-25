@@ -1,7 +1,7 @@
 use crate::{OutputFormat, ui};
 use clap::Subcommand;
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use vpnctl_core::{ServerId, User, UserId};
 use vpnctl_crypto::{gen_password, gen_uuid, gen_vpn_router_device_id, gen_wireguard_keypair};
 use vpnctl_inventory::SqliteInventory;
@@ -77,12 +77,18 @@ pub(crate) enum UserCmd {
     Disable {
         /// User id.
         id: String,
+        /// Immediately deploy the listed pending servers; fail if any deploy fails.
+        #[arg(long)]
+        deploy: bool,
     },
 
     /// Enable a user in inventory. Deploy the listed servers to restore node access.
     Enable {
         /// User id.
         id: String,
+        /// Immediately deploy the listed pending servers; fail if any deploy fails.
+        #[arg(long)]
+        deploy: bool,
     },
 
     /// Set or clear monthly bandwidth limit and alert threshold.
@@ -317,7 +323,7 @@ pub(crate) async fn run(
             Ok(())
         }
 
-        UserCmd::Disable { id } => {
+        UserCmd::Disable { id, deploy } => {
             let uid = UserId(id.clone());
             let changed = inv.set_user_disabled_audited(&uid, true, "cli").await?;
             if changed {
@@ -325,11 +331,11 @@ pub(crate) async fn run(
             } else {
                 println!("user '{id}' is already disabled in inventory");
             }
-            print_pending_deploys(&inv, &uid).await?;
+            handle_pending_deploys(&inv, &uid, deploy, &db_path).await?;
             Ok(())
         }
 
-        UserCmd::Enable { id } => {
+        UserCmd::Enable { id, deploy } => {
             let uid = UserId(id.clone());
             let changed = inv.set_user_disabled_audited(&uid, false, "cli").await?;
             if changed {
@@ -337,7 +343,7 @@ pub(crate) async fn run(
             } else {
                 println!("user '{id}' is already enabled in inventory");
             }
-            print_pending_deploys(&inv, &uid).await?;
+            handle_pending_deploys(&inv, &uid, deploy, &db_path).await?;
             Ok(())
         }
 
@@ -450,7 +456,8 @@ pub(crate) async fn run(
             }
 
             let secrets = inv.list_server_secrets(&sid).await?;
-            let ctx = vpnctl_core::RenderCtx::with_peers(&server_obj, &secrets, &peers);
+            let ctx = vpnctl_core::RenderCtx::with_peers(&server_obj, &secrets, &peers)
+                .with_wg_octets(inv.wg_octets_for_server(&sid).await?);
             let conf = vpnctl_protocols::render_client_conf_public(&ctx, &user_obj)?;
 
             if let Some(path) = out {
@@ -474,7 +481,12 @@ pub(crate) async fn run(
     }
 }
 
-async fn print_pending_deploys(inv: &SqliteInventory, uid: &UserId) -> anyhow::Result<()> {
+async fn handle_pending_deploys(
+    inv: &SqliteInventory,
+    uid: &UserId,
+    deploy: bool,
+    db_path: &Path,
+) -> anyhow::Result<()> {
     let granted: Vec<ServerId> = inv
         .servers_for_user(uid)
         .await?
@@ -484,8 +496,21 @@ async fn print_pending_deploys(inv: &SqliteInventory, uid: &UserId) -> anyhow::R
     let pending = inv.servers_pending_deploy_for_user(uid, &granted).await?;
     if !pending.is_empty() {
         println!("Node access changes require deploy on these servers:");
-        for server in pending {
+        for server in &pending {
             println!("  vpnctl deploy {server}");
+        }
+    }
+    if deploy {
+        let mut failures = Vec::new();
+        for server in pending {
+            if let Err(error) =
+                super::deploy::run(&server.0, None, Some(db_path.to_path_buf())).await
+            {
+                failures.push(format!("{server}: {error:#}"));
+            }
+        }
+        if !failures.is_empty() {
+            anyhow::bail!("deploy failed: {}", failures.join("; "));
         }
     }
     Ok(())

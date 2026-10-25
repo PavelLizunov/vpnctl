@@ -609,29 +609,28 @@ fn run_child_with_timeout(
                 break status;
             }
             Ok(Some(_)) | Ok(None) => {
-                if let Some(ref w) = in_writer {
-                    if w.is_finished() {
-                        if let Some(w) = in_writer.take() {
-                            match w.join() {
-                                Ok(Err(e)) => {
-                                    kill_and_reap(&mut child);
-                                    let _ = out_reader.join();
-                                    let _ = err_reader.join();
-                                    return Err(CoreError::Transport(format!(
-                                        "ssh stdin write {label}: {e}"
-                                    )));
-                                }
-                                Err(_) => {
-                                    kill_and_reap(&mut child);
-                                    let _ = out_reader.join();
-                                    let _ = err_reader.join();
-                                    return Err(CoreError::Transport(format!(
-                                        "ssh stdin write {label}: writer thread panicked"
-                                    )));
-                                }
-                                Ok(Ok(())) => {}
-                            }
+                if let Some(ref w) = in_writer
+                    && w.is_finished()
+                    && let Some(w) = in_writer.take()
+                {
+                    match w.join() {
+                        Ok(Err(e)) => {
+                            kill_and_reap(&mut child);
+                            let _ = out_reader.join();
+                            let _ = err_reader.join();
+                            return Err(CoreError::Transport(format!(
+                                "ssh stdin write {label}: {e}"
+                            )));
                         }
+                        Err(_) => {
+                            kill_and_reap(&mut child);
+                            let _ = out_reader.join();
+                            let _ = err_reader.join();
+                            return Err(CoreError::Transport(format!(
+                                "ssh stdin write {label}: writer thread panicked"
+                            )));
+                        }
+                        Ok(Ok(())) => {}
                     }
                 }
                 std::thread::sleep(Duration::from_millis(10));

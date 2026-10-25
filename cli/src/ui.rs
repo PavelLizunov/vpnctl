@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 
 pub(crate) fn resolve_db_path(flag: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     if let Some(p) = flag {
-        if let Some(parent) = p.parent() {
-            if !parent.as_os_str().is_empty() {
-                ensure_dir(parent)?;
-            }
+        if let Some(parent) = p.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            ensure_dir(parent)?;
         }
         return Ok(p);
     }

@@ -111,13 +111,12 @@ pub(super) async fn scan_once_inner(
             .filter(|(_, _, ev)| seen.insert(ev.resolves.unwrap_or(ev.kind)));
         for (prev, cur, mut ev) in events {
             if let (Some(p_id), Some(c_id)) = (prev.sample_id.as_deref(), cur.sample_id.as_deref())
+                && let serde_json::Value::Object(ref mut map) = ev.payload
             {
-                if let serde_json::Value::Object(ref mut map) = ev.payload {
-                    map.insert(
-                        "_source_event".to_string(),
-                        serde_json::json!(format!("{p_id}:{c_id}")),
-                    );
-                }
+                map.insert(
+                    "_source_event".to_string(),
+                    serde_json::json!(format!("{p_id}:{c_id}")),
+                );
             }
             if ev.kind == "server.singbox.log.too_big"
                 && prev

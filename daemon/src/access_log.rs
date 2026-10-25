@@ -72,17 +72,16 @@ async fn run_writer(inv: SqliteInventory, mut rx: mpsc::Receiver<AccessLogRecord
         }
 
         for r in &mut batch {
-            if geoip.is_loaded() {
-                if let Ok(parsed_ip) = r.ip.parse() {
-                    if let Some(info) = geoip.lookup(parsed_ip) {
-                        let asn_label = info.asn_label();
-                        if r.geo_country.is_none() {
-                            r.geo_country = info.country_iso;
-                        }
-                        if r.geo_asn.is_none() {
-                            r.geo_asn = asn_label;
-                        }
-                    }
+            if geoip.is_loaded()
+                && let Ok(parsed_ip) = r.ip.parse()
+                && let Some(info) = geoip.lookup(parsed_ip)
+            {
+                let asn_label = info.asn_label();
+                if r.geo_country.is_none() {
+                    r.geo_country = info.country_iso;
+                }
+                if r.geo_asn.is_none() {
+                    r.geo_asn = asn_label;
                 }
             }
         }
@@ -113,17 +112,16 @@ async fn run_writer(inv: SqliteInventory, mut rx: mpsc::Receiver<AccessLogRecord
                         && !is_lan_alert_allowed(r.device_class.as_deref())
                         && !is_trusted_reverse_proxy(&r.ip)
                         && !is_allowlisted_service_ip(&r.ip)
+                        && let Err(e) = fire_suspicious_local_ip_alert(&inv, r, kind).await
                     {
-                        if let Err(e) = fire_suspicious_local_ip_alert(&inv, r, kind).await {
-                            tracing::warn!(
-                                target = "vpnctld::access_log_writer",
-                                user = %r.user_id,
-                                ip = %r.ip,
-                                kind = kind.label(),
-                                error = %e,
-                                "sub_access.suspicious_local_ip alert insert failed (row persisted, no alert raised this time)"
-                            );
-                        }
+                        tracing::warn!(
+                            target = "vpnctld::access_log_writer",
+                            user = %r.user_id,
+                            ip = %r.ip,
+                            kind = kind.label(),
+                            error = %e,
+                            "sub_access.suspicious_local_ip alert insert failed (row persisted, no alert raised this time)"
+                        );
                     }
                 }
             }

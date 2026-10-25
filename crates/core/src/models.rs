@@ -93,6 +93,7 @@ pub struct RenderCtx<'a> {
     pub server: &'a Server,
     pub secrets: &'a HashMap<String, String>,
     pub peers: &'a [User],
+    pub wg_octets: Option<HashMap<UserId, u16>>,
 }
 
 impl<'a> RenderCtx<'a> {
@@ -101,6 +102,7 @@ impl<'a> RenderCtx<'a> {
             server,
             secrets,
             peers: &[],
+            wg_octets: None,
         }
     }
 
@@ -113,7 +115,13 @@ impl<'a> RenderCtx<'a> {
             server,
             secrets,
             peers,
+            wg_octets: None,
         }
+    }
+
+    pub fn with_wg_octets(mut self, octets: HashMap<UserId, u16>) -> Self {
+        self.wg_octets = Some(octets);
+        self
     }
 
     pub fn require(&self, key: &str) -> Result<&str> {

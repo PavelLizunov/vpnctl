@@ -126,19 +126,18 @@ impl SqliteInventory {
             .await?
         };
 
-        if let Some(inv_micros) = inv_rate {
-            if inv_micros > 0 {
-                let calc_micros = (RATE_SCALE as i128 * RATE_SCALE as i128
-                    + inv_micros as i128 / 2)
-                    / inv_micros as i128;
-                return Ok(Some(CurrencyRate {
-                    base_currency: base.into(),
-                    target_currency: target.into(),
-                    rate_micros: calc_micros as i64,
-                    source: "inverse".into(),
-                    fetched_at: String::new(),
-                }));
-            }
+        if let Some(inv_micros) = inv_rate
+            && inv_micros > 0
+        {
+            let calc_micros = (RATE_SCALE as i128 * RATE_SCALE as i128 + inv_micros as i128 / 2)
+                / inv_micros as i128;
+            return Ok(Some(CurrencyRate {
+                base_currency: base.into(),
+                target_currency: target.into(),
+                rate_micros: calc_micros as i64,
+                source: "inverse".into(),
+                fetched_at: String::new(),
+            }));
         }
 
         let common: Option<(i64, i64)> = sqlx::query_as(
@@ -153,19 +152,19 @@ impl SqliteInventory {
         .fetch_optional(&self.pool)
         .await?;
 
-        if let Some((rate_x_base, rate_x_target)) = common {
-            if rate_x_base > 0 {
-                let calc_micros = (rate_x_target as i128 * RATE_SCALE as i128
-                    + rate_x_base as i128 / 2)
-                    / rate_x_base as i128;
-                return Ok(Some(CurrencyRate {
-                    base_currency: base.into(),
-                    target_currency: target.into(),
-                    rate_micros: calc_micros as i64,
-                    source: "triangulated".into(),
-                    fetched_at: String::new(),
-                }));
-            }
+        if let Some((rate_x_base, rate_x_target)) = common
+            && rate_x_base > 0
+        {
+            let calc_micros = (rate_x_target as i128 * RATE_SCALE as i128
+                + rate_x_base as i128 / 2)
+                / rate_x_base as i128;
+            return Ok(Some(CurrencyRate {
+                base_currency: base.into(),
+                target_currency: target.into(),
+                rate_micros: calc_micros as i64,
+                source: "triangulated".into(),
+                fetched_at: String::new(),
+            }));
         }
 
         Ok(None)

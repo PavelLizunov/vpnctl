@@ -178,10 +178,10 @@ pub(crate) fn collect_extra_protocol_uris(
             continue;
         }
         let secrets = &input.secrets;
-        if let Some(req) = require_secret {
-            if !secrets.contains_key(req) {
-                continue;
-            }
+        if let Some(req) = require_secret
+            && !secrets.contains_key(req)
+        {
+            continue;
         }
         let per_server_user = user.with_per_server_uuid(&input.client_uuid);
         let ctx = RenderCtx::new(server, secrets);
@@ -252,7 +252,8 @@ pub(crate) fn collect_awg_subscription_uris(
             continue;
         }
 
-        let ctx = RenderCtx::with_peers(server, &input.secrets, &input.peers);
+        let ctx = RenderCtx::with_peers(server, &input.secrets, &input.peers)
+            .with_wg_octets(input.wg_octets.clone());
         for (chosen_pid, tag) in target_pids {
             let link_res = if chosen_pid == &awg3_pid {
                 vpnctl_protocols::awg3_share_link(&ctx, user)

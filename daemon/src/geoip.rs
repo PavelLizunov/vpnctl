@@ -121,25 +121,23 @@ impl GeoLookup {
         use maxminddb::geoip2;
         let inner = self.inner.as_ref()?;
         let mut info = GeoInfo::default();
-        if let Some(reader) = &inner.city {
-            if let Ok(lookup) = reader.lookup(ip) {
-                if let Ok(Some(city_rec)) = lookup.decode::<geoip2::City>() {
-                    info.country_iso = city_rec.country.iso_code.map(|s| s.to_string());
-                    if let Some(en) = city_rec.city.names.english {
-                        info.city = Some(en.to_string());
-                    }
-                }
+        if let Some(reader) = &inner.city
+            && let Ok(lookup) = reader.lookup(ip)
+            && let Ok(Some(city_rec)) = lookup.decode::<geoip2::City>()
+        {
+            info.country_iso = city_rec.country.iso_code.map(|s| s.to_string());
+            if let Some(en) = city_rec.city.names.english {
+                info.city = Some(en.to_string());
             }
         }
-        if let Some(reader) = &inner.asn {
-            if let Ok(lookup) = reader.lookup(ip) {
-                if let Ok(Some(asn_rec)) = lookup.decode::<geoip2::Asn>() {
-                    info.asn = asn_rec.autonomous_system_number;
-                    info.org = asn_rec
-                        .autonomous_system_organization
-                        .map(|s| s.to_string());
-                }
-            }
+        if let Some(reader) = &inner.asn
+            && let Ok(lookup) = reader.lookup(ip)
+            && let Ok(Some(asn_rec)) = lookup.decode::<geoip2::Asn>()
+        {
+            info.asn = asn_rec.autonomous_system_number;
+            info.org = asn_rec
+                .autonomous_system_organization
+                .map(|s| s.to_string());
         }
         if info.country_iso.is_none()
             && info.city.is_none()

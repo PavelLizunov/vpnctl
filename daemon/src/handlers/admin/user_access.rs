@@ -26,38 +26,20 @@ pub(crate) async fn user_grant_server(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
 
-    let was_granted = match state.inv.servers_for_user(&uid).await {
-        Ok(v) => v.iter().any(|s| s.id == sid),
-        Err(e) => return internal_error(anyhow::Error::new(e)),
-    };
-    if let Err(e) = state.inv.grant(&uid, &sid).await {
-        return match e {
-            vpnctl_inventory::SqliteInventoryError::Invalid(message) => bad_request(&message),
-            other => internal_error(anyhow::Error::new(other)),
-        };
-    }
-    if !was_granted {
-        if let Err(e) = state
-            .inv
-            .audit(
-                "admin",
-                "user.grant",
-                Some(&user_id_str),
-                Some(&serde_json::json!({
-                    "server": server_id_str,
-                    "source": "user-detail",
-                })),
-            )
-            .await
-        {
-            tracing::warn!(
-                target = "vpnctld::admin",
-                user = %user_id_str,
-                server = %server_id_str,
-                error = %e,
-                "audit write failed for user.grant — mutation already committed"
-            );
+    let granted = match state
+        .inv
+        .grant_audited(&uid, &sid, "admin", "user-detail")
+        .await
+    {
+        Ok(granted) => granted,
+        Err(e) => {
+            return match e {
+                vpnctl_inventory::SqliteInventoryError::Invalid(message) => bad_request(&message),
+                other => internal_error(anyhow::Error::new(other)),
+            };
         }
+    };
+    if granted {
         spawn_user_servers_redeploy(&state, vec![server], user_id_str.clone(), "user.grant");
     }
     Redirect::to(&format!(

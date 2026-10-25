@@ -145,10 +145,10 @@ pub(crate) async fn get_config(
             .unwrap_or(false),
         _ => false,
     };
-    if let Some(ip) = ip_to_throttle(rl_ip, is_egress) {
-        if let Err((retry, _)) = state.rate_limiter.try_acquire_ip(ip) {
-            return crate::handlers::sub::rate_limited(retry, "ip");
-        }
+    if let Some(ip) = ip_to_throttle(rl_ip, is_egress)
+        && let Err((retry, _)) = state.rate_limiter.try_acquire_ip(ip)
+    {
+        return crate::handlers::sub::rate_limited(retry, "ip");
     }
 
     let user = match state

@@ -111,9 +111,11 @@ configs containing private or preshared keys.
   no proxies. Invalid entries (including empty entries between commas) stop
   startup with an error naming the bad entry. Without this setting, client
   IPs log as the proxy and the suspicious-local-ip detector fires on every
-  legit request. Security
-  invariant: once a proxy is trusted, `resolve_peer_real_ip` trusts its
-  `X-Real-IP` — so every proxy block targeting vpnctld must authoritatively
+  legit request. Security and access logging (including GeoIP and sharing
+  signals) use the same resolver: trusted peers supply a single valid
+  `X-Real-IP`; missing or invalid values fall back to the peer address.
+  Untrusted peers always use the peer address. `X-Forwarded-For` is ignored.
+  Every proxy block targeting vpnctld must authoritatively
   `header_up X-Real-IP {client_addr}`, and the site config must strip any
   client-supplied `X-Real-IP` before routing. For HTTPS admin access the proxy
   must also overwrite `X-Forwarded-Proto` with the actual external scheme;

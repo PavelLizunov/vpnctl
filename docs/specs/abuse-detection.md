@@ -32,12 +32,17 @@ Related contracts: `/api/v1/app/config` rate-limiting is per-`device_id`
 (post-resolve — not spoofable) with per-IP anti-flood only for non-egress IPs
 (a VPN-connected client refreshes through its node, so many users collapse into
 one server IP — never naive per-IP limit there); throttle-only, no bans.
-Logged IPs behind the appending proxy are only as trustworthy as the proxy's
-`X-Real-IP` handling (see `deployment.md`).
+Access-log IPs, GeoIP enrichment, and sharing signals use the same trusted
+resolver as security decisions: `X-Real-IP` from a configured trusted proxy,
+otherwise the peer address (also used when `X-Real-IP` is missing or invalid).
+`X-Forwarded-For` never supplies the logged IP. The proxy must overwrite
+`X-Real-IP` as specified in `deployment.md`.
 
 ## 3. Verification Checklist
 
 - [ ] Layer-1 rows carry the REAL client IP through the trusted proxy
       (not the proxy's LAN address).
+- [ ] Spoofed leftmost XFF cannot change logged IPs; missing or invalid
+      `X-Real-IP` falls back to the peer address, never XFF.
 - [ ] A shared-URL scenario produces a visible UA/IP cluster on user-detail.
 - [ ] Rate-limit flood returns 429 for the abuser without affecting real users.

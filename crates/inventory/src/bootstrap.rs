@@ -4,6 +4,34 @@ use vpnctl_core::{Registry, Server, ServerId, ServerSecretSpec};
 
 use crate::SqliteInventory;
 
+pub async fn refresh_deployed_server_secrets(
+    inv: &SqliteInventory,
+    kernel: &dyn vpnctl_core::Kernel,
+    ssh: &dyn vpnctl_core::SshTransport,
+    ctx: &vpnctl_core::RenderCtx<'_>,
+    actor: &str,
+) -> Result<bool, String> {
+    let observed = kernel
+        .deployed_server_secrets(ssh, ctx)
+        .await
+        .map_err(|e| format!("read deployed server secrets: {e}"))?;
+    if observed.is_empty() {
+        return Ok(false);
+    }
+    let values: Vec<_> = observed
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    inv.set_server_secrets_audited(
+        &ctx.server.id,
+        actor,
+        "server.deployed_secrets.set",
+        &values,
+    )
+    .await
+    .map_err(|e| format!("save deployed server secrets: {e}"))
+}
+
 pub async fn bootstrap_server_secrets(
     inv: &SqliteInventory,
     server: &Server,

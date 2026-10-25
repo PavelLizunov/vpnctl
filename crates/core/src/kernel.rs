@@ -57,6 +57,15 @@ pub trait Kernel: fmt::Debug + Send + Sync {
         Ok(())
     }
 
+    /// Observe derived secrets after a successful deploy; inventory owns persistence.
+    async fn deployed_server_secrets(
+        &self,
+        _ssh: &dyn SshTransport,
+        _ctx: &RenderCtx<'_>,
+    ) -> Result<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
+
     async fn restart(&self, ssh: &dyn SshTransport) -> Result<()>;
     async fn status(&self, ssh: &dyn SshTransport) -> Result<KernelStatus>;
 }

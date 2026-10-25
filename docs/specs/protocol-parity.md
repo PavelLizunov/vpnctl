@@ -6,7 +6,8 @@
   renderer's refusal as a backstop.
 - Legacy AmneziaWG server and clients use the same effective obfuscation values.
   Existing INI, `awg://` and client JSON output with complete parameter sets,
-  and unrelated client output, retain their exact bytes. AWG `vpn://` output
+  and unrelated client output, retain their exact bytes. Peer addresses follow
+  the [persisted address contract](wireguard-peer-addresses.md). AWG `vpn://` output
   deliberately adds the structured fields described below to repair imports.
 
 ## 2. Interface / Data Contract

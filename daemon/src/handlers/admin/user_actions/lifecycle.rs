@@ -49,8 +49,8 @@ pub(crate) async fn user_set_traffic_limit(
         Ok(changed) => changed,
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
-    if changed {
-        if let Err(e) = state
+    if changed
+        && let Err(e) = state
             .inv
             .audit(
                 "admin",
@@ -63,14 +63,13 @@ pub(crate) async fn user_set_traffic_limit(
                 })),
             )
             .await
-        {
-            tracing::warn!(
-                target = "vpnctld::admin",
-                user = %user_id_str,
-                error = %e,
-                "audit write failed for user.traffic_limit.set"
-            );
-        }
+    {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            user = %user_id_str,
+            error = %e,
+            "audit write failed for user.traffic_limit.set"
+        );
     }
 
     Redirect::to(&format!(
@@ -150,7 +149,11 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
                 let mut granted: u32 = 0;
                 let mut granted_servers: Vec<vpnctl_core::Server> = Vec::new();
                 for s in &servers {
-                    if let Err(e) = state.inv.grant(&user.id, &s.id).await {
+                    if let Err(e) = state
+                        .inv
+                        .grant_audited(&user.id, &s.id, "admin", "user.create.grant_all")
+                        .await
+                    {
                         tracing::warn!(
                             target = "vpnctld::admin",
                             user = %id_decoded,
@@ -162,27 +165,6 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
                     }
                     granted += 1;
                     granted_servers.push(s.clone());
-                    if let Err(e) = state
-                        .inv
-                        .audit(
-                            "admin",
-                            "user.grant",
-                            Some(&id_decoded),
-                            Some(&serde_json::json!({
-                                "server": s.id.0,
-                                "source": "user.create.grant_all",
-                            })),
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            target = "vpnctld::admin",
-                            user = %id_decoded,
-                            server = %s.id.0,
-                            error = %e,
-                            "audit write failed for user.grant — mutation already committed"
-                        );
-                    }
                 }
                 if granted > 0 {
                     tracing::info!(

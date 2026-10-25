@@ -48,23 +48,11 @@ pub(crate) fn is_trusted_proxy(peer: IpAddr) -> bool {
 }
 
 pub fn resolve_real_ip(headers: &HeaderMap, peer: IpAddr) -> IpAddr {
-    resolve_real_ip_inner(headers, peer, is_trusted_proxy(peer))
+    resolve_peer_real_ip(headers, peer)
 }
 
 pub fn resolve_real_ip_with(headers: &HeaderMap, peer: IpAddr, trusted: &[IpAddr]) -> IpAddr {
-    resolve_real_ip_inner(headers, peer, trusted.contains(&peer))
-}
-
-fn resolve_real_ip_inner(headers: &HeaderMap, peer: IpAddr, trusted: bool) -> IpAddr {
-    if !trusted {
-        return peer;
-    }
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .and_then(|s| s.trim().parse::<IpAddr>().ok())
-        .unwrap_or(peer)
+    resolve_peer_real_ip_with(headers, peer, trusted)
 }
 
 pub fn resolve_peer_real_ip(headers: &HeaderMap, peer: IpAddr) -> IpAddr {
@@ -164,7 +152,7 @@ mod tests {
 
     fn header(value: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
-        h.insert("x-forwarded-for", HeaderValue::from_str(value).unwrap());
+        h.insert("x-real-ip", HeaderValue::from_str(value).unwrap());
         h
     }
 
@@ -215,7 +203,8 @@ mod tests {
     #[test]
     fn peer_real_ip_trusts_cidr_proxy_but_rejects_peers_outside_range() {
         let proxies = parse_trusted_proxies("10.0.0.0/8,2001:db8::/32").unwrap();
-        let mut headers = header("198.51.100.99");
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("198.51.100.99"));
         headers.insert("x-real-ip", HeaderValue::from_static("203.0.113.9"));
         let client: IpAddr = "203.0.113.9".parse().unwrap();
         for ip in ["10.0.0.1", "10.255.255.255", "2001:db8::42"] {
@@ -242,8 +231,8 @@ mod tests {
     }
 
     #[test]
-    fn trusted_peer_extracts_leftmost_xff() {
-        let h = header("203.0.113.7, 192.168.0.207");
+    fn trusted_peer_extracts_x_real_ip() {
+        let h = header("203.0.113.7");
         let trusted = DEFAULT_TRUSTED_PROXY_LAN;
         let got = resolve_real_ip_with(&h, trusted, &[trusted]);
         assert_eq!(got, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
@@ -266,8 +255,8 @@ mod tests {
     }
 
     #[test]
-    fn trusted_peer_extracts_ipv6_xff() {
-        let h = header("2001:db8::42, 192.168.0.207");
+    fn trusted_peer_extracts_ipv6_x_real_ip() {
+        let h = header("2001:db8::42");
         let trusted = DEFAULT_TRUSTED_PROXY_LAN;
         let got = resolve_real_ip_with(&h, trusted, &[trusted]);
         assert_eq!(got.to_string(), "2001:db8::42");
@@ -284,12 +273,25 @@ mod tests {
         let trusted = DEFAULT_TRUSTED_PROXY_LAN;
         assert_eq!(
             resolve_real_ip_with(&h, trusted, &[trusted]).to_string(),
-            "198.51.100.93"
+            "203.0.113.9"
         );
         assert_eq!(
             resolve_peer_real_ip_with(&h, trusted, &[trusted]).to_string(),
             "203.0.113.9"
         );
+    }
+
+    #[test]
+    fn logging_ip_never_falls_back_to_xff() {
+        let trusted = DEFAULT_TRUSTED_PROXY_LAN;
+        for real_ip in [None, Some("not-an-ip"), Some("203.0.113.9, 198.51.100.93")] {
+            let mut h = HeaderMap::new();
+            h.insert("x-forwarded-for", HeaderValue::from_static("198.51.100.93"));
+            if let Some(value) = real_ip {
+                h.insert("x-real-ip", HeaderValue::from_static(value));
+            }
+            assert_eq!(resolve_real_ip_with(&h, trusted, &[trusted]), trusted);
+        }
     }
 
     #[test]

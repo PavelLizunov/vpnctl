@@ -12,6 +12,8 @@ vpnctl-core = { path = "../core" }
 serde_json = { workspace = true }
 percent-encoding = "2"
 base64 = "0.22"
+hmac = { version = "0.12", default-features = false }
+sha2 = { version = "0.10", default-features = false }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [lints]

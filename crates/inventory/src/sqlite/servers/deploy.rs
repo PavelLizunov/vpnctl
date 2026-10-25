@@ -14,13 +14,13 @@ pub(crate) const DEPLOY_INPUT_REVISION_SQL: &str = "SELECT json_object(
                       WHERE server_id = ?1 ORDER BY protocol_id)),
         'secrets', (SELECT json_group_array(json_array(key, value)) FROM
                    (SELECT key, value FROM server_secrets
-                    WHERE server_id = ?1 ORDER BY key)),
+                    WHERE server_id = ?1 AND key != 'tls.cert_sha256' ORDER BY key)),
         'users', (SELECT json_group_array(json_array(id, uuid, tuic_password,
-                                                    wireguard_pubkey, wireguard_private)) FROM
+                                                    wireguard_pubkey, wireguard_private, wg_octet)) FROM
                  (SELECT u.id AS id, COALESCE(g.client_uuid, u.uuid) AS uuid,
                          u.tuic_password AS tuic_password,
                          u.wireguard_pubkey AS wireguard_pubkey,
-                         u.wireguard_private AS wireguard_private
+                         u.wireguard_private AS wireguard_private, g.wg_octet AS wg_octet
                   FROM grants g JOIN users u ON u.id = g.user_id
                   WHERE g.server_id = ?1 AND u.disabled = 0
                   ORDER BY u.id))

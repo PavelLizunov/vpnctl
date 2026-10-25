@@ -434,6 +434,9 @@ async fn boosty_page_renders_stored_report_without_live_sync() {
     assert!(html.contains("boosty-301"), "auto-created user renders");
     assert!(html.contains("eve"), "grace-period user renders");
     assert!(html.contains("dave"), "suppressed-disables banner renders");
+    assert!(html.contains("Unconfirmed subscription loss"));
+    assert!(!html.contains("Empty roster"));
+    assert!(!html.contains("No one was disabled"));
     assert!(html.contains("Boosty roster snapshot"));
     assert!(html.contains("1500"), "cumulative payments value renders");
     assert!(

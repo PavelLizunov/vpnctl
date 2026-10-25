@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sqlx::Row;
 use vpnctl_core::{ProtocolId, Server, ServerId, User, UserId};
 
 use super::users::crud::row_to_user;
-use super::{Result, SqliteInventory};
+use super::{Result, SqliteInventory, SqliteInventoryError};
 
 /// Request-local inputs shared by all app-config protocol collectors.
 pub struct SubscriptionServer {
@@ -17,6 +17,7 @@ pub struct SubscriptionServer {
     pub visible: Vec<ProtocolId>,
     pub secrets: HashMap<String, String>,
     pub peers: Vec<User>,
+    pub wg_octets: HashMap<UserId, u16>,
 }
 
 // Manual impl: secrets and peer credentials must never reach debug output.
@@ -34,7 +35,7 @@ impl std::fmt::Debug for SubscriptionServer {
 }
 
 impl SqliteInventory {
-    /// Load subscription render inputs in a fixed number of queries, in server order.
+    /// Load inputs in server order; only missing WG addresses need extra transactions.
     pub async fn subscription_render_inputs(
         &self,
         user: &UserId,
@@ -77,6 +78,7 @@ impl SqliteInventory {
                     visible: Vec::new(),
                     secrets: HashMap::new(),
                     peers: Vec::new(),
+                    wg_octets: HashMap::new(),
                 },
             );
         }
@@ -112,10 +114,11 @@ impl SqliteInventory {
             }
         }
         if include_awg_peers {
+            let mut missing_octets = HashSet::new();
             let rows = sqlx::query(
                 "SELECT g.server_id, u.id, COALESCE(g.client_uuid, u.uuid) AS uuid,
                         u.tuic_password, u.wireguard_pubkey, u.wireguard_private,
-                        u.sub_token, u.vpn_router_device_id, u.disabled
+                        u.sub_token, u.vpn_router_device_id, u.disabled, g.wg_octet
                  FROM users u JOIN grants g ON g.user_id = u.id
                  WHERE u.disabled = 0 AND g.server_id IN (
                      SELECT own.server_id FROM grants own JOIN server_protocols sp
@@ -129,7 +132,29 @@ impl SqliteInventory {
             .await?;
             for row in rows {
                 if let Some(input) = inputs.get_mut(&ServerId(row.try_get("server_id")?)) {
+                    if input
+                        .server
+                        .enabled_protocols
+                        .iter()
+                        .any(|p| p.0 == "wireguard")
+                    {
+                        if let Some(octet) = row.try_get::<Option<i64>, _>("wg_octet")? {
+                            let octet = u16::try_from(octet).map_err(|_| {
+                                SqliteInventoryError::Invalid(format!(
+                                    "invalid WireGuard octet {octet}"
+                                ))
+                            })?;
+                            input.wg_octets.insert(UserId(row.try_get("id")?), octet);
+                        } else {
+                            missing_octets.insert(input.server.id.clone());
+                        }
+                    }
                     input.peers.push(row_to_user(row)?);
+                }
+            }
+            for server in missing_octets {
+                if let Some(input) = inputs.get_mut(&server) {
+                    input.wg_octets = self.wg_octets_for_server(&server).await?;
                 }
             }
         }

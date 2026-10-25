@@ -98,21 +98,23 @@ impl SyncReport {
         let mut total_revenue_rub_cents: i64 = 0;
 
         for sub in &self.subscribers {
-            if let Ok(payments_f) = sub.payments.trim().parse::<f64>() {
-                if payments_f > 0.0 && payments_f.is_finite() {
-                    let kopecks = (payments_f * 100.0).round() as i64;
-                    total_revenue_rub_cents = total_revenue_rub_cents.saturating_add(kopecks);
-                }
+            if let Ok(payments_f) = sub.payments.trim().parse::<f64>()
+                && payments_f > 0.0
+                && payments_f.is_finite()
+            {
+                let kopecks = (payments_f * 100.0).round() as i64;
+                total_revenue_rub_cents = total_revenue_rub_cents.saturating_add(kopecks);
             }
 
-            if sub.present && sub.status.eq_ignore_ascii_case("active") {
-                if let Ok(price_f) = sub.price.trim().parse::<f64>() {
-                    if price_f > 0.0 && price_f.is_finite() {
-                        let kopecks = (price_f * 100.0).round() as i64;
-                        mrr_rub_cents = mrr_rub_cents.saturating_add(kopecks);
-                        active_payers += 1;
-                    }
-                }
+            if sub.present
+                && sub.status.eq_ignore_ascii_case("active")
+                && let Ok(price_f) = sub.price.trim().parse::<f64>()
+                && price_f > 0.0
+                && price_f.is_finite()
+            {
+                let kopecks = (price_f * 100.0).round() as i64;
+                mrr_rub_cents = mrr_rub_cents.saturating_add(kopecks);
+                active_payers += 1;
             }
         }
 

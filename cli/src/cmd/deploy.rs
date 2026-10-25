@@ -36,6 +36,7 @@ pub(crate) async fn run(
         println!("  minted {label}");
     }
 
+    inv.wg_octets_for_server(&sid).await?;
     let deploy_revision = inv.deploy_input_revision(&sid).await?;
     let server = inv
         .get_server(&sid)
@@ -43,6 +44,7 @@ pub(crate) async fn run(
         .ok_or_else(|| anyhow::anyhow!("server was removed before deploy: {server_id}"))?;
     let secrets = inv.list_server_secrets(&sid).await?;
     let users = inv.users_for_server(&sid).await?;
+    let wg_octets = inv.wg_octets_for_server(&sid).await?;
     registry.validate_server(&server, &secrets)?;
     if server.kernels.is_empty() {
         anyhow::bail!("server '{}' has no kernels declared", server.id);
@@ -90,7 +92,7 @@ pub(crate) async fn run(
     let retired = inv.retired_server_kernels(&sid).await?;
     vpnctl_kernels::reconcile_disabled_kernels(&registry, &server, &retired, &ssh).await?;
 
-    let ctx = RenderCtx::new(&server, &secrets);
+    let ctx = RenderCtx::with_peers(&server, &secrets, &users).with_wg_octets(wg_octets);
     let known_user_uuids = inv.known_user_uuids().await?;
 
     let mut total_config_bytes = 0usize;
@@ -134,6 +136,9 @@ pub(crate) async fn run(
         if let Err(e) = k.open_firewall(&ssh, &ctx, &protocols_for_k).await {
             anyhow::bail!("{}: open_firewall failed: {e}", k.id());
         }
+        vpnctl_inventory::bootstrap::refresh_deployed_server_secrets(&inv, *k, &ssh, &ctx, "cli")
+            .await
+            .map_err(|e| anyhow::anyhow!("{}: {e}", k.id()))?;
         total_config_bytes += config.len();
         rendered_kernels.push(k.id().0);
     }

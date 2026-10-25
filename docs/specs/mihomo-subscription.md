@@ -6,12 +6,18 @@
   provides the local proxy/TUN settings; a bare core needs these merged into a
   local configuration with a proxy listener or enabled TUN routing. It is not
   a complete standalone core configuration.
-- Existing `/sub/{token}` default sing-box/UA behavior, `?format=sing-box`, and `/api/v1/app/config/*` responses remain byte-for-byte unchanged.
+- Non-empty sing-box JSON remains byte-for-byte unchanged. The additive TLS pin
+  extension changes only Hysteria2 URIs in UA-selected and app-config payloads
+  when a node pin exists; see [self-signed TLS pinning](self-signed-tls-pinning.md).
 - The canonical public URL `GET /api/v1/sub/{token}` defaults to Mihomo YAML without requiring query parameters, while preserving full compatibility with legacy `?format=mihomo` query parameters.
-- Protocol scope is strictly bounded to VLESS+REALITY and Hysteria2; unsupported protocols (XHTTP, VLESS-WS, Trojan, Naive, TUIC-v5, SS-2022, WireGuard) are omitted and not claimed.
+- Protocol scope includes VLESS+REALITY and Hysteria2, plus Trojan, AnyTLS and
+  TUIC-v5 when `tls.cert_sha256` exists. Hysteria2, Trojan, AnyTLS and TUIC carry
+  the certificate pin in `fingerprint` while retaining `skip-cert-verify`.
+  Without a pin the previous bytes and protocol omissions remain unchanged.
+  XHTTP, VLESS-WS, Naive, SS-2022 and WireGuard remain omitted.
 - Distinct server records are never deduplicated by address: an S5 target and its entry remain separate proxies even when both use the same IP.
 - A chained target is emitted only with a usable upstream through Mihomo `dialer-proxy`; direct target fallback is forbidden.
-- A disabled user receives a valid empty config using `DIRECT`; an unknown token keeps the existing `404`.
+- A disabled user or a user with no usable proxies receives a valid empty config with `REJECT` as the only member of the `VPN` group and `MATCH,VPN`. Empty sing-box subscriptions use `block` for both DNS and `route.final`. An unknown token keeps the existing `404`.
 - No database migration or grant mutation.
 
 ## 2. Interface / Data Contract
@@ -47,7 +53,10 @@ rules:
 - [ ] Compatibility verified for legacy query URLs (`?format=mihomo`).
 - [ ] Same-address S5 target and entry both remain present, with the target using `dialer-proxy`.
 - [ ] Response parses with an independent YAML parser and passes `mihomo -t`.
+- [ ] Empty responses fail closed for disabled users and users with no usable proxies; byte-level tests pin empty and unchanged non-empty responses.
 - [ ] Every permitted usable VLESS/Reality and Hysteria2 grant is present.
+- [ ] Pinned Trojan, AnyTLS and TUIC grants are present; all four TLS protocols
+      carry their own server's certificate fingerprint. No-pin output is byte-identical.
 - [ ] Hidden, denied, suppressed, and unsupported protocols are absent (no unsupported protocols claimed).
 - [ ] A chained target carries `dialer-proxy`; missing or nested upstream hides the target.
 - [ ] Spec-only tests and independent review leave no unresolved important findings.

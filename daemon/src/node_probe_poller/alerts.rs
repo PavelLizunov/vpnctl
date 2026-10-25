@@ -124,15 +124,15 @@ pub async fn dispatch_alerts(
         UnreachableTransition::NoChange => {}
     }
 
-    if matches!(outcome, ProbeOutcome::Ok(_)) {
-        if let Err(e) = inv.set_server_suppressed(&server.id, false).await {
-            tracing::warn!(
-                target = "vpnctld::node_probe",
-                server = %server.id.0,
-                error = %e,
-                "auto-restore (clear suppressed) failed"
-            );
-        }
+    if matches!(outcome, ProbeOutcome::Ok(_))
+        && let Err(e) = inv.set_server_suppressed(&server.id, false).await
+    {
+        tracing::warn!(
+            target = "vpnctld::node_probe",
+            server = %server.id.0,
+            error = %e,
+            "auto-restore (clear suppressed) failed"
+        );
     }
 
     if let ProbeOutcome::Ok(probe) = outcome {
@@ -267,12 +267,26 @@ pub(crate) async fn push_alert(
         }
     };
 
+    if let Some(id) = alert_id {
+        match inv
+            .claim_alert_telegram_delivery(id, chrono::Utc::now(), false)
+            .await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(target = "vpnctld::alert_sink", %error, "could not reserve alert delivery");
+                return;
+            }
+        }
+    }
+
     let kind = kind.to_string();
     let severity = severity.to_string();
     let inv = inv.clone();
     tokio::spawn(async move {
         let sink_name = sink.name();
-        match send_with_retry(
+        let result = send_with_retry(
             sink.as_ref(),
             &kind,
             &severity,
@@ -280,37 +294,111 @@ pub(crate) async fn push_alert(
             silent,
             std::time::Duration::from_secs(30),
         )
-        .await
-        {
-            Ok(message_id) => {
-                tracing::info!(
-                    target = "vpnctld::alert_sink",
-                    kind = %kind,
-                    "pushed via {}",
-                    sink_name
-                );
-                if let (Some(aid), Some(mid)) = (alert_id, message_id) {
-                    if let Err(e) = inv.set_alert_telegram_message_id(aid, &mid).await {
-                        tracing::warn!(
-                            target = "vpnctld::alert_sink",
-                            kind = %kind,
-                            error = %e,
-                            "failed to record telegram_message_id; edit-on-recover will fall back"
-                        );
-                    }
-                }
+        .await;
+        if result.is_ok() {
+            tracing::info!(target = "vpnctld::alert_sink", %kind, "pushed via {}", sink_name);
+        }
+        if let Some(aid) = alert_id {
+            if let Err(error) =
+                record_delivery_result(&inv, aid, 1, &result, chrono::Utc::now()).await
+            {
+                tracing::warn!(target = "vpnctld::alert_sink", %error, "failed to record alert delivery result");
             }
-            Err(e) => {
-                tracing::warn!(
-                    target = "vpnctld::alert_sink",
-                    kind = %kind,
-                    error = %e,
-                    "push to {} failed; alert row still in admin_alerts",
-                    sink_name
-                );
-            }
+        } else if let Err(error) = result {
+            tracing::warn!(target = "vpnctld::alert_sink", %kind, %error, "push to {} failed", sink_name);
         }
     });
+}
+
+fn telegram_retry_delay(attempts: i64) -> chrono::Duration {
+    let exponent = attempts.saturating_sub(1).clamp(0, 6) as u32;
+    chrono::Duration::seconds((60_i64 << exponent).min(3600))
+}
+
+async fn record_delivery_result(
+    inv: &SqliteInventory,
+    alert_id: i64,
+    attempts: i64,
+    result: &Result<Option<String>, crate::alert_sink::AlertSinkError>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), vpnctl_inventory::SqliteInventoryError> {
+    match result {
+        Ok(message_id) => {
+            inv.record_alert_telegram_delivery(alert_id, message_id.as_deref())
+                .await
+        }
+        Err(error) => {
+            tracing::warn!(target = "vpnctld::alert_sink", alert_id, %error, "alert delivery failed; retry scheduled");
+            inv.defer_alert_telegram_delivery(alert_id, now + telegram_retry_delay(attempts))
+                .await
+        }
+    }
+}
+
+pub(crate) async fn retry_alert_deliveries(inv: &SqliteInventory) -> anyhow::Result<()> {
+    let sink = build_alert_sink(inv).await?;
+    retry_alert_deliveries_with_sink(inv, sink.as_deref(), chrono::Utc::now()).await
+}
+
+async fn retry_alert_deliveries_with_sink(
+    inv: &SqliteInventory,
+    sink: Option<&dyn crate::alert_sink::AlertSink>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<()> {
+    let Some(cfg) = inv
+        .get_telegram_config()
+        .await?
+        .filter(|cfg| cfg.is_enabled())
+    else {
+        return Ok(());
+    };
+    let expired = inv.expire_alert_telegram_deliveries(now).await?;
+    if expired > 0 {
+        tracing::warn!(
+            target = "vpnctld::alert_sink",
+            expired,
+            "gave up undelivered alerts after 24 hours"
+        );
+    }
+    let Some(sink) = sink else {
+        return Ok(());
+    };
+    let loc = crate::i18n::Locale::from_lang_code(cfg.language.as_deref());
+    for alert in inv.pending_alert_telegram_deliveries(now).await? {
+        let Some(attempts) = inv
+            .claim_alert_telegram_delivery(alert.id, now, true)
+            .await?
+        else {
+            continue;
+        };
+        let subject = if let Some(sid) = &alert.server_id {
+            server_subject(inv, sid).await
+        } else if let Some((_, suffix)) = alert.kind.split_once(':') {
+            suffix.to_string()
+        } else {
+            String::new()
+        };
+        let payload = alert
+            .payload_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let rendered =
+            crate::alert_text::render_alert(&alert.kind, &alert.severity, &subject, &payload, loc);
+        let time_local =
+            crate::handlers::admin::format_local_with_pattern(alert.created_at, "%d.%m %H:%M");
+        let text = crate::alert_text::to_telegram_html(&rendered, loc, &time_local, false);
+        let result = sink
+            .send_text(
+                &alert.kind,
+                &alert.severity,
+                &text,
+                crate::alert_text::is_silent(&alert.severity),
+            )
+            .await;
+        record_delivery_result(inv, alert.id, attempts, &result, now).await?;
+    }
+    Ok(())
 }
 
 async fn send_with_retry(
@@ -663,5 +751,184 @@ mod tests {
             .is_err()
         );
         assert_eq!(sink.calls.load(Ordering::SeqCst), 3);
+    }
+
+    async fn pending_delivery() -> (
+        tempfile::TempDir,
+        SqliteInventory,
+        i64,
+        chrono::DateTime<chrono::Utc>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        inv.set_telegram_config(Some("test-token"), Some("42"), None)
+            .await
+            .unwrap();
+        let id = inv
+            .insert_alert("test", None, "warning", "test alert", None)
+            .await
+            .unwrap();
+        let now = chrono::Utc::now();
+        assert_eq!(
+            inv.claim_alert_telegram_delivery(id, now, false)
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        (dir, inv, id, now)
+    }
+
+    #[test]
+    fn telegram_backoff_doubles_from_one_minute_and_caps_at_one_hour() {
+        for (attempts, seconds) in [
+            (1, 60),
+            (2, 120),
+            (3, 240),
+            (4, 480),
+            (5, 960),
+            (6, 1920),
+            (7, 3600),
+            (8, 3600),
+            (i64::MAX, 3600),
+        ] {
+            assert_eq!(telegram_retry_delay(attempts).num_seconds(), seconds);
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_delivery_is_retried_after_reopen_and_marked_delivered() {
+        let (dir, inv, id, now) = pending_delivery().await;
+        let sink = FlakySink {
+            calls: AtomicUsize::new(0),
+            failures: 3,
+        };
+        let result = send_with_retry(
+            &sink,
+            "test",
+            "warning",
+            "test alert",
+            false,
+            std::time::Duration::ZERO,
+        )
+        .await;
+        assert!(result.is_err());
+        record_delivery_result(&inv, id, 1, &result, now)
+            .await
+            .unwrap();
+        assert!(
+            inv.pending_alert_telegram_deliveries(now)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        drop(inv);
+        let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        retry_alert_deliveries_with_sink(&inv, Some(&sink), now + chrono::Duration::seconds(59))
+            .await
+            .unwrap();
+        assert_eq!(sink.calls.load(Ordering::SeqCst), 3);
+        retry_alert_deliveries_with_sink(&inv, Some(&sink), now + chrono::Duration::seconds(60))
+            .await
+            .unwrap();
+        assert_eq!(sink.calls.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            inv.latest_alert_message_id("test", None)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("123")
+        );
+        retry_alert_deliveries_with_sink(&inv, Some(&sink), now + chrono::Duration::hours(2))
+            .await
+            .unwrap();
+        assert_eq!(sink.calls.load(Ordering::SeqCst), 4);
+        assert!(
+            inv.claim_alert_telegram_delivery(id, now, false)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_delivery_backs_off_and_gives_up_after_24_hours() {
+        let (_dir, inv, id, now) = pending_delivery().await;
+        let sink = FlakySink {
+            calls: AtomicUsize::new(0),
+            failures: usize::MAX,
+        };
+        let failure = Err(crate::alert_sink::AlertSinkError::Misconfigured);
+        record_delivery_result(&inv, id, 1, &failure, now)
+            .await
+            .unwrap();
+        retry_alert_deliveries_with_sink(&inv, Some(&sink), now + chrono::Duration::seconds(60))
+            .await
+            .unwrap();
+        assert_eq!(sink.calls.load(Ordering::SeqCst), 1);
+        retry_alert_deliveries_with_sink(&inv, Some(&sink), now + chrono::Duration::seconds(179))
+            .await
+            .unwrap();
+        assert_eq!(sink.calls.load(Ordering::SeqCst), 1);
+        retry_alert_deliveries_with_sink(&inv, Some(&sink), now + chrono::Duration::seconds(180))
+            .await
+            .unwrap();
+        assert_eq!(sink.calls.load(Ordering::SeqCst), 2);
+        retry_alert_deliveries_with_sink(&inv, None, now + chrono::Duration::hours(24))
+            .await
+            .unwrap();
+        assert_eq!(sink.calls.load(Ordering::SeqCst), 2);
+        assert!(
+            inv.pending_alert_telegram_deliveries(now + chrono::Duration::hours(25))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            inv.expire_alert_telegram_deliveries(now + chrono::Duration::hours(25))
+                .await
+                .unwrap(),
+            0
+        );
+        // Once recorded, expiry remains final even if wall-clock time moves backwards.
+        assert!(
+            inv.claim_alert_telegram_delivery(id, now + chrono::Duration::hours(1), true)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(inv.unacked_alert_count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn disabled_telegram_does_not_send_or_change_pending_delivery() {
+        let (_dir, inv, id, now) = pending_delivery().await;
+        inv.defer_alert_telegram_delivery(id, now).await.unwrap();
+        inv.set_telegram_config(None, None, None).await.unwrap();
+        let sink = FlakySink {
+            calls: AtomicUsize::new(0),
+            failures: 0,
+        };
+        retry_alert_deliveries(&inv).await.unwrap();
+        retry_alert_deliveries_with_sink(&inv, Some(&sink), now + chrono::Duration::hours(25))
+            .await
+            .unwrap();
+        assert_eq!(sink.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            inv.pending_alert_telegram_deliveries(now)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            inv.claim_alert_telegram_delivery(id, now, true)
+                .await
+                .unwrap(),
+            Some(2)
+        );
     }
 }

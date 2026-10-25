@@ -330,6 +330,57 @@ pub(crate) async fn server_rotate_hysteria2_obfs(
     .into_response()
 }
 
+pub(crate) async fn server_set_ss2022_mode(
+    Path(server_id): Path<String>,
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id.clone());
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return not_found(&format!("no such server '{server_id}'")),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    let pid = vpnctl_core::ProtocolId("shadowsocks-2022".into());
+    if !server.enabled_protocols.contains(&pid) {
+        return bad_request("Shadowsocks-2022 is not enabled on this server");
+    }
+    let mode = form_field(&body, "mode").unwrap_or_default();
+    if !matches!(mode.as_str(), "shared" | "multi-user") {
+        return bad_request("ss2022.mode must be shared or multi-user");
+    }
+    let mut secrets = match state.inv.list_server_secrets(&sid).await {
+        Ok(s) => s,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    let changed = secrets.get("ss2022.mode").map_or("shared", String::as_str) != mode.as_str();
+    secrets.insert("ss2022.mode".into(), mode.clone());
+    let Some(protocol) = state.registry.protocol(&pid) else {
+        return bad_request("Shadowsocks-2022 is not registered");
+    };
+    if let Err(e) = protocol.validate_server(&vpnctl_core::RenderCtx::new(&server, &secrets)) {
+        return bad_request(&e.to_string());
+    }
+    if changed
+        && let Err(e) = state
+            .inv
+            .set_server_secrets_audited(
+                &sid,
+                "admin",
+                "server.secret.set",
+                &[("ss2022.mode", mode.as_str())],
+            )
+            .await
+    {
+        return internal_error(anyhow::Error::new(e));
+    }
+    Redirect::to(&format!(
+        "/admin/servers/{}/protocols",
+        path_segment_encode(&server_id)
+    ))
+    .into_response()
+}
+
 pub(crate) async fn server_set_display_name(
     Path(server_id): Path<String>,
     State(state): State<AppState>,

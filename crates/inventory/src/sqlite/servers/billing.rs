@@ -123,28 +123,29 @@ impl SqliteInventory {
             updated_at: row.try_get("updated_at")?,
         };
 
-        if let Some(count) = input.initial_payments_count {
-            if count > 0 {
-                let existing_count: i64 =
-                    sqlx::query_scalar("SELECT COUNT(*) FROM server_payments WHERE server_id = ?1")
-                        .bind(&sid.0)
-                        .fetch_one(&mut *tx)
-                        .await
-                        .unwrap_or(0);
+        if let Some(count) = input.initial_payments_count
+            && count > 0
+        {
+            let existing_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM server_payments WHERE server_id = ?1")
+                    .bind(&sid.0)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap_or(0);
 
-                if existing_count == 0 {
-                    let (conv_minor, disp_cur, rate_used, markup_used) = match &conv_snapshot {
-                        Some(c) => (
-                            Some(c.amount_minor),
-                            Some(c.target_currency.as_str()),
-                            Some(c.rate_micros),
-                            Some(c.markup_bps),
-                        ),
-                        None => (None, None, None, None),
-                    };
+            if existing_count == 0 {
+                let (conv_minor, disp_cur, rate_used, markup_used) = match &conv_snapshot {
+                    Some(c) => (
+                        Some(c.amount_minor),
+                        Some(c.target_currency.as_str()),
+                        Some(c.rate_micros),
+                        Some(c.markup_bps),
+                    ),
+                    None => (None, None, None, None),
+                };
 
-                    for _ in 0..count.min(120) {
-                        sqlx::query(
+                for _ in 0..count.min(120) {
+                    sqlx::query(
                             "INSERT INTO server_payments
                                 (server_id, amount_minor, currency, cycle,
                                  converted_minor, display_currency, rate_micros_used, markup_bps_used)
@@ -160,7 +161,6 @@ impl SqliteInventory {
                         .bind(markup_used)
                         .execute(&mut *tx)
                         .await?;
-                    }
                 }
             }
         }
@@ -336,13 +336,12 @@ impl SqliteInventory {
             let Ok(due) = validate_due_date(&b.due_date) else {
                 continue;
             };
-            if due <= today {
-                if let Ok(Some(upd)) = self
+            if due <= today
+                && let Ok(Some(upd)) = self
                     .advance_server_billing_cycle_guarded(&item.server_id, &b.due_date, true)
                     .await
-                {
-                    advanced.push((item.server_id.clone(), upd.due_date));
-                }
+            {
+                advanced.push((item.server_id.clone(), upd.due_date));
             }
         }
 

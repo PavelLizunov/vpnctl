@@ -185,7 +185,7 @@ impl SqliteInventory {
             .fetch_one(&mut *tx)
             .await?;
         let prior_server = sqlx::query(
-            "SELECT upload_total, download_total, uptime_seconds, observed_at,
+            "SELECT upload_total, download_total, uptime_seconds, observed_at, generation,
                     upload_ahead, download_ahead, upload_pending, download_pending
              FROM vpn_server_counter_baselines WHERE server_id = ?1",
         )
@@ -196,14 +196,15 @@ impl SqliteInventory {
         let Some(prior_server) = prior_server else {
             sqlx::query(
                 "INSERT INTO vpn_server_counter_baselines
-                 (server_id, upload_total, download_total, uptime_seconds, observed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                 (server_id, upload_total, download_total, uptime_seconds, observed_at, generation)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )
             .bind(&server_id.0)
             .bind(server_upload)
             .bind(server_download)
             .bind(uptime_seconds)
             .bind(observed_at)
+            .bind(&tick.generation)
             .execute(&mut *tx)
             .await?;
             for (counter, upload, download) in &users {
@@ -236,10 +237,16 @@ impl SqliteInventory {
         })?;
         let elapsed = observed_at_u64.saturating_sub(prior_observed_at);
         let expected_uptime = prior_uptime.saturating_add(elapsed);
-        let restarted = tick.uptime_seconds < prior_uptime
-            || (tick.uptime_seconds.saturating_add(10) < expected_uptime
-                && (tick.server_upload_total < prior_server_upload
-                    || tick.server_download_total < prior_server_download));
+        let prior_generation: Option<String> = prior_server.try_get("generation")?;
+        let restarted = match (prior_generation.as_deref(), tick.generation.as_deref()) {
+            (Some(prior), Some(current)) => prior != current,
+            _ => {
+                tick.uptime_seconds < prior_uptime
+                    || (tick.uptime_seconds.saturating_add(10) < expected_uptime
+                        && (tick.server_upload_total < prior_server_upload
+                            || tick.server_download_total < prior_server_download))
+            }
+        };
         let server_upload_delta = if restarted {
             tick.server_upload_total
         } else {
@@ -345,7 +352,7 @@ impl SqliteInventory {
             "UPDATE vpn_server_counter_baselines
              SET upload_total = ?2, download_total = ?3, uptime_seconds = ?4,
                  observed_at = ?5, upload_ahead = ?6, download_ahead = ?7,
-                 upload_pending = ?8, download_pending = ?9
+                 upload_pending = ?8, download_pending = ?9, generation = ?10
              WHERE server_id = ?1",
         )
         .bind(&server_id.0)
@@ -357,6 +364,7 @@ impl SqliteInventory {
         .bind(download_ahead)
         .bind(upload_pending)
         .bind(download_pending)
+        .bind(&tick.generation)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;

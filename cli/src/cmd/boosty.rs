@@ -200,7 +200,7 @@ fn print_report(r: &SyncReport, mode: ApplyMode) {
     }
     if !r.suppressed_disables.is_empty() {
         eprintln!(
-            "SUPPRESSED disables ({}): roster came back EMPTY — check blog_url. Untouched: {}",
+            "SUPPRESSED disables ({}): no VPN-eligible subscribers; linked subscribers absent from roster. Untouched: {}",
             r.suppressed_disables.len(),
             r.suppressed_disables.join(", ")
         );

@@ -585,3 +585,157 @@ fn client_config_empty_peers_fallback_returns_base_address() {
         Some("10.66.0.2/32")
     );
 }
+
+fn peer_artifact_bytes(ctx: &RenderCtx<'_>, user: &User) -> Vec<Vec<u8>> {
+    let protocol = WireGuard::new();
+    vec![
+        super::render::render_client_conf(ctx, user)
+            .unwrap()
+            .into_bytes(),
+        serde_json::to_vec(&protocol.client_config(ctx, user).unwrap()).unwrap(),
+        protocol.share_link(ctx, user).unwrap().into_bytes(),
+        amnezia_share_link(ctx, user).unwrap().into_bytes(),
+        awg_share_link(ctx, user).unwrap().into_bytes(),
+    ]
+}
+
+#[test]
+fn persisted_addresses_preserve_wg_and_awg_artifact_bytes_after_peer_changes() {
+    for legacy_awg in [false, true] {
+        let mut server = fake_server();
+        let mut secrets = fake_secrets();
+        secrets.insert(
+            "wireguard.server_private_key".into(),
+            "test-server-private".into(),
+        );
+        if legacy_awg {
+            server.kernels = vec![KernelId("amneziawg".into())];
+        } else {
+            // Parameterized WG delivery also supports the awg:// export.
+            secrets.insert("amneziawg.jc".into(), "7".into());
+        }
+        let peers: Vec<User> = ["alice", "bob", "clara"]
+            .iter()
+            .map(|id| {
+                let mut user = fake_user();
+                user.id = UserId((*id).into());
+                user
+            })
+            .collect();
+        let octets: HashMap<_, _> = peers
+            .iter()
+            .enumerate()
+            .map(|(index, user)| (user.id.clone(), 2 + u16::try_from(index).unwrap()))
+            .collect();
+        let legacy = RenderCtx::with_peers(&server, &secrets, &peers);
+        let persisted =
+            RenderCtx::with_peers(&server, &secrets, &peers).with_wg_octets(octets.clone());
+        let protocol = WireGuard::new();
+        assert_eq!(
+            serde_json::to_vec(&protocol.server_inbound(&legacy, &peers).unwrap()).unwrap(),
+            serde_json::to_vec(&protocol.server_inbound(&persisted, &peers).unwrap()).unwrap(),
+            "unchanged server envelope must remain byte-identical"
+        );
+        for user in &peers {
+            assert_eq!(
+                peer_artifact_bytes(&legacy, user),
+                peer_artifact_bytes(&persisted, user)
+            );
+        }
+        // A new earlier-sorted peer must not change saved profiles. Missing
+        // key material on another peer must not consume a different slot.
+        let mut added = fake_user();
+        added.id = UserId("aaron".into());
+        added.wireguard_pubkey = None;
+        let expanded = [added, peers[0].clone(), peers[1].clone(), peers[2].clone()];
+        let added_ctx =
+            RenderCtx::with_peers(&server, &secrets, &expanded).with_wg_octets(octets.clone());
+        for user in &peers {
+            assert_eq!(
+                peer_artifact_bytes(&legacy, user),
+                peer_artifact_bytes(&added_ctx, user)
+            );
+        }
+        let changed = [peers[1].clone(), peers[2].clone()];
+        let current = RenderCtx::with_peers(&server, &secrets, &changed).with_wg_octets(octets);
+        for user in &peers[1..] {
+            assert_eq!(
+                peer_artifact_bytes(&legacy, user),
+                peer_artifact_bytes(&current, user)
+            );
+        }
+        let inbound = protocol.server_inbound(&current, &changed).unwrap();
+        assert_eq!(inbound["peers"][0]["allowed_ips"], "10.66.0.3/32");
+        assert_eq!(inbound["peers"][1]["allowed_ips"], "10.66.0.4/32");
+        assert_ne!(
+            peer_artifact_bytes(
+                &RenderCtx::with_peers(&server, &secrets, &changed),
+                &peers[2]
+            ),
+            peer_artifact_bytes(&current, &peers[2]),
+            "index fallback must reproduce the regression on the changed fleet"
+        );
+    }
+}
+
+#[test]
+fn persisted_plain_wireguard_bytes_match_the_legacy_index() {
+    let server = fake_server();
+    let secrets = fake_secrets();
+    let peers = [fake_user()];
+    let legacy = RenderCtx::with_peers(&server, &secrets, &peers);
+    let persisted = RenderCtx::with_peers(&server, &secrets, &peers)
+        .with_wg_octets(HashMap::from([(peers[0].id.clone(), 2)]));
+    assert_eq!(
+        super::render::render_client_conf(&legacy, &peers[0])
+            .unwrap()
+            .as_bytes(),
+        super::render::render_client_conf(&persisted, &peers[0])
+            .unwrap()
+            .as_bytes()
+    );
+    assert_eq!(
+        WireGuard::new()
+            .share_link(&legacy, &peers[0])
+            .unwrap()
+            .as_bytes(),
+        WireGuard::new()
+            .share_link(&persisted, &peers[0])
+            .unwrap()
+            .as_bytes()
+    );
+    assert_eq!(
+        amnezia_share_link(&legacy, &peers[0]).unwrap().as_bytes(),
+        amnezia_share_link(&persisted, &peers[0])
+            .unwrap()
+            .as_bytes()
+    );
+}
+
+#[test]
+fn persisted_addresses_never_fall_back_for_missing_or_invalid_assignments() {
+    let server = fake_server();
+    let mut secrets = fake_secrets();
+    secrets.insert(
+        "wireguard.server_private_key".into(),
+        "test-server-private".into(),
+    );
+    let peers = [fake_user()];
+    let protocol = WireGuard::new();
+    for octets in [
+        HashMap::new(),
+        HashMap::from([(peers[0].id.clone(), 255)]),
+        HashMap::from([(peers[0].id.clone(), 1)]),
+    ] {
+        let ctx = RenderCtx::with_peers(&server, &secrets, &peers).with_wg_octets(octets);
+        assert!(protocol.client_config(&ctx, &peers[0]).is_err());
+        assert!(protocol.share_link(&ctx, &peers[0]).is_err());
+        assert!(protocol.server_inbound(&ctx, &peers).is_err());
+    }
+    let ctx = RenderCtx::with_peers(&server, &secrets, &peers)
+        .with_wg_octets(HashMap::from([(peers[0].id.clone(), 254)]));
+    assert_eq!(
+        protocol.client_config(&ctx, &peers[0]).unwrap()["interface"]["address_cidr"],
+        "10.66.0.254/32"
+    );
+}

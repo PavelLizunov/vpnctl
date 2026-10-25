@@ -11,7 +11,7 @@ const VICTIM_IP: &str = "198.51.100.77";
 const ATTACKER_IP: &str = "203.0.113.9";
 
 #[test]
-fn security_ip_resists_leftmost_xff_spoof_logging_ip_keeps_it() {
+fn security_and_logging_ips_resist_leftmost_xff_spoof() {
     let mut h = HeaderMap::new();
     h.insert(
         "x-forwarded-for",
@@ -35,9 +35,8 @@ fn security_ip_resists_leftmost_xff_spoof_logging_ip_keeps_it() {
     );
     assert_eq!(
         ips.log_ip.map(|i| i.to_string()).as_deref(),
-        Some(VICTIM_IP),
-        "logging IP (sub_access_log) keeps the established richer leftmost-XFF \
-         value — only the security decision moved"
+        Some(ATTACKER_IP),
+        "access logging, GeoIP, and sharing signals must use the same trusted IP as security"
     );
 }
 
@@ -47,6 +46,20 @@ fn both_ips_fall_back_to_peer_when_no_headers() {
     let ips = resolve_sub_ips_with(&h, Some(TRUSTED_PROXY), &[TRUSTED_PROXY]);
     assert_eq!(ips.sec_ip, Some(TRUSTED_PROXY));
     assert_eq!(ips.log_ip, Some(TRUSTED_PROXY));
+}
+
+#[test]
+fn both_ips_ignore_xff_when_x_real_ip_is_missing_or_invalid() {
+    for real_ip in [None, Some("not-an-ip"), Some("203.0.113.9, 198.51.100.77")] {
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", HeaderValue::from_static(VICTIM_IP));
+        if let Some(value) = real_ip {
+            h.insert("x-real-ip", HeaderValue::from_static(value));
+        }
+        let ips = resolve_sub_ips_with(&h, Some(TRUSTED_PROXY), &[TRUSTED_PROXY]);
+        assert_eq!(ips.sec_ip, Some(TRUSTED_PROXY));
+        assert_eq!(ips.log_ip, Some(TRUSTED_PROXY));
+    }
 }
 
 #[test]

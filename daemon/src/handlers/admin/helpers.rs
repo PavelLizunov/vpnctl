@@ -124,10 +124,10 @@ pub(crate) fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> 
         let Ok(raw) = hdr.to_str() else { continue };
         for part in raw.split(';') {
             let part = part.trim();
-            if let Some((k, v)) = part.split_once('=') {
-                if k == name {
-                    return Some(v);
-                }
+            if let Some((k, v)) = part.split_once('=')
+                && k == name
+            {
+                return Some(v);
             }
         }
     }

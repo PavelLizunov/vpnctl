@@ -453,3 +453,197 @@ fn ss_aes128_share_link_and_config_bytes_are_unchanged() {
         br#"{"method":"2022-blake3-aes-128-gcm","password":"AAECAwQFBgcICQoLDA0ODw==","server":"203.0.113.7","server_port":8388,"tag":"ss22-out","type":"shadowsocks"}"#
     );
 }
+
+#[test]
+fn ss_shared_mode_and_legacy_render_bytes_are_identical_for_every_method() {
+    let server = srv();
+    let protocol = Shadowsocks2022::new();
+    for (method, psk) in [
+        ("2022-blake3-aes-128-gcm", PSK),
+        (
+            "2022-blake3-aes-256-gcm",
+            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        ),
+        (
+            "2022-blake3-chacha20-poly1305",
+            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        ),
+    ] {
+        for mode in [None, Some("shared")] {
+            let mut secrets = HashMap::from([
+                ("ss2022.psk".into(), psk.into()),
+                ("ss2022.method".into(), method.into()),
+            ]);
+            if let Some(mode) = mode {
+                secrets.insert("ss2022.mode".into(), mode.into());
+            }
+            let ctx = ctx_with(&server, &secrets);
+            assert_eq!(
+                protocol
+                    .share_link(&ctx, &user("alice"))
+                    .unwrap()
+                    .as_bytes(),
+                format!("ss://{method}:{psk}@203.0.113.7:8388/#alice").as_bytes()
+            );
+            assert_eq!(
+                serde_json::to_vec(&protocol.client_config(&ctx, &user("alice")).unwrap()).unwrap(),
+                format!(r#"{{"method":"{method}","password":"{psk}","server":"203.0.113.7","server_port":8388,"tag":"ss22-out","type":"shadowsocks"}}"#).as_bytes()
+            );
+            assert_eq!(
+                serde_json::to_vec(&protocol.server_inbound(&ctx, &[user("alice")]).unwrap()).unwrap(),
+                format!(r#"{{"listen":"::","listen_port":8388,"method":"{method}","password":"{psk}","tag":"ss22-in","type":"shadowsocks"}}"#).as_bytes()
+            );
+        }
+    }
+}
+
+#[test]
+fn ss_multi_user_known_answers_pin_share_link_client_and_inbound_bytes() {
+    let server = srv();
+    let protocol = Shadowsocks2022::new();
+    // Independently computed HMAC-SHA256 vectors, keyed by bytes 0..16 / 0..32.
+    for (method, psk, derived, encoded) in [
+        (
+            "2022-blake3-aes-128-gcm",
+            PSK,
+            "Gjw/MOzkwdF8pDO05jE0+g==",
+            "AAECAwQFBgcICQoLDA0ODw==%3AGjw%2FMOzkwdF8pDO05jE0+g==",
+        ),
+        (
+            "2022-blake3-aes-256-gcm",
+            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+            "5/cezLXFua1GXJudyg+41zRhwZdoxhC2t+Wznim8mbo=",
+            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=%3A5%2FcezLXFua1GXJudyg+41zRhwZdoxhC2t+Wznim8mbo=",
+        ),
+    ] {
+        let secrets = HashMap::from([
+            ("ss2022.psk".into(), psk.into()),
+            ("ss2022.method".into(), method.into()),
+            ("ss2022.mode".into(), "multi-user".into()),
+        ]);
+        let ctx = ctx_with(&server, &secrets);
+        assert_eq!(
+            protocol
+                .share_link(&ctx, &user("alice"))
+                .unwrap()
+                .as_bytes(),
+            format!("ss://{method}:{encoded}@203.0.113.7:8388/#alice").as_bytes()
+        );
+        assert_eq!(
+            serde_json::to_vec(&protocol.client_config(&ctx, &user("alice")).unwrap()).unwrap(),
+            format!(r#"{{"method":"{method}","password":"{psk}:{derived}","server":"203.0.113.7","server_port":8388,"tag":"ss22-out","type":"shadowsocks"}}"#).as_bytes()
+        );
+        assert_eq!(
+            serde_json::to_vec(&protocol.server_inbound(&ctx, &[user("alice")]).unwrap()).unwrap(),
+            format!(r#"{{"listen":"::","listen_port":8388,"method":"{method}","password":"{psk}","tag":"ss22-in","type":"shadowsocks","users":[{{"name":"alice","password":"{derived}"}}]}}"#).as_bytes()
+        );
+    }
+}
+
+#[test]
+fn ss_multi_user_removal_and_uuid_rotation_change_only_that_users_key() {
+    let server = srv();
+    let mut secrets = secrets_with_psk();
+    secrets.insert("ss2022.mode".into(), "multi-user".into());
+    let without_placeholder = secrets.clone();
+    secrets.insert(
+        "ss2022.no_users_psk".into(),
+        "BAUGBwgJCgsMDQ4PEBESEw==".into(),
+    );
+    let ctx = ctx_with(&server, &secrets);
+    let protocol = Shadowsocks2022::new();
+    assert!(
+        protocol
+            .server_inbound(&ctx_with(&server, &without_placeholder), &[])
+            .is_err(),
+        "an empty multi-user inbound needs the independent placeholder secret"
+    );
+    assert!(
+        protocol
+            .server_secret_specs_for(&without_placeholder)
+            .unwrap()
+            .iter()
+            .any(|spec| matches!(
+                spec,
+                vpnctl_core::ServerSecretSpec::Base64Key {
+                    key: "ss2022.no_users_psk",
+                    key_bytes: 16
+                }
+            ))
+    );
+    let alice = user("alice");
+    let mut bob = user("bob");
+    bob.uuid = "ffffffff-ffff-ffff-ffff-ffffffffffff".into();
+    let inbound = protocol
+        .server_inbound(&ctx, &[alice.clone(), bob.clone()])
+        .unwrap();
+    assert_eq!(
+        inbound["users"],
+        serde_json::json!([
+            {"name": "alice", "password": "Gjw/MOzkwdF8pDO05jE0+g=="},
+            {"name": "bob", "password": "D3EvTuq9vyRr5kw11skwxA=="},
+        ])
+    );
+    let remaining = protocol
+        .server_inbound(&ctx, std::slice::from_ref(&bob))
+        .unwrap();
+    assert_eq!(remaining["users"], serde_json::json!([inbound["users"][1]]));
+    assert_eq!(remaining["password"], PSK);
+    // An empty list would make sing-box accept the bare server PSK again.
+    let empty = protocol.server_inbound(&ctx, &[]).unwrap();
+    assert_eq!(
+        empty["users"],
+        serde_json::json!([{"name": "vpnctl-no-users", "password": "BAUGBwgJCgsMDQ4PEBESEw=="}])
+    );
+    let mut rotated = alice.clone();
+    rotated.uuid.clone_from(&bob.uuid);
+    assert_eq!(
+        protocol.client_config(&ctx, &rotated).unwrap()["password"],
+        "AAECAwQFBgcICQoLDA0ODw==:D3EvTuq9vyRr5kw11skwxA=="
+    );
+    assert_ne!(
+        protocol.share_link(&ctx, &alice).unwrap(),
+        protocol.share_link(&ctx, &rotated).unwrap()
+    );
+    let renamed = User {
+        id: UserId("renamed".into()),
+        ..alice
+    };
+    assert_eq!(
+        protocol.client_config(&ctx, &renamed).unwrap()["password"],
+        "AAECAwQFBgcICQoLDA0ODw==:Gjw/MOzkwdF8pDO05jE0+g=="
+    );
+}
+
+#[test]
+fn ss_multi_user_rejects_chacha_and_unknown_modes() {
+    let server = srv();
+    let protocol = Shadowsocks2022::new();
+    for (mode, method, message) in [
+        (
+            "multi-user",
+            "2022-blake3-chacha20-poly1305",
+            "chacha20 does not support EIH",
+        ),
+        (
+            "unknown",
+            "2022-blake3-aes-256-gcm",
+            "ss2022.mode must be shared or multi-user",
+        ),
+    ] {
+        let secrets = HashMap::from([
+            ("ss2022.psk".into(), B64.encode([0_u8; 32])),
+            ("ss2022.method".into(), method.into()),
+            ("ss2022.mode".into(), mode.into()),
+        ]);
+        let ctx = ctx_with(&server, &secrets);
+        for error in [
+            protocol.validate_server(&ctx).unwrap_err(),
+            protocol.server_inbound(&ctx, &[]).unwrap_err(),
+            protocol.client_config(&ctx, &user("alice")).unwrap_err(),
+            protocol.share_link(&ctx, &user("alice")).unwrap_err(),
+        ] {
+            assert!(error.to_string().contains(message));
+        }
+    }
+}

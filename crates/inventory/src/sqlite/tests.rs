@@ -1,5 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod wg_addressing;
+
 use super::*;
 use serde_json::json;
 use tempfile::tempdir;
@@ -1743,4 +1745,204 @@ async fn server_address_lookups_ignore_access_log_and_do_not_need_a_write_lock()
     assert_eq!(inv.server_id_for_address("192.0.2.1").await?, None);
     tx.rollback().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn telegram_delivery_claim_is_exclusive_and_success_without_message_id_is_final() {
+    let inv = fresh().await;
+    let id = inv
+        .insert_alert("test.delivery", None, "warning", "test", None)
+        .await
+        .unwrap();
+    let now = chrono::Utc::now();
+    let audit_before: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM audit_log")
+        .fetch_one(inv.pool())
+        .await
+        .unwrap();
+    let (first, second) = tokio::join!(
+        inv.claim_alert_telegram_delivery(id, now, false),
+        inv.claim_alert_telegram_delivery(id, now, false),
+    );
+    let claims = [first.unwrap(), second.unwrap()];
+    assert_eq!(claims.iter().filter(|claim| **claim == Some(1)).count(), 1);
+    assert_eq!(claims.iter().filter(|claim| claim.is_none()).count(), 1);
+    assert!(
+        inv.claim_alert_telegram_delivery(id, now, true)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    inv.record_alert_telegram_delivery(id, None).await.unwrap();
+    let state: (i64, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT telegram_attempts, telegram_delivered_at, telegram_next_attempt_at FROM admin_alerts WHERE id = ?1",
+    ).bind(id).fetch_one(inv.pool()).await.unwrap();
+    assert_eq!(state.0, 1);
+    assert!(state.1.is_some());
+    assert!(state.2.is_none());
+    inv.record_alert_telegram_delivery(id, None).await.unwrap();
+    inv.defer_alert_telegram_delivery(id, now).await.unwrap();
+    assert!(
+        inv.pending_alert_telegram_deliveries(now + chrono::Duration::hours(1))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        inv.expire_alert_telegram_deliveries(now + chrono::Duration::hours(25))
+            .await
+            .unwrap(),
+        0
+    );
+    let audit_after: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM audit_log")
+        .fetch_one(inv.pool())
+        .await
+        .unwrap();
+    assert_eq!(audit_before, audit_after);
+    assert!(
+        inv.claim_alert_telegram_delivery(-1, now, false)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn telegram_pending_delivery_recovers_abandoned_claims_and_skips_closed_alerts() {
+    let inv = fresh().await;
+    let id = inv
+        .insert_alert("test.delivery", None, "warning", "test", None)
+        .await
+        .unwrap();
+    let created = inv.recent_alerts(1, false).await.unwrap()[0].created_at;
+    assert!(
+        inv.pending_alert_telegram_deliveries(created + chrono::Duration::seconds(299))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        inv.pending_alert_telegram_deliveries(created + chrono::Duration::minutes(5))
+            .await
+            .unwrap()[0]
+            .id,
+        id
+    );
+    assert_eq!(
+        inv.claim_alert_telegram_delivery(id, created, false)
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        inv.claim_alert_telegram_delivery(id, created + chrono::Duration::minutes(5), true)
+            .await
+            .unwrap(),
+        Some(2)
+    );
+    inv.ack_alert(id).await.unwrap();
+    assert!(
+        inv.pending_alert_telegram_deliveries(created + chrono::Duration::minutes(10))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        inv.claim_alert_telegram_delivery(id, created + chrono::Duration::minutes(10), true)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // Keep the existing immediate push for acknowledged one-shot notifications.
+    let one_shot = inv
+        .insert_alert_acked("test.event", None, "info", "event", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        inv.claim_alert_telegram_delivery(one_shot, created, false)
+            .await
+            .unwrap(),
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn telegram_delivery_expiry_records_the_exact_24_hour_boundary_once() {
+    let inv = fresh().await;
+    let id = inv
+        .insert_alert("test.delivery", None, "warning", "test", None)
+        .await
+        .unwrap();
+    let created = inv.recent_alerts(1, false).await.unwrap()[0].created_at;
+    let deadline = created + chrono::Duration::hours(24);
+    assert_eq!(
+        inv.expire_alert_telegram_deliveries(deadline - chrono::Duration::seconds(1))
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        inv.expire_alert_telegram_deliveries(deadline)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        inv.expire_alert_telegram_deliveries(deadline)
+            .await
+            .unwrap(),
+        0
+    );
+    let state: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT telegram_gave_up_at, telegram_next_attempt_at FROM admin_alerts WHERE id = ?1",
+    )
+    .bind(id)
+    .fetch_one(inv.pool())
+    .await
+    .unwrap();
+    assert_eq!(state.0.as_deref(), Some(deadline.to_rfc3339().as_str()));
+    assert!(state.1.is_none());
+    assert!(
+        inv.claim_alert_telegram_delivery(id, created, false)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(inv.unacked_alert_count().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn telegram_delivery_migration_preserves_existing_message_ids() {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "CREATE TABLE admin_alerts (
+            id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, acked_at TEXT, telegram_message_id TEXT
+         );
+         INSERT INTO admin_alerts VALUES (1, '2026-10-01T00:00:00.000Z', NULL, '123');
+         INSERT INTO admin_alerts VALUES (2, '2026-10-01T00:00:00.000Z', NULL, NULL);",
+    ).execute(&pool).await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/0069_alert_delivery_state.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let states: Vec<(i64, Option<String>, Option<String>, i64)> = sqlx::query_as(
+        "SELECT id, telegram_message_id, telegram_delivered_at, telegram_attempts FROM admin_alerts ORDER BY id",
+    ).fetch_all(&pool).await.unwrap();
+    assert_eq!(
+        states,
+        vec![
+            (
+                1,
+                Some("123".into()),
+                Some("2026-10-01T00:00:00.000Z".into()),
+                0
+            ),
+            (2, None, None, 0),
+        ]
+    );
 }

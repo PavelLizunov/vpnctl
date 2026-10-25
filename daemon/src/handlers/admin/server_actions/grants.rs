@@ -29,32 +29,20 @@ pub(crate) async fn server_grant_user(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     }
 
-    let was_granted = match state.inv.servers_for_user(&uid).await {
-        Ok(v) => v.iter().any(|s| s.id == sid),
-        Err(e) => return internal_error(anyhow::Error::new(e)),
-    };
-    if let Err(e) = state.inv.grant(&uid, &sid).await {
-        return match e {
-            vpnctl_inventory::SqliteInventoryError::Invalid(message) => bad_request(&message),
-            other => internal_error(anyhow::Error::new(other)),
-        };
-    }
-    if !was_granted {
-        if let Err(e) = state
-            .inv
-            .audit(
-                "admin",
-                "user.grant",
-                Some(&user_id_str),
-                Some(&serde_json::json!({
-                    "server": server_id_str,
-                    "source": "server-detail",
-                })),
-            )
-            .await
-        {
-            tracing::warn!(target = "vpnctld::admin", error = %e, "audit write failed for user.grant");
+    let granted = match state
+        .inv
+        .grant_audited(&uid, &sid, "admin", "server-detail")
+        .await
+    {
+        Ok(granted) => granted,
+        Err(e) => {
+            return match e {
+                vpnctl_inventory::SqliteInventoryError::Invalid(message) => bad_request(&message),
+                other => internal_error(anyhow::Error::new(other)),
+            };
         }
+    };
+    if granted {
         spawn_user_servers_redeploy(&state, vec![server], user_id_str.clone(), "user.grant");
     }
     Redirect::to(&format!(
@@ -158,31 +146,13 @@ pub(crate) async fn server_grant_all_users(
             already += 1;
             continue;
         }
-        match state.inv.grant(&u.id, &sid).await {
-            Ok(()) => {
-                granted += 1;
-                if let Err(e) = state
-                    .inv
-                    .audit(
-                        "admin",
-                        "user.grant",
-                        Some(&u.id.0),
-                        Some(&serde_json::json!({
-                            "server": server_id_str,
-                            "source": "server-detail.bulk",
-                        })),
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        target = "vpnctld::admin",
-                        server = %server_id_str,
-                        user = %u.id,
-                        error = %e,
-                        "audit write failed for user.grant (bulk) — mutation already committed"
-                    );
-                }
-            }
+        match state
+            .inv
+            .grant_audited(&u.id, &sid, "admin", "server-detail.bulk")
+            .await
+        {
+            Ok(true) => granted += 1,
+            Ok(false) => already += 1,
             Err(e) => {
                 failed += 1;
                 failures.push((u.id.0.clone(), e.to_string()));

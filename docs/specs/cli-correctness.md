@@ -9,9 +9,15 @@
 
 ## Interface/Data contract
 
-- `user disable` and `user enable` update inventory only. Help and output say so;
+- `user disable` and `user enable` update inventory only by default. Help and output say so;
   output lists `vpnctl deploy <id>` for each granted server still pending deploy,
   including on a no-op retry. Already deployed and ungranted servers are omitted.
+  With `--deploy`, after saving the audited flag change, the command immediately
+  deploys exactly that listed set through the existing CLI deploy path, using its
+  default SSH key (`~/.ssh/id_ed25519`). Every listed server is attempted; any
+  failure returns a nonzero exit code with per-server errors. The inventory flag
+  remains saved, and a no-op retry with `--deploy` retries pending servers without
+  another flag-change audit. An empty pending set succeeds without a deploy.
   `set_user_disabled_audited(&self, id: &UserId, disabled: bool, actor: &str)`
   commits the flag and canonical `user.disable` / `user.enable` audit together
   under `BEGIN IMMEDIATE`; audit failure rolls back the flag. It returns whether
@@ -41,6 +47,9 @@
 - [ ] Disable/enable identify pending servers, retry without mutation audit, and
   omit servers after a successful deploy audit. Audit failure rolls back either
   flag change; reopening and retrying preserves pending deploy without a new row.
+- [ ] Both commands parse `--deploy` with an inventory-only default. Immediate
+  deploy attempts exactly the pending granted set, continues after a server fails,
+  returns nonzero on any failure, and succeeds without work when nothing is pending.
 - [ ] Default CLI and web creation store matching WireGuard keys; explicit external
   public keys stay unchanged. Incomplete legacy downloads return 409 without mutation.
 - [ ] Invalid IDs and port values leave rows and audit unchanged; boundaries pass.

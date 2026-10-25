@@ -68,6 +68,9 @@ async fn server_deploy_locked(
         Ok(v) => v,
         Err(e) => return internal_error(anyhow::anyhow!(e)),
     };
+    if let Err(e) = state.inv.wg_octets_for_server(&sid).await {
+        return internal_error(anyhow::Error::new(e));
+    }
     let deploy_revision = match state.inv.deploy_input_revision(&sid).await {
         Ok(revision) => revision,
         Err(e) => return internal_error(anyhow::Error::new(e)),
@@ -113,6 +116,10 @@ async fn server_deploy_locked(
             Ok(u) => u,
             Err(e) => return internal_error(anyhow::Error::new(e)),
         };
+        let wg_octets = match state.inv.wg_octets_for_server(&sid).await {
+            Ok(octets) => octets,
+            Err(e) => return internal_error(anyhow::Error::new(e)),
+        };
         if let Err(e) = state.inv.assert_no_uuid_collisions(&sid).await {
             return internal_error(anyhow::Error::new(e));
         }
@@ -131,7 +138,8 @@ async fn server_deploy_locked(
                 "inventory changed while preparing deploy — retry",
             );
         }
-        let ctx = vpnctl_core::RenderCtx::new(&server, &secrets);
+        let ctx =
+            vpnctl_core::RenderCtx::with_peers(&server, &secrets, &users).with_wg_octets(wg_octets);
 
         match state.inv.retired_server_kernels(&sid).await {
             Ok(retired) => {
@@ -204,6 +212,14 @@ async fn server_deploy_locked(
             configs_applied += 1;
             if let Err(e) = kernel.open_firewall(&ssh, &ctx, &protocols).await {
                 ssh_errors.push(format!("{}: open_firewall failed: {e}", kid.0));
+                continue;
+            }
+            if let Err(e) = vpnctl_inventory::bootstrap::refresh_deployed_server_secrets(
+                &state.inv, kernel, &ssh, &ctx, "admin",
+            )
+            .await
+            {
+                ssh_errors.push(format!("{}: {e}", kid.0));
             }
         }
     }
@@ -412,14 +428,14 @@ pub(crate) async fn server_push_deploy_key(
             Err(e) => Err(e),
         };
 
-    if result.is_ok() && ssh_user != server.ssh_user {
-        if let Err(e) = state
+    if result.is_ok()
+        && ssh_user != server.ssh_user
+        && let Err(e) = state
             .inv
             .update_server_ssh_user_audited(&sid, &server.ssh_user, &ssh_user, method)
             .await
-        {
-            return internal_error(anyhow::Error::new(e));
-        }
+    {
+        return internal_error(anyhow::Error::new(e));
     }
 
     if verify_only {

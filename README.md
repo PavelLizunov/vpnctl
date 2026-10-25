@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/PavelLizunov/vpnctl/actions/workflows/ci.yml/badge.svg)](https://github.com/PavelLizunov/vpnctl/actions/workflows/ci.yml)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.87%2B%20(2024%20ed)-orange.svg)](rust-toolchain.toml)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B%20(2024%20ed)-orange.svg)](rust-toolchain.toml)
 [![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)](#project-size)
 [![Version](https://img.shields.io/badge/version-0.9.0-blue.svg)](#production-health-check)
 
@@ -39,7 +39,7 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 |---|---|
 | Protocols × Kernels | **12 protocols** × **4 kernels**, fully orthogonal (see [Architecture](#architecture)) |
 | Inventory | SQLite via `sqlx`, audit-on-mutation |
-| Toolchain | Rust **1.87+**, edition **2024** · static musl Linux x86_64 binaries (`x86_64-unknown-linux-musl`) |
+| Toolchain | Rust **1.88+**, edition **2024** · static musl Linux x86_64 binaries (`x86_64-unknown-linux-musl`) |
 
 ### What ships today
 
@@ -67,6 +67,11 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 | **Uptime SLO** — per-server 24h/7d/30d chips on detail page + fleet-wide tile on dashboard | ✅ |
 | Bilingual EN/RU shell + nav + body copy (wave 2 shipped; wave 3 in flight) | ✅ |
 | Workspace test suite, GitHub Actions CI green | ✅ |
+
+SS2022 defaults to the legacy shared key. The server's **Protocols** tab can
+switch AES methods to per-user keys for revocation on deploy, or back to shared
+mode. After switching and deploying, every SS2022 user must re-import their
+profile. See the [compatibility contract](docs/specs/migration-compatibility.md#shadowsocks-2022-per-user-keys-d7-01).
 
 ### Deployment state and service quality
 
@@ -170,8 +175,10 @@ never live on the protocol struct.
 The canonical public route (`https://ninitux.com/api/v1/sub/<token>`) defaults to the Mihomo / Omarchy YAML format without requiring a query parameter. The legacy `GET /sub/<token>` route is unchanged: without a selector it keeps its existing sing-box/UA behavior, while `?format=mihomo` and `?format=sing-box` remain explicit options.
 
 - **Mihomo / Omarchy format** (default for public `https://ninitux.com/api/v1/sub/<token>`, legacy query `?format=mihomo`): Renders a ready YAML configuration for
-  Mihomo, Omarchy, and Clash Meta. The initial scope is `vless+reality` and `hysteria2`;
-  unsupported protocols are omitted. Chained routes use Mihomo `dialer-proxy`, failing closed
+  Mihomo, Omarchy, and Clash Meta. Exports `vless+reality` and `hysteria2`, plus Trojan,
+  AnyTLS and TUIC when a node certificate pin has been collected by deployment.
+  Self-signed TLS proxies include the pin when available; unsupported protocols are omitted.
+  Chained routes use Mihomo `dialer-proxy`, failing closed
   (omitting target nodes) when their direct entry node is unavailable or unusable.
 - **Stock sing-box format** (`?format=sing-box`): Delivers stock sing-box JSON where chained targets
   carry native `detour` fields and disappear fail-closed when their entry has no usable outbound.
@@ -282,7 +289,9 @@ using the fingerprint from the hoster's console. See the
 [migration contract](docs/specs/migration-compatibility.md).
 
 CLI `user disable` and `user enable` save inventory state and list the pending
-`vpnctl deploy <id>` commands needed to apply node access changes. CLI `sub`
+`vpnctl deploy <id>` commands needed to apply node access changes. Add `--deploy`
+to immediately deploy that pending set; any failed deploy returns a nonzero exit
+code while preserving the saved inventory state. CLI `sub`
 exits nonzero if a selected share link cannot be generated. See the
 [CLI correctness contract](docs/specs/cli-correctness.md).
 

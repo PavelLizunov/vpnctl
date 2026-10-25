@@ -881,3 +881,77 @@ async fn vpn_router_extra_protocols_per_server_uuid_byte_equal() {
     // The Reality server and both password-based protocols retain all bytes.
     assert_eq!(lines.join("\n").as_bytes(), expected.as_bytes());
 }
+
+#[tokio::test]
+async fn persisted_wg_addresses_keep_http_bytes_when_other_grants_change() {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+
+    let dir = TempDir::new().unwrap();
+    let mut state = seed_state_with_awg(&dir).await;
+    state.rate_limiter = Arc::new(vpnctld::rate_limit::RateLimiter::new(
+        100.0,
+        0.0,
+        std::time::Duration::from_secs(60),
+    ));
+    let target = state
+        .inv
+        .get_user(&UserId("tester-1".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    let token = target.sub_token.as_deref().unwrap();
+    let cases = [
+        (
+            format!("/api/v1/app/config/{AWG_DEVICE_ID}"),
+            "VPNRouter/2.4.1 v2rayN/6.62",
+        ),
+        (format!("/sub/{token}"), "v2rayN/6.62"),
+        (format!("/sub/{token}"), "Mozilla/5.0"),
+        (format!("/sub/{token}?format=sing-box"), "Mozilla/5.0"),
+        (format!("/sub/{token}?format=mihomo"), "Mozilla/5.0"),
+        (format!("/api/v1/sub/{token}"), "Mozilla/5.0"),
+    ];
+    let mut before = Vec::new();
+    for (path, ua) in &cases {
+        let (status, bytes, _) = super::common::get(router(state.clone()), path, ua).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        before.push(bytes);
+    }
+    let links = String::from_utf8(STANDARD.decode(&before[0]).unwrap()).unwrap();
+    assert!(links.contains("awg://"));
+    assert!(links.contains("address=10.66.0.2/32"));
+    let other = User {
+        id: UserId("aaron".into()),
+        uuid: "uuid-aaron".into(),
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        tuic_password: None,
+        sub_token: None,
+        vpn_router_device_id: None,
+        disabled: false,
+    };
+    state.inv.add_user(&other).await.unwrap();
+    let server = ServerId("aw".into());
+    for change in ["grant", "disable", "enable", "remove"] {
+        match change {
+            "grant" => state.inv.grant(&other.id, &server).await.unwrap(),
+            "disable" => {
+                state.inv.set_user_disabled(&other.id, true).await.unwrap();
+            }
+            "enable" => {
+                state.inv.set_user_disabled(&other.id, false).await.unwrap();
+            }
+            "remove" => state.inv.remove_user(&other.id).await.unwrap(),
+            _ => unreachable!(),
+        }
+        for (index, (path, ua)) in cases.iter().enumerate() {
+            let (status, bytes, _) = super::common::get(router(state.clone()), path, ua).await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+            assert_eq!(
+                bytes, before[index],
+                "HTTP bytes changed after {change}: {path}"
+            );
+        }
+    }
+}

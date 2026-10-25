@@ -98,13 +98,13 @@ impl Protocol for Hysteria2 {
             }
         }
 
-        if let Some(obfs_pw) = obfs_password(ctx) {
-            if let Some(map) = inbound.as_object_mut() {
-                map.insert(
-                    "obfs".to_string(),
-                    json!({ "type": "salamander", "password": obfs_pw }),
-                );
-            }
+        if let Some(obfs_pw) = obfs_password(ctx)
+            && let Some(map) = inbound.as_object_mut()
+        {
+            map.insert(
+                "obfs".to_string(),
+                json!({ "type": "salamander", "password": obfs_pw }),
+            );
         }
 
         Ok(inbound)
@@ -125,13 +125,13 @@ impl Protocol for Hysteria2 {
             "password": pw,
             "tls": { "enabled": true, "insecure": true, "alpn": ["h3"] }
         });
-        if let Some(obfs_pw) = obfs_password(ctx) {
-            if let Some(map) = out.as_object_mut() {
-                map.insert(
-                    "obfs".to_string(),
-                    json!({ "type": "salamander", "password": obfs_pw }),
-                );
-            }
+        if let Some(obfs_pw) = obfs_password(ctx)
+            && let Some(map) = out.as_object_mut()
+        {
+            map.insert(
+                "obfs".to_string(),
+                json!({ "type": "salamander", "password": obfs_pw }),
+            );
         }
         Ok(out)
     }
@@ -152,8 +152,13 @@ impl Protocol for Hysteria2 {
             }
             None => String::new(),
         };
+        let pin_suffix = ctx
+            .secrets
+            .get("tls.cert_sha256")
+            .map(|pin| format!("&pinSHA256={pin}"))
+            .unwrap_or_default();
         Ok(format!(
-            "hysteria2://{pw}@{host}:8444/?sni={sni}&insecure=1{obfs_suffix}#{name}",
+            "hysteria2://{pw}@{host}:8444/?sni={sni}&insecure=1{obfs_suffix}{pin_suffix}#{name}",
             pw = pw,
             host = host_for_url(&ctx.server.address),
             sni = ctx.server.address,

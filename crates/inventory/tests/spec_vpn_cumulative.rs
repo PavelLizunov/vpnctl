@@ -63,6 +63,7 @@ fn tick(
         server_upload_total,
         server_download_total,
         uptime_seconds,
+        generation: None,
         active_connections,
         users,
     }
@@ -121,6 +122,108 @@ async fn fixture(dir: &TempDir, users: &[&str]) -> (SqliteInventory, ServerId) {
         inv.add_user(&user(id)).await.expect("add user");
     }
     (inv, server_id)
+}
+
+#[tokio::test]
+async fn changed_generation_counts_fresh_totals_even_above_the_baseline() {
+    for changed in [
+        "00000000-0000-0000-0000-000000000001:200",
+        "00000000-0000-0000-0000-000000000002:100",
+    ] {
+        let dir = TempDir::new().unwrap();
+        let (inv, server_id) = fixture(&dir, &["alice"]).await;
+        let mut sample = tick(100, 200, 100, 1, vec![counter("alice", 60, 120)]);
+        sample.generation = Some("00000000-0000-0000-0000-000000000001:100".into());
+        inv.record_vpn_cumulative_stats(&server_id, &sample)
+            .await
+            .unwrap();
+        drop(inv);
+        let inv = open(&dir).await;
+        sample = tick(150, 300, 200, 2, vec![counter("alice", 90, 180)]);
+        sample.generation = Some(changed.into());
+        inv.record_vpn_cumulative_stats(&server_id, &sample)
+            .await
+            .unwrap();
+        inv.record_vpn_cumulative_stats(&server_id, &sample)
+            .await
+            .unwrap();
+        let raw = rows(&dir, &server_id).await;
+        assert_eq!(sums_for(&raw, Some("alice")), (90, 180));
+        assert_eq!(sums_for(&raw, None), (60, 120));
+
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path(&dir).display()))
+            .await
+            .unwrap();
+        let stored: Option<String> = sqlx::query_scalar(
+            "SELECT generation FROM vpn_server_counter_baselines WHERE server_id = ?1",
+        )
+        .bind(&server_id.0)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stored.as_deref(), Some(changed));
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'vpn_stats.generation'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(audits, 2, "an unchanged token must not add an audit row");
+        pool.close().await;
+        inv.close().await;
+    }
+}
+
+#[tokio::test]
+async fn same_generation_uses_deltas_despite_lower_uptime() {
+    let dir = TempDir::new().unwrap();
+    let (inv, server_id) = fixture(&dir, &["alice"]).await;
+    for (upload, download, uptime) in [(100, 200, 1_000), (150, 300, 900)] {
+        let mut sample = tick(
+            upload,
+            download,
+            uptime,
+            1,
+            vec![counter("alice", upload, download)],
+        );
+        sample.generation = Some("00000000-0000-0000-0000-000000000001:100".into());
+        inv.record_vpn_cumulative_stats(&server_id, &sample)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        sums_for(&rows(&dir, &server_id).await, Some("alice")),
+        (50, 100)
+    );
+}
+
+#[tokio::test]
+async fn missing_generation_on_either_observation_keeps_the_uptime_heuristic() {
+    for missing_prior in [true, false] {
+        let dir = TempDir::new().unwrap();
+        let (inv, server_id) = fixture(&dir, &["alice"]).await;
+        for (index, (upload, download, uptime)) in
+            [(100, 200, 1_000), (150, 300, 10)].into_iter().enumerate()
+        {
+            let mut sample = tick(
+                upload,
+                download,
+                uptime,
+                1,
+                vec![counter("alice", upload, download)],
+            );
+            if (index == 0) != missing_prior {
+                sample.generation = Some("00000000-0000-0000-0000-000000000001:100".into());
+            }
+            inv.record_vpn_cumulative_stats(&server_id, &sample)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            sums_for(&rows(&dir, &server_id).await, Some("alice")),
+            (150, 300)
+        );
+    }
 }
 
 #[tokio::test]

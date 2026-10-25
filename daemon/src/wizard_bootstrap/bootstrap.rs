@@ -268,6 +268,9 @@ async fn bootstrap_pipeline(
         Err(e) => fail!("secrets", "{e}"),
     };
 
+    if let Err(e) = inv.wg_octets_for_server(&server.id).await {
+        fail!("install", "WireGuard address assignment failed: {e}");
+    }
     let deploy_revision = match inv.deploy_input_revision(&server.id).await {
         Ok(revision) => revision,
         Err(e) => fail!("install", "cannot snapshot deploy inputs: {e}"),
@@ -285,6 +288,10 @@ async fn bootstrap_pipeline(
         Ok(u) => u,
         Err(e) => fail!("install", "users_for_server: {e}"),
     };
+    let wg_octets = match inv.wg_octets_for_server(&server.id).await {
+        Ok(octets) => octets,
+        Err(e) => fail!("install", "WireGuard address assignment failed: {e}"),
+    };
     let known_user_uuids = match inv.known_user_uuids().await {
         Ok(k) => k,
         Err(e) => fail!("install", "known_user_uuids: {e}"),
@@ -299,7 +306,7 @@ async fn bootstrap_pipeline(
     if let Err(e) = inv.assert_no_uuid_collisions(&server.id).await {
         fail!("install", "{e}");
     }
-    let ctx = RenderCtx::new(&server, &secrets);
+    let ctx = RenderCtx::with_peers(&server, &secrets, &users).with_wg_octets(wg_octets);
     let retired = match inv.retired_server_kernels(&server.id).await {
         Ok(r) => r,
         Err(e) => fail!("install", "retired kernel lookup failed: {e}"),
@@ -382,6 +389,13 @@ async fn bootstrap_pipeline(
         send_step!("apply", "{}: ok — service running with new config.", kid.0);
         if let Err(e) = kernel.open_firewall(&ssh, &ctx, &protocols).await {
             fail!("apply", "{}: open_firewall failed: {e}", kid.0);
+        }
+        if let Err(e) = vpnctl_inventory::bootstrap::refresh_deployed_server_secrets(
+            &inv, kernel, &ssh, &ctx, "admin",
+        )
+        .await
+        {
+            fail!("apply", "{}: {e}", kid.0);
         }
     }
 

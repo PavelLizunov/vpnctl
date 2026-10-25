@@ -129,7 +129,8 @@ async fn collect_links(
         }
         let secrets = inv.list_server_secrets(&server.id).await?;
         let peers = inv.users_for_server(&server.id).await?;
-        let ctx = RenderCtx::with_peers(server, &secrets, &peers);
+        let ctx = RenderCtx::with_peers(server, &secrets, &peers)
+            .with_wg_octets(inv.wg_octets_for_server(&server.id).await?);
 
         let per_server_user = inv.user_with_per_server_uuid(user, &server.id).await?;
 
