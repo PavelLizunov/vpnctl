@@ -224,9 +224,15 @@ async fn subprocess_ssh_strict_host_key_verification() {
         .expect("subsequent connect with matching known_hosts must succeed");
     assert_eq!(uname2.trim(), "Linux");
 
-    let bogus_entry = format!(
-        "[127.0.0.1]:{host_port} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBogusKeyMismatchedFingerprint1234567890abcdef\n"
-    );
+    // A syntactically valid but different host key: ssh ignores malformed
+    // lines, so a made-up base64 string would not test the mismatch at all.
+    let (_, other_pub) = fresh_keypair(&tmp, "id_other_host");
+    let other_key = other_pub
+        .split_whitespace()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let bogus_entry = format!("[127.0.0.1]:{host_port} {other_key}\n");
     std::fs::write(&known_hosts_path, bogus_entry).expect("write bogus known_hosts");
 
     let mismatch_err = transport.exec("uname -s").await;
