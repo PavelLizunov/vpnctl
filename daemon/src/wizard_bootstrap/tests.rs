@@ -281,23 +281,71 @@ fn bootstrap_event_serialises_with_kind_tag() {
 
 #[test]
 fn deploy_audit_action_reserves_baseline_for_applied_success() {
-    assert_eq!(deploy_audit_action(&[], 1, None, false), "server.deploy");
     assert_eq!(
-        deploy_audit_action(&[], 0, Some("deploy key absent"), false),
+        deploy_audit_action(&[], 1, None, false, false),
+        "server.deploy"
+    );
+    assert_eq!(
+        deploy_audit_action(&[], 0, Some("deploy key absent"), false, false),
         "server.deploy.skipped"
     );
     assert_eq!(
-        deploy_audit_action(&[], 0, None, false),
+        deploy_audit_action(&[], 0, None, false, false),
         "server.deploy.skipped"
     );
     assert_eq!(
-        deploy_audit_action(&["sing-box failed".into()], 1, None, false),
+        deploy_audit_action(&["sing-box failed".into()], 1, None, false, false),
         "server.deploy.failed"
     );
     assert_eq!(
-        deploy_audit_action(&[], 1, None, true),
+        deploy_audit_action(&[], 1, None, true, false),
         "server.deploy.stale"
     );
+}
+
+#[tokio::test]
+async fn shutdown_only_deploy_clears_pending_only_after_successful_reconciliation() {
+    for failed in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = vpnctl_inventory::SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        let server = redeploy_test_server("shutdown-only", vec![]);
+        inv.add_server(&server).await.unwrap();
+        inv.set_reserved_ports(&server.id, &[12345]).await.unwrap();
+        let revision = inv.deploy_input_revision(&server.id).await.unwrap();
+        assert!(inv.server_pending_deploy(&server.id).await.unwrap());
+        let errors = if failed {
+            vec!["kernel shutdown failed".into()]
+        } else {
+            vec![]
+        };
+        let action = super::audit::write_deploy_audit(
+            &inv,
+            &server,
+            &[],
+            &[],
+            &errors,
+            0,
+            0,
+            None,
+            false,
+            &revision,
+        )
+        .await;
+        assert_eq!(
+            action,
+            if failed {
+                "server.deploy.failed"
+            } else {
+                "server.deploy"
+            }
+        );
+        assert_eq!(inv.server_pending_deploy(&server.id).await.unwrap(), failed);
+        let audits = inv.audit_for_server(&server.id.0, 10).await.unwrap();
+        let deploy = audits.iter().find(|entry| entry.action == action).unwrap();
+        assert_eq!(deploy.payload.as_ref().unwrap()["configs_applied"], 0);
+    }
 }
 
 #[test]
@@ -828,7 +876,7 @@ async fn redeploy_firewall_failure_records_failed_audit_and_keeps_server_pending
             KernelId("firewall-test".into())
         }
         fn supported_protocols(&self) -> Vec<ProtocolId> {
-            vec![]
+            vec![ProtocolId("vless+reality".into())]
         }
         async fn ensure_installed(
             &self,
@@ -876,7 +924,13 @@ async fn redeploy_firewall_failure_records_failed_audit_and_keeps_server_pending
         .unwrap();
     let mut registry = vpnctl_core::Registry::new();
     registry.register_kernel(Box::new(FirewallFailure)).unwrap();
-    let mut server = redeploy_test_server("redeploy-firewall-failure", vec![]);
+    registry
+        .register_protocol(Box::new(vpnctl_protocols::VlessReality::new()))
+        .unwrap();
+    let mut server = redeploy_test_server(
+        "redeploy-firewall-failure",
+        vec![ProtocolId("vless+reality".into())],
+    );
     server.kernels = vec![KernelId("firewall-test".into())];
     inv.add_server(&server).await.unwrap();
     inv.set_reserved_ports(&server.id, &[12345]).await.unwrap();

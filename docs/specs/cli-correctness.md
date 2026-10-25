@@ -12,9 +12,18 @@
 - `user disable` and `user enable` update inventory only. Help and output say so;
   output lists `vpnctl deploy <id>` for each granted server still pending deploy,
   including on a no-op retry. Already deployed and ungranted servers are omitted.
+  `set_user_disabled_audited(&self, id: &UserId, disabled: bool, actor: &str)`
+  commits the flag and canonical `user.disable` / `user.enable` audit together
+  under `BEGIN IMMEDIATE`; audit failure rolls back the flag. It returns whether
+  the flag changed; missing users are errors and no-op retries write no audit.
 - `user add` uses `vpnctl_core::valid_user_id`: 2–32 ASCII bytes from `a-z`,
   `0-9`, `.`, `_`, `-`; alphanumeric endpoints; no consecutive dots. No trimming.
   Existing stored IDs are unaffected; web validation is unchanged.
+  WireGuard keys are generated and stored as a pair by default, matching web
+  creation. `--gen-wireguard` remains accepted; `--wireguard-pubkey` explicitly
+  stores an external public key without a private key. The legacy admin `.conf`
+  download returns 409 for a missing or empty half and points at Generate/Rotate
+  on the user's Delivery tab; GET never changes keys.
 - `server secret` trims `*.listen_port` values and accepts an empty value to restore
   the protocol default, or a nonzero `u16`, matching web settings. Other values
   remain opaque. Invalid ports do not mutate inventory or create an audit row.
@@ -30,7 +39,10 @@
 ## Verification checklist
 
 - [ ] Disable/enable identify pending servers, retry without mutation audit, and
-  omit servers after a successful deploy audit.
+  omit servers after a successful deploy audit. Audit failure rolls back either
+  flag change; reopening and retrying preserves pending deploy without a new row.
+- [ ] Default CLI and web creation store matching WireGuard keys; explicit external
+  public keys stay unchanged. Incomplete legacy downloads return 409 without mutation.
 - [ ] Invalid IDs and port values leave rows and audit unchanged; boundaries pass.
 - [ ] Mocked SSH command failures preserve JSON stdout and TOFU audit on both paths.
 - [ ] Share-link errors exit nonzero; successful subscription bytes stay pinned.

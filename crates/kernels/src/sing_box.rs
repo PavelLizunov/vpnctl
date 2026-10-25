@@ -143,6 +143,7 @@ impl Kernel for SingBox {
                 inbound
                     .get("tag")
                     .and_then(serde_json::Value::as_str)
+                    .filter(|tag| !tag.is_empty())
                     .map(str::to_owned)
                     .ok_or_else(|| CoreError::Render("sing-box inbound is missing its tag".into()))
             })
@@ -168,7 +169,8 @@ impl Kernel for SingBox {
                 }
             }
         });
-        if !endpoints.is_empty() {
+        if !stats_inbounds.is_empty() || !endpoints.is_empty() {
+            let mut user_tags: Vec<&str> = stats_inbounds.iter().map(String::as_str).collect();
             let endpoint_tags: Vec<&str> = endpoints
                 .iter()
                 .map(|endpoint| {
@@ -181,22 +183,39 @@ impl Kernel for SingBox {
                         })
                 })
                 .collect::<Result<_>>()?;
-            let mut rules = vec![json!({
-                "inbound": endpoint_tags, "ip_is_private": true, "action": "reject"
-            })];
-            if let Ok(address) = ctx.server.address.parse::<std::net::IpAddr>() {
-                let prefix = if address.is_ipv4() { 32 } else { 128 };
-                rules.push(json!({
-                    "inbound": endpoint_tags,
-                    "ip_cidr": [format!("{address}/{prefix}")],
-                    "action": "reject"
-                }));
-            } else {
+            user_tags.extend(endpoint_tags);
+            let address = ctx.server.address.parse::<std::net::IpAddr>().ok();
+            if address.is_none() && !endpoints.is_empty() {
                 return Err(CoreError::Render(
                     "AWG server isolation requires a literal server IP; set the server address in the admin UI before deploying".into(),
                 ));
             }
+            let mut rules = Vec::new();
+            if !stats_inbounds.is_empty() {
+                // Resolve before IP matching; direct uses these same resolved addresses.
+                rules.push(json!({
+                    "inbound": stats_inbounds, "action": "resolve"
+                }));
+            }
+            rules.push(json!({
+                "inbound": user_tags, "ip_is_private": true, "action": "reject"
+            }));
+            let mut denied: Vec<String> = crate::USER_TRAFFIC_DENIED_CIDRS
+                .iter()
+                .map(|cidr| (*cidr).to_owned())
+                .collect();
+            if let Some(address) = address {
+                let prefix = if address.is_ipv4() { 32 } else { 128 };
+                denied.push(format!("{address}/{prefix}"));
+            }
+            rules.push(json!({
+                "inbound": user_tags,
+                "ip_cidr": denied,
+                "action": "reject"
+            }));
             cfg["route"] = json!({ "rules": rules, "final": "direct" });
+        }
+        if !endpoints.is_empty() {
             cfg["endpoints"] = json!(endpoints);
         }
         serde_json::to_vec_pretty(&cfg).map_err(CoreError::from)

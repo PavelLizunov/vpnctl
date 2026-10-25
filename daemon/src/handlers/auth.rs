@@ -160,9 +160,11 @@ pub(crate) struct BasicAuth {
     login_throttle: Arc<LoginThrottle>,
 }
 
-fn derive_session_key(secret: &PasswordSecret) -> [u8; 32] {
+fn derive_session_key(secret: &PasswordSecret, install_secret: &str) -> [u8; 32] {
     let mut h = Sha256::new();
-    h.update(b"vpnctl-session-v1\0");
+    h.update(b"vpnctl-session-v2\0");
+    h.update(install_secret.as_bytes());
+    h.update(b"\0");
     match secret {
         PasswordSecret::Argon2Phc(phc) => h.update(phc.as_bytes()),
         PasswordSecret::PlainBytes(bytes) => h.update(bytes.as_slice()),
@@ -171,16 +173,18 @@ fn derive_session_key(secret: &PasswordSecret) -> [u8; 32] {
 }
 
 impl BasicAuth {
-    pub(crate) fn from_env() -> Result<Option<Self>, AuthConfigError> {
+    pub(crate) fn from_env(install_secret: &str) -> Result<Option<Self>, AuthConfigError> {
         Self::from_parts(
             std::env::var("VPNCTLD_ADMIN_USER").ok(),
             std::env::var("VPNCTLD_ADMIN_PASSWORD").ok(),
+            install_secret,
         )
     }
 
     pub(crate) fn from_parts(
         user: Option<String>,
         pw: Option<String>,
+        install_secret: &str,
     ) -> Result<Option<Self>, AuthConfigError> {
         let (Some(user), Some(pw)) = (user, pw) else {
             return Ok(None);
@@ -200,7 +204,7 @@ impl BasicAuth {
                  compare but offers zero defense if the env file leaks."
             );
         }
-        let session_key = Arc::new(derive_session_key(&secret));
+        let session_key = Arc::new(derive_session_key(&secret, install_secret));
         Ok(Some(Self {
             user: Arc::new(user),
             secret,
@@ -260,9 +264,14 @@ fn extract_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     None
 }
 
-fn build_session_cookie(value: &str) -> String {
+fn build_session_cookie(value: &str, forwarded_proto: Option<&str>) -> String {
     let max_age = session_ttl_secs();
-    format!("{SESSION_COOKIE}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax")
+    let secure = if forwarded_proto == Some("https") {
+        "; Secure"
+    } else {
+        ""
+    };
+    format!("{SESSION_COOKIE}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}")
 }
 
 pub(crate) fn build_logout_cookie() -> String {
@@ -294,13 +303,24 @@ pub(crate) async fn require_basic_auth(
                 .insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
             return resp;
         }
-        if verify_basic(header, auth.clone()).await {
+        if verify_basic(header, auth.clone(), &VERIFY_PERMITS).await {
             auth.login_throttle.clear(ip);
             let logout =
                 req.method() == axum::http::Method::POST && req.uri().path() == "/admin/logout";
+            let forwarded_proto =
+                req.extensions()
+                    .get::<ConnectInfo<SocketAddr>>()
+                    .and_then(|peer| {
+                        crate::real_ip::resolve_trusted_header(
+                            req.headers(),
+                            peer.0.ip(),
+                            "x-forwarded-proto",
+                        )
+                    });
             let mut resp = next.run(req).await;
             if !logout {
-                let cookie = build_session_cookie(&auth.sign_session(now));
+                let cookie =
+                    build_session_cookie(&auth.sign_session(now), forwarded_proto.as_deref());
                 if let Ok(hv) = HeaderValue::from_str(&cookie) {
                     resp.headers_mut().append(header::SET_COOKIE, hv);
                 }
@@ -331,13 +351,21 @@ const MAX_CONCURRENT_VERIFICATIONS: usize = 4;
 static VERIFY_PERMITS: tokio::sync::Semaphore =
     tokio::sync::Semaphore::const_new(MAX_CONCURRENT_VERIFICATIONS);
 
-async fn verify_basic(header: HeaderValue, auth: BasicAuth) -> bool {
-    let Ok(_permit) = VERIFY_PERMITS.acquire().await else {
+async fn verify_basic(
+    header: HeaderValue,
+    auth: BasicAuth,
+    permits: &'static tokio::sync::Semaphore,
+) -> bool {
+    let Ok(permit) = permits.acquire().await else {
         return false;
     };
-    tokio::task::spawn_blocking(move || check_basic(Some(&header), &auth))
-        .await
-        .unwrap_or(false)
+    tokio::task::spawn_blocking(move || {
+        // The blocking job outlives a cancelled HTTP request.
+        let _permit = permit;
+        check_basic(Some(&header), &auth)
+    })
+    .await
+    .unwrap_or(false)
 }
 
 fn check_basic(header: Option<&HeaderValue>, auth: &BasicAuth) -> bool {
@@ -377,6 +405,8 @@ mod tests {
     use axum::routing::{get, post};
     use tower::ServiceExt;
 
+    const TEST_INSTALL_SECRET: &str = "test-install-secret";
+
     fn req_with_basic(user: &str, pw: &str) -> Request {
         let creds = format!("{user}:{pw}");
         let b64 = STANDARD.encode(creds.as_bytes());
@@ -393,7 +423,7 @@ mod tests {
 
     fn auth_plain(user: &str, pw: &str) -> BasicAuth {
         let secret = PasswordSecret::PlainBytes(Arc::new(pw.as_bytes().to_vec()));
-        let session_key = Arc::new(derive_session_key(&secret));
+        let session_key = Arc::new(derive_session_key(&secret, TEST_INSTALL_SECRET));
         BasicAuth {
             user: Arc::new(user.to_string()),
             secret,
@@ -404,7 +434,7 @@ mod tests {
 
     fn auth_argon2(user: &str, phc: &str) -> BasicAuth {
         let secret = PasswordSecret::Argon2Phc(Arc::new(phc.to_string()));
-        let session_key = Arc::new(derive_session_key(&secret));
+        let session_key = Arc::new(derive_session_key(&secret, TEST_INSTALL_SECRET));
         BasicAuth {
             user: Arc::new(user.to_string()),
             secret,
@@ -505,7 +535,7 @@ mod tests {
         let header = req_with_basic("admin", "password").headers()[header::AUTHORIZATION].clone();
         let progressed = AtomicBool::new(false);
         let verify = async {
-            let valid = verify_basic(header, auth).await;
+            let valid = verify_basic(header, auth, &VERIFY_PERMITS).await;
             assert!(progressed.load(Ordering::SeqCst));
             valid
         };
@@ -515,6 +545,64 @@ mod tests {
         };
         let (valid, ()) = tokio::join!(verify, heartbeat);
         assert!(valid);
+    }
+
+    #[test]
+    fn cancelled_verifications_hold_permits_until_blocking_jobs_finish() {
+        static PERMITS: tokio::sync::Semaphore =
+            tokio::sync::Semaphore::const_new(MAX_CONCURRENT_VERIFICATIONS);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_time()
+            .build()
+            .unwrap();
+        let auth = auth_argon2("admin", &make_phc("password"));
+        let header = req_with_basic("admin", "password").headers()[header::AUTHORIZATION].clone();
+        runtime.block_on(async {
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                let _ = release_rx.recv();
+            });
+            started_rx.await.unwrap();
+            let mut requests = Vec::new();
+            for _ in 0..MAX_CONCURRENT_VERIFICATIONS {
+                requests.push(tokio::spawn(verify_basic(
+                    header.clone(),
+                    auth.clone(),
+                    &PERMITS,
+                )));
+            }
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while PERMITS.available_permits() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let following = tokio::spawn(verify_basic(header, auth, &PERMITS));
+            for request in &requests {
+                request.abort();
+            }
+            for request in requests {
+                assert!(request.await.unwrap_err().is_cancelled());
+            }
+            // Queued blocking jobs still own the entire verification budget.
+            assert_eq!(PERMITS.available_permits(), 0);
+            release_tx.send(()).unwrap();
+            blocker.await.unwrap();
+            let permit = tokio::time::timeout(
+                Duration::from_secs(10),
+                PERMITS.acquire_many(u32::try_from(MAX_CONCURRENT_VERIFICATIONS).unwrap()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            drop(permit);
+            assert!(following.await.unwrap());
+            assert_eq!(PERMITS.available_permits(), MAX_CONCURRENT_VERIFICATIONS);
+        });
     }
 
     #[tokio::test]
@@ -657,7 +745,11 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    BasicAuth::from_parts(Some("admin".into()), Some(phc.clone())),
+                    BasicAuth::from_parts(
+                        Some("admin".into()),
+                        Some(phc.clone()),
+                        TEST_INSTALL_SECRET
+                    ),
                     Err(AuthConfigError::MalformedArgon2Hash)
                 ),
                 "must reject {phc}"
@@ -673,13 +765,16 @@ mod tests {
 
     #[test]
     fn from_parts_absent_when_a_var_is_missing() {
-        assert!(matches!(BasicAuth::from_parts(None, None), Ok(None)));
         assert!(matches!(
-            BasicAuth::from_parts(Some("slovn".into()), None),
+            BasicAuth::from_parts(None, None, TEST_INSTALL_SECRET),
             Ok(None)
         ));
         assert!(matches!(
-            BasicAuth::from_parts(None, Some("hunter2".into())),
+            BasicAuth::from_parts(Some("slovn".into()), None, TEST_INSTALL_SECRET),
+            Ok(None)
+        ));
+        assert!(matches!(
+            BasicAuth::from_parts(None, Some("hunter2".into()), TEST_INSTALL_SECRET),
             Ok(None)
         ));
     }
@@ -687,18 +782,30 @@ mod tests {
     #[test]
     fn from_parts_absent_when_a_var_is_empty() {
         assert!(matches!(
-            BasicAuth::from_parts(Some(String::new()), Some("hunter2".into())),
+            BasicAuth::from_parts(
+                Some(String::new()),
+                Some("hunter2".into()),
+                TEST_INSTALL_SECRET
+            ),
             Ok(None)
         ));
         assert!(matches!(
-            BasicAuth::from_parts(Some("slovn".into()), Some(String::new())),
+            BasicAuth::from_parts(
+                Some("slovn".into()),
+                Some(String::new()),
+                TEST_INSTALL_SECRET
+            ),
             Ok(None)
         ));
     }
 
     #[test]
     fn from_parts_configured_for_plaintext_password() {
-        let got = BasicAuth::from_parts(Some("slovn".into()), Some("hunter2".into()));
+        let got = BasicAuth::from_parts(
+            Some("slovn".into()),
+            Some("hunter2".into()),
+            TEST_INSTALL_SECRET,
+        );
         assert!(
             matches!(got, Ok(Some(_))),
             "plaintext creds must yield a usable BasicAuth"
@@ -708,7 +815,7 @@ mod tests {
     #[test]
     fn from_parts_configured_for_valid_argon2() {
         let phc = make_phc("hunter2");
-        let got = BasicAuth::from_parts(Some("slovn".into()), Some(phc));
+        let got = BasicAuth::from_parts(Some("slovn".into()), Some(phc), TEST_INSTALL_SECRET);
         assert!(
             matches!(got, Ok(Some(_))),
             "valid argon2 PHC must yield a usable BasicAuth"
@@ -717,7 +824,11 @@ mod tests {
 
     #[test]
     fn from_parts_malformed_argon2_is_error_not_none() {
-        let got = BasicAuth::from_parts(Some("slovn".into()), Some(MALFORMED_ARGON2.into()));
+        let got = BasicAuth::from_parts(
+            Some("slovn".into()),
+            Some(MALFORMED_ARGON2.into()),
+            TEST_INSTALL_SECRET,
+        );
         assert!(
             matches!(got, Err(AuthConfigError::MalformedArgon2Hash)),
             "malformed argon2 must be a hard error, not Ok(None)"
@@ -784,6 +895,75 @@ mod tests {
             auth.verify_session(&cookie, now),
             "freshly minted cookie must verify at the same instant"
         );
+    }
+
+    #[tokio::test]
+    async fn session_cookie_forged_from_phc_alone_is_rejected() {
+        let phc = make_phc("password");
+        let auth = auth_argon2("admin", &phc);
+        let exp = now_unix() + 86_400;
+        let mut hash = Sha256::new();
+        hash.update(b"vpnctl-session-v1\0");
+        hash.update(phc.as_bytes());
+        let mut mac = Hmac::<Sha256>::new_from_slice(&hash.finalize()).unwrap();
+        mac.update(format!("v1|{exp}|admin").as_bytes());
+        let forged = format!(
+            "{exp}.{}",
+            URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+        );
+        assert!(!auth.verify_session(&forged, now_unix()));
+        let mut req = Request::builder().body(axum::body::Body::empty()).unwrap();
+        req.headers_mut().insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{SESSION_COOKIE}={forged}")).unwrap(),
+        );
+        assert_eq!(
+            protected_router(auth).oneshot(req).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn session_cookie_survives_inventory_reopen_but_not_credential_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inv.db");
+        let inv = vpnctl_inventory::SqliteInventory::open(&path)
+            .await
+            .unwrap();
+        let install_secret = inv.get_or_create_admin_session_secret().await.unwrap();
+        let phc = make_phc("password");
+        let auth = BasicAuth::from_parts(Some("admin".into()), Some(phc.clone()), &install_secret)
+            .unwrap()
+            .unwrap();
+        let now = 1_700_000_000;
+        let cookie = auth.sign_session(now);
+        inv.close().await;
+        let reopened = vpnctl_inventory::SqliteInventory::open(&path)
+            .await
+            .unwrap();
+        let persisted = reopened.get_or_create_admin_session_secret().await.unwrap();
+        let restarted = BasicAuth::from_parts(Some("admin".into()), Some(phc.clone()), &persisted)
+            .unwrap()
+            .unwrap();
+        assert!(restarted.verify_session(&cookie, now));
+        let changed_password = BasicAuth::from_parts(
+            Some("admin".into()),
+            Some(make_phc("new-password")),
+            &persisted,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!changed_password.verify_session(&cookie, now));
+        let changed_user =
+            BasicAuth::from_parts(Some("other".into()), Some(phc.clone()), &persisted)
+                .unwrap()
+                .unwrap();
+        assert!(!changed_user.verify_session(&cookie, now));
+        let other_install =
+            BasicAuth::from_parts(Some("admin".into()), Some(phc), "other-install-secret")
+                .unwrap()
+                .unwrap();
+        assert!(!other_install.verify_session(&cookie, now));
     }
 
     #[test]
@@ -892,7 +1072,7 @@ mod tests {
 
     #[test]
     fn build_session_cookie_carries_required_attrs() {
-        let c = build_session_cookie("payload.sig");
+        let c = build_session_cookie("payload.sig", None);
         assert!(c.starts_with("vpnctl_admin_session=payload.sig"));
         assert!(c.contains("Path=/"));
         assert!(c.contains("HttpOnly"));
@@ -903,8 +1083,55 @@ mod tests {
         );
         assert!(
             !c.contains("Secure"),
-            "Secure flag must not be set while the admin UI is HTTP-only"
+            "Plain HTTP must remain usable without a Secure flag"
         );
+    }
+
+    #[test]
+    fn session_cookie_secure_requires_https_from_a_trusted_proxy() {
+        let peer: IpAddr = "192.0.2.1".parse().unwrap();
+        for (trusted, proto, secure) in [
+            (true, "https", true),
+            (true, "http", false),
+            (true, "https,http", false),
+            (false, "https", false),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-forwarded-proto", HeaderValue::from_str(proto).unwrap());
+            let trusted_peers = if trusted { vec![peer] } else { Vec::new() };
+            let forwarded = crate::real_ip::resolve_trusted_header_with(
+                &headers,
+                peer,
+                "x-forwarded-proto",
+                &trusted_peers,
+            );
+            let cookie = build_session_cookie("payload.sig", forwarded.as_deref());
+            assert_eq!(cookie.ends_with("; Secure"), secure, "{trusted}: {proto}");
+        }
+        assert!(!build_session_cookie("payload.sig", None).contains("Secure"));
+    }
+
+    #[tokio::test]
+    async fn login_ignores_https_forwarding_from_untrusted_or_missing_peer() {
+        for peer in [None, Some("192.0.2.1:12345".parse::<SocketAddr>().unwrap())] {
+            let mut req = req_with_basic("admin", "password");
+            if let Some(peer) = peer {
+                req.extensions_mut().insert(ConnectInfo(peer));
+            }
+            req.headers_mut()
+                .insert("x-forwarded-proto", HeaderValue::from_static("https"));
+            let resp = protected_router(auth_plain("admin", "password"))
+                .oneshot(req)
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert!(
+                !resp.headers()[header::SET_COOKIE]
+                    .to_str()
+                    .unwrap()
+                    .contains("Secure")
+            );
+        }
     }
 
     #[test]

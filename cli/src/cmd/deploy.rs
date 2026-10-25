@@ -90,11 +90,6 @@ pub(crate) async fn run(
     let retired = inv.retired_server_kernels(&sid).await?;
     vpnctl_kernels::reconcile_disabled_kernels(&registry, &server, &retired, &ssh).await?;
 
-    for k in &kernels {
-        println!("→ ensuring kernel '{}' is installed", k.id());
-        k.ensure_installed(&ssh).await?;
-    }
-
     let ctx = RenderCtx::new(&server, &secrets);
     let known_user_uuids = inv.known_user_uuids().await?;
 
@@ -113,12 +108,11 @@ pub(crate) async fn run(
             })
             .collect::<anyhow::Result<_>>()?;
         if protocols_for_k.is_empty() {
-            println!(
-                "→ skipping {} (no enabled_protocols this kernel can render)",
-                k.id()
-            );
+            println!("→ disabled {} (no enabled protocols)", k.id());
             continue;
         }
+        println!("→ ensuring kernel '{}' is installed", k.id());
+        k.ensure_installed(&ssh).await?;
         println!(
             "→ rendering config for {} ({} users × {} protocols)",
             k.id(),
@@ -151,7 +145,7 @@ pub(crate) async fn run(
         "config_bytes_total": total_config_bytes,
         "inputs_changed": false,
     });
-    let audit_action = if rendered_kernels.is_empty() {
+    let audit_action = if rendered_kernels.is_empty() && !server.enabled_protocols.is_empty() {
         inv.audit(
             "cli",
             "server.deploy.skipped",

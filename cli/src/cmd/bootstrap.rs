@@ -8,9 +8,10 @@
 //! 2. Append our public key (default `~/.ssh/id_ed25519.pub`) to the
 //!    target user's `~/.ssh/authorized_keys` if it isn't already there.
 //! 3. Capture the host's SHA256 fingerprint observed during connect.
-//! 4. Persist the server to inventory with the fingerprint baked in
+//! 4. Verify a new key-only connection pinned to that fingerprint.
+//! 5. Persist the server to inventory with the fingerprint baked in
 //!    (so subsequent `vpnctl deploy` enforces strict host-key check).
-//! 5. Write an audit_log entry.
+//! 6. Write an audit_log entry.
 //!
 //! After bootstrap, `vpnctl deploy <id>` works without any password —
 //! pure key auth + fingerprint-pinned host verification.
@@ -124,7 +125,7 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
         args.ssh_user, args.address, args.ssh_port
     );
     let ssh =
-        RusshTransportBuilder::new(args.address.clone(), args.ssh_user.clone(), priv_key_path)
+        RusshTransportBuilder::new(args.address.clone(), args.ssh_user.clone(), &priv_key_path)
             .port(args.ssh_port)
             .password(args.root_password.clone())
             .connect()
@@ -134,14 +135,7 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
         "→ installing pubkey into ~{}/.ssh/authorized_keys",
         args.ssh_user
     );
-    let install_cmd = format!(
-        "set -eu; \
-         mkdir -p ~/.ssh && chmod 700 ~/.ssh; \
-         touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys; \
-         grep -qxF {key_quoted} ~/.ssh/authorized_keys || echo {key_quoted} >> ~/.ssh/authorized_keys; \
-         echo OK",
-        key_quoted = shell_single_quote(&pubkey_one_line),
-    );
+    let install_cmd = authorized_key_push_cmd(&pubkey_one_line);
     let out = ssh.exec_unprivileged(&install_cmd).await?;
     let last_line = out.lines().last().map(str::trim).unwrap_or("");
     if last_line != "OK" {
@@ -155,6 +149,15 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
         .await
         .ok_or_else(|| anyhow::anyhow!("no host fingerprint observed (russh internal)"))?;
     println!("  host fingerprint: {observed_fp}");
+
+    println!("→ verifying deploy-key authentication");
+    let key_ssh = RusshTransportBuilder::new(&args.address, &args.ssh_user, priv_key_path)
+        .port(args.ssh_port)
+        .trusted_fingerprint(&observed_fp)
+        .connect()
+        .await
+        .map_err(|e| anyhow::anyhow!("deploy-key verification failed: {e}"))?;
+    key_ssh.exec_unprivileged("true").await?;
 
     let server = Server {
         id: ServerId(args.id.clone()),
@@ -195,3 +198,54 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
 }
 
 use vpnctl_core::shell::single_quote as shell_single_quote;
+
+// Mirror the wizard's idempotent append, including files without a final LF.
+fn authorized_key_push_cmd(pubkey: &str) -> String {
+    format!(
+        "set -eu; \
+         mkdir -p ~/.ssh && chmod 700 ~/.ssh; \
+         touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys; \
+         if ! grep -qxF {key_quoted} ~/.ssh/authorized_keys; then \
+         if [ -s ~/.ssh/authorized_keys ] && [ -n \"$(tail -c 1 ~/.ssh/authorized_keys)\" ]; then \
+         echo >> ~/.ssh/authorized_keys; fi; \
+         printf '%s\\n' {key_quoted} >> ~/.ssh/authorized_keys; fi; \
+         echo OK",
+        key_quoted = shell_single_quote(pubkey),
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::authorized_key_push_cmd;
+
+    #[test]
+    fn key_push_preserves_unterminated_keys_and_is_idempotent() {
+        for original in ["", "ssh-ed25519 AAAAexisting", "ssh-ed25519 AAAAexisting\n"] {
+            let dir = tempfile::tempdir().unwrap();
+            let ssh = dir.path().join(".ssh");
+            std::fs::create_dir(&ssh).unwrap();
+            let path = ssh.join("authorized_keys");
+            std::fs::write(&path, original).unwrap();
+            let key = "ssh-ed25519 AAAAdeploy operator's key";
+            for _ in 0..2 {
+                let out = std::process::Command::new("bash")
+                    .args(["-c", &authorized_key_push_cmd(key)])
+                    .env("HOME", dir.path())
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "{out:?}");
+                assert_eq!(out.stdout, b"OK\n");
+            }
+            let prefix = if original.is_empty() {
+                ""
+            } else {
+                "ssh-ed25519 AAAAexisting\n"
+            };
+            assert_eq!(
+                std::fs::read_to_string(path).unwrap(),
+                format!("{prefix}{key}\n")
+            );
+        }
+    }
+}

@@ -1,6 +1,32 @@
 use super::*;
 
 impl SqliteInventory {
+    /// Load persistent signing material, creating and auditing it only once.
+    pub async fn get_or_create_admin_session_secret(&self) -> Result<String> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let existing: Option<String> =
+            sqlx::query_scalar("SELECT session_secret FROM admin_auth_settings WHERE id = 1")
+                .fetch_optional(&mut *tx)
+                .await?;
+        if let Some(secret) = existing {
+            tx.commit().await?;
+            return Ok(secret);
+        }
+        let secret = vpnctl_crypto::gen_password(32).map_err(SqliteInventoryError::CryptoIo)?;
+        sqlx::query("INSERT INTO admin_auth_settings (id, session_secret) VALUES (1, ?1)")
+            .bind(&secret)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO audit_log (actor, action, target, payload)
+             VALUES ('system', 'admin.session_secret.create', 'admin', '{}')",
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(secret)
+    }
+
     pub async fn get_display_timezone(&self) -> Result<String> {
         let row =
             sqlx::query_as::<_, (String,)>("SELECT timezone FROM display_settings WHERE id = 1")
@@ -133,5 +159,85 @@ impl SqliteInventory {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn admin_session_secret_is_persistent_unique_and_audited_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inv.db");
+        let inv = SqliteInventory::open(&path).await.unwrap();
+        let other_handle = SqliteInventory::open(&path).await.unwrap();
+        let (first, second) = tokio::join!(
+            inv.get_or_create_admin_session_secret(),
+            other_handle.get_or_create_admin_session_secret(),
+        );
+        let secret = first.unwrap();
+        assert_eq!(secret.len(), 43);
+        assert!(
+            secret
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        );
+        assert_eq!(secret, second.unwrap());
+        inv.close().await;
+        other_handle.close().await;
+        let reopened = SqliteInventory::open(&path).await.unwrap();
+        assert_eq!(
+            secret,
+            reopened.get_or_create_admin_session_secret().await.unwrap()
+        );
+        let audit = reopened.recent_audit(10).await.unwrap();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].action, "admin.session_secret.create");
+        assert_eq!(audit[0].payload, Some(serde_json::json!({})));
+        assert!(!format!("{reopened:?}").contains(&secret));
+        let other = SqliteInventory::open(&dir.path().join("other.db"))
+            .await
+            .unwrap();
+        assert_ne!(
+            secret,
+            other.get_or_create_admin_session_secret().await.unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_session_secret_creation_rolls_back_if_audit_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER reject_session_secret_audit BEFORE INSERT ON audit_log
+             WHEN NEW.action = 'admin.session_secret.create'
+             BEGIN SELECT RAISE(ABORT, 'test audit failure'); END",
+        )
+        .execute(&inv.pool)
+        .await
+        .unwrap();
+        assert!(inv.get_or_create_admin_session_secret().await.is_err());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_auth_settings")
+            .fetch_one(&inv.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        assert!(inv.recent_audit(10).await.unwrap().is_empty());
+        sqlx::query("DROP TRIGGER reject_session_secret_audit")
+            .execute(&inv.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            inv.get_or_create_admin_session_secret()
+                .await
+                .unwrap()
+                .len(),
+            43
+        );
+        assert_eq!(inv.recent_audit(10).await.unwrap().len(), 1);
     }
 }

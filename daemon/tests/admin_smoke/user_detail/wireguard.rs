@@ -72,6 +72,7 @@ async fn admin_user_detail_wireguard_section_shows_pubkey_and_rotate_button() {
         .unwrap()
         .wireguard_private
         .unwrap();
+    assert!(vpnctl_crypto::wireguard_keypair_matches(&priv_, &pk));
     assert!(
         !html.contains(priv_.as_str()),
         "PRIVATE LEAK: detail HTML contains the raw private bytes"
@@ -955,5 +956,49 @@ async fn admin_wireguard_download_visibility_refusal_and_restore_byte_equal() {
             };
             assert_eq!(body.as_ref(), expected.as_bytes(), "{kernel} {gate}");
         }
+    }
+}
+
+#[tokio::test]
+async fn admin_user_wireguard_conf_download_refuses_incomplete_keys_without_mutation() {
+    for (public, private) in [
+        (None, None),
+        (Some("fixture-public-key"), None),
+        (None, Some("fixture-private-key")),
+        (Some("fixture-public-key"), Some("")),
+        (Some(""), Some("fixture-private-key")),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let s = wireguard_download_state(&dir, "sing-box").await;
+        let mut user = mk_user("incomplete", false);
+        user.wireguard_pubkey = public.map(str::to_owned);
+        user.wireguard_private = private.map(str::to_owned);
+        s.inv.add_user(&user).await.unwrap();
+        s.inv
+            .grant(&user.id, &ServerId("dlsrv".into()))
+            .await
+            .unwrap();
+        let before = s.inv.get_user(&user.id).await.unwrap().unwrap();
+        let audit = s.inv.recent_audit(100).await.unwrap().len();
+        let resp = router(s.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/users/incomplete/wireguard/conf/dlsrv")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert!(!resp.headers().contains_key("content-disposition"));
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = std::str::from_utf8(&body).unwrap();
+        assert!(text.contains("Generate/Rotate WireGuard keypair button"));
+        assert!(text.contains("Delivery tab"));
+        assert!(!text.contains("PASTE YOUR PRIVATE KEY"));
+        let after = s.inv.get_user(&user.id).await.unwrap().unwrap();
+        assert_eq!(after.wireguard_pubkey, before.wireguard_pubkey);
+        assert_eq!(after.wireguard_private, before.wireguard_private);
+        assert_eq!(s.inv.recent_audit(100).await.unwrap().len(), audit);
     }
 }

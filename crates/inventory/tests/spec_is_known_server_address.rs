@@ -12,7 +12,7 @@ async fn is_known_server_address_matches_registered_address_only() {
         .unwrap();
     inv.add_server(&Server {
         id: ServerId("de".into()),
-        address: "104.194.156.93".into(),
+        address: "198.51.100.93".into(),
         ssh_port: 22,
         ssh_user: "root".into(),
         kernels: vec![KernelId("sing-box".into())],
@@ -25,7 +25,7 @@ async fn is_known_server_address_matches_registered_address_only() {
     .await
     .unwrap();
 
-    assert!(inv.is_known_server_address("104.194.156.93").await.unwrap());
+    assert!(inv.is_known_server_address("198.51.100.93").await.unwrap());
     assert!(!inv.is_known_server_address("203.0.113.50").await.unwrap());
     assert!(!inv.is_known_server_address("").await.unwrap());
 }

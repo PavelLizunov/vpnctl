@@ -21,7 +21,7 @@ EnvironmentFile=-/etc/vpnctl/vpnctld.env
 ExecStart=/usr/local/bin/vpnctl-backup.sh
 # Hardening: minimal capabilities. The script runs sqlite3 + tar + zstd
 # + age + scp; none need elevated privileges if the inv.db is readable
-# by `user` (which it is — see /var/lib/vpnctl perms in CLAUDE.md).
+# by `user` (the service user owns /var/lib/vpnctl).
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only

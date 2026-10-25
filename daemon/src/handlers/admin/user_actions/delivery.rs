@@ -1,6 +1,8 @@
 use crate::AppState;
 use crate::handlers::admin::audit::sanitize_header_filename;
-use crate::handlers::admin::helpers::{bad_request, internal_error, not_found, user_not_found};
+use crate::handlers::admin::helpers::{
+    bad_request, error_resp, internal_error, not_found, user_not_found,
+};
 use axum::extract::{Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -64,6 +66,14 @@ pub(crate) async fn user_wireguard_conf_download(
             );
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+    if user.wireguard_private.as_deref().is_none_or(str::is_empty)
+        || user.wireguard_pubkey.as_deref().is_none_or(str::is_empty)
+    {
+        return error_resp(
+            StatusCode::CONFLICT,
+            "WireGuard keypair is incomplete. Use the Generate/Rotate WireGuard keypair button on the user's Delivery tab, then deploy the server before downloading a .conf.",
+        );
     }
     let secrets = match state.inv.list_server_secrets(&sid).await {
         Ok(m) => m,

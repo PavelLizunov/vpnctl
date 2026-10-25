@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -530,7 +532,7 @@ fn run_child_with_timeout(
     timeout: Duration,
     label: &str,
 ) -> Result<Vec<u8>> {
-    use std::io::{Read, Write};
+    use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::process::CommandExt;
 
@@ -560,22 +562,15 @@ fn run_child_with_timeout(
         let _ = child.wait();
     };
 
-    let mut out_pipe = child.stdout.take();
-    let mut err_pipe = child.stderr.take();
-    let out_reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = out_pipe.as_mut() {
-            let _ = p.read_to_end(&mut buf);
-        }
-        buf
-    });
-    let err_reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = err_pipe.as_mut() {
-            let _ = p.read_to_end(&mut buf);
-        }
-        buf
-    });
+    let out_pipe = child.stdout.take();
+    let err_pipe = child.stderr.take();
+    let output_exceeded = Arc::new(AtomicBool::new(false));
+    let out_exceeded = Arc::clone(&output_exceeded);
+    let out_reader =
+        std::thread::spawn(move || read_capped(out_pipe, crate::MAX_STDOUT_BYTES, &out_exceeded));
+    let err_exceeded = Arc::clone(&output_exceeded);
+    let err_reader =
+        std::thread::spawn(move || read_capped(err_pipe, crate::MAX_STDERR_BYTES, &err_exceeded));
 
     let mut in_writer = if let (Some(bytes), Some(mut sin)) = (stdin_bytes, child.stdin.take()) {
         Some(std::thread::spawn(move || {
@@ -588,6 +583,15 @@ fn run_child_with_timeout(
     };
 
     let status = loop {
+        if output_exceeded.load(Ordering::Relaxed) {
+            kill_and_reap(&mut child);
+            let _ = out_reader.join();
+            let _ = err_reader.join();
+            if let Some(w) = in_writer {
+                let _ = w.join();
+            }
+            return Err(output_limit_error(label));
+        }
         if Instant::now() >= deadline {
             kill_and_reap(&mut child);
             let _ = out_reader.join();
@@ -601,8 +605,10 @@ fn run_child_with_timeout(
         }
 
         match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
+            Ok(Some(status)) if out_reader.is_finished() && err_reader.is_finished() => {
+                break status;
+            }
+            Ok(Some(_)) | Ok(None) => {
                 if let Some(ref w) = in_writer {
                     if w.is_finished() {
                         if let Some(w) = in_writer.take() {
@@ -645,6 +651,14 @@ fn run_child_with_timeout(
     let stdout = out_reader.join().unwrap_or_default();
     let stderr = err_reader.join().unwrap_or_default();
 
+    if output_exceeded.load(Ordering::Relaxed) {
+        kill_and_reap(&mut child);
+        if let Some(w) = in_writer {
+            let _ = w.join();
+        }
+        return Err(output_limit_error(label));
+    }
+
     if let Some(w) = in_writer {
         match w.join() {
             Ok(Err(e)) => {
@@ -678,6 +692,28 @@ fn run_child_with_timeout(
         )));
     }
     Ok(stdout)
+}
+
+fn read_capped(pipe: Option<impl std::io::Read>, limit: usize, exceeded: &AtomicBool) -> Vec<u8> {
+    use std::io::Read;
+
+    let mut buf = Vec::new();
+    if let Some(pipe) = pipe {
+        let _ = pipe.take((limit + 1) as u64).read_to_end(&mut buf);
+        if buf.len() > limit {
+            exceeded.store(true, Ordering::Relaxed);
+            buf.truncate(limit);
+        }
+    }
+    buf
+}
+
+fn output_limit_error(label: &str) -> CoreError {
+    CoreError::Transport(format!(
+        "ssh {label} output limit exceeded (stdout: {} bytes, stderr: {} bytes; remote command killed)",
+        crate::MAX_STDOUT_BYTES,
+        crate::MAX_STDERR_BYTES,
+    ))
 }
 
 #[async_trait]
@@ -860,6 +896,60 @@ pub fn read_public_key(private_path: &Path) -> std::io::Result<String> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capped_reader_preserves_boundary_bytes_and_stops_at_overflow() {
+        for data in [b"abcd".as_slice(), b"abcde".as_slice()] {
+            let exceeded = AtomicBool::new(false);
+            let output = read_capped(Some(std::io::Cursor::new(data)), 4, &exceeded);
+            assert_eq!(output, b"abcd");
+            assert_eq!(exceeded.load(Ordering::Relaxed), data.len() > 4);
+        }
+    }
+
+    #[test]
+    fn subprocess_rejects_excess_output_and_kills_child() {
+        for (stream, limit) in [
+            ("stdout", crate::MAX_STDOUT_BYTES),
+            ("stderr", crate::MAX_STDERR_BYTES),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let pid_path = dir.path().join("pid");
+            let redirect = if stream == "stderr" { " >&2" } else { "" };
+            let mut cmd = Command::new("bash");
+            cmd.args([
+                "-c",
+                &format!(
+                    "printf '%s' \"$$\" > \"$1\"; head -c {} /dev/zero{redirect}; sleep 30",
+                    limit + 1
+                ),
+                "output-limit-test",
+            ])
+            .arg(&pid_path);
+            let error = run_child_with_timeout(cmd, None, Duration::from_secs(10), "test")
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("output limit exceeded"), "{stream}: {error}");
+            assert!(error.len() < 256);
+            let pid = std::fs::read_to_string(pid_path).unwrap();
+            assert!(
+                !Command::new("kill")
+                    .args(["-0", &pid])
+                    .stderr(Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+    }
+
+    #[test]
+    fn subprocess_preserves_binary_output_below_limit() {
+        let mut cmd = Command::new("bash");
+        cmd.args(["-c", "printf '\\000\\377hello'; printf diagnostic >&2"]);
+        let bytes = run_child_with_timeout(cmd, None, Duration::from_secs(5), "test").unwrap();
+        assert_eq!(bytes, b"\0\xffhello");
+    }
 
     #[tokio::test]
     async fn ensure_deploy_key_restores_missing_public_half_without_changing_private_key() {

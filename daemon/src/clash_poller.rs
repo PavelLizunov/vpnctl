@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn is_real_client_ip_excludes_known_server_hops_control_and_private() {
         let known = [
-            "104.194.156.93".parse().unwrap(),
+            "198.51.100.93".parse().unwrap(),
             "2001:db8::1".parse().unwrap(),
         ]
         .into_iter()
@@ -375,7 +375,7 @@ mod tests {
         assert!(is_real_client_ip("8.8.8.8", &known));
 
         assert!(
-            !is_real_client_ip("104.194.156.93", &known),
+            !is_real_client_ip("198.51.100.93", &known),
             "a registered server address must not count as a concurrent client"
         );
         assert!(!is_real_client_ip("2001:0db8:0:0::1", &known));

@@ -430,12 +430,6 @@ async fn redeploy_pipeline(
             send_step!("apply", "✗ {} — kernel not registered.", kid.0);
             continue;
         };
-        send_step!("install", "{}: ensure_installed (apt + systemd)…", kid.0);
-        if let Err(e) = kernel.ensure_installed(&ssh).await {
-            ssh_errors.push(format!("{}: ensure_installed failed: {e}", kid.0));
-            send_step!("install", "✗ {} install failed: {e}", kid.0);
-            continue;
-        }
         let supported = kernel.supported_protocols();
         let protocols: Vec<&dyn vpnctl_core::Protocol> = server
             .enabled_protocols
@@ -443,6 +437,16 @@ async fn redeploy_pipeline(
             .filter(|p| supported.contains(p))
             .filter_map(|p| registry.protocol(p))
             .collect();
+        if protocols.is_empty() {
+            send_step!("apply", "{}: no enabled protocols; skipping config.", kid.0);
+            continue;
+        }
+        send_step!("install", "{}: ensure_installed (apt + systemd)…", kid.0);
+        if let Err(e) = kernel.ensure_installed(&ssh).await {
+            ssh_errors.push(format!("{}: ensure_installed failed: {e}", kid.0));
+            send_step!("install", "✗ {} install failed: {e}", kid.0);
+            continue;
+        }
         send_step!(
             "render",
             "{}: rendering config for {} protocol(s)…",

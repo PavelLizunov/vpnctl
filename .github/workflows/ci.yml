@@ -56,9 +56,11 @@ jobs:
       - name: backup script regression tests
         run: |
           sudo apt-get update
-          sudo apt-get install -y zstd
+          sudo apt-get install -y zstd sqlite3
           bash -n scripts/vpnctl-backup.sh scripts/tests/test_vpnctl_backup.sh
           bash scripts/tests/test_vpnctl_backup.sh
+      - name: script and docs regression tests
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
       - run: cargo test --workspace --all-targets
 
   deny:

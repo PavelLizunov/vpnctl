@@ -84,7 +84,7 @@ esac
 cat >&2 <<GREEN
 
 🤖 vpnctl git-gate green (tree: $gate_root).
-   Reminders (CLAUDE.md → Workflow rules):
+   Reminders (AGENTS.md → Change review workflow):
   1. review-agent on the diff?              (Agent / general-purpose)
   2. test-writer-agent for new public APIs? (spec only, no impl)
   3. After push: gh run watch <id> --exit-status to verify CI.

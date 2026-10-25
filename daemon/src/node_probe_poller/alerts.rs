@@ -425,13 +425,16 @@ pub(crate) async fn server_subject(inv: &SqliteInventory, sid: &vpnctl_core::Ser
     crate::handlers::vpn_router::server_display_label(&sid.0, custom.as_deref())
 }
 
-pub(crate) async fn send_digest(inv: &SqliteInventory) {
-    let loc = match inv.get_telegram_config().await {
-        Ok(Some(cfg)) => crate::i18n::Locale::from_lang_code(cfg.language.as_deref()),
-        _ => crate::i18n::Locale::En,
+pub(crate) async fn send_digest(inv: &SqliteInventory) -> anyhow::Result<bool> {
+    let Some(sink) = build_alert_sink(inv).await? else {
+        return Ok(false);
     };
-    let open = inv.recent_alerts(50, false).await.unwrap_or_default();
-    let servers = inv.list_servers().await.map(|s| s.len()).unwrap_or(0);
+    let loc = match inv.get_telegram_config().await? {
+        Some(cfg) => crate::i18n::Locale::from_lang_code(cfg.language.as_deref()),
+        None => crate::i18n::Locale::En,
+    };
+    let open = inv.recent_alerts(50, false).await?;
+    let servers = inv.list_servers().await?.len();
     let mut titles = Vec::with_capacity(open.len());
     for a in &open {
         let subject = if let Some(sid) = &a.server_id {
@@ -451,29 +454,17 @@ pub(crate) async fn send_digest(inv: &SqliteInventory) {
     }
     let time_local =
         crate::handlers::admin::format_local_with_pattern(chrono::Utc::now(), "%d.%m %H:%M");
-    let text = crate::alert_text::render_digest_html(loc, servers, &titles, &time_local);
-
-    let sink = match build_alert_sink(inv).await {
-        Ok(Some(s)) => s,
-        Ok(None) => return,
-        Err(e) => {
-            tracing::warn!(
-                target = "vpnctld::alert_sink",
-                error = %e,
-                "build_alert_sink failed; skipping digest"
-            );
-            return;
-        }
-    };
-    if let Err(e) = sink.send_text("digest", "info", &text, true).await {
-        tracing::warn!(target = "vpnctld::alert_sink", error = %e, "digest push failed");
-    } else {
-        tracing::info!(
-            target = "vpnctld::alert_sink",
-            open = open.len(),
-            "sent fleet digest"
-        );
+    let messages =
+        crate::alert_text::digest::render_digest_messages(loc, servers, &titles, &time_local);
+    for text in &messages {
+        sink.send_text("digest", "info", text, true).await?;
     }
+    tracing::info!(
+        target = "vpnctld::alert_sink",
+        open = open.len(),
+        "sent fleet digest"
+    );
+    Ok(true)
 }
 
 pub async fn build_alert_sink(

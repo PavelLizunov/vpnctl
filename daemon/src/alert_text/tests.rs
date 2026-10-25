@@ -518,3 +518,98 @@ fn protocol_assurance_alerts_name_failure_layer_and_recovery() {
     assert!(recovered.body.contains("transfer"));
     assert!(recovered.action.is_none());
 }
+
+#[test]
+fn digest_messages_preserve_short_digest_bytes() {
+    for loc in [Locale::En, Locale::Ru] {
+        for titles in [vec![], vec!["🔴 sing-box down — a&lt;b&gt;&amp;c".into()]] {
+            let messages = super::digest::render_digest_messages(loc, 3, &titles, "now");
+            assert_eq!(messages, vec![render_digest_html(loc, 3, &titles, "now")]);
+        }
+    }
+}
+
+#[test]
+fn digest_messages_split_fifty_long_server_titles_without_losing_text() {
+    for loc in [Locale::En, Locale::Ru] {
+        let titles: Vec<_> = (0..50)
+            .map(|n| {
+                let alert = render_alert(
+                    "server.singbox.down",
+                    "critical",
+                    &format!("{n:02}{}", "я".repeat(62)),
+                    &json!({}),
+                    loc,
+                );
+                format!("{} {}", alert.icon, alert.title)
+            })
+            .collect();
+        let messages = super::digest::render_digest_messages(loc, 50, &titles, "now");
+        assert!(messages.len() > 1);
+        for message in &messages {
+            assert!(super::to_plain(message).encode_utf16().count() <= 4096);
+            assert_eq!(
+                message.matches("<b>").count(),
+                message.matches("</b>").count()
+            );
+        }
+        let plain: String = messages.iter().map(|m| super::to_plain(m)).collect();
+        assert_eq!(
+            plain,
+            super::to_plain(&render_digest_html(loc, 50, &titles, "now"))
+        );
+    }
+}
+
+#[test]
+fn digest_messages_balance_nested_tags_and_preserve_entities_at_boundaries() {
+    let titles = vec![format!(
+        "<b><code>{}</code></b>",
+        "😀&amp;&lt;&gt;".repeat(2000)
+    )];
+    let messages = super::digest::render_digest_messages(Locale::En, 1, &titles, "now");
+    assert!(messages.len() > 2);
+    for message in &messages {
+        assert!(super::to_plain(message).encode_utf16().count() <= 4096);
+        let mut tags = Vec::new();
+        let mut rest = message.as_str();
+        while let Some(start) = rest.find('<') {
+            rest = &rest[start + 1..];
+            let (tag, tail) = rest.split_once('>').unwrap();
+            if let Some(closing) = tag.strip_prefix('/') {
+                assert_eq!(tags.pop(), Some(closing));
+            } else {
+                tags.push(tag);
+            }
+            rest = tail;
+        }
+        assert!(tags.is_empty());
+        let mut rest = message.as_str();
+        while let Some(start) = rest.find('&') {
+            rest = &rest[start..];
+            let entity = ["&amp;", "&lt;", "&gt;"]
+                .into_iter()
+                .find(|entity| rest.starts_with(*entity))
+                .unwrap();
+            rest = &rest[entity.len()..];
+        }
+    }
+    let plain: String = messages.iter().map(|m| super::to_plain(m)).collect();
+    assert_eq!(
+        plain,
+        super::to_plain(&render_digest_html(Locale::En, 1, &titles, "now"))
+    );
+}
+
+#[test]
+fn digest_messages_split_only_after_the_telegram_limit() {
+    let overhead = super::to_plain(&render_digest_html(Locale::En, 1, &[String::new()], "now"))
+        .encode_utf16()
+        .count();
+    for (extra, count) in [(0, 1), (1, 2)] {
+        let titles = vec!["x".repeat(4096 - overhead + extra)];
+        let messages = super::digest::render_digest_messages(Locale::En, 1, &titles, "now");
+        assert_eq!(messages.len(), count);
+        assert_eq!(super::to_plain(&messages[0]).encode_utf16().count(), 4096);
+    }
+}

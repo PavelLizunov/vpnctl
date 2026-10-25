@@ -10,7 +10,6 @@ import hashlib
 import json
 import os
 import re
-import signal
 import socket
 import stat
 import subprocess
@@ -104,11 +103,11 @@ def stop_process(process):
     if process.poll() is not None:
         return
     try:
-        os.killpg(process.pid, signal.SIGTERM)
+        process.terminate()
         process.wait(timeout=2)
     except (ProcessLookupError, subprocess.TimeoutExpired):
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            process.kill()
         except ProcessLookupError:
             pass
         try:
@@ -169,7 +168,6 @@ def main():
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                start_new_session=True,
                 close_fds=True,
                 env=SAFE_ENV,
             )

@@ -42,8 +42,8 @@ Total **first-time** cost per protocol if all layers run: **~45 min of Claude wa
 
 ## Layer 5 — staging server contract (`84.19.3.104:22`)
 
-This is where the "lessons from the first real staging deploy"
-(CLAUDE.md, Lessons table) get caught. Hardware as of 2026-05-15:
+This is where the lessons from the first real staging deploy
+(curl missing, log-file perms, systemctl racing) get caught. Hardware as of 2026-05-15:
 
 | | |
 |---|---|
@@ -135,8 +135,8 @@ Tick each item, in order. Skipping = leaving a bug class uncovered.
 - [ ] Layer 2: in-module unit tests for any pure helper (validators,
   encoders, parsers). At least 3 tests per helper.
 - [ ] Layer 3: `test-writer-agent` writes `tests/spec_<protocol>.rs`
-  with the spec-only prompt. The prompt template is in `CLAUDE.md`
-  under "test-writer-agent prompt template". Coverage target:
+  with the spec-only prompt. The prompt template is in
+  `docs/specs/agent-workflow.md`. Coverage target:
   * `<proto>_id_is_<name>` — pin the ProtocolId string
   * `<proto>_server_inbound_default_<key>` — every default value
   * `<proto>_server_inbound_override_<key>_via_secret` — each secret key
@@ -145,13 +145,13 @@ Tick each item, in order. Skipping = leaving a bug class uncovered.
   * `<proto>_share_link_byte_stable_across_runs` — pin against HashMap-iteration order bugs
   * `<proto>_share_link_special_chars_get_percent_encoded` — pin against unescaped URL injection
 - [ ] Layer 4: `review-agent` on `git diff <base>..HEAD` with the
-  template in `CLAUDE.md`. Fix `critical` + `important` inline.
+  template in `docs/specs/agent-workflow.md`. Fix `critical` + `important` inline.
 
 ### D. Live staging (this is the lesson-amplifier)
 
 Run all of these on `84.19.3.104`. Don't skip even when "trivial" —
-the lessons in `CLAUDE.md`'s "Lessons from the first real staging
-deploy" (curl missing, log-file perms, systemctl racing) ALL surfaced
+the lessons from the first real staging
+deploy (curl missing, log-file perms, systemctl racing) ALL surfaced
 only at this layer.
 
 - [ ] **Generate the secrets** the protocol needs on the staging box
@@ -203,7 +203,7 @@ only at this layer.
   commits (root cause / what ships / tests / live-staging /
   what's NOT in this commit / co-author trailer).
 - [ ] `gh run watch <id> --exit-status` to confirm CI is green
-  before moving on (`CLAUDE.md` workflow rule #4).
+  before moving on (AGENTS.md, change review workflow).
 
 ---
 
@@ -276,8 +276,8 @@ Use these to size autonomous-mode burst plans.
 
 | Anti-pattern | What it bought us | When it surfaced |
 |---|---|---|
-| Skipping live staging for "trivial" config changes | `sing-box: open /var/log/sing-box.log: permission denied` on first real deploy | Lessons table in CLAUDE.md |
-| `sing-box check` returns 0 but service silently exits | Deploy "succeeds" while sing-box crash-loops; 10 min of "why isn't it working" | Same lessons table; fix is the 8s `is-active` poll |
+| Skipping live staging for "trivial" config changes | `sing-box: open /var/log/sing-box.log: permission denied` on first real deploy | First real staging deploy |
+| `sing-box check` returns 0 but service silently exits | Deploy "succeeds" while sing-box crash-loops; 10 min of "why isn't it working" | First real staging deploy; fix is the 8s `is-active` poll |
 | Trusting `cargo test` alone for a new public API | review-agent caught a per-user double-count bug in `clash_poller` that all 7 in-module tests missed | `ebb2d7f` commit message |
 | `HashMap` iteration for share-link assembly | Hypothetical (caught by spec test before shipping): `BTreeMap` or sort-then-emit is mandatory for byte-stable links | `wg_share_link_byte_stable_across_runs` test |
 | Including `:` in SS-2022 password without splitting method-encode + password-encode | First-run failure in agent-written spec test for Shadowsocks-2022 | `7708716` commit message |

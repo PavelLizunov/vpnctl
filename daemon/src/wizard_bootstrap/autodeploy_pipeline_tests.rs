@@ -77,7 +77,7 @@ impl Kernel for BarrierKernel {
 }
 
 #[tokio::test]
-async fn revoke_and_last_protocol_removal_during_remote_apply_converge_via_canonical_audit() {
+async fn revoke_during_remote_apply_converges_via_canonical_audit() {
     let dir = tempfile::tempdir().unwrap();
     let inv = SqliteInventory::open(&dir.path().join("inv.db"))
         .await
@@ -148,17 +148,6 @@ async fn revoke_and_last_protocol_removal_during_remote_apply_converge_via_canon
         "manual/CLI lock must remain exclusive during remote apply"
     );
     inv.revoke(&user.id, &server.id).await.unwrap();
-    inv.remove_server_protocol(&server.id, &TestProtocol.id())
-        .await
-        .unwrap();
-    inv.audit(
-        "admin",
-        "server.protocol.disable",
-        Some(&server.id.0),
-        Some(&serde_json::json!({"protocol": TestProtocol.id().0})),
-    )
-    .await
-    .unwrap();
     let (_, duplicate) = coordinator.request(server.id.0.clone());
     assert!(duplicate.is_none());
     released.wait().await;
@@ -174,7 +163,7 @@ async fn revoke_and_last_protocol_removal_during_remote_apply_converge_via_canon
         );
         assert_eq!(
             applied[1],
-            serde_json::json!({ "users": [], "protocols": [] })
+            serde_json::json!({ "users": [], "protocols": ["coalescer-test"] })
         );
     }
     let audit = inv.audit_for_server(&server.id.0, 100).await.unwrap();
@@ -193,14 +182,12 @@ async fn revoke_and_last_protocol_removal_during_remote_apply_converge_via_canon
         1
     );
     assert!(!inv.server_pending_deploy(&server.id).await.unwrap());
-    inv.add_server_protocol(&server.id, &TestProtocol.id())
-        .await
-        .unwrap();
+    inv.grant(&user.id, &server.id).await.unwrap();
     inv.audit(
         "admin",
-        "server.protocol.enable",
-        Some(&server.id.0),
-        Some(&serde_json::json!({"protocol": TestProtocol.id().0})),
+        "user.grant",
+        Some(&user.id.0),
+        Some(&serde_json::json!({"server": server.id.0})),
     )
     .await
     .unwrap();

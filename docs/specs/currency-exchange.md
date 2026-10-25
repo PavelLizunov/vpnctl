@@ -182,7 +182,8 @@ falling back to open.er-api.com; each HTTP request has a 20-second timeout.
 Failed refreshes preserve cached rates. Manual rate overrides in settings retain
 precedence over fetched table rows. The web refresh button invokes the same
 refresh function. This section owns the current ingestion contract;
-[exchange-rate-ingestion.md](exchange-rate-ingestion.md) is a historical proposal.
+the superseded pre-implementation proposal is in git history
+(`git show f7745e8:docs/specs/exchange-rate-ingestion.md`).
 
 ## 3. Verification Checklist (Definition of Done)
 

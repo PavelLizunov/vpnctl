@@ -347,3 +347,71 @@ async fn protocol_settings_posts_require_csrf_and_existing_enabled_server() {
     );
     assert_eq!(s.inv.recent_audit(1).await.unwrap()[0].id, latest);
 }
+
+#[tokio::test]
+async fn naive_and_vlessws_equal_saves_do_not_audit_or_mark_pending() {
+    for (protocol, suffix, action, body) in [
+        (
+            "naive",
+            "naive-config",
+            "server.naive.set",
+            "domain=cdn.example.com&acme_email=admin%40example.com",
+        ),
+        (
+            "vless-ws",
+            "vlessws-config",
+            "server.vlessws.set",
+            "domain=cdn.example.com&acme_email=admin%40example.com&listen_port=8443",
+        ),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let s = state(&dir).await;
+        let mut server = naive_server("s0");
+        server.enabled_protocols = vec![ProtocolId(protocol.into())];
+        if protocol == "vless-ws" {
+            server
+                .kernels
+                .push(vpnctl_core::KernelId("sing-box".into()));
+        }
+        s.inv.add_server(&server).await.unwrap();
+        let before = s.inv.recent_audit(100).await.unwrap().len();
+        assert_eq!(post(&s, suffix, body).await.status(), StatusCode::SEE_OTHER);
+        let audit = s.inv.recent_audit(100).await.unwrap();
+        assert_eq!(audit.len(), before + 1);
+        assert_eq!(audit[0].action, action);
+        assert_eq!(audit[0].actor, "admin");
+        assert_eq!(audit[0].target.as_deref(), Some("s0"));
+        assert!(s.inv.server_pending_deploy(&server.id).await.unwrap());
+
+        s.inv
+            .audit("test", "server.deploy", Some("s0"), None)
+            .await
+            .unwrap();
+        let latest = s.inv.recent_audit(1).await.unwrap()[0].id;
+        let secrets = s.inv.list_server_secrets(&server.id).await.unwrap();
+        assert_eq!(post(&s, suffix, body).await.status(), StatusCode::SEE_OTHER);
+        assert_eq!(s.inv.recent_audit(1).await.unwrap()[0].id, latest);
+        assert_eq!(
+            s.inv.list_server_secrets(&server.id).await.unwrap(),
+            secrets
+        );
+        assert!(!s.inv.server_pending_deploy(&server.id).await.unwrap());
+
+        let changed = body.replace("cdn.example.com", "other.example.com");
+        assert_eq!(
+            post(&s, suffix, &changed).await.status(),
+            StatusCode::SEE_OTHER
+        );
+        assert!(s.inv.server_pending_deploy(&server.id).await.unwrap());
+        let audit = s.inv.recent_audit(1).await.unwrap();
+        assert_eq!(audit[0].action, action);
+        assert_eq!(
+            audit[0].payload,
+            Some(serde_json::json!({"keys": [if protocol == "naive" {
+                "naive.domain"
+            } else {
+                "vlessws.domain"
+            }]}))
+        );
+    }
+}

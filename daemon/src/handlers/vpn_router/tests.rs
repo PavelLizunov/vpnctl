@@ -101,7 +101,7 @@ fn server_display_label_precedence() {
 fn ip_to_throttle_exempts_egress_and_unspecified() {
     use std::net::IpAddr;
     let client: IpAddr = "203.0.113.50".parse().unwrap();
-    let egress: IpAddr = "104.194.156.93".parse().unwrap();
+    let egress: IpAddr = "198.51.100.93".parse().unwrap();
     let unspecified: IpAddr = "0.0.0.0".parse().unwrap();
 
     assert_eq!(ip_to_throttle(Some(client), false), Some(client));
@@ -114,17 +114,17 @@ fn ip_to_throttle_exempts_egress_and_unspecified() {
 #[test]
 fn render_vless_uri_post_rename_fragment_format() {
     let got = render_vless_uri(
-        "104.194.156.93",
+        "198.51.100.93",
         443,
         "www.microsoft.com",
-        "gDawCMB0X6iGXZkG8nZIFW5TaaW29x0DMzWijN-gc2A",
-        "d86e92a0c6dd2271",
+        "FixturePublicKeyAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "0123456789abcdef",
         "60063863-d2be-4d57-bc0b-aef4da88528b",
         "Germany",
         "tester-1",
     );
 
-    let expected = "vless://60063863-d2be-4d57-bc0b-aef4da88528b@104.194.156.93:443?encryption=none&type=tcp&security=reality&pbk=gDawCMB0X6iGXZkG8nZIFW5TaaW29x0DMzWijN-gc2A&fp=randomized&sni=www.microsoft.com&sid=d86e92a0c6dd2271&spx=%2F&flow=xtls-rprx-vision&packetEncoding=xudp#Germany%20VLESS%20~tester-1";
+    let expected = "vless://60063863-d2be-4d57-bc0b-aef4da88528b@198.51.100.93:443?encryption=none&type=tcp&security=reality&pbk=FixturePublicKeyAAAAAAAAAAAAAAAAAAAAAAAAAAA&fp=randomized&sni=www.microsoft.com&sid=0123456789abcdef&spx=%2F&flow=xtls-rprx-vision&packetEncoding=xudp#Germany%20VLESS%20~tester-1";
     assert_eq!(got, expected, "vless URI fragment drifted");
 }
 
@@ -134,8 +134,8 @@ fn render_vless_uri_brackets_ipv6_authority() {
         "2a00:1450::1",
         443,
         "www.microsoft.com",
-        "gDawCMB0X6iGXZkG8nZIFW5TaaW29x0DMzWijN-gc2A",
-        "d86e92a0c6dd2271",
+        "FixturePublicKeyAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "0123456789abcdef",
         "60063863-d2be-4d57-bc0b-aef4da88528b",
         "Germany",
         "tester-1",

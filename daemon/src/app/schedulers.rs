@@ -68,7 +68,9 @@ pub(crate) fn spawn_digest_scheduler(inv: SqliteInventory) -> tokio::task::JoinH
         tick.tick().await;
         loop {
             tick.tick().await;
-            crate::node_probe_poller::send_digest(&inv).await;
+            if let Err(e) = crate::node_probe_poller::send_digest(&inv).await {
+                tracing::warn!(target = "vpnctld::alert_sink", error = %e, "digest push failed");
+            }
         }
     })
 }

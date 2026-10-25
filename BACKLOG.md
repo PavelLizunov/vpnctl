@@ -37,36 +37,17 @@ so breakage surfaces at PR time. Note: the 2026-08-23 prod deploy shipped a
 same-distro `x86_64-unknown-linux-gnu` build (bookworm worker → bookworm
 host) — proven, but not the canonical static target.
 
-## Documentation migration debt (post-CLAUDE.md audit, 2026-08-22)
+## Unverified gap closures
 
-Items surfaced by the audit that moved the project from `CLAUDE.md` to
-`AGENTS.md` + `docs/specs/`:
+Verify these end to end before declaring them closed:
 
-1. **Stale "web-deploy has no SSH" comments.** `daemon/src/handlers/admin/server_actions.rs:~334`
-   and `daemon/src/app.rs:~1129` still say the Deploy button waits for "a
-   working SSH path on bookworm-2.36", but SSH deploy shipped via
-   `SubprocessSshTransport` + `wizard_bootstrap::run_redeploy`
-   (`ensure_installed` + `apply_config`). Rewrite the comments to describe the
-   current pipeline.
-2. **`probeable()` ignores AmneziaWG.** `daemon/src/node_probe_poller.rs:55`
-   `TODO(amneziawg)`: the AmneziaWg kernel is registered, but node probing
-   only understands sing-box. Wire a per-kernel probe variant (`wg show`) or a
-   sibling `probeable_amneziawg`.
-3. **Subscription base URL — closed in code.** `/admin/settings` exposes the
-   public base URL; `daemon/src/handlers/admin/legacy/settings/system.rs`
-   validates and saves it through `update_public_base_url_audited`. Staging
-   overrides no longer require changing a hard-coded URL.
-4. **Verify before declaring gaps closed.** (a) Fingerprint drift:
-   `check_fingerprint_drift` exists and fires `server.fingerprint.drift`, but
-   the README gap (TOFU host-key rotation surfacing as cryptic
-   `server.unreachable` + one-click «accept new») needs a full-path check.
-   (b) TLS cert provisioning: `sing_box::ensure_installed` generates
+1. **Fingerprint drift.** `check_fingerprint_drift` exists and fires
+   `server.fingerprint.drift`, but the README gap (TOFU host-key rotation
+   surfacing as cryptic `server.unreachable` + one-click «accept new») needs a
+   full-path check.
+2. **TLS cert provisioning.** `sing_box::ensure_installed` generates
    `cert.pem`/`key.pem`, but parity across ALL deploy paths (wizard, CLI,
    redeploy) is unverified.
-5. **~50 historical references to `CLAUDE.md`** remain in code comments,
-   tests, scripts, and docs. They are provenance pointers; the content now
-   lives in `AGENTS.md` / `docs/specs/` and in git history. Optional cleanup:
-   retarget them, or leave as historical markers.
 
 ## Cumulative per-user traffic attribution (Go helper)
 

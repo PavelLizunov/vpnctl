@@ -18,6 +18,8 @@ use tracing::info;
 
 use vpnctld::{DaemonConfig, assert_auth_safe_for_addr};
 
+mod server;
+
 #[derive(Parser, Debug)]
 #[command(name = "vpnctld", version, about = "vpnctl HTTP daemon")]
 struct Cli {
@@ -50,15 +52,9 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("bind {}", config.addr))?;
     info!(target = "vpnctld", "listening on http://{}", config.addr);
 
-    let serve_result = axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await
-    .context("axum::serve");
+    server::serve(listener, app, shutdown_signal()).await;
     vpnctld::access_log::drain_writer(writer_handle).await;
-    serve_result
+    Ok(())
 }
 
 fn init_tracing() {

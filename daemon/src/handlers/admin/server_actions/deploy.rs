@@ -154,10 +154,6 @@ async fn server_deploy_locked(
                 ssh_errors.push(format!("{}: kernel not registered", kid.0));
                 continue;
             };
-            if let Err(e) = kernel.ensure_installed(&ssh).await {
-                ssh_errors.push(format!("{}: ensure_installed failed: {e}", kid.0));
-                continue;
-            };
             let supported = kernel.supported_protocols();
             let protocols: Vec<&dyn vpnctl_core::Protocol> = server
                 .enabled_protocols
@@ -166,9 +162,12 @@ async fn server_deploy_locked(
                 .filter_map(|p| state.registry.protocol(p))
                 .collect();
             if protocols.is_empty() {
-                ssh_kernels_pushed.push(format!("{} (installed, no protocols)", kid.0));
                 continue;
             }
+            if let Err(e) = kernel.ensure_installed(&ssh).await {
+                ssh_errors.push(format!("{}: ensure_installed failed: {e}", kid.0));
+                continue;
+            };
             let config = match kernel.render_config(&ctx, &users, &protocols) {
                 Ok(c) => c,
                 Err(e) => {
@@ -214,6 +213,7 @@ async fn server_deploy_locked(
         configs_applied,
         ssh_skip_reason,
         false,
+        server.enabled_protocols.is_empty(),
     );
     let payload = serde_json::json!({
         "bootstrapped": bootstrapped,

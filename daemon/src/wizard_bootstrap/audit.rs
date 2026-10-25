@@ -41,6 +41,7 @@ pub(crate) fn deploy_audit_action(
     configs_applied: usize,
     ssh_skip_reason: Option<&str>,
     inputs_changed: bool,
+    shutdown_only: bool,
 ) -> &'static str {
     if ssh_skip_reason.is_some() {
         "server.deploy.skipped"
@@ -48,7 +49,7 @@ pub(crate) fn deploy_audit_action(
         "server.deploy.failed"
     } else if inputs_changed {
         "server.deploy.stale"
-    } else if configs_applied == 0 {
+    } else if configs_applied == 0 && !shutdown_only {
         "server.deploy.skipped"
     } else {
         "server.deploy"
@@ -68,8 +69,13 @@ pub(super) async fn write_deploy_audit(
     inputs_changed: bool,
     expected_revision: &str,
 ) -> &'static str {
-    let mut action =
-        deploy_audit_action(ssh_errors, configs_applied, ssh_skip_reason, inputs_changed);
+    let mut action = deploy_audit_action(
+        ssh_errors,
+        configs_applied,
+        ssh_skip_reason,
+        inputs_changed,
+        !server.kernels.is_empty() && server.enabled_protocols.is_empty(),
+    );
     let payload = serde_json::json!({
         "bootstrapped": bootstrapped,
         "kernels": server.kernels.iter().map(|k| &k.0).collect::<Vec<_>>(),

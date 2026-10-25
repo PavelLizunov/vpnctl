@@ -205,7 +205,7 @@ async fn search_finds_server_by_address_substring() {
     st.inv
         .add_server(&Server {
             id: ServerId("germany".into()),
-            address: "104.194.156.93".into(),
+            address: "198.51.100.93".into(),
             ssh_port: 2222,
             ssh_user: "root".into(),
             kernels: vec![KernelId("sing-box".into())],
@@ -221,7 +221,7 @@ async fn search_finds_server_by_address_substring() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin/search?q=104.194")
+                .uri("/admin/search?q=198.51.100")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -234,7 +234,7 @@ async fn search_finds_server_by_address_substring() {
         "address substring must surface the server"
     );
     assert!(
-        html.contains("104.194.156.93"),
+        html.contains("198.51.100.93"),
         "rendered row must show the matching address"
     );
 }

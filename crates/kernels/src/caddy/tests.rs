@@ -1443,13 +1443,13 @@ async fn caddy_apply_naive_executes_script_retiring_vlessws() {
         .apply_config(&ssh, config)
         .await
         .expect("naive apply ok");
-    assert_eq!(
-        ssh.executed_commands().expect("command log"),
-        vec![
-            "install -o root -g root -m 0600 /dev/null '/etc/caddy/Caddyfile.new'".to_string(),
-            naive_apply_script(),
-        ]
+    let commands = ssh.executed_commands().expect("command log");
+    assert_eq!(commands.len(), 2);
+    assert!(
+        commands[0]
+            .ends_with("install -o root -g root -m 0600 /dev/null '/etc/caddy/Caddyfile.new'")
     );
+    assert_eq!(commands[1], naive_apply_script());
     assert_eq!(
         ssh.uploaded("/etc/caddy/Caddyfile.new"),
         Some(config.to_vec())
@@ -1468,14 +1468,14 @@ async fn caddy_apply_vlessws_executes_bundle_apply_script() {
         .apply_config(&ssh, &config)
         .await
         .expect("vlessws apply ok");
-    assert_eq!(
-        ssh.executed_commands().expect("command log"),
-        vec![
+    let commands = ssh.executed_commands().expect("command log");
+    assert_eq!(commands.len(), 2);
+    assert!(
+        commands[0].ends_with(
             "install -o root -g root -m 0600 /dev/null '/etc/caddy/.vlessws-bundle.new'"
-                .to_string(),
-            vlessws_apply_script(),
-        ]
+        )
     );
+    assert_eq!(commands[1], vlessws_apply_script());
     assert_eq!(ssh.uploaded("/etc/caddy/.vlessws-bundle.new"), Some(config));
 }
 

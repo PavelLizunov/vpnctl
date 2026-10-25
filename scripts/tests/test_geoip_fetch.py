@@ -2,6 +2,7 @@
 import gzip
 import os
 import shutil
+import signal
 import sqlite3
 import subprocess
 import tempfile
@@ -18,6 +19,10 @@ class GeoipFetchTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        self.script = self.root / "fetch.sh"
+        self.script.write_text(SCRIPT.read_text()
+                               .replace("MAX_GZ_BYTES=$((128 * 1024 * 1024))", "MAX_GZ_BYTES=8192")
+                               .replace("MAX_MMDB_BYTES=$((512 * 1024 * 1024))", "MAX_MMDB_BYTES=1200000"))
         self.db = sqlite3.connect(self.root / "inv.db")
         self.addCleanup(self.db.close)
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -50,14 +55,14 @@ class GeoipFetchTest(unittest.TestCase):
                         VPNCTLD_GEOIP_DIR=str(self.root / "geoip"))
 
     def test_live_wal_server_is_visible_to_node_selection(self):
-        result = subprocess.run(["bash", str(SCRIPT)], env=self.env, capture_output=True, timeout=15)
+        result = subprocess.run(["bash", str(self.script)], env=self.env, capture_output=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         self.assertIn("root@203.0.113.10", (self.root / "ssh.log").read_text())
         self.assertEqual((self.root / "geoip/GeoLite2-City.mmdb").read_bytes(), self.mmdb)
 
     def test_concurrent_updaters_use_distinct_partial_files(self):
         env = dict(self.env, TEST_BLOCK="1")
-        children = [subprocess.Popen(["bash", str(SCRIPT)], env=env,
+        children = [subprocess.Popen(["bash", str(self.script)], env=env,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(2)]
         try:
             deadline = time.monotonic() + 5
@@ -73,6 +78,49 @@ class GeoipFetchTest(unittest.TestCase):
         for name in ["GeoLite2-City.mmdb", "GeoLite2-ASN.mmdb"]:
             self.assertEqual((self.root / "geoip" / name).read_bytes(), self.mmdb)
         self.assertFalse(list((self.root / "geoip").glob("*.partial*")))
+
+    def assert_rejected_without_replacing_databases(self):
+        geoip = self.root / "geoip"
+        geoip.mkdir()
+        names = ["GeoLite2-City.mmdb", "GeoLite2-ASN.mmdb"]
+        for name in names:
+            (geoip / name).write_bytes(b"previous database")
+        result = subprocess.run(["bash", str(self.script)], env=self.env, capture_output=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        for name in names:
+            self.assertEqual((geoip / name).read_bytes(), b"previous database")
+        self.assertFalse(list(geoip.glob("*.partial*")))
+
+    def test_oversized_download_is_rejected_and_cleaned(self):
+        (self.root / "fixture.gz").write_bytes(gzip.compress(os.urandom(32000) + self.mmdb))
+        self.assert_rejected_without_replacing_databases()
+
+    def test_decompression_bomb_is_rejected_and_cleaned(self):
+        (self.root / "fixture.gz").write_bytes(gzip.compress(b"x" * 1_300_000 + b"MaxMind.com"))
+        self.assert_rejected_without_replacing_databases()
+
+    def test_local_deadline_stops_a_blocked_node_and_cleans_partials(self):
+        env = dict(self.env, TEST_BLOCK="1", VPNCTLD_GEOIP_DEADLINE_SECS="1")
+        result = subprocess.run(["bash", str(self.script)], env=env, capture_output=True, timeout=8)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(list((self.root / "geoip").glob("*.partial*")))
+
+    def test_termination_cleans_partial_files(self):
+        child = subprocess.Popen(["bash", str(self.script)], env=dict(self.env, TEST_BLOCK="1"),
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        try:
+            deadline = time.monotonic() + 5
+            while not list((self.root / "ready").iterdir()) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(list((self.root / "geoip").glob("*.partial.gz")))
+            os.killpg(child.pid, signal.SIGTERM)
+            child.communicate(timeout=5)
+            self.assertNotEqual(child.returncode, 0)
+            self.assertFalse(list((self.root / "geoip").glob("*.partial*")))
+        finally:
+            if child.poll() is None:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.communicate(timeout=5)
 
 
 if __name__ == "__main__":

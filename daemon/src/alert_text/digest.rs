@@ -61,3 +61,55 @@ pub fn render_digest_html(
     m.push_str(&esc(time_local));
     m
 }
+
+// Split only renderer-generated HTML: tags and entities are already well formed.
+pub(crate) fn render_digest_messages(
+    loc: Locale,
+    servers: usize,
+    open_titles: &[String],
+    time_local: &str,
+) -> Vec<String> {
+    const MAX_UNITS: usize = 4096;
+    let html = render_digest_html(loc, servers, open_titles, time_local);
+    let mut remaining = html.as_str();
+    let mut messages = Vec::new();
+    let mut message = String::new();
+    let mut open_tags = Vec::new();
+    let mut units = 0;
+    while let Some(ch) = remaining.chars().next() {
+        let end = match ch {
+            '<' => remaining.find('>').map_or(ch.len_utf8(), |end| end + 1),
+            '&' => remaining.find(';').map_or(ch.len_utf8(), |end| end + 1),
+            _ => ch.len_utf8(),
+        };
+        let token = &remaining[..end];
+        // UTF-16 units are a conservative bound for Telegram's character limit.
+        let width = match ch {
+            '<' => 0,
+            '&' => 1,
+            _ => ch.len_utf16(),
+        };
+        if units + width > MAX_UNITS {
+            for tag in open_tags.iter().rev() {
+                message.push_str(&format!("</{tag}>"));
+            }
+            messages.push(std::mem::take(&mut message));
+            for tag in &open_tags {
+                message.push_str(&format!("<{tag}>"));
+            }
+            units = 0;
+        }
+        message.push_str(token);
+        if let Some(tag) = token.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+            if tag.starts_with('/') {
+                open_tags.pop();
+            } else {
+                open_tags.push(tag);
+            }
+        }
+        units += width;
+        remaining = &remaining[end..];
+    }
+    messages.push(message);
+    messages
+}

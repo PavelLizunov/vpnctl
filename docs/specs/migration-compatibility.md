@@ -31,6 +31,14 @@
 ```
 
 Behavior rules:
+- `migrate from-bash` verifies the SSH host key before authentication or file
+  reads. It uses inventory pins found by server ID or address; conflicting pins
+  fail closed. Without an inventory pin, import one server at a time with
+  `--server <IP> --trusted-fingerprint <SHA256:...>` obtained from the hoster's
+  console. The explicit fingerprint cannot override an inventory pin. Successful
+  apply retains the verified pin (audited when adding a pin to an existing row).
+  Dry runs consult existing inventory through normal inventory-open maintenance
+  but never apply servers, users, grants, secrets, or new pins.
 - UUIDs and password material migrate verbatim (`vpnctl migrate from-bash`);
   overwriting an existing server address requires the
   `--i-really-mean-overwrite-address` gate. Existing server secrets are retained
@@ -58,6 +66,8 @@ Behavior rules:
 
 ## 3. Verification Checklist
 
+- [ ] Migration reuses inventory pins by ID and address, rejects conflicting or
+      missing trust before SSH/import, and persists first-import pins on apply.
 - [ ] `*_byte_equal*` tests pass; `just mutants-protocols` shows the tests
       catch inverted rendering.
 - [ ] `daemon/tests/restore_e2e.rs`: pre-mutation output ≠ post-mutation AND

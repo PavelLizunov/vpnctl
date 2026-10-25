@@ -4,7 +4,8 @@ mod tests {
 
     use async_trait::async_trait;
     use vpnctl_core::{
-        CoreError, KernelId, Registry, RenderCtx, Result, Server, ServerId, SshTransport,
+        CoreError, KernelId, ProtocolId, Registry, RenderCtx, Result, Server, ServerId,
+        SshTransport,
     };
     use vpnctl_kernels::{AmneziaWg, Caddy, SingBox, Xray, reconcile_disabled_kernels};
 
@@ -55,7 +56,10 @@ mod tests {
             ssh_port: 22,
             ssh_user: "root".into(),
             kernels,
-            enabled_protocols: vec![],
+            enabled_protocols: ["vless+reality", "wireguard", "naive", "vless+xhttp"]
+                .into_iter()
+                .map(|id| ProtocolId(id.into()))
+                .collect(),
             trusted_host_fingerprint: None,
             hoster: "generic".into(),
             jump_via: None,
@@ -69,7 +73,7 @@ mod tests {
         let systemctl = dir.path().join("systemctl");
         std::fs::write(
             &systemctl,
-            r#"#!/bin/sh
+            r#"#!/bin/bash
 case "$1" in
     show)
         printf '%s\n' "$VPNCTL_UNIT_STATE"
@@ -84,7 +88,7 @@ esac
         .unwrap();
         std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o700)).unwrap();
         let calls = dir.path().join("calls");
-        let output = std::process::Command::new("sh")
+        let output = std::process::Command::new("bash")
             .args(["-c", script])
             .env("PATH", format!("{}:/usr/bin:/bin", dir.path().display()))
             .env("VPNCTL_UNIT_STATE", state)
@@ -171,6 +175,61 @@ esac
             ssh.scripts.lock().unwrap().is_empty(),
             "kernels vpnctl never managed here must not have their units stopped"
         );
+    }
+
+    #[tokio::test]
+    async fn last_protocol_removal_stops_enabled_kernel_and_preserves_other_listeners() {
+        let registry = registry();
+        for (id, protocol, units) in [
+            ("sing-box", "vless+reality", vec!["sing-box.service"]),
+            ("amneziawg", "wireguard", vec!["awg-quick@awg0.service"]),
+            (
+                "caddy",
+                "naive",
+                vec!["caddy.service", "caddy-vlessws.service"],
+            ),
+            ("xray", "vless+xhttp", vec!["xray.service"]),
+        ] {
+            let mut server = server(registry.kernel_ids());
+            server.enabled_protocols.retain(|pid| pid.0 != protocol);
+            let ssh = RecordingTransport::default();
+            reconcile_disabled_kernels(&registry, &server, &[], &ssh)
+                .await
+                .unwrap();
+            {
+                let scripts = ssh.scripts.lock().unwrap();
+                assert_eq!(scripts.len(), 1, "{id}");
+                let (success, calls) = run_script(&scripts[0], "loaded", false);
+                assert!(success, "{id}");
+                assert_eq!(
+                    calls,
+                    units
+                        .iter()
+                        .map(|unit| format!("disable --now -- {unit}\n"))
+                        .collect::<String>(),
+                    "{id}"
+                );
+                assert!(!run_script(&scripts[0], "loaded", true).0, "{id}");
+            }
+            let failing = RecordingTransport {
+                fail: true,
+                ..Default::default()
+            };
+            assert!(
+                reconcile_disabled_kernels(&registry, &server, &[], &failing)
+                    .await
+                    .is_err()
+            );
+            server.enabled_protocols.push(ProtocolId(protocol.into()));
+            let ssh = RecordingTransport::default();
+            reconcile_disabled_kernels(&registry, &server, &[], &ssh)
+                .await
+                .unwrap();
+            assert!(
+                ssh.scripts.lock().unwrap().is_empty(),
+                "{id}: re-enabled protocol"
+            );
+        }
     }
 
     #[tokio::test]

@@ -21,6 +21,7 @@ use super::schedulers::{
 #[derive(Clone)]
 pub struct AppState {
     pub inv: SqliteInventory,
+    pub(crate) admin_session_secret: Arc<String>,
     pub registry: Arc<Registry>,
     pub access_log_tx: mpsc::Sender<AccessLogRecord>,
     pub rate_limiter: Arc<RateLimiter>,
@@ -54,6 +55,7 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<(Router, tokio::task:
     crate::real_ip::init_trusted_proxies()?;
     super::routes::validate_admin_assets(&super::routes::admin_assets_dir())?;
     let inv = SqliteInventory::open(&config.db_path).await?;
+    let admin_session_secret = Arc::new(inv.get_or_create_admin_session_secret().await?);
     let registry = Arc::new(build_registry()?);
 
     let deploy_key_path = deploy_key_path();
@@ -153,6 +155,7 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<(Router, tokio::task:
     let geo = crate::geoip::GeoLookup::from_env();
     let state = AppState {
         inv,
+        admin_session_secret,
         registry,
         access_log_tx,
         rate_limiter,
@@ -179,6 +182,7 @@ pub fn make_app_state_with_rate_limiter(
     (
         AppState {
             inv,
+            admin_session_secret: Arc::new("test-only-session-secret".into()),
             registry,
             access_log_tx,
             rate_limiter,

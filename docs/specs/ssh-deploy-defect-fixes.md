@@ -6,6 +6,13 @@
   fallback. Unpinned first contact retains trust on first use.
 - Password SSH uses the same child-process deadline and process-group kill as
   key authentication (`VPNCTLD_SSH_TIMEOUT_SECS`, default 300 seconds).
+- Retained subprocess and russh output is capped at 64 MiB for stdout and 1 MiB
+  for stderr per command, including file reads and upload diagnostics. Overflow
+  fails with a bounded diagnostic; subprocess execution kills and reaps its process group,
+  while russh requests KILL and closes the channel with a bounded wait.
+- CLI bootstrap preserves existing authorized-key lines without a final LF.
+  Before registration it verifies a fresh connection using only the configured
+  deploy private key, pinned to the host key observed during installation.
 - Cancelling the synchronous deploy HTTP handler must not release its operation
   lock while its background deploy is still running.
 - Deploy reconciles kernels the operator disabled on the server (any
@@ -71,6 +78,10 @@ cannot discard it.
 - [ ] Rendered fail2ban script includes the connected and all configured ports,
       removes duplicates, and retains port 22 as the last fallback.
 - [ ] Hung password command is killed within the deadline, with no surviving child.
+- [ ] Oversized stdout or stderr fails promptly in both transports; below-limit
+      binary output retains its bytes. Upload diagnostics are also bounded.
+- [ ] Repeated CLI key installation preserves unterminated existing keys and
+      does not duplicate the deploy key; key-only verification precedes registration.
 - [ ] Cancelled HTTP deploy retains its lock until SSH work completes.
 - [ ] Retired kernel services are stopped/disabled; enabled, never-retired and
       absent units are untouched; shutdown errors propagate.

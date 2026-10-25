@@ -138,7 +138,7 @@
           },
           "private_key": "EXAMPLE_REDACTED_PRIVATE_KEY_xxxxxxxxxxxxxxxxxxxx",
           "short_id": [
-            "d86e92a0c6dd2271"
+            "0123456789abcdef"
           ]
         }
       }
@@ -337,7 +337,7 @@
           },
           "private_key": "EXAMPLE_REDACTED_PRIVATE_KEY_xxxxxxxxxxxxxxxxxxxx",
           "short_id": [
-            "d86e92a0c6dd2271"
+            "0123456789abcdef"
           ]
         }
       }

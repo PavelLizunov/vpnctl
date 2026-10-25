@@ -278,13 +278,13 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert(
             "x-forwarded-for",
-            HeaderValue::from_static("104.194.156.93, 203.0.113.9"),
+            HeaderValue::from_static("198.51.100.93, 203.0.113.9"),
         );
         h.insert("x-real-ip", HeaderValue::from_static("203.0.113.9"));
         let trusted = DEFAULT_TRUSTED_PROXY_LAN;
         assert_eq!(
             resolve_real_ip_with(&h, trusted, &[trusted]).to_string(),
-            "104.194.156.93"
+            "198.51.100.93"
         );
         assert_eq!(
             resolve_peer_real_ip_with(&h, trusted, &[trusted]).to_string(),

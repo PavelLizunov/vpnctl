@@ -7,6 +7,9 @@
 - The app config URL (`<base>/api/v1/app/config/<device_id>`, also the QR
   payload) and the Mihomo subscription URL (`<base>/api/v1/sub/<token>`) are
   built on the configured base; without one, on `http://<request Host>`.
+- Delivery Flow A's recommended Hiddify / sing-box URL and QR use
+  `<base>/sub/<token>`, with the same base selection as
+  the chain subscription. The legacy Overview fallback URL stays unchanged.
 - Response bodies of `/sub`, `/api/v1/sub` and `/api/v1/app/config` do not
   change (byte contract); only admin pages and their QR codes change.
 - Existing installs keep the URLs they showed before: migration 0059 sets
@@ -33,5 +36,7 @@ Settings -> System shows the field (#public-address).
 
 - [ ] Configured base appears in the overview QR URL and Mihomo URL; fresh install
       shows no owner domain (`admin_smoke` user_detail tests).
+- [ ] Flow A itself contains the exact public HTTPS sing-box URL when accessed
+      through a LAN Host; only an unset public base falls back to that Host.
 - [ ] POST validates, normalises, audits once per change (`settings_integrations`).
 - [ ] Migration seeds only installs that already have users (`spec_public_base_url`).

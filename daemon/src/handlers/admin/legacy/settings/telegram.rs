@@ -9,7 +9,20 @@ use crate::handlers::admin::helpers::{
 use crate::http_util::form_field;
 
 pub(crate) async fn settings_digest_now(State(state): State<AppState>) -> Response {
-    crate::node_probe_poller::send_digest(&state.inv).await;
+    match crate::node_probe_poller::send_digest(&state.inv).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return bad_request(
+                "Telegram transport unavailable — check the notification settings before sending a digest",
+            );
+        }
+        Err(e) => {
+            return error_resp(
+                StatusCode::BAD_GATEWAY,
+                &format!("digest delivery failed: {e}"),
+            );
+        }
+    }
     if let Err(e) = state
         .inv
         .audit("admin", "settings.digest.send", None, None)
@@ -77,30 +90,22 @@ pub(crate) async fn settings_telegram(State(state): State<AppState>, body: Strin
             }
         }
     } else {
-        if !token.contains(':') || token.len() < 20 {
-            return bad_request(
-                "bot token looks malformed (expected '<bot_id>:<auth_hex>' from @BotFather)",
-            );
-        }
         Some(token.to_string())
     };
+
+    if token_arg
+        .as_deref()
+        .is_some_and(|value| !crate::alert_sink::valid_telegram_bot_token(value))
+    {
+        return bad_request(
+            "bot token looks malformed (expected '<bot_id>:<auth_token>' from @BotFather)",
+        );
+    }
 
     let chat_id_arg: Option<String> = if chat_id.is_empty() {
         None
     } else {
-        let looks_numeric = chat_id
-            .strip_prefix('-')
-            .unwrap_or(chat_id)
-            .chars()
-            .all(|c| c.is_ascii_digit())
-            && !chat_id.is_empty()
-            && chat_id != "-";
-        let looks_channel = chat_id.starts_with('@')
-            && chat_id.len() >= 2
-            && chat_id[1..]
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_');
-        if !looks_numeric && !looks_channel {
+        if !crate::alert_sink::valid_telegram_chat_id(chat_id) {
             return bad_request(
                 "chat-id must be numeric (e.g. 123456789, or -100123... for supergroups) or '@channel_name'",
             );

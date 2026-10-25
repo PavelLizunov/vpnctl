@@ -208,10 +208,11 @@ pub(crate) async fn user_detail_render(
     let base = public_base(&headers, configured_base.as_deref());
     let sub_url_str = sub_token.as_deref().map(|t| sub_url(&headers, t));
     let mihomo_sub_url_str = sub_token.as_deref().map(|t| mihomo_sub_url(&base, t));
+    // Public base, not the request Host: the QRs are scanned off-LAN.
+    let flow_a_sub_url_str = sub_token.as_deref().map(|t| format!("{base}/sub/{t}"));
     let chain_sub_url_str = if chain_routes.is_empty() {
         None
     } else {
-        // Public base, not the request Host: the QR is scanned off-LAN.
         sub_token
             .as_deref()
             .map(|t| format!("{}?format=sing-box", mihomo_sub_url(&base, t)))
@@ -573,7 +574,7 @@ pub(crate) async fn user_detail_render(
                 &user,
                 &servers,
                 app_config_url_str.as_deref(),
-                sub_url_str.as_deref(),
+                flow_a_sub_url_str.as_deref(),
                 sub_token.as_deref(),
                 mihomo_sub_url_str.as_deref(),
                 &chain_route_summary,

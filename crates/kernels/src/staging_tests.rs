@@ -12,8 +12,10 @@ struct LocalUpload {
 impl SshTransport for LocalUpload {
     async fn exec(&self, cmd: &str) -> Result<String> {
         // Exercise real file modes without requiring root ownership in tests.
-        let cmd = cmd.replace("-o root -g root ", "");
-        let output = std::process::Command::new("sh")
+        let cmd = cmd
+            .replace("-o root -g root ", "")
+            .replace("chown root ", "true ");
+        let output = std::process::Command::new("bash")
             .args(["-c", &cmd])
             .output()?;
         if !output.status.success() {
@@ -27,6 +29,9 @@ impl SshTransport for LocalUpload {
     }
 
     async fn upload(&self, path: &str, content: &[u8]) -> Result<()> {
+        let parent = std::path::Path::new(path).parent().unwrap();
+        assert_eq!(std::fs::metadata(parent)?.permissions().mode() & 0o022, 0);
+        assert!(!std::fs::symlink_metadata(path)?.file_type().is_symlink());
         assert_eq!(std::fs::metadata(path)?.permissions().mode() & 0o777, 0o600);
         std::fs::write(path, content)?;
         assert_eq!(std::fs::metadata(path)?.permissions().mode() & 0o777, 0o600);
@@ -84,12 +89,70 @@ async fn every_kernel_precreates_private_staging_before_apply() {
         let ssh = vpnctl_ssh::MockTransport::new();
         kernel.apply_config(&ssh, b"fixture-secret").await.unwrap();
         let commands = ssh.executed_commands().unwrap();
-        assert_eq!(
-            commands[0],
-            format!("install -o root -g root -m 0600 /dev/null '{path}'")
-        );
+        let parent = std::path::Path::new(path)
+            .parent()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(commands[0].contains(&format!(
+            "test ! -L '{parent}'\nchown root '{parent}'\nchmod go-w '{parent}'"
+        )));
+        assert!(commands[0].ends_with(&format!(
+            "rm -f -- '{path}'\ninstall -o root -g root -m 0600 /dev/null '{path}'"
+        )));
         assert_eq!(ssh.uploaded(path), Some(b"fixture-secret".to_vec()));
     }
+}
+
+#[tokio::test]
+async fn staging_replaces_untrusted_links_only_after_protecting_directory() {
+    for hard_link in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        std::fs::create_dir(&config_dir).unwrap();
+        std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "PRESERVE").unwrap();
+        let staged = config_dir.join("config.new");
+        if hard_link {
+            std::fs::hard_link(&victim, &staged).unwrap();
+        } else {
+            std::os::unix::fs::symlink(&victim, &staged).unwrap();
+        }
+        let ssh = LocalUpload { fail_upload: false };
+        super::apply_staged_config(&ssh, staged.to_str().unwrap(), b"NEW", "true")
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"PRESERVE");
+        assert_eq!(std::fs::read(&staged).unwrap(), b"NEW");
+        assert_eq!(
+            std::fs::metadata(&config_dir).unwrap().permissions().mode() & 0o022,
+            0
+        );
+    }
+}
+
+#[tokio::test]
+async fn staging_rejects_symlinked_directory_before_touching_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    std::fs::create_dir(&target).unwrap();
+    let config_dir = dir.path().join("config");
+    std::os::unix::fs::symlink(&target, &config_dir).unwrap();
+    let victim = target.join("config.new");
+    std::fs::write(&victim, "PRESERVE").unwrap();
+    let ssh = LocalUpload { fail_upload: false };
+    assert!(
+        super::apply_staged_config(
+            &ssh,
+            config_dir.join("config.new").to_str().unwrap(),
+            b"NEW",
+            "true",
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(std::fs::read(victim).unwrap(), b"PRESERVE");
 }
 
 pub(super) fn assert_validation_failure_removes_staging(
@@ -108,7 +171,7 @@ pub(super) fn assert_validation_failure_removes_staging(
         .replace(staging_path, staged.to_str().unwrap())
         .replace(live_path, live.to_str().unwrap())
         .replace(validator, "false");
-    let output = std::process::Command::new("sh")
+    let output = std::process::Command::new("bash")
         .args(["-c", &script])
         .output()
         .unwrap();

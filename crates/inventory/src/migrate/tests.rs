@@ -4,15 +4,15 @@ use super::*;
 
 #[test]
 fn parse_bash_inventory_env_real_fixture() {
-    let s = include_str!("../../tests/fixtures/bash_migration/104.194.156.93.env");
+    let s = include_str!("../../tests/fixtures/bash_migration/198.51.100.93.env");
     let inv = parse_bash_inventory_env(s).unwrap();
-    assert_eq!(inv.server_ip, "104.194.156.93");
+    assert_eq!(inv.server_ip, "198.51.100.93");
     assert_eq!(inv.ssh_port, 2222);
     assert_eq!(
         inv.reality_public,
-        "gDawCMB0X6iGXZkG8nZIFW5TaaW29x0DMzWijN-gc2A"
+        "FixturePublicKeyAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     );
-    assert_eq!(inv.short_id, "d86e92a0c6dd2271");
+    assert_eq!(inv.short_id, "0123456789abcdef");
     assert_eq!(inv.users.len(), 20);
     assert_eq!(inv.users[0], "main-brat");
 }
@@ -48,7 +48,7 @@ fn parse_bash_singbox_real_fixture_counts() {
     assert_eq!(
         data.vless_users.len(),
         23,
-        "expected 23 VLESS users from 104 fixture"
+        "expected 23 VLESS users from the migration fixture"
     );
     assert_eq!(data.tuic_users.len(), 9, "expected 9 TUIC users");
     assert!(
@@ -348,7 +348,7 @@ fn build_plan_assigns_sub_tokens_via_closure() {
 
 #[test]
 fn derive_server_id_keeps_ipv4_unchanged() {
-    assert_eq!(derive_server_id_from_ip("104.194.156.93"), "104.194.156.93");
+    assert_eq!(derive_server_id_from_ip("198.51.100.93"), "198.51.100.93");
 }
 
 #[test]
@@ -563,7 +563,7 @@ async fn apply_with_overwrite_updates_existing_server_address() {
 #[test]
 fn build_plan_real_fixture_end_to_end() {
     let inv = parse_bash_inventory_env(include_str!(
-        "../../tests/fixtures/bash_migration/104.194.156.93.env"
+        "../../tests/fixtures/bash_migration/198.51.100.93.env"
     ))
     .unwrap();
     let data = parse_bash_singbox(

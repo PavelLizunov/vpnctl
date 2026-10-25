@@ -272,8 +272,8 @@ LR
     logrotate /etc/logrotate.d/sing-box
     # fail2ban — SSH brute-force protection. The add-server wizard UI
     # promises it and the Phase-G health monitor alerts on
-    # `server.fail2ban.down`, but NO deploy path actually installed it
-    # (CLAUDE.md Known-gaps). Provisioned HERE so BOTH the CLI and the
+    # `server.fail2ban.down`, but NO deploy path actually installed it.
+    # Provisioned HERE so BOTH the CLI and the
     # web/SSE deploy harden every node idempotently. (Scope: every node
     # runs the sing-box kernel today; a kernel-independent bootstrap home
     # for host-hardening is the longer-term fix for amneziawg/caddy-only
