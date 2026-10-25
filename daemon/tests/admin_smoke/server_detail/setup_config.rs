@@ -467,8 +467,12 @@ async fn server_detail_renders_live_monitoring_when_deploy_is_in_flight() {
     let html = fetch_html(app, "/admin/servers/sb-live").await;
 
     assert!(
-        html.contains(r#"data-sse-autostart="/admin/servers/sb-live/deploy/sse""#),
-        "deploy log pane must autostart SSE when deploy is in flight: {html}"
+        html.contains(r#"data-reload-after="5""#),
+        "deploy log pane must refresh while a deploy is in flight: {html}"
+    );
+    assert!(
+        !html.contains("data-sse-autostart"),
+        "viewing an in-flight deploy must not open the deploy SSE, which queues another deploy: {html}"
     );
     assert!(
         html.contains("disabled") && html.contains("is-loading"),

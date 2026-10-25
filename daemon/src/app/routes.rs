@@ -191,6 +191,7 @@ pub(crate) fn admin_router(state: AppState) -> Router {
             post(admin::server_set_reserved_ports),
         )
         .route("/admin/servers/quick-add", post(admin::server_quick_add))
+        .route("/admin/sse-ticket", post(admin::sse_ticket))
         .route("/admin/servers/{id}/deploy", post(admin::server_deploy))
         .route(
             "/admin/servers/{id}/deploy/sse",

@@ -5,6 +5,7 @@ mod server_detail;
 mod settings;
 mod settings_geoip_sse;
 mod shell;
+mod sse_ticket;
 mod user_sections;
 mod wizard_ui;
 
@@ -14,6 +15,7 @@ pub(crate) use self::kernel_update_sse::*;
 pub(crate) use self::server_detail::*;
 pub(crate) use self::settings::*;
 pub(crate) use self::settings_geoip_sse::*;
+pub(crate) use self::sse_ticket::sse_ticket;
 pub(crate) use self::user_sections::*;
 pub(crate) use self::wizard_ui::*;
 

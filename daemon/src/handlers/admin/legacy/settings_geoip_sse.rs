@@ -1,10 +1,8 @@
 use crate::AppState;
-use crate::handlers::admin::helpers::error_resp;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 pub(crate) async fn settings_geoip_update_now_sse(
-    headers: HeaderMap,
+    uri: axum::http::Uri,
     State(state): State<AppState>,
 ) -> Response {
     use axum::response::sse::{Event, KeepAlive, Sse};
@@ -12,13 +10,8 @@ pub(crate) async fn settings_geoip_update_now_sse(
     use std::pin::Pin;
     use tokio_stream::StreamExt;
 
-    if let Some(sfs) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
-        if sfs != "same-origin" && sfs != "none" {
-            return error_resp(
-                StatusCode::FORBIDDEN,
-                "cross-origin request rejected — open the admin UI directly",
-            );
-        }
+    if let Some(resp) = super::sse_ticket::refuse_without_ticket(&uri) {
+        return resp;
     }
 
     if let Err(e) = state

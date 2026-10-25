@@ -137,7 +137,7 @@ impl SqliteInventory {
 
         let grants = sqlx::query(
             "INSERT INTO grants (user_id, server_id, granted_at)
-             SELECT ?1, id, datetime('now') FROM servers",
+             SELECT ?1, id, datetime('now') FROM servers WHERE role = 'vpn-exit'",
         )
         .bind(&user.id.0)
         .execute(&mut *tx)

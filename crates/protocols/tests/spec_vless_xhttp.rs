@@ -6,7 +6,7 @@ use vpnctl_core::{
     CoreError, DpiRisk, KernelId, Protocol, ProtocolId, RenderCtx, Server, ServerId,
     ServerSecretSpec, User, UserId,
 };
-use vpnctl_protocols::{VLESS_XHTTP_PORT, VlessXhttp};
+use vpnctl_protocols::{VLESS_XHTTP_PORT, VlessReality, VlessXhttp};
 
 const PRIVATE_KEY: &str = "priv-key-abc123";
 const PUBLIC_KEY: &str = "pub-key-xyz789";
@@ -78,39 +78,40 @@ fn dpi_risk_is_strong() {
 }
 
 #[test]
-fn server_secret_specs_is_exactly_vlessxhttp_path_password_and_nothing_vless_namespaced() {
+fn server_secret_specs_share_the_reality_keypair_and_add_only_the_path() {
     let specs = VlessXhttp::new().server_secret_specs();
     assert_eq!(
         specs,
-        vec![ServerSecretSpec::Password {
-            key: "vlessxhttp.path",
-            entropy_bytes: 16,
-        }]
-    );
-    for spec in &specs {
-        let key = match spec {
-            ServerSecretSpec::Password { key, .. } => *key,
-            ServerSecretSpec::Base64Key { key, .. } => *key,
+        vec![
             ServerSecretSpec::X25519Keypair {
-                private_key,
-                public_key,
-            } => {
-                assert!(
-                    !private_key.starts_with("vless."),
-                    "must not mint its own vless.* keypair: {private_key}"
-                );
-                assert!(
-                    !public_key.starts_with("vless."),
-                    "must not mint its own vless.* keypair: {public_key}"
-                );
-                continue;
+                private_key: "vless.private_key",
+                public_key: "vless.public_key",
+            },
+            ServerSecretSpec::ShortId {
+                key: "vless.short_id",
+            },
+            ServerSecretSpec::Password {
+                key: "vlessxhttp.path",
+                entropy_bytes: 16,
+            },
+        ]
+    );
+    // One REALITY identity per server: every vless.* key xhttp declares is
+    // declared identically by vless+reality, so bootstrap mints it once and
+    // both protocols reuse it (an xray-only server still gets it minted).
+    let reality = VlessReality::new().server_secret_specs();
+    for spec in specs.iter().filter(|s| {
+        !matches!(
+            s,
+            ServerSecretSpec::Password {
+                key: "vlessxhttp.path",
+                ..
             }
-            ServerSecretSpec::WireguardKeypair { .. } => continue,
-            ServerSecretSpec::ShortId { key } => *key,
-        };
+        )
+    }) {
         assert!(
-            !key.starts_with("vless."),
-            "server_secret_specs must not declare a vless.*-namespaced key, got {key}"
+            reality.contains(spec),
+            "xhttp must reuse the vless+reality declaration, not a second keypair: {spec:?}"
         );
     }
 }

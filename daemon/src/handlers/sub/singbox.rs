@@ -209,18 +209,19 @@ fn protocol_display_name(protocol_id: &str) -> String {
 }
 
 fn build_client_envelope(_user: &User, mut outbounds: Vec<Value>, tags: &[String]) -> Value {
-    if !tags.is_empty() {
-        let selector_outbounds: Vec<Value> = tags.iter().map(|t| json!(t)).collect();
-        outbounds.insert(
-            0,
-            json!({
-                "type": "selector",
-                "tag": "proxy",
-                "outbounds": selector_outbounds,
-                "default": tags.first(),
-            }),
-        );
+    if tags.is_empty() {
+        return empty_singbox_config();
     }
+    let selector_outbounds: Vec<Value> = tags.iter().map(|t| json!(t)).collect();
+    outbounds.insert(
+        0,
+        json!({
+            "type": "selector",
+            "tag": "proxy",
+            "outbounds": selector_outbounds,
+            "default": tags.first(),
+        }),
+    );
     outbounds.push(json!({ "type": "direct", "tag": "direct" }));
     outbounds.push(json!({ "type": "block",  "tag": "block"  }));
 

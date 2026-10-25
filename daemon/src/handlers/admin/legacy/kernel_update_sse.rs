@@ -1,11 +1,10 @@
 use crate::AppState;
-use crate::handlers::admin::helpers::{error_resp, internal_error, not_found};
+use crate::handlers::admin::helpers::{internal_error, not_found};
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 pub(crate) async fn server_update_kernels_sse(
     axum::extract::Path(server_id): axum::extract::Path<String>,
-    headers: HeaderMap,
+    uri: axum::http::Uri,
     State(state): State<AppState>,
 ) -> Response {
     use axum::response::sse::{Event, KeepAlive, Sse};
@@ -13,13 +12,8 @@ pub(crate) async fn server_update_kernels_sse(
     use std::pin::Pin;
     use tokio_stream::StreamExt;
 
-    if let Some(sfs) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
-        if sfs != "same-origin" && sfs != "none" {
-            return error_resp(
-                StatusCode::FORBIDDEN,
-                "cross-origin update-kernels trigger refused (same-origin only)",
-            );
-        }
+    if let Some(resp) = super::sse_ticket::refuse_without_ticket(&uri) {
+        return resp;
     }
 
     let sid = vpnctl_core::ServerId(server_id.clone());
@@ -64,7 +58,7 @@ pub(crate) async fn server_update_kernels_sse(
 }
 
 pub(crate) async fn servers_update_kernels_all_sse(
-    headers: HeaderMap,
+    uri: axum::http::Uri,
     State(state): State<AppState>,
 ) -> Response {
     use axum::response::sse::{Event, KeepAlive, Sse};
@@ -72,13 +66,8 @@ pub(crate) async fn servers_update_kernels_all_sse(
     use std::pin::Pin;
     use tokio_stream::StreamExt;
 
-    if let Some(sfs) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
-        if sfs != "same-origin" && sfs != "none" {
-            return error_resp(
-                StatusCode::FORBIDDEN,
-                "cross-origin update-kernels trigger refused (same-origin only)",
-            );
-        }
+    if let Some(resp) = super::sse_ticket::refuse_without_ticket(&uri) {
+        return resp;
     }
 
     let servers = match state.inv.list_fleet_servers().await {

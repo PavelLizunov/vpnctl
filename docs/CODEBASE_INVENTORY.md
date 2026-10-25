@@ -5,10 +5,10 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 412 (276 prod / 136 test)
-- **Total Rust LOC:** 130,162 (74,743 prod / 55,419 test)
+- **Tracked Rust Files:** 413 (277 prod / 136 test)
+- **Total Rust LOC:** 130,740 (74,984 prod / 55,756 test)
 - **Database Migrations:** 60
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 128
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 129
 
 ## Workspace Crates & Targets
 
@@ -19,30 +19,30 @@
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,256 (12) | 0 (0) | **1,256** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 318 (1) | 125 (1) | **443** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 193 (1) | 454 (2) | **647** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 45 tests | 13,373 (52) | 16,924 (49) | **30,297** |
-| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 3 tests, 1 examples | 5,492 (13) | 676 (4) | **6,168** |
-| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 3,744 (20) | 4,431 (12) | **8,175** |
-| `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,398 (4) | 1,150 (5) | **2,548** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 41,979 (147) | 29,792 (59) | **71,771** |
-| **Total** | | | | **74,743 (276)** | **55,419 (136)** | **130,162** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 45 tests | 13,375 (52) | 16,998 (49) | **30,373** |
+| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 3 tests, 1 examples | 5,536 (13) | 739 (4) | **6,275** |
+| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 3,759 (20) | 4,432 (12) | **8,191** |
+| `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,406 (4) | 1,160 (5) | **2,566** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 42,151 (148) | 29,981 (59) | **72,132** |
+| **Total** | | | | **74,984 (277)** | **55,756 (136)** | **130,740** |
 
 ## Largest Rust Modules (Top 25)
 
 | File | LOC | Crate | Role |
 |---|---|---|---|
-| `daemon/tests/admin_smoke/settings_integrations.rs` | 2,049 | `daemon` | Test |
+| `daemon/tests/admin_smoke/settings_integrations.rs` | 2,039 | `daemon` | Test |
 | `daemon/src/health_monitor/tests.rs` | 1,541 | `daemon` | Prod |
 | `crates/kernels/src/caddy/tests.rs` | 1,513 | `crates/kernels` | Prod |
 | `daemon/tests/admin_smoke/alerts_health.rs` | 1,452 | `daemon` | Test |
-| `crates/kernels/src/sing_box/tests.rs` | 1,360 | `crates/kernels` | Prod |
-| `daemon/tests/admin_smoke/server_detail/setup_config.rs` | 1,314 | `daemon` | Test |
+| `crates/kernels/src/sing_box/tests.rs` | 1,373 | `crates/kernels` | Prod |
+| `daemon/tests/admin_smoke/server_detail/setup_config.rs` | 1,318 | `daemon` | Test |
 | `crates/inventory/src/sqlite/tests.rs` | 1,262 | `crates/inventory` | Prod |
 | `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,200 | `daemon` | Test |
 | `daemon/tests/admin_smoke/dashboard.rs` | 1,161 | `daemon` | Test |
 | `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,119 | `daemon` | Test |
 | `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,033 | `daemon` | Prod |
 | `crates/inventory/src/sqlite/health.rs` | 1,027 | `crates/inventory` | Prod |
-| `daemon/tests/admin_smoke/servers.rs` | 1,005 | `daemon` | Test |
+| `daemon/tests/admin_smoke/servers.rs` | 1,004 | `daemon` | Test |
 | `daemon/src/quality_poller.rs` | 992 | `daemon` | Prod |
 | `crates/inventory/tests/spec_node_health.rs` | 984 | `crates/inventory` | Test |
 | `daemon/tests/admin_smoke/shell_nav/shell_assets_nav.rs` | 965 | `daemon` | Test |
@@ -121,7 +121,7 @@
 | `0059` | public base url | `crates/inventory/migrations/0059_public_base_url.sql` | 6 |
 | `0060` | retired user uuids | `crates/inventory/migrations/0060_retired_user_uuids.sql` | 38 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (128)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (129)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -218,6 +218,7 @@
 | `POST` | `/admin/settings/timezone` | `admin::settings_timezone_set` |
 | `GET` | `/admin/sharing` | `admin::sharing` |
 | `GET` | `/admin/sharing/` | `admin::sharing` |
+| `POST` | `/admin/sse-ticket` | `admin::sse_ticket` |
 | `POST` | `/admin/tweak/{kind}` | `admin::set_tweak` |
 | `GET` | `/admin/users` | `admin::users` |
 | `POST` | `/admin/users` | `admin::user_create` |

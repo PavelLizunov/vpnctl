@@ -95,7 +95,7 @@ pub(crate) async fn wizard_step2_sse(
 
 pub(crate) async fn server_deploy_sse(
     axum::extract::Path(server_id): axum::extract::Path<String>,
-    headers: HeaderMap,
+    uri: axum::http::Uri,
     State(state): State<AppState>,
 ) -> Response {
     use axum::response::sse::{Event, KeepAlive, Sse};
@@ -103,13 +103,8 @@ pub(crate) async fn server_deploy_sse(
     use std::pin::Pin;
     use tokio_stream::StreamExt;
 
-    if let Some(sfs) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
-        if sfs != "same-origin" && sfs != "none" {
-            return error_resp(
-                StatusCode::FORBIDDEN,
-                "cross-origin deploy trigger refused (same-origin only)",
-            );
-        }
+    if let Some(resp) = super::sse_ticket::refuse_without_ticket(&uri) {
+        return resp;
     }
 
     let sid = vpnctl_core::ServerId(server_id.clone());
@@ -154,10 +149,10 @@ pub(crate) async fn server_deploy_sse(
 }
 
 pub(crate) async fn servers_deploy_all_sse(
-    headers: HeaderMap,
+    uri: axum::http::Uri,
     State(state): State<AppState>,
 ) -> Response {
-    if let Some(resp) = refuse_cross_origin_sse(&headers) {
+    if let Some(resp) = super::sse_ticket::refuse_without_ticket(&uri) {
         return resp;
     }
 
@@ -169,11 +164,11 @@ pub(crate) async fn servers_deploy_all_sse(
 }
 
 pub(crate) async fn user_deploy_pending_sse(
-    headers: HeaderMap,
+    uri: axum::http::Uri,
     Path(user_id_str): Path<String>,
     State(state): State<AppState>,
 ) -> Response {
-    if let Some(resp) = refuse_cross_origin_sse(&headers) {
+    if let Some(resp) = super::sse_ticket::refuse_without_ticket(&uri) {
         return resp;
     }
     let uid = vpnctl_core::UserId(user_id_str.clone());
@@ -210,18 +205,6 @@ pub(crate) async fn user_deploy_pending_sse(
             .into_response();
     }
     deploy_servers_sse_response(&state, servers)
-}
-
-fn refuse_cross_origin_sse(headers: &HeaderMap) -> Option<Response> {
-    if let Some(sfs) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
-        if sfs != "same-origin" && sfs != "none" {
-            return Some(error_resp(
-                StatusCode::FORBIDDEN,
-                "cross-origin deploy trigger refused (same-origin only)",
-            ));
-        }
-    }
-    None
 }
 
 fn deploy_servers_sse_response(state: &AppState, servers: Vec<vpnctl_core::Server>) -> Response {

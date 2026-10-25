@@ -326,23 +326,29 @@ pub(super) fn sing_box_apply_script() -> &'static str {
             mv /etc/sing-box/config.json.new /etc/sing-box/config.json
             chown sing-box:sing-box /etc/sing-box/config.json
             chmod 0640 /etc/sing-box/config.json
-            systemctl reload-or-restart sing-box
+            # A failed reload/restart goes straight to the rollback below: under
+            # set -eu it would otherwise exit first, and an old process that is
+            # still active must not pass for the new config.
+            restart_rc=0
+            systemctl reload-or-restart sing-box || restart_rc=$?
 
             # Wait up to 8 seconds for the service and loopback Stats API.
             # An active service without Stats means the managed binary/helper
             # pair is incompatible and must not be accepted.
             stats_failed=0
-            for i in 1 2 3 4 5 6 7 8; do
-                state=$(systemctl is-active sing-box || true)
-                if [ "$state" = "active" ]; then
-                    if /usr/local/libexec/vpnctl/singbox-stats-helper --timeout 2s >/dev/null 2>&1; then
-                        rm -f /etc/sing-box/config.json.bak
-                        exit 0
+            if [ "$restart_rc" -eq 0 ]; then
+                for i in 1 2 3 4 5 6 7 8; do
+                    state=$(systemctl is-active sing-box || true)
+                    if [ "$state" = "active" ]; then
+                        if /usr/local/libexec/vpnctl/singbox-stats-helper --timeout 2s >/dev/null 2>&1; then
+                            rm -f /etc/sing-box/config.json.bak
+                            exit 0
+                        fi
+                        stats_failed=1
                     fi
-                    stats_failed=1
-                fi
-                sleep 1
-            done
+                    sleep 1
+                done
+            fi
 
             # Failed to come up. Dump diagnostics, then ROLL BACK to the
             # snapshot so the node returns to its last-good config instead of

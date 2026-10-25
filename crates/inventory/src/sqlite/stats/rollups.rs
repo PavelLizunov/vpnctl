@@ -48,7 +48,7 @@ impl SqliteInventory {
                 COALESCE(SUM(download_bytes), 0)      AS dn_total,
                 COALESCE(MAX(active_connections), 0)  AS peak_conns
              FROM vpn_connection_stats
-             WHERE user_id IS NOT NULL
+             WHERE user_id IN (SELECT id FROM users)
                AND ts >= ?1
                AND ts <= ?2
              GROUP BY user_id, server_id",
