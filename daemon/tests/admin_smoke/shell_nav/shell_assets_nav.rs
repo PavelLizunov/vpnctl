@@ -1012,3 +1012,40 @@ async fn tooltips_footer_drops_htmx_lie() {
         "footer must NOT claim htmx — we don't ship it"
     );
 }
+
+#[tokio::test]
+async fn admin_dynamic_pages_carry_no_store_cache_control() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    let app = router(s);
+
+    for path in [
+        "/admin/",
+        "/admin/users",
+        "/admin/users/u0",
+        "/admin/servers",
+        "/admin/servers/s0",
+        "/admin/settings",
+        "/admin/audit",
+        "/admin/alerts",
+        "/admin/monitoring",
+        "/admin/boosty",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "path failed: {path}");
+        let cc = resp
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok());
+        assert_eq!(
+            cc,
+            Some("no-store"),
+            "dynamic admin page {path} must serve Cache-Control: no-store, got {cc:?}"
+        );
+    }
+}

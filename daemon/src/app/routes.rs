@@ -435,6 +435,12 @@ pub(crate) fn admin_router(state: AppState) -> Router {
             state.clone(),
             admin::html_error_pages,
         ))
+        .route_layer(
+            tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("no-store"),
+            ),
+        )
         .nest_service(
             "/admin/assets",
             tower::ServiceBuilder::new()
