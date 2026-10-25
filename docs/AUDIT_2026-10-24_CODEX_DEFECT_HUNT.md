@@ -237,3 +237,46 @@ its own command so a failing status stops the deploy instead of reading as
 "inactive" (review finding); with several accepted host keys the wizard pins
 the key the node presents, only if the password login already trusted it.
 Not deployed.
+
+## Round 5 (2026-10-25): performance, retention, i18n, CLI, pollers, migrations, startup, specs
+
+Eight read-only Codex hunters at `acb62b7`. The lead spot-checked the
+important rows; implementers re-verify each row before fixing.
+
+| ID | Severity | Area | Finding |
+|---|---|---|---|
+| R5-01 | important | backups | A self-test FAIL (e.g. zero users or servers) sets `prune_ok: false`, but hourly snapshots continue, so nothing is pruned and the disk fills. |
+| R5-02 | important | rollups | The daily rollup recomputes only today and yesterday; after downtime longer than a day the missed days stay partial and raw rows are purged. |
+| R5-03 | important | i18n | The server delete confirmation page is English-only (key loss, node untouched, Telegram relay warnings). |
+| R5-04 | important | CLI | `vpnctl user disable` only flips the flag (help says it revokes node access); the web action also redeploys. |
+| R5-05 | important | remediation | Auto-remediation runs only when the alert row is first inserted; if the node lock was busy then, it never retries while the condition persists. |
+| R5-06 | important | assurance | The external runner timeout kills only the child; `reader.join()` can block forever on inherited stdout and stall the poller. |
+| R5-07 | important | Boosty | The 600 s cross-process sync lease is never renewed; a long sync can overlap with another process's sync. |
+| R5-08 | important | clock | Health samples are ordered by wall-clock `ts`; after a backwards clock step an old healthy sample stays "latest" and hides failures. |
+| R5-09 | important | migrations | Migration 0013 creates a unique index over open alerts without removing pre-existing duplicates, so very old snapshots fail to open. |
+| R5-10 | important | restore | `restore` run as root leaves the DB owned by root with 0600; the service user cannot open it. |
+| R5-11 | important | restore UI | The in-app DR instructions say `vpnctl restore /path/to/inv.db` without `--db`, which restores into the CLI's XDG default, not `/var/lib/vpnctl/inv.db`. |
+| R5-12 | important | config | `VPNCTLD_TRUSTED_PROXIES` silently drops unparsable entries (e.g. CIDR); all proxied clients then share the proxy IP and one rate-limit ban. |
+| R5-13 | important | startup | An assets dir without `admin.js`/`admin.css` is accepted; every JS-driven action (wizard, deploy) silently does nothing. |
+| R5-14 | important | specs | `backup-restore.md` merges the daemon's hourly SQLite snapshots with the daily encrypted DR bundle (different tool, schedule, retention). |
+| R5-15 | minor | perf | `/api/v1/app/config` issues hundreds of sequential queries per refresh. |
+| R5-16 | minor | perf | Every user-detail tab loads other users' credentials and prepares delivery data it does not show. |
+| R5-17 | minor | perf | IP-to-server lookup scans the subscription access log, once inside a write transaction. |
+| R5-18 | minor | perf | Latest fleet health is computed over the whole health history. |
+| R5-19 | minor | retention | The traffic window "all" shows only the last 32 days. |
+| R5-20 | minor | retention | Session cleanup deletes sessions that are still active. |
+| R5-21 | minor | retention | After history purge a used account shows "never" as last activity. |
+| R5-22 | minor | retention | Hourly cleanup scans several telemetry tables fully. |
+| R5-23 | minor | i18n | Restore self-test warning reasons are not translated. |
+| R5-24 | minor | i18n | A Telegram check error refers to a field label that does not exist in RU. |
+| R5-25 | minor | CLI | `server secret` accepts an invalid port that renders as 443. |
+| R5-26 | minor | CLI | `update-kernels --output json` prints text into stdout. |
+| R5-27 | minor | CLI | Subscription generation errors exit 0. |
+| R5-28 | minor | CLI | CLI accepts user IDs that break the AWG config. |
+| R5-29 | minor | CLI | CLI TOFU fingerprint save writes no audit row. |
+| R5-30 | minor | startup | The deploy key is reported ready without its public half. |
+| R5-31 | minor | specs | S5 specs require incompatible server roles. |
+| R5-32 | minor | specs | The wizard contract still forbids several accepted host keys, which wave 4 allows. |
+| R5-33 | minor | specs | The running exchange-rate poller is still described as future work. |
+| R5-34 | minor | specs | Finance specs give different rounding rules. |
+| R5-35 | minor | README | README still promises the old Boosty grant behaviour. |
