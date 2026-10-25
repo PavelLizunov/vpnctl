@@ -40,10 +40,18 @@ trait Protocol {
     fn share_link(&self, ctx: &RenderCtx) -> Result<String>;
 }
 
-// Registration: cli/src/registry.rs — one `register_kernel` / `register_protocol`
+// Registration: crates/kernels/src/registry.rs — one `register_kernel` / `register_protocol`
 // line per implementation. `Registry::validate_server` rejects incompatible
 // kernel × protocol combos BEFORE any SSH session opens.
 ```
+
+`vpnctl_kernels::build_registry() -> vpnctl_core::Result<Registry>` is the
+single builder used by CLI and daemon. Its location in
+`crates/kernels/src/registry.rs` reuses a crate both consumers already depend on;
+`vpnctl-kernels` depends on `vpnctl-protocols` for composition, while protocols
+depend only on core, so no dependency cycle or extra crate is needed. Kernel
+implementations still use protocol traits rather than concrete protocol types.
+Registration order is preserved because registry iteration feeds client output.
 
 Kernel implementations declare every managed systemd unit, including auxiliary
 services, through `service_units`. Before installing/applying enabled kernels,
@@ -63,7 +71,9 @@ missing secrets and preserves existing values. See
 ## 3. Verification Checklist
 
 - [ ] Adding kernel `X` touches only `crates/kernels/src/x.rs` + one line in
-      `cli/src/registry.rs` (review-agent checks for cross-crate edits).
+      `crates/kernels/src/registry.rs` (review-agent checks for cross-crate edits).
+- [ ] `build_registry_matches_canonical_set` pins shared membership and order;
+      CLI and daemon both re-export this builder without local registrations.
 - [ ] `cargo deny check` passes (no openssl-sys / native-tls).
 - [ ] clippy `-D warnings` passes (no unwrap/expect/panic in non-test code).
 - [ ] Every new inventory write path emits an `audit_log` row; no-op writes

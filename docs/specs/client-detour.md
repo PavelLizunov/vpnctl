@@ -30,7 +30,12 @@ pub async fn set_client_detour_via_as(
 {"type":"vless","tag":"S5 VLESS ~user","detour":"Iceland VLESS ~user"}
 ```
 
-- The entry is deterministic: the first usable sing-box outbound in the upstream server's `enabled_protocols` order.
+- The entry is deterministic: the first usable outbound in the upstream server's
+  `enabled_protocols` order that can carry the target transport. Hysteria2 and TUIC
+  require a UDP-capable entry; Naive cannot carry them, while VLESS carries UDP
+  (xudp) over every transport, WS and XHTTP included. If none exists, omit that target with no direct fallback. Mihomo uses the
+  same selection within its supported protocols. VPNRouter detour metadata is
+  limited to VLESS Reality targets and entries.
 - A real mutation writes `server.client_detour.set`; a no-op writes no audit row.
 - Deleting an entry server is rejected while any target references it; the error
   lists the targets. Their policies and grants remain unchanged, and the rejected

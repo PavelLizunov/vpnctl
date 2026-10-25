@@ -3,154 +3,6 @@ use maud::{Markup, html};
 const VALID_THEMES: &[&str] = &["default", "newsprint", "foxed", "ink"];
 const VALID_ACCENTS: &[&str] = &["default", "rust", "forest", "plum"];
 
-#[allow(dead_code)]
-fn glyph(size: u32) -> Markup {
-    crate::handlers::admin::ui::glyph(size)
-}
-
-#[derive(Clone, Copy)]
-#[allow(dead_code)]
-struct NavItem {
-    key: &'static str,
-    label_key: crate::i18n::K,
-}
-
-#[allow(dead_code)]
-const NAV: &[NavItem] = &[
-    NavItem {
-        key: "dashboard",
-        label_key: crate::i18n::K::NavDashboard,
-    },
-    NavItem {
-        key: "monitoring",
-        label_key: crate::i18n::K::NavMonitoring,
-    },
-    NavItem {
-        key: "servers",
-        label_key: crate::i18n::K::NavServers,
-    },
-    NavItem {
-        key: "users",
-        label_key: crate::i18n::K::NavUsers,
-    },
-    NavItem {
-        key: "audit",
-        label_key: crate::i18n::K::NavAudit,
-    },
-    NavItem {
-        key: "alerts",
-        label_key: crate::i18n::K::NavAlerts,
-    },
-    NavItem {
-        key: "settings",
-        label_key: crate::i18n::K::NavSettings,
-    },
-    NavItem {
-        key: "boosty",
-        label_key: crate::i18n::K::NavBoosty,
-    },
-];
-
-#[allow(dead_code)]
-fn nav_href(key: &str) -> String {
-    if key == "dashboard" {
-        "/admin/".to_string()
-    } else {
-        format!("/admin/{key}")
-    }
-}
-
-#[allow(dead_code)]
-fn topbar(active: &str, lang: crate::i18n::Locale, alerts_unacked: u64) -> Markup {
-    use crate::i18n::{K, Locale, t};
-    let other = match lang {
-        Locale::En => Locale::Ru,
-        Locale::Ru => Locale::En,
-    };
-    html! {
-        div.ed-tb {
-            a.ed-tb__logo href="/admin/" {
-                span style="color: var(--acc); display: flex;" { (glyph(18)) }
-                "vpnctl"
-            }
-            nav.ed-tb__nav {
-                @for it in NAV {
-                    @let count = if it.key == "alerts" && alerts_unacked > 0 {
-                        Some(alerts_unacked)
-                    } else {
-                        None
-                    };
-                    @if it.key == active {
-                        a.on href=(nav_href(it.key)) {
-                            (t(lang, it.label_key))
-                            @if let Some(c) = count { " " span.ct { (c) } }
-                        }
-                    } @else {
-                        a href=(nav_href(it.key)) {
-                            (t(lang, it.label_key))
-                            @if let Some(c) = count { " " span.ct { (c) } }
-                        }
-                    }
-                }
-            }
-            span.ed-tb__r {
-                form method="get" action="/admin/search" style="display: flex; margin: 0;" {
-                    input.ed-tb__search type="search" name="q" id="tb-search"
-                          title=(match lang {
-                              Locale::En => "Fleet-wide search — press / to focus",
-                              Locale::Ru => "Поиск по флоту — нажми / чтобы сфокусировать",
-                          })
-                          placeholder=(match lang {
-                              Locale::En => "search…  /",
-                              Locale::Ru => "поиск…  /",
-                          });
-                }
-                span.ed-tb__who {
-                    b { (lang.cookie_value().to_uppercase()) }
-                    "|"
-                    form method="post" action="/admin/tweak/lang" style="display: inline; margin: 0; padding: 0;" {
-                        input type="hidden" name="value" value=(other.cookie_value()) {}
-                        button type="submit"
-                               title=(match other {
-                                   Locale::En => "Switch admin UI to English",
-                                   Locale::Ru => "Переключить админку на русский",
-                               }) {
-                            (other.cookie_value().to_uppercase())
-                        }
-                    }
-                    @if let Some(name) = crate::handlers::admin::helpers::operator_name() {
-                        span.ed-tb__host { " · " (t(lang, K::NavOperator)) " " (name) }
-                    }
-                    " · "
-                    form method="post" action="/admin/logout" style="display: inline; margin: 0; padding: 0;" {
-                        button type="submit"
-                               title=(match lang {
-                                   Locale::En => "Sign out of the admin UI on this device",
-                                   Locale::Ru => "Выйти из админки на этом устройстве",
-                               }) {
-                            (match lang { Locale::En => "logout", Locale::Ru => "выйти" })
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[allow(dead_code)]
-fn foot(lang: crate::i18n::Locale) -> Markup {
-    use crate::i18n::{K, t};
-    html! {
-        div.ed-foot {
-            div.ed-foot__l {
-                span { "vpnctld " (vpnctl_core::build_version()) }
-                span { (t(lang, K::FootStack)) }
-            }
-            span { "github.com/PavelLizunov/vpnctl" }
-        }
-    }
-}
-
 pub(super) fn tweaks_inline(theme: &str, accent: &str, lang: crate::i18n::Locale) -> Markup {
     use crate::i18n::tr;
     html! {
@@ -187,20 +39,27 @@ pub(super) fn tweaks_inline(theme: &str, accent: &str, lang: crate::i18n::Locale
     }
 }
 
-#[allow(dead_code)]
-fn root_class(theme: &str, accent: &str) -> String {
-    let mut cls = String::from("ed");
-    match theme {
-        "newsprint" => cls.push_str(" ed-newsprint"),
-        "foxed" => cls.push_str(" ed-foxed"),
-        "ink" => cls.push_str(" ed-ink"),
-        _ => {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tweaks_inline_keeps_theme_and_accent_controls_in_both_locales() {
+        for lang in [crate::i18n::Locale::En, crate::i18n::Locale::Ru] {
+            let markup = tweaks_inline("ink", "rust", lang).into_string();
+            assert!(markup.contains("action=\"/admin/tweak/theme\""));
+            assert!(markup.contains("action=\"/admin/tweak/accent\""));
+            for value in [
+                "default",
+                "newsprint",
+                "foxed",
+                "ink",
+                "rust",
+                "forest",
+                "plum",
+            ] {
+                assert!(markup.contains(&format!("name=\"value\" value=\"{value}\"")));
+            }
+        }
     }
-    match accent {
-        "rust" => cls.push_str(" ed-acc-rust"),
-        "forest" => cls.push_str(" ed-acc-forest"),
-        "plum" => cls.push_str(" ed-acc-plum"),
-        _ => {}
-    }
-    cls
 }

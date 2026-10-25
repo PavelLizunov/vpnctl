@@ -162,8 +162,9 @@ restore; превышение согласованной паузы; невоз�
    EnvFile, unit/override, правила сети, необходимые assets, согласованные версии
    четырёх артефактов и способ восстановления нод. Хранить в защищённом виде,
    не в Git, тикете или чате. Проверить содержимое и возможность расшифровки.
-   Скрипт архива считает SSH-ключ optional: успешный exit сам по себе **не**
-   удовлетворяет обязательному требованию регламента о наличии ключа.
+   The script requires a nonempty, readable regular deploy key, not a symlink;
+   a missing, empty, unreadable or symlinked key exits 13. Public key and
+   known_hosts are included when present; verify the full DR bundle separately.
 3. **Независимое хранение и drill:** проверенная внешняя копия вне общего домена
    отказа питания/диска/провайдера; возраст, целостность и доступ к ключу
    расшифровки. На изолированном восстановлении проверить БД/FK/идентичности,
@@ -172,10 +173,14 @@ restore; превышение согласованной паузы; невоз�
 
 Локальный scheduler снимков БД и отдельный encrypted bundle timer — разные
 механизмы; не выводить периодичность полного архива из наличия часовых снимков.
-Off-site push в скрипте best-effort: успешный общий job не доказывает внешнюю
-копию. Сжатие `zstd -19` и `TimeoutStartSec=300` требуют проверки на реальном
-размере архива. Ранее зарегистрированный timeout нельзя закрыть наличием одного
-ручного архива: нужны успешный очередной job и проверенная доставка.
+The script uses `zstd -3`. Primary delivery failure exits 11. When off-site
+is enabled, an unreadable off-site key or a failed transfer exits 14. Retention
+failure exits 15; a simultaneous off-site transfer and local retention failure
+preserves exit 14. Delivery failures preserve the local archive.
+`OFFSITE_HOST=""` explicitly disables off-site delivery: a successful job in this
+mode does not prove an off-site copy. Validate `TimeoutStartSec=300` against the
+actual archive size. Closing a recorded timeout requires a successful scheduled
+job and verified delivery, not just one manually created archive.
 
 **Порядок возврата выбирается по типу изменения:**
 - бинарник без изменения схемы: восстановить проверенный согласованный комплект

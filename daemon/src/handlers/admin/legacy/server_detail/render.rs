@@ -629,6 +629,7 @@ pub(super) async fn server_detail_render(
             (server_detail_naive_config_section(&server, &server_secrets, lang))
             (server_detail_vlessws_config_section(&server, &server_secrets, lang))
             (server_detail_reality_config_section(&server, &server_secrets, lang))
+            (server_detail_hysteria2_obfs_section(&server, lang))
             (server_detail_udp_pair_section(&server, udp_pair_enabled, lang))
             (server_detail_reserved_ports_section(&server, &reserved_ports, lang))
             (server_detail_drift_detail_section(&server, drift_live.as_ref(), query.drift_live(), lang))

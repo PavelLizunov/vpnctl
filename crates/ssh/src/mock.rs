@@ -6,6 +6,7 @@ use vpnctl_core::{CoreError, Result, SshTransport};
 #[derive(Debug, Default)]
 pub struct MockTransport {
     exec_responses: Mutex<HashMap<String, String>>,
+    executed_commands: Mutex<Vec<String>>,
     files: Mutex<HashMap<String, Vec<u8>>>,
 }
 
@@ -23,11 +24,22 @@ impl MockTransport {
     pub fn uploaded(&self, path: &str) -> Option<Vec<u8>> {
         self.files.lock().ok()?.get(path).cloned()
     }
+
+    pub fn executed_commands(&self) -> Result<Vec<String>> {
+        self.executed_commands
+            .lock()
+            .map(|commands| commands.clone())
+            .map_err(|_| CoreError::Transport("mock lock poisoned".into()))
+    }
 }
 
 #[async_trait]
 impl SshTransport for MockTransport {
     async fn exec(&self, cmd: &str) -> Result<String> {
+        self.executed_commands
+            .lock()
+            .map_err(|_| CoreError::Transport("mock lock poisoned".into()))?
+            .push(cmd.to_string());
         let g = self
             .exec_responses
             .lock()
@@ -68,6 +80,19 @@ mod tests {
         let t = MockTransport::new();
         t.expect("uname -s", "Linux\n");
         assert_eq!(t.exec("uname -s").await?, "Linux\n");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn executed_commands_records_calls_in_order_including_repeats() -> Result<()> {
+        let t = MockTransport::new();
+        t.expect("not executed", "unused response");
+        assert!(t.executed_commands()?.is_empty());
+
+        t.exec("id -u").await?;
+        t.exec_unprivileged("whoami").await?;
+        t.exec("id -u").await?;
+        assert_eq!(t.executed_commands()?, ["id -u", "whoami", "id -u"]);
         Ok(())
     }
 

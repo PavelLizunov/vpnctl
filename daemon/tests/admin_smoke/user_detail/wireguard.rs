@@ -943,7 +943,17 @@ async fn admin_wireguard_download_visibility_refusal_and_restore_byte_equal() {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK, "{gate}");
             let body = response.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(body.as_ref(), WIREGUARD_DOWNLOAD_BYTES.as_bytes(), "{gate}");
+            // The AWG kernel always applies its default obfuscation params, so
+            // its download carries them (R3-18); sing-box serves plain WireGuard.
+            let expected = if kernel == "amneziawg" {
+                WIREGUARD_DOWNLOAD_BYTES.replace(
+                    "DNS = 1.1.1.1\n",
+                    "DNS = 1.1.1.1\nJc = 4\nJmin = 40\nJmax = 70\nS1 = 50\nS2 = 100\nH1 = 1\nH2 = 2\nH3 = 3\nH4 = 4\n",
+                )
+            } else {
+                WIREGUARD_DOWNLOAD_BYTES.to_string()
+            };
+            assert_eq!(body.as_ref(), expected.as_bytes(), "{kernel} {gate}");
         }
     }
 }

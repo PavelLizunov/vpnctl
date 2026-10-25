@@ -36,6 +36,50 @@ fn num(secrets: &std::collections::HashMap<String, String>, k: &str) -> u32 {
 }
 
 #[tokio::test]
+async fn partial_legacy_obfs_is_completed_without_rotation_and_audited_once() {
+    for missing_h1 in [false, true] {
+        let dir = TempDir::new().unwrap();
+        let inv = open(&dir).await;
+        let s = srv("legacy-awg", &["amneziawg"]);
+        inv.add_server(&s).await.unwrap();
+        inv.set_server_secret(&s.id, "amneziawg.s1", "37")
+            .await
+            .unwrap();
+        if !missing_h1 {
+            inv.set_server_secret(&s.id, "amneziawg.h1", "123456789")
+                .await
+                .unwrap();
+        }
+        let before = inv.list_server_secrets(&s.id).await.unwrap();
+        let audit_before = inv.recent_audit(100).await.unwrap().len();
+        let (secrets, minted) = bootstrap_server_secrets(&inv, &s, &Registry::new())
+            .await
+            .unwrap();
+        let expected: std::collections::HashMap<_, _> =
+            vpnctl_core::amneziawg::effective_params(&before)
+                .into_iter()
+                .map(|(key, value)| {
+                    (
+                        format!("amneziawg.{}", key.to_ascii_lowercase()),
+                        value.to_string(),
+                    )
+                })
+                .collect();
+        assert_eq!(secrets, expected);
+        assert_eq!(inv.list_server_secrets(&s.id).await.unwrap(), expected);
+        assert_eq!(minted, vec!["amneziawg obfs params"]);
+        let audit_after = inv.recent_audit(100).await.unwrap().len();
+        assert_eq!(audit_after - audit_before, 9 - before.len());
+        let (repeated, minted) = bootstrap_server_secrets(&inv, &s, &Registry::new())
+            .await
+            .unwrap();
+        assert_eq!(repeated, expected);
+        assert!(minted.is_empty());
+        assert_eq!(inv.recent_audit(100).await.unwrap().len(), audit_after);
+    }
+}
+
+#[tokio::test]
 async fn amneziawg_kernel_server_mints_nine_coherent_obfs_params() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;

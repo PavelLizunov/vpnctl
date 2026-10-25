@@ -159,11 +159,20 @@ impl SqliteInventory {
         let uptime_seconds = sqlite_counter(tick.uptime_seconds, "uptime_seconds")?;
         let mut seen = HashSet::with_capacity(tick.users.len());
         let mut users = Vec::with_capacity(tick.users.len());
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         for counter in &tick.users {
             if !seen.insert(counter.user_id.0.as_str()) {
                 return Err(SqliteInventoryError::Invalid(
                     "duplicate cumulative user counter".into(),
                 ));
+            }
+            let known: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = ?1)")
+                    .bind(&counter.user_id.0)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if !known {
+                continue;
             }
             users.push((
                 counter,
@@ -172,7 +181,6 @@ impl SqliteInventory {
             ));
         }
 
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let observed_at: i64 = sqlx::query_scalar("SELECT unixepoch()")
             .fetch_one(&mut *tx)
             .await?;

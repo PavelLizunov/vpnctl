@@ -152,7 +152,7 @@ source by the lead; duplicates across hunters are merged.
 | R3-18 | minor | AWG params | The AWG server fills missing obfuscation keys with defaults while clients drop the whole block when any key is missing; a partial legacy set yields mismatched server/client configs. |
 | R3-19 | minor | currency docs | Migration 0058 and `currency-exchange.md` describe per-currency `minor_units`; no such column exists and every currency is stored in hundredths. |
 | R3-20 | minor | BACKLOG | Stale items: Deploy-All lock retry (now waits up to 300 s), subscription base URL "hard-coded" (now a web setting), v2ray-stats helper "deferred" (wired in `clash_poller`). `abuse-detection.md` still says `user_id` stays NULL. |
-| R3-21 | minor | README | Rust 1.85+ (manifest says 1.87); "10 protocols" (12 registered); DPI tiers list (Naive, VLESS-WS, VLESS-XHTTP are Strong); "build SHA changes on every checkout build" (only when `VPNCTL_BUILD_SHA` is set). |
+| R3-21 | minor | README | Rust 1.85+ (manifest says 1.87, and the code already uses let-chains, which need 1.88); "10 protocols" (12 registered); DPI tiers list (Naive, VLESS-WS, VLESS-XHTTP are Strong); "build SHA changes on every checkout build" (only when `VPNCTL_BUILD_SHA` is set). |
 | R3-22 | minor | docs | `PROTOCOL_TESTING.md` lists AnyTLS, Trojan and Naive as not shipped; `commercial-operations.md` describes the old backup script (optional key, best-effort off-site, `zstd -19`). |
 | R3-23 | minor | test quality | `spec_privilege_semantics.rs` compares inputs to themselves; `cli admin hash-password` test never calls the command; `resolve_one_accepts_valid_ipv4_chars_only` discards every result. |
 | R3-24 | minor | cleanup | Unused: `legacy/shell.rs` topbar/foot/root_class + nav, `set_server_jump_via` (stale `server.jump_via.set` audit), `clash_api::Snapshot::{bytes_per_user, connection_count_for_user}`. |
@@ -163,3 +163,21 @@ commit between the two makes SQLite return `SQLITE_BUSY` at once, bypassing
 `busy_timeout` (seen as a flaky "database is locked" in an admin smoke test).
 Fixed in wave 2: every inventory transaction uses `BEGIN IMMEDIATE`, guarded by
 `crates/inventory/tests/spec_write_transactions.rs`.
+
+### Round 3 fix status
+
+Wave 3 (branch `fix/codex-wave3-20261025`): R3-01..24 fixed by eight Codex
+implementers, integrated and reviewed by the lead plus four diff-only
+reviewers. Lead changes on top: VLESS on any transport (WS/XHTTP included)
+counts as a UDP-capable detour entry, only Naive is TCP-only (R3-01); a
+payment made in the display currency counts at its paid amount even without a
+snapshot, so legacy rows stay exact (R3-10). The AWG fix (R3-18)
+changes client output only where the server already applied default params
+that the client omitted; complete parameter sets render byte-identically.
+Not deployed.
+
+Still open from round 3: the workspace declares `rust-version = "1.87"` but
+the code already uses let-chains, which need Rust 1.88. Raising the MSRV
+turns on clippy's MSRV-gated lints (`collapsible_if` into let-chains,
+`as_chunks`) across untouched code, so it is left for a separate mechanical
+change.

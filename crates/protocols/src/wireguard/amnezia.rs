@@ -11,31 +11,21 @@ use super::helpers::{
 use super::render::render_client_conf;
 
 pub(crate) fn amneziawg_block(ctx: &RenderCtx<'_>) -> Option<serde_json::Value> {
-    let keys = [
-        "amneziawg.jc",
-        "amneziawg.jmin",
-        "amneziawg.jmax",
-        "amneziawg.s1",
-        "amneziawg.s2",
-        "amneziawg.h1",
-        "amneziawg.h2",
-        "amneziawg.h3",
-        "amneziawg.h4",
-    ];
-    for k in &keys {
-        ctx.secrets.get(*k)?;
+    let has_params = vpnctl_core::amneziawg::DEFAULT_AMNEZIA_PARAMS
+        .iter()
+        .any(|(key, _)| {
+            ctx.secrets
+                .contains_key(&format!("amneziawg.{}", key.to_ascii_lowercase()))
+        });
+    if !has_params && !ctx.server.kernels.iter().any(|k| k.0 == "amneziawg") {
+        return None;
     }
-    Some(json!({
-        "jc":   ctx.secrets.get("amneziawg.jc"),
-        "jmin": ctx.secrets.get("amneziawg.jmin"),
-        "jmax": ctx.secrets.get("amneziawg.jmax"),
-        "s1":   ctx.secrets.get("amneziawg.s1"),
-        "s2":   ctx.secrets.get("amneziawg.s2"),
-        "h1":   ctx.secrets.get("amneziawg.h1"),
-        "h2":   ctx.secrets.get("amneziawg.h2"),
-        "h3":   ctx.secrets.get("amneziawg.h3"),
-        "h4":   ctx.secrets.get("amneziawg.h4"),
-    }))
+    Some(serde_json::Value::Object(
+        vpnctl_core::amneziawg::effective_params(ctx.secrets)
+            .into_iter()
+            .map(|(key, value)| (key.to_ascii_lowercase(), json!(value)))
+            .collect(),
+    ))
 }
 
 pub fn amnezia_share_link(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {

@@ -71,18 +71,6 @@ static AMNEZIAWG_SETUP_SCRIPT: std::sync::LazyLock<String> = std::sync::LazyLock
     )
 });
 
-const DEFAULT_AMNEZIA_PARAMS: &[(&str, &str)] = &[
-    ("Jc", "4"),
-    ("Jmin", "40"),
-    ("Jmax", "70"),
-    ("S1", "50"),
-    ("S2", "100"),
-    ("H1", "1"),
-    ("H2", "2"),
-    ("H3", "3"),
-    ("H4", "4"),
-];
-
 #[derive(Debug, Deserialize)]
 struct WireGuardEnvelope {
     listen_port: u16,
@@ -247,9 +235,7 @@ impl Kernel for AmneziaWg {
         out.push_str(&format!("ListenPort = {}\n", env.listen_port));
         out.push_str(&format!("Address = {}\n", env.address_cidr));
 
-        for (ini_key, default) in DEFAULT_AMNEZIA_PARAMS {
-            let secret_key = format!("amneziawg.{}", ini_key.to_ascii_lowercase());
-            let value = ctx.or_default(&secret_key, default);
+        for (ini_key, value) in vpnctl_core::amneziawg::effective_params(ctx.secrets) {
             out.push_str(&format!("{ini_key} = {value}\n"));
         }
 

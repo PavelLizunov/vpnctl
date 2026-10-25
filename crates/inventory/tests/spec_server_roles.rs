@@ -110,6 +110,46 @@ async fn set_role_no_op_audit_suppression() {
 }
 
 #[tokio::test]
+async fn routing_policy_updates_jump_via_and_audits_only_changes() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let mut target = srv("target");
+    let mut jump = srv("jump");
+    for server in [&mut target, &mut jump] {
+        server.trusted_host_fingerprint =
+            Some("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into());
+        inv.add_server(server).await.unwrap();
+    }
+
+    for _ in 0..2 {
+        inv.set_server_routing_policy_as("admin", &target.id, ServerRole::VpnExit, Some(&jump.id))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        inv.get_server(&target.id).await.unwrap().unwrap().jump_via,
+        Some(jump.id.clone())
+    );
+    assert_eq!(audit_count(&inv, "server.routing_policy.set").await, 1);
+
+    for _ in 0..2 {
+        inv.set_server_routing_policy_as("admin", &target.id, ServerRole::VpnExit, None)
+            .await
+            .unwrap();
+    }
+    assert!(
+        inv.get_server(&target.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .jump_via
+            .is_none()
+    );
+    assert_eq!(audit_count(&inv, "server.routing_policy.set").await, 2);
+    assert_eq!(audit_count(&inv, "server.jump_via.set").await, 0);
+}
+
+#[tokio::test]
 async fn list_fleet_servers_filters_workload_only() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;

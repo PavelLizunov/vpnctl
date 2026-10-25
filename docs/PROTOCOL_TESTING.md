@@ -8,8 +8,8 @@ WHO does what + HOW MUCH TIME each layer costs.
 **Why this exists.** Adding a VPN protocol to a Rust workspace looks
 small in code (one file, ~200 LOC, copy-paste from a sibling). The
 real cost is **proving it works** — handshake against a real client,
-survives DPI, survives 24h of traffic. We've shipped 5 protocols
-since v0.1; this is what it actually takes per protocol, distilled.
+survives DPI, survives 24h of traffic. The registry now ships 12 protocols;
+this is what verification takes per protocol, distilled.
 
 ---
 
@@ -123,8 +123,8 @@ Tick each item, in order. Skipping = leaving a bug class uncovered.
 - [ ] `Protocol::share_link` returns the canonical wire share URI for
   this protocol. Trailing `#<user-id>` percent-encoded.
 - [ ] `lib.rs` re-exports the type + any public constants.
-- [ ] `cli/src/registry.rs` AND `daemon/src/app.rs::build_registry`
-  each get **one line** `register_protocol(Box::new(MyProto::new()))?;`.
+- [ ] The shared `crates/kernels/src/registry.rs` gets **one line**
+  `register_protocol(Box::new(MyProto::new()))?;` for both CLI and daemon.
   Nothing else in `core` / `ssh` / `crypto` / `inventory` should
   change — if they do, the kernel/protocol orthogonality invariant
   was violated, fix it.
@@ -207,35 +207,40 @@ only at this layer.
 
 ---
 
-## The matrix — every sing-box inbound + our position
+## The matrix — shipped protocols and inbound candidates
 
-sing-box 1.13.11 supports these inbound types. We've shipped 5 of
-them; the rest are tabled with explicit decisions.
+The shared registry in `crates/kernels/src/registry.rs` ships 12 protocols
+across four kernels. Canonical protocol IDs are used below; some are endpoints
+or use kernels other than sing-box. **Shipped** means registered and implemented,
+not that live-client or anti-censorship validation has passed on every node.
+DPI tiers mirror each implementation's `dpi_risk()`.
 
-| Inbound | Wire | Anti-DPI? | Use case | Status in vpnctl | Recommendation |
+| Protocol / candidate | Wire | DPI tier | Use case | Status in vpnctl | Kernel / recommendation |
 |---|---|---|---|---|---|
-| `vless` (+REALITY) | TCP/443 | ✅ TLS-mimics yahoo.com (default `vless.sni`; was microsoft.com — fragile dest, 2026-06-25) | Censorship-circumvention primary | ✅ shipped | keep as default |
-| `tuic` v5 | UDP | ⚠️ self-signed TLS, no SNI mimic | Low-latency UDP-friendly net | ✅ shipped | keep as secondary |
-| `hysteria2` | UDP/QUIC | ⚠️ fingerprintable; ✅ with Salamander obfs (just shipped) | LTE/satellite + censored networks | ✅ shipped + Realm + Salamander | promote when Pavel has rendezvous server |
-| `shadowsocks` (2022) | TCP/UDP | ⚠️ different fingerprint than VLESS | Fallback channel | ✅ shipped (single-user) | wire multi-user via new `User.shadowsocks_2022_psk` column |
-| `wireguard` (via AmneziaWG) | UDP | ✅ with AmneziaWG obfs params | Homelab hosting + RU resilience | ✅ shipped | needs `--wireguard-pubkey` CLI plumbing (open follow-up) |
-| **`anytls`** | TCP/443 | ✅ multipath-TLS (sing-box 1.10+) | New-gen REALITY successor; harder for DPI than vanilla TLS-mimic | ❌ NOT shipped | **add — high priority**; ~200 LOC, matches REALITY's slot |
-| **`shadowtls`** v3 | TCP/443 | ✅ wraps SS in real TLS handshake to a legit host | When REALITY proxy-prober gives a different fingerprint than expected | ❌ NOT shipped | **add — medium**; secondary to AnyTLS, similar threat model |
-| `vmess` | TCP | ❌ deprecated by upstream, fingerprintable | Legacy compat for old clients | ❌ NOT shipped | **skip** — V2Ray's own users moved away |
-| `trojan` | TCP/443 | ⚠️ TLS-mimic-like, simpler than REALITY | Backup channel | ❌ NOT shipped | **add — low priority**; nice to have but largely subsumed by VLESS+REALITY |
-| `naive` | TCP/443 | ⚠️ Chrome fingerprint mimic | Niche, harder to detect on networks that don't whitelist Chrome | ❌ NOT shipped | **skip for now**; client support narrow |
-| `mixed` / `socks` / `http` | TCP | n/a | Local debugging proxy | ❌ NOT shipped | **skip** — wrong abstraction (these are local proxies, not VPN inbounds) |
-| `direct` | TCP/UDP | n/a | Tunneling raw | ❌ NOT shipped | **skip** — port-forward use case, not VPN |
-| `tun` / `redirect` / `tproxy` | OS-level | n/a | Transparent VPN client | ❌ NOT shipped | **skip** — client-side feature, not server inbound |
+| `vless+reality` | TCP | Strong | Censorship-circumvention primary | ✅ shipped | `sing-box`; default |
+| `tuic-v5` | UDP | Moderate | Low-latency UDP-friendly net | ✅ shipped | `sing-box`; secondary |
+| `hysteria2` | UDP/QUIC | Weak | LTE/satellite; optional Salamander and Realm | ✅ shipped | `sing-box`; validate Realm across distinct networks |
+| `shadowsocks-2022` | TCP/UDP | Weak | Fallback channel | ✅ shipped (single-user) | `sing-box`; shared server PSK |
+| `wireguard` | UDP | Weak | Native WireGuard delivery | ✅ shipped | `amneziawg`; legacy protocol |
+| `amneziawg2` | UDP | Moderate | AmneziaWG 2.0 native client | ✅ shipped | `sing-box`; native `.conf` delivery |
+| `amneziawg3` | UDP | Moderate | AmneziaWG 3.1 native client | ✅ shipped | `sing-box`; native `.conf` delivery |
+| `anytls` | TCP/TLS | Moderate | Alternative TLS transport | ✅ shipped | `sing-box` |
+| `trojan` | TCP/TLS | Weak | Backup channel | ✅ shipped | `sing-box` |
+| `naive` | HTTPS | Strong | Browser-like HTTPS transport | ✅ shipped | `caddy` |
+| `vless-ws` | WebSocket/TLS | Strong | VLESS behind an HTTPS cover site | ✅ shipped | `caddy` + `sing-box` |
+| `vless+xhttp` | XHTTP/TLS | Strong | XHTTP transport | ✅ shipped | `xray`; requires a compatible client |
+| `shadowtls` v3 | TCP/TLS | — | Wrap Shadowsocks in a real TLS handshake | ❌ NOT shipped | candidate; separate implementation and validation required |
+| `vmess` | TCP | — | Legacy compatibility | ❌ NOT shipped | skip; no current product requirement |
+| `mixed` / `socks` / `http` | TCP | — | Local debugging proxy | ❌ NOT shipped | skip; local proxies, not VPN server protocols |
+| `direct` | TCP/UDP | — | Raw tunneling | ❌ NOT shipped | skip; port-forward use case |
+| `tun` / `redirect` / `tproxy` | OS-level | — | Transparent VPN client | ❌ NOT shipped | skip; client-side feature |
 
-**Net add to the roadmap:**
+**Remaining roadmap candidates:**
 
 | Order | Inbound | Effort | Threat-model gap closed |
 |---|---|---|---|
-| 1 | AnyTLS | ~200 LOC + tests | DPI catching REALITY's specific pattern; AnyTLS uses different TLS extension fingerprint |
-| 2 | ShadowTLS v3 | ~250 LOC + tests | TLS-mimic with different shape than REALITY's proxy-rotation |
-| 3 | Trojan | ~150 LOC + tests | "I need yet another channel" insurance |
-| — | VMess, Naive, mixed, direct, tun | — | **skip** — see table above |
+| 1 | ShadowTLS v3 | ~250 LOC + tests | TLS wrapper with a different handshake shape |
+| — | VMess, mixed, direct, tun | — | skip; see table above |
 
 ---
 

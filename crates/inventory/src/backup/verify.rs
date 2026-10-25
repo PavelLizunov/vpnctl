@@ -136,6 +136,51 @@ pub async fn verify_snapshot(snapshot_path: &Path) -> Result<SelfTestReport, Sql
         .map_err(|e| {
             SqliteInventoryError::Invalid(format!("open self-test tmp {}: {e}", tmp_path.display()))
         })?;
+    match sqlx::query_scalar::<_, String>("PRAGMA integrity_check")
+        .fetch_all(&migrate_pool)
+        .await
+    {
+        Ok(rows) => {
+            let ok = rows.len() == 1 && rows[0] == "ok";
+            checks.push(CheckResult {
+                name: "integrity_check",
+                status: if ok {
+                    CheckStatus::Ok
+                } else {
+                    CheckStatus::Fail
+                },
+                detail: if ok {
+                    "integrity_check passed".to_string()
+                } else {
+                    format!("integrity_check failed ({} result rows)", rows.len())
+                },
+            });
+        }
+        Err(e) => checks.push(CheckResult {
+            name: "integrity_check",
+            status: CheckStatus::Fail,
+            detail: format!("integrity_check query failed: {e}"),
+        }),
+    }
+    match sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(&migrate_pool)
+        .await
+    {
+        Ok(rows) => checks.push(CheckResult {
+            name: "foreign_key_check",
+            status: if rows.is_empty() {
+                CheckStatus::Ok
+            } else {
+                CheckStatus::Fail
+            },
+            detail: format!("{} foreign key violation(s)", rows.len()),
+        }),
+        Err(e) => checks.push(CheckResult {
+            name: "foreign_key_check",
+            status: CheckStatus::Fail,
+            detail: format!("foreign_key_check query failed: {e}"),
+        }),
+    }
     let migration_ok = crate::sqlite::migrator().run(&migrate_pool).await;
     let expected_migrations = embedded_migration_count();
     let mut schema_migrations_applied: i64 = 0;

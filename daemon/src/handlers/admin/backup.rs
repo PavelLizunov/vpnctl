@@ -11,7 +11,7 @@ use super::helpers::{
 use crate::AppState;
 
 pub(crate) async fn backup_snapshot_now(State(state): State<AppState>) -> Response {
-    let backup_dir = std::path::PathBuf::from(crate::app::DEFAULT_BACKUP_DIR);
+    let backup_dir = vpnctl_inventory::backup_dir_from_env();
     let snapshot_result = vpnctl_inventory::snapshot_now(&state.inv, &backup_dir).await;
     let snapshot_path: Option<String> = snapshot_result
         .as_ref()
@@ -43,10 +43,7 @@ pub(crate) async fn backup_snapshot_now(State(state): State<AppState>) -> Respon
         tracing::error!(target = "vpnctld::backup", error = %e, "manual snapshot failed");
         return super::helpers::error_resp(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!(
-                "snapshot into {} failed: {e}",
-                crate::app::DEFAULT_BACKUP_DIR
-            ),
+            &format!("snapshot into {} failed: {e}", backup_dir.display()),
         );
     }
     Redirect::to("/admin/settings/backups#backups-section").into_response()
@@ -60,7 +57,7 @@ pub(crate) async fn backup_download(Path(name): Path<String>) -> Response {
             suffix = vpnctl_inventory::backup::SNAPSHOT_FILENAME_SUFFIX,
         ));
     }
-    let backup_dir = std::path::PathBuf::from(crate::app::DEFAULT_BACKUP_DIR);
+    let backup_dir = vpnctl_inventory::backup_dir_from_env();
     let path = backup_dir.join(&name);
     let canon_dir = match std::fs::canonicalize(&backup_dir) {
         Ok(p) => p,
@@ -97,7 +94,7 @@ pub(crate) async fn backup_self_test(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Response {
-    let backup_dir = std::path::PathBuf::from(crate::app::DEFAULT_BACKUP_DIR);
+    let backup_dir = vpnctl_inventory::backup_dir_from_env();
     let snapshots = match vpnctl_inventory::list_snapshots(&backup_dir) {
         Ok(list) => list,
         Err(e) => return internal_error(anyhow::Error::new(e)),

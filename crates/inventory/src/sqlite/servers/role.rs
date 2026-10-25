@@ -104,47 +104,6 @@ impl SqliteInventory {
         self.set_server_role(sid, role).await
     }
 
-    pub async fn set_server_jump_via(
-        &self,
-        sid: &ServerId,
-        jump_via: Option<&ServerId>,
-    ) -> Result<()> {
-        let target = self
-            .get_server(sid)
-            .await?
-            .ok_or_else(|| SqliteInventoryError::Invalid(format!("no such server '{}'", sid.0)))?;
-        if target.jump_via.as_ref() == jump_via {
-            return Ok(());
-        }
-        if let Some(jump_id) = jump_via {
-            let jump = self.get_server(jump_id).await?.ok_or_else(|| {
-                SqliteInventoryError::Invalid(format!("no such jump server '{}'", jump_id.0))
-            })?;
-            let mut candidate = target.clone();
-            candidate.jump_via = Some(jump_id.clone());
-            crate::jump_resolver::resolve_jump_host(&candidate, Some(&jump))
-                .map_err(|error| SqliteInventoryError::Invalid(error.to_string()))?;
-        }
-        let old = target.jump_via.as_ref().map(|id| id.0.as_str());
-        let new = jump_via.map(|id| id.0.as_str());
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query("UPDATE servers SET jump_via = ?1 WHERE id = ?2")
-            .bind(new)
-            .bind(&sid.0)
-            .execute(&mut *tx)
-            .await?;
-        let payload = serde_json::json!({"old": old, "new": new});
-        sqlx::query(
-            "INSERT INTO audit_log (actor, action, target, payload) VALUES ('admin', 'server.jump_via.set', ?1, ?2)",
-        )
-        .bind(&sid.0)
-        .bind(serde_json::to_string(&payload)?)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(())
-    }
-
     pub async fn set_server_routing_policy_as(
         &self,
         actor: &str,

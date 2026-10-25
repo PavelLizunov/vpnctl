@@ -219,6 +219,44 @@ async fn q4c_matches_target_or_payload_server_id_newest_first() {
 }
 
 #[tokio::test]
+async fn q4c_matches_payload_server_for_grants_revokes_and_user_removal() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+
+    for (action, payload) in [
+        ("user.grant", serde_json::json!({"server": "srv1"})),
+        ("user.revoke", serde_json::json!({"server": "srv1"})),
+        (
+            "user.revoke",
+            serde_json::json!({"server": "srv1", "reason": "user.remove"}),
+        ),
+    ] {
+        inv.audit("admin", action, Some("alice"), Some(&payload))
+            .await
+            .unwrap();
+    }
+    for other in ["srv2", "srv10"] {
+        inv.audit(
+            "admin",
+            "user.grant",
+            Some("alice"),
+            Some(&serde_json::json!({"server": other})),
+        )
+        .await
+        .unwrap();
+    }
+
+    let rows = inv.audit_for_server("srv1", 50).await.unwrap();
+    let actions: Vec<_> = rows.iter().map(|row| row.action.as_str()).collect();
+    assert_eq!(actions, vec!["user.revoke", "user.revoke", "user.grant"]);
+    assert_eq!(rows[0].payload.as_ref().unwrap()["reason"], "user.remove");
+    assert!(rows.windows(2).all(|pair| pair[0].id > pair[1].id));
+    let limited = inv.audit_for_server("srv1", 1).await.unwrap();
+    assert_eq!(limited.len(), 1);
+    assert_eq!(limited[0].id, rows[0].id);
+}
+
+#[tokio::test]
 async fn q4c_limit_and_empty() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;

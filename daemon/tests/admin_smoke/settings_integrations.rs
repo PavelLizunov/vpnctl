@@ -312,16 +312,34 @@ async fn boosty_settings_save_via_web() {
 }
 
 #[tokio::test]
-async fn boosty_page_explains_refresh_credentials_are_preferred() {
+async fn boosty_page_explains_bearer_first_and_refresh_recovery_in_both_languages() {
     let dir = TempDir::new().unwrap();
-    let html = fetch_html(router(state(&dir).await), "/admin/boosty").await;
-
-    assert!(html.contains("refresh token · preferred"));
-    assert!(html.contains("device id · with refresh"));
-    assert!(html.contains("access token · fallback"));
-    assert!(html.contains(
-        "Access token is a short-lived fallback used only when that pair is incomplete."
-    ));
+    let app = router(state(&dir).await);
+    for (cookie, access_label, refresh_label, device_label, explanation, stale) in [
+        (
+            "vpnctl_lang=en",
+            "access token · used first",
+            "refresh token · renewal",
+            "device id · with refresh",
+            "A non-empty access token is used first. A non-empty refresh token + device id pair is used when no access token is set, or to retry after an authentication failure.",
+            "fallback used only when that pair is incomplete",
+        ),
+        (
+            "vpnctl_lang=ru",
+            "access token · используется первым",
+            "refresh token · обновление",
+            "device id · для refresh",
+            "Сначала используется непустой access token. Непустая пара refresh token + device id используется, когда access token не задан, или для повторной попытки после ошибки авторизации.",
+            "он используется только если пара заполнена не полностью",
+        ),
+    ] {
+        let html = fetch_html_with_cookie(app.clone(), "/admin/boosty", cookie).await;
+        assert!(html.contains(access_label));
+        assert!(html.contains(refresh_label));
+        assert!(html.contains(device_label));
+        assert!(html.contains(explanation));
+        assert!(!html.contains(stale));
+    }
 }
 
 #[tokio::test]
@@ -1136,6 +1154,117 @@ async fn admin_settings_shows_backups_section_with_snapshot_button() {
 }
 
 #[tokio::test]
+async fn admin_recovery_instructions_restore_decrypted_inventory_after_unpacking() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    for lang in ["en", "ru"] {
+        let html = fetch_html_with_cookie(
+            app.clone(),
+            "/admin/settings/backups",
+            &format!("vpnctl_lang={lang}"),
+        )
+        .await;
+        let unpack = html
+            .find("scripts/vpnctl-restore.sh /path/to/archive.tar.zst.age /path/to/vpnctl-backup-key.age")
+            .expect("recovery must explain bundle decryption and extraction");
+        let restore = html
+            .find("vpnctl restore /path/to/inv.db")
+            .expect("restore must take the extracted SQLite snapshot");
+        assert!(unpack < restore);
+        assert!(!html.contains("vpnctl restore /path/to/archive.tar.zst.age"));
+        assert!(html.contains(if lang == "en" {
+            "keep the daemon stopped"
+        } else {
+            "оставь демон остановленным"
+        }));
+        for path in ["known_hosts", "GeoIP", "systemd"] {
+            assert!(html.contains(path));
+        }
+    }
+}
+
+#[tokio::test]
+async fn admin_backup_handlers_share_configured_directory() {
+    const CHILD: &str = "VPNCTL_BACKUP_ADMIN_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let dir = TempDir::new().unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "settings_integrations::admin_backup_handlers_share_configured_directory",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("VPNCTLD_BACKUP_DIR", dir.path().join("custom backups"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    let app = router(s);
+    let response = app
+        .clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/backup/snapshot"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let backup_dir = vpnctl_inventory::backup_dir_from_env();
+    let snapshots = vpnctl_inventory::list_snapshots(&backup_dir).unwrap();
+    assert_eq!(snapshots.len(), 1);
+    let snapshot = &snapshots[0];
+    let html = fetch_html(app.clone(), "/admin/settings/backups").await;
+    assert!(html.contains(&backup_dir.display().to_string()));
+    assert!(html.contains(&snapshot.file_name));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/admin/backup/download/{}", snapshot.file_name))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        bytes.as_ref(),
+        std::fs::read(&snapshot.path).unwrap().as_slice()
+    );
+
+    let response = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/backup/self-test"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&bytes).unwrap();
+    assert!(html.contains(&snapshot.path.display().to_string()));
+    assert!(html.contains("integrity_check"));
+    assert!(html.contains("foreign_key_check"));
+}
+
+#[tokio::test]
 async fn admin_backup_snapshot_now_posts_and_redirects_back() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
@@ -1304,6 +1433,28 @@ async fn track_1_3_settings_geoip_section_shows_missing_state_by_default() {
         html.contains("(missing — use the") || html.contains("(отсутствует — нажми"),
         "expected the 'missing' empty-state for both City + ASN"
     );
+}
+
+#[tokio::test]
+async fn settings_geoip_update_copy_requires_daemon_restart_in_both_languages() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    for (cookie, explanation, stale) in [
+        (
+            "vpnctl_lang=en",
+            "The new databases are used after vpnctld restarts.",
+            "then reloads the DB",
+        ),
+        (
+            "vpnctl_lang=ru",
+            "Новые базы используются после перезапуска vpnctld.",
+            "затем перезагружает БД",
+        ),
+    ] {
+        let html = fetch_html_with_cookie(app.clone(), "/admin/settings/system", cookie).await;
+        assert!(html.contains(explanation));
+        assert!(!html.contains(stale));
+    }
 }
 
 #[tokio::test]

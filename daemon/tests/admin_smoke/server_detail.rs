@@ -4,6 +4,8 @@ mod drift_traffic;
 mod kernels;
 #[path = "server_detail/overview_telemetry.rs"]
 mod overview_telemetry;
+#[path = "server_detail/protocol_settings.rs"]
+mod protocol_settings;
 #[path = "server_detail/protocols.rs"]
 mod protocols;
 #[path = "server_detail/setup_config.rs"]

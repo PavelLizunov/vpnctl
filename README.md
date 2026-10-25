@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/PavelLizunov/vpnctl/actions/workflows/ci.yml/badge.svg)](https://github.com/PavelLizunov/vpnctl/actions/workflows/ci.yml)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.85%2B%20(2024%20ed)-orange.svg)](rust-toolchain.toml)
+[![Rust](https://img.shields.io/badge/rust-1.87%2B%20(2024%20ed)-orange.svg)](rust-toolchain.toml)
 [![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)](#project-size)
 [![Version](https://img.shields.io/badge/version-0.9.0-blue.svg)](#production-health-check)
 
@@ -37,9 +37,9 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 
 | Aspect | Value |
 |---|---|
-| Protocols × Kernels | **10 protocols** × **4 kernels**, fully orthogonal (see [Architecture](#architecture)) |
+| Protocols × Kernels | **12 protocols** × **4 kernels**, fully orthogonal (see [Architecture](#architecture)) |
 | Inventory | SQLite via `sqlx`, audit-on-mutation |
-| Toolchain | Rust **1.85+**, edition **2024** · static musl Linux x86_64 binaries (`x86_64-unknown-linux-musl`) |
+| Toolchain | Rust **1.87+**, edition **2024** · static musl Linux x86_64 binaries (`x86_64-unknown-linux-musl`) |
 
 ### What ships today
 
@@ -51,7 +51,7 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 | `vpnctld` daemon — REST API + `/sub/<token>` + Admin UI + per-IP rate-limit + persistent bans | ✅ |
 | Inventory — sqlx + SQLite, migrations, audit_log, retention scheduler | ✅ |
 | Kernels — `sing-box`, `amneziawg`, `caddy` (naive / vless-ws cover site), `xray` | ✅ |
-| Protocols — `vless+reality`, `tuic-v5`, `hysteria2`, `shadowsocks-2022`, `wireguard`, `anytls`, `trojan`, `naive`, `vless-ws`, `vless+xhttp` | ✅ (10 across 4 kernels) |
+| Protocols — `vless+reality`, `tuic-v5`, `hysteria2`, `shadowsocks-2022`, `wireguard`, `amneziawg2`, `amneziawg3`, `anytls`, `trojan`, `naive`, `vless-ws`, `vless+xhttp` | ✅ (12 across 4 kernels) |
 | Hosters — DigitalOcean / Cloudzy / Generic (SSH port quirks) | ✅ |
 | Add-server **wizard** (Phase E) — paste IP+root password, SSE-streamed bootstrap | ✅ |
 | Backups — VACUUM INTO snapshot + hourly retention + off-site copy + restore CLI/web self-test + CI-protected byte-equality (`restore_e2e`) + in-product Disaster Recovery section | ✅ |
@@ -59,7 +59,7 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 | Chain-capable subscriptions — stock sing-box JSON plus capability-gated VPNRouter app-config metadata, both with fail-closed entry filtering | ✅ |
 | Boosty subscription bridge — auto-creates complete users for new paid subscribers, grants every server, and supports a configurable disable grace period | ✅ |
 | Protocol visibility — per-(server, protocol) hide + per-(user, server, protocol) deny with OR-semantics | ✅ |
-| DPI-risk tiers — Strong / Moderate / Weak chip per protocol (REALITY Strong; tuic/anytls Moderate; rest Weak) | ✅ |
+| DPI-risk tiers — Strong: `naive`, `vless+reality`, `vless+xhttp`, `vless-ws`; Moderate: `amneziawg2`, `amneziawg3`, `anytls`, `tuic-v5`; Weak: `hysteria2`, `shadowsocks-2022`, `trojan`, `wireguard` | ✅ |
 | Monitoring — 24h sub-fetch sparkline + heavy-users heatmap + filtered `/admin/sharing` risk page + per-user UA fingerprint heuristic | ✅ |
 | Traffic accounting — cumulative per-user sing-box V2Ray Stats (Clash for live metadata; AmneziaWG independent) | ✅ |
 | Audit timeline — paginated + filtered + CSV export | ✅ |
@@ -99,6 +99,13 @@ exits 15 unless a delivery failure takes precedence. These failures are visible
 in the systemd job result and stage logs, not a new Web status panel.
 `OFFSITE_HOST=""` explicitly disables off-site delivery; it is not proof of an
 off-site copy. See the [backup/restore contract](docs/specs/backup-restore.md).
+
+For bundle recovery, `scripts/vpnctl-restore.sh <archive.tar.zst.age>
+<age-private-key-file>` decrypts, unpacks and verifies files in a scratch
+directory. With vpnctld stopped, pass the extracted `vpnctl-snap/inv.db` to
+`vpnctl restore <snapshot>`, then restore env, assets, deploy key, known_hosts,
+GeoIP, systemd units and firewall rules to their configured paths with their
+ownership and permissions preserved before starting vpnctld.
 
 ### AmneziaWG 2.0 / 3.1 integration
 
@@ -155,16 +162,17 @@ the other:
 | Trait | Meaning | Examples |
 |---|---|---|
 | `Kernel` | Node-side daemon that holds the connections | `sing-box`, `amneziawg`, `caddy`, `xray` |
-| `Protocol` | Wire format presented to the client | `vless+reality`, `tuic-v5`, `hysteria2`, `shadowsocks-2022`, `wireguard`, `anytls`, `trojan`, `naive`, `vless-ws`, `vless+xhttp` |
+| `Protocol` | Wire format presented to the client | `vless+reality`, `tuic-v5`, `hysteria2`, `shadowsocks-2022`, `wireguard`, `amneziawg2`, `amneziawg3`, `anytls`, `trojan`, `naive`, `vless-ws`, `vless+xhttp` |
 
 A `Kernel` declares which `Protocol`s it can host (`Kernel::supported_protocols()`).
 `Registry::validate_server` catches incompatible combinations **before** an
 SSH session opens.
 
 Adding a new kernel (e.g. `xray`) = one new file in `crates/kernels/src/` +
-one `register_kernel` line. Adding a new protocol = one new file in
-`crates/protocols/src/` + one `register_protocol` line. CLI, inventory, SSH
-layer, daemon, admin UI, and crypto stay **unaffected**.
+one `register_kernel` line in `crates/kernels/src/registry.rs`. Adding a new
+protocol = one new file in `crates/protocols/src/` + one `register_protocol`
+line in the same shared builder. CLI, inventory, SSH layer, daemon, admin UI,
+and crypto stay **unaffected**.
 
 Protocols are **stateless** — per-server secrets arrive via `RenderCtx`,
 never live on the protocol struct.
@@ -192,7 +200,7 @@ vpnctl/
 │   ├── host-fingerprint/ ssh-keyscan wrapper + SHA256 validate_shape
 │   ├── ssh/              SshTransport trait + russh implementations
 │   ├── protocols/        vless+reality, tuic-v5, hysteria2, ss-2022, wg,
-│   │                     anytls, trojan, naive, vless-ws,
+│   │                     amneziawg2, amneziawg3, anytls, trojan, naive, vless-ws,
 │   │                     vless+xhttp
 │   ├── kernels/          sing-box (full), amneziawg, caddy, xray
 │   ├── inventory/        SqliteInventory, migrations, audit_log
@@ -227,7 +235,7 @@ curl --fail --silent --show-error http://127.0.0.1:18402/api/v1/health
 The response is HTTP `200 OK` with a minimal JSON body. `version` is the
 stable SemVer — machine-readable and safe to grep/parse. `build` adds
 provenance: the same SemVer plus the short Git SHA the binary was built from
-(`+unknown` when built outside a Git checkout, e.g. a release tarball):
+(`+unknown` when `VPNCTL_BUILD_SHA` is unset, even inside a Git checkout):
 
 ```json
 {"status":"ok","version":"0.9.0","build":"0.9.0+a1b2c3d"}
@@ -235,14 +243,14 @@ provenance: the same SemVer plus the short Git SHA the binary was built from
 
 **Release rule.** SemVer (`version`) changes only intentionally, when a
 release is cut — it is the operator-facing contract. The build SHA (`build`)
-changes on **every** build from a checkout, so two daemons that both report
-`version: 0.9.0` are still distinguishable by `build`. The same
-`<semver>+<sha>` stamp is shown in the admin UI footer/masthead and by
+is included only when `VPNCTL_BUILD_SHA` is set at compile time, so two daemons
+that both report `version: 0.9.0` can be distinguished by their supplied build SHA.
+The same `<semver>+<sha>` stamp is shown in the admin UI footer/masthead and by
 `vpnctl --version`, giving one provenance string across the deployed daemon
 and CLI. The SHA is baked in at compile time: `scripts/deploy.sh` exports
 `VPNCTL_BUILD_SHA` before `cargo build`, and `vpnctl_core::build_version()`
 reads it via `option_env!` — no build script and no `git` at runtime
-(outside a checkout the stamp falls back to `+unknown`).
+(without that environment variable the stamp falls back to `+unknown`).
 
 Use the deployment's public base URL instead of `127.0.0.1:18402` to verify
 the reverse-proxy path as well. This endpoint reports `vpnctld` process
@@ -257,7 +265,7 @@ scripting / disaster recovery.
 
 | Goal | Web | CLI |
 |---|---|---|
-| Add a new server | `/admin/servers/quick-add` wizard, SSE-streamed bootstrap | `vpnctl bootstrap <ip> <password>` then `vpnctl deploy <id>` |
+| Add a new server | `/admin/servers/new` wizard, SSE-streamed bootstrap | `vpnctl bootstrap <id> --address <ip>` (password via `--root-password` or `VPNCTL_ROOT_PW`), then `vpnctl deploy <id>` |
 | Add a user | `/admin/users` + form | `vpnctl user add <name>` |
 | Grant a user access to a server | `/admin/users/<id>` per-server toggle | `vpnctl grant <user> <server>` |
 | Get subscription URL / QR / config | `/admin/users/<id>` (clipboard / QR / `.conf` download) | `vpnctl sub <user>` |
@@ -267,7 +275,8 @@ scripting / disaster recovery.
 | Inspect Boosty bridge & income | `/admin/boosty` (1-click bookmarklet, MRR & roster) | `vpnctl boosty status` (global `--output json` for automation) |
 | Manage server billing & P&L | `/admin/servers/billing` (multi-currency, P&L coverage) | (none; web-only) |
 | Ack all infra alerts | `/admin/alerts` → «ack all (N)» button | (none; web-only) |
-| Restore a snapshot | `/admin/settings` self-test, then CLI restore on a recovered host | `vpnctl restore <bundle>` |
+| Restore a decrypted SQLite snapshot | `/admin/settings/backups` self-test, then CLI restore with vpnctld stopped | `vpnctl restore <snapshot>` |
+| Unpack an encrypted recovery bundle | Recovery host; restore extracted `inv.db` and the other files before starting vpnctld | `scripts/vpnctl-restore.sh <archive.tar.zst.age> <age-private-key-file>` |
 
 ### Client setup guides
 

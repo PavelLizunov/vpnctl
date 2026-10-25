@@ -35,24 +35,10 @@ pub(super) fn server_detail_kernels_section(
                 (icon("triangle-alert"))
                 (tr(
                     lang,
-                    "toggle here = inventory only",
-                    "тогл здесь = только инвентарь",
+                    "Changes are saved and applied automatically to the node.",
+                    "Изменения сохраняются и автоматически применяются на ноде.",
                 ))
             }
-            (tr(
-                lang,
-                " — the live node sees the change only after you click ",
-                " — живая нода увидит изменение только после клика по ",
-            ))
-            a href="#deploy-button"
-              style="color: var(--ink); border-bottom: 1px dotted var(--ink); text-decoration: none; font-weight: 500;" {
-                span.ed-mono { (icon("rocket")) (tr(lang, "deploy", "деплой")) }
-            }
-            (tr(
-                lang,
-                " at the top of this page. We never SSH-push a config without an explicit operator click (no surprise redeploys).",
-                " вверху страницы. Мы никогда не пушим конфиг через SSH без явного клика оператора (без сюрпризов-redeploy).",
-            ))
         }
         ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px; line-height: 1.8;" {
             @for kid in &all_kernels {
@@ -81,8 +67,8 @@ pub(super) fn server_detail_kernels_section(
                              data-confirm=(crate::i18n::tr(lang, "Disable this kernel on the server?", "Отключить это ядро на сервере?"))
                              style="margin: 0; padding: 0;" {
                             @let dis_title = match lang {
-                                crate::i18n::Locale::En => format!("Remove {} from {}.kernels. Takes effect on next deploy.", kid.0, server.id.0),
-                                crate::i18n::Locale::Ru => format!("Убрать {} из {}.kernels. Применится при следующем деплое.", kid.0, server.id.0),
+                                crate::i18n::Locale::En => format!("Remove {} from {}.kernels. Applied automatically to the node.", kid.0, server.id.0),
+                                crate::i18n::Locale::Ru => format!("Убрать {} из {}.kernels. Применяется автоматически на ноде.", kid.0, server.id.0),
                             };
                             button type="submit"
                                    title=(dis_title)
@@ -98,8 +84,8 @@ pub(super) fn server_detail_kernels_section(
                              action=(format!("/admin/servers/{}/kernels/{}/enable", sid_enc, path_segment_encode(&kid.0)))
                              style="margin: 0; padding: 0;" {
                             @let en_title = match lang {
-                                crate::i18n::Locale::En => format!("Add {} to {}.kernels. Takes effect on next deploy.", kid.0, server.id.0),
-                                crate::i18n::Locale::Ru => format!("Добавить {} в {}.kernels. Применится при следующем деплое.", kid.0, server.id.0),
+                                crate::i18n::Locale::En => format!("Add {} to {}.kernels. Applied automatically to the node.", kid.0, server.id.0),
+                                crate::i18n::Locale::Ru => format!("Добавить {} в {}.kernels. Применяется автоматически на ноде.", kid.0, server.id.0),
                             };
                             button type="submit"
                                    title=(en_title)

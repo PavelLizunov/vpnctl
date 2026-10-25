@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 vpnctl-core = { path = "../core" }
+vpnctl-protocols = { path = "../protocols" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
@@ -16,7 +17,6 @@ sha2 = "0.10"
 tokio = { version = "1", features = ["rt"] }
 
 [dev-dependencies]
-vpnctl-protocols = { path = "../protocols" }
 vpnctl-ssh = { path = "../ssh" }
 tokio = { version = "1", features = ["macros", "rt"] }
 tempfile = "3"

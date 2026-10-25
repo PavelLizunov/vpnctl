@@ -41,6 +41,13 @@ pub(crate) async fn server_enable_protocol(
                 "cannot enable protocol '{protocol_id_str}': {msg}"
             ));
         }
+        for kid in &after.kernels {
+            if let Some(kernel) = state.registry.kernel(kid)
+                && let Err(e) = kernel.validate_server_support(&after)
+            {
+                return bad_request(&format!("cannot enable protocol '{protocol_id_str}': {e}"));
+            }
+        }
     }
 
     let inserted = match state.inv.add_server_protocol(&sid, &pid).await {

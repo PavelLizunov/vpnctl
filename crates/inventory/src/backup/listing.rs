@@ -12,6 +12,13 @@ pub struct SnapshotInfo {
 
 pub const DEFAULT_BACKUP_DIR: &str = "/var/lib/vpnctl/backups";
 
+/// Resolve the shared CLI and daemon snapshot directory.
+pub fn backup_dir_from_env() -> PathBuf {
+    std::env::var("VPNCTLD_BACKUP_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_BACKUP_DIR))
+}
+
 pub const SNAPSHOT_FILENAME_PREFIX: &str = "inv.db.";
 pub const SNAPSHOT_FILENAME_SUFFIX: &str = ".bak";
 

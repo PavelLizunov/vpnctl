@@ -259,14 +259,41 @@ pub(crate) async fn server_set_reality_config(
         return bad_request("invalid REALITY listen port (1..=65535)");
     }
 
+    let sni_raw = form_field(&body, "sni");
+    let sni = sni_raw.as_deref().map(str::trim);
+    if let Some(sni) = sni
+        && (sni.is_empty()
+            || sni.len() > 253
+            || sni.parse::<std::net::IpAddr>().is_ok()
+            || !sni.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && label.starts_with(|c: char| c.is_ascii_alphanumeric())
+                    && label.ends_with(|c: char| c.is_ascii_alphanumeric())
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            }))
+    {
+        return bad_request("invalid REALITY handshake domain (expected a hostname)");
+    }
+
     let mut candidate = match state.inv.list_server_secrets(&sid).await {
         Ok(s) => s,
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
+    let mut values = Vec::new();
+    if !port.is_empty() || candidate.contains_key("vless.listen_port") {
+        values.push(("vless.listen_port", port));
+    }
     if port.is_empty() {
         candidate.remove("vless.listen_port");
     } else {
         candidate.insert("vless.listen_port".to_string(), port.to_string());
+    }
+    if let Some(sni) = sni {
+        candidate.insert("vless.sni".to_string(), sni.to_string());
+        values.push(("vless.sni", sni));
     }
     if let Err(e) = state.registry.validate_server(&server, &candidate) {
         return bad_request(&format!("{e}"));
@@ -274,21 +301,48 @@ pub(crate) async fn server_set_reality_config(
 
     if let Err(e) = state
         .inv
-        .set_server_secret(&sid, "vless.listen_port", port)
+        .set_server_secrets_audited(&sid, "admin", "server.reality.set", &values)
         .await
     {
         return internal_error(anyhow::Error::new(e));
     }
-    let _ = state
-        .inv
-        .audit(
-            "admin",
-            "server.reality.set",
-            Some(&server_id),
-            Some(&serde_json::json!({ "listen_port": port })),
-        )
-        .await;
 
+    Redirect::to(&format!(
+        "/admin/servers/{}/protocols",
+        path_segment_encode(&server_id)
+    ))
+    .into_response()
+}
+
+pub(crate) async fn server_rotate_hysteria2_obfs(
+    Path(server_id): Path<String>,
+    State(state): State<AppState>,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id.clone());
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return not_found(&format!("no such server '{server_id}'")),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    if !server.enabled_protocols.iter().any(|p| p.0 == "hysteria2") {
+        return bad_request("Hysteria2 is not enabled on this server");
+    }
+    let password = match vpnctl_crypto::gen_password(24) {
+        Ok(password) => password,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    if let Err(e) = state
+        .inv
+        .set_server_secrets_audited(
+            &sid,
+            "admin",
+            "server.secret.set",
+            &[("hysteria2.obfs.password", password.as_str())],
+        )
+        .await
+    {
+        return internal_error(anyhow::Error::new(e));
+    }
     Redirect::to(&format!(
         "/admin/servers/{}/protocols",
         path_segment_encode(&server_id)

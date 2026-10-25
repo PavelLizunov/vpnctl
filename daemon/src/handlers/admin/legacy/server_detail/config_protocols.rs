@@ -156,6 +156,10 @@ pub(crate) fn server_detail_reality_config_section(
         .get("vless.listen_port")
         .map(String::as_str)
         .unwrap_or("");
+    let sni = server_secrets
+        .get("vless.sni")
+        .map(String::as_str)
+        .unwrap_or(vpnctl_protocols::DEFAULT_REALITY_SNI);
     html! {
         div.ed-rule {}
         div.ed-art-eyebrow
@@ -164,9 +168,21 @@ pub(crate) fn server_detail_reality_config_section(
                 "REALITY слушает этот порт напрямую. По умолчанию 443 (золотой стандарт HTTPS-маскировки); задай другой порт, если 443 на этом хосте занят со-жителем (naive/caddy, легаси 3x-ui). При сохранении проверяется против портов всех остальных протоколов и вступает в силу при деплое.")) {
             (tr(lang, "VLESS+REALITY CONFIG", "КОНФИГ VLESS+REALITY"))
         }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 10px;" {
+            (tr(lang,
+                "Deploy after saving. Clients receive the new handshake domain when they refresh their subscription after the deploy.",
+                "После сохранения выполни деплой. Клиенты получат новый домен рукопожатия при обновлении подписки после деплоя."))
+        }
         form method="post"
              action=(format!("/admin/servers/{sid_enc}/reality-config"))
              style="display: grid; grid-template-columns: 96px 1fr; gap: 6px 8px; align-items: center; max-width: 520px;" {
+            label for="reality-sni" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                (tr(lang, "handshake domain", "домен рукопожатия"))
+            }
+            input id="reality-sni" type="text" name="sni" maxlength="253" required
+                  value=(sni)
+                  title=(tr(lang, "Hostname of the HTTPS site used for the REALITY handshake.", "Имя HTTPS-сайта для рукопожатия REALITY."))
+                  style="min-width: 0; padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
             label style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                 (tr(lang, "listen port", "порт"))
             }
@@ -177,9 +193,37 @@ pub(crate) fn server_detail_reality_config_section(
                   style="padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
             span {}
             button type="submit"
-                   title=(tr(lang, "Save the REALITY listen port", "Сохранить порт REALITY"))
+                   title=(tr(lang, "Save REALITY settings", "Сохранить настройки REALITY"))
                    style="justify-self: start; padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                (icon("save")) (tr(lang, "save reality port", "сохранить порт"))
+                (icon("save")) (tr(lang, "save reality config", "сохранить конфиг"))
+            }
+        }
+    }
+}
+
+pub(crate) fn server_detail_hysteria2_obfs_section(
+    server: &vpnctl_core::Server,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    if !server.enabled_protocols.iter().any(|p| p.0 == "hysteria2") {
+        return html! {};
+    }
+    let sid_enc = path_segment_encode(&server.id.0);
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow {
+            (tr(lang, "HYSTERIA2 OBFUSCATION", "ОБФУСКАЦИЯ HYSTERIA2"))
+        }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 10px;" {
+            (tr(lang,
+                "Generate a new obfuscation password, then deploy. Clients receive the new password when they refresh their subscription after the deploy; cached configurations must be refreshed.",
+                "Создай новый пароль обфускации, затем выполни деплой. Клиенты получат новый пароль при обновлении подписки после деплоя; сохранённые конфигурации нужно обновить."))
+        }
+        form method="post" action=(format!("/admin/servers/{sid_enc}/hysteria2-obfs-rotate")) {
+            button type="submit" class="ed-abtn" {
+                (icon("rotate-cw"))
+                (tr(lang, "rotate obfuscation password", "сменить пароль обфускации"))
             }
         }
     }

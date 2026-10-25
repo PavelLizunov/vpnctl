@@ -43,8 +43,8 @@ pub(crate) fn render_delivery_tab(
             }
             span.ed-tip title=(crate::i18n::tr(
                 lang,
-                "The mobile app polls this URL on a fixed schedule; rotating the sub-token below invalidates the old URL immediately.",
-                "Приложение опрашивает этот URL по расписанию; ротация sub-token ниже мгновенно гасит старый URL.",
+                "The mobile app polls this URL on a fixed schedule. Rotating the sub-token immediately invalidates links that use it; app-config links use device_id and remain unchanged.",
+                "Приложение опрашивает этот URL по расписанию. Ротация sub-token мгновенно делает ссылки с ним недействительными; ссылки app-config используют device_id и остаются без изменений.",
             )) { (icon("info")) }
             @if let Some(t) = sub_token {
                 span.ed-grid__mut style="margin-left: auto; font-family: var(--mono); font-size: 10px;" {

@@ -1,125 +1,86 @@
 #![allow(clippy::expect_used)]
 
-use std::sync::Mutex;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
+use std::process::Command;
 
-use async_trait::async_trait;
-use vpnctl_core::{Result, SshTransport, shell::single_quote};
+use vpnctl_core::SshTransport;
+use vpnctl_ssh::SubprocessSshTransport;
 
-#[derive(Debug, PartialEq, Eq)]
-enum Operation {
-    PrivilegedExec(String),
-    LoginUserExec(String),
-    PrivilegedUpload { path: String, content: Vec<u8> },
-    PrivilegedRead(String),
-}
+const WORKER_ENV: &str = "VPNCTL_PRIVILEGE_TEST_WORKER";
 
-#[derive(Debug, Default)]
-struct RecordingTransport {
-    operations: Mutex<Vec<Operation>>,
-}
-
-impl RecordingTransport {
-    fn take_operations(&self) -> Vec<Operation> {
-        std::mem::take(&mut *self.operations.lock().expect("recording lock"))
-    }
-}
-
-#[async_trait]
-impl SshTransport for RecordingTransport {
-    async fn exec(&self, cmd: &str) -> Result<String> {
-        self.operations
-            .lock()
-            .expect("recording lock")
-            .push(Operation::PrivilegedExec(cmd.to_owned()));
-        Ok(String::new())
+fn with_fake_ssh(test_name: &str) -> bool {
+    if std::env::var(WORKER_ENV).as_deref() == Ok(test_name) {
+        return true;
     }
 
-    async fn exec_unprivileged(&self, cmd: &str) -> Result<String> {
-        self.operations
-            .lock()
-            .expect("recording lock")
-            .push(Operation::LoginUserExec(cmd.to_owned()));
-        Ok(String::new())
-    }
+    let tmp = tempfile::TempDir::new().expect("tmpdir");
+    let ssh = tmp.path().join("ssh");
+    std::fs::write(
+        &ssh,
+        "#!/bin/sh\nfor arg do :; done\nprintf '%s' \"$arg\"\n",
+    )
+    .expect("write fake ssh");
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))
+        .expect("make fake ssh executable");
 
-    async fn upload(&self, path: &str, content: &[u8]) -> Result<()> {
-        self.operations
-            .lock()
-            .expect("recording lock")
-            .push(Operation::PrivilegedUpload {
-                path: path.to_owned(),
-                content: content.to_vec(),
-            });
-        Ok(())
-    }
-
-    async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
-        self.operations
-            .lock()
-            .expect("recording lock")
-            .push(Operation::PrivilegedRead(path.to_owned()));
-        Ok(Vec::new())
-    }
+    // Override PATH only in a child so parallel tests keep their environment.
+    let output = Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", test_name, "--nocapture"])
+        .env(WORKER_ENV, test_name)
+        .env("PATH", tmp.path())
+        .output()
+        .expect("run transport test with fake ssh");
+    assert!(
+        output.status.success(),
+        "transport worker failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    false
 }
 
 #[tokio::test]
-async fn transport_api_keeps_privileged_and_login_user_operations_distinct() {
-    let transport = RecordingTransport::default();
-
-    transport.exec("id -u").await.expect("privileged exec");
-    transport
-        .exec_unprivileged("printf login-user")
-        .await
-        .expect("login-user exec");
-    transport
-        .upload("/etc/vpnctl/config", b"secret")
-        .await
-        .expect("privileged upload");
-    transport
-        .read_file("/etc/vpnctl/config")
-        .await
-        .expect("privileged read");
-
-    assert_eq!(
-        transport.take_operations(),
-        vec![
-            Operation::PrivilegedExec("id -u".into()),
-            Operation::LoginUserExec("printf login-user".into()),
-            Operation::PrivilegedUpload {
-                path: "/etc/vpnctl/config".into(),
-                content: b"secret".to_vec(),
-            },
-            Operation::PrivilegedRead("/etc/vpnctl/config".into()),
-        ]
-    );
-}
-
-#[test]
-fn root_transport_wire_command_is_unchanged() {
+async fn root_transport_wire_command_is_unchanged() {
+    if !with_fake_ssh("root_transport_wire_command_is_unchanged") {
+        return;
+    }
+    let transport = SubprocessSshTransport::new("example.invalid", "root", PathBuf::from("key"));
     let command = "printf '%s\\n' \"$HOME\"; id -u";
 
-    let expected_root_wire_command = command;
-
-    assert_eq!(expected_root_wire_command, command);
+    assert_eq!(transport.exec(command).await.expect("root exec"), command);
 }
 
-#[test]
-fn non_root_privileged_wire_command_uses_noninteractive_sudo_and_posix_quoting() {
+#[tokio::test]
+async fn non_root_privileged_wire_command_uses_noninteractive_sudo_and_posix_quoting() {
+    if !with_fake_ssh("non_root_privileged_wire_command_uses_noninteractive_sudo_and_posix_quoting")
+    {
+        return;
+    }
+    let transport =
+        SubprocessSshTransport::new("example.invalid", "operator", PathBuf::from("key"));
     let command = "printf '%s' 'a b'; echo $HOME; echo `id`; printf '\\n'";
 
-    let expected_wire_command = format!("sudo -n sh -c {}", single_quote(command));
-
     assert_eq!(
-        expected_wire_command,
-        "sudo -n sh -c 'printf '\\''%s'\\'' '\\''a b'\\''; echo $HOME; echo `id`; printf '\\''\\n'\\'''"
+        transport.exec(command).await.expect("privileged exec"),
+        r"sudo -n sh -c 'printf '\''%s'\'' '\''a b'\''; echo $HOME; echo `id`; printf '\''\n'\'''"
     );
 }
 
-#[test]
-fn non_root_unprivileged_wire_command_is_unchanged() {
+#[tokio::test]
+async fn non_root_unprivileged_wire_command_is_unchanged() {
+    if !with_fake_ssh("non_root_unprivileged_wire_command_is_unchanged") {
+        return;
+    }
+    let transport =
+        SubprocessSshTransport::new("example.invalid", "operator", PathBuf::from("key"));
     let command = "mkdir -p ~/.ssh && printf login-user";
 
-    let expected_login_user_wire_command = command;
-
-    assert_eq!(expected_login_user_wire_command, command);
+    assert_eq!(
+        SshTransport::exec_unprivileged(&transport, command)
+            .await
+            .expect("login-user exec"),
+        command
+    );
 }

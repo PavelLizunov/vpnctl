@@ -8,6 +8,7 @@ pub(crate) fn settings_disaster_recovery_section(
     last_self_test: Option<&vpnctl_inventory::AuditEntry>,
 ) -> Markup {
     use crate::i18n::tr;
+    let backup_dir = vpnctl_inventory::backup_dir_from_env();
     let deploy_key = crate::app::deploy_key_path();
     let deploy_key_pub = crate::ssh_subprocess::public_key_path(&deploy_key);
     let deploy_key_bundle_label =
@@ -74,7 +75,7 @@ pub(crate) fn settings_disaster_recovery_section(
             tbody {
                 tr style="border-bottom: 1px dotted var(--rule);" {
                     td style="padding: 6px 8px;" { "1. local" }
-                    td style="padding: 6px 8px;" { span.ed-mono { (crate::app::DEFAULT_BACKUP_DIR) } }
+                    td style="padding: 6px 8px;" { span.ed-mono { (backup_dir.display()) } }
                     td style="padding: 6px 8px; color: var(--mute);" { (tr(lang, "plaintext (daemon-owned 0640)", "plaintext (демон-only 0640)")) }
                     td style="padding: 6px 8px; color: var(--mute);" { (tr(lang, "24 hourly + 30 daily + 12 monthly", "24 часовых + 30 дневных + 12 месячных")) }
                 }
@@ -204,18 +205,18 @@ pub(crate) fn settings_disaster_recovery_section(
             li {
                 b { (tr(lang, "On the new host: decrypt + extract", "На новом хосте: расшифруй + распакуй")) }
                 " — "
-                (tr(lang, "anywhere (new VPS, restored from VM snapshot, fresh laptop install). Decrypt the latest archive from tier 3 (off-site) with ", "где угодно (новый VPS, восстановленный VM-снэпшот, свежий ноут). Расшифруй последний архив с уровня 3 (off-site) через "))
-                span.ed-mono { "age -d -i /path/to/vpnctl-backup-key.age" }
-                (tr(lang, ". Extract the tar — you'll get the full ", ". Распакуй tar — получишь полный "))
+                (tr(lang, "run the recovery script on the latest archive from tier 3 (off-site): ", "запусти скрипт восстановления для последнего архива с уровня 3 (off-site): "))
+                span.ed-mono { "scripts/vpnctl-restore.sh /path/to/archive.tar.zst.age /path/to/vpnctl-backup-key.age" }
+                (tr(lang, ". It decrypts, unpacks and verifies the bundle in a scratch directory; it does not install files. The extracted ", ". Он расшифрует, распакует и проверит бандл во временном каталоге; файлы на рабочие места он не устанавливает. Распакованное дерево "))
                 span.ed-mono { "vpnctl-snap/" }
-                (tr(lang, " tree.", " дерево."))
+                (tr(lang, " tree includes inv.db and the other recovery files.", " содержит inv.db и остальные файлы восстановления."))
             }
             li {
                 b { (tr(lang, "On the new host: restore inv.db + start the daemon", "На новом хосте: восстанови inv.db + запусти демон")) }
                 " — "
-                (tr(lang, "install the new vpnctld binary (built from git, glibc-2.36-compatible), then ", "поставь свежий vpnctld binary (собранный из git, glibc-2.36-совместимый), затем "))
+                (tr(lang, "install vpnctld and vpnctl, keep the daemon stopped, then restore the decrypted SQLite snapshot: ", "установи vpnctld и vpnctl, оставь демон остановленным и восстанови расшифрованный SQLite-снэпшот: "))
                 span.ed-mono { "vpnctl restore /path/to/inv.db" }
-                (tr(lang, ". This is the one CLI-only exception even on a HEALTHY host (daemon can't replace its own open DB); on a recovery host the daemon doesn't even exist yet. Copy env + assets + deploy key into place; ", ". Это один CLI-only шаг даже на ЗДОРОВОМ хосте (демон не может заменить свою же открытую БД); на recovery-хосте демона ещё нет. Скопируй env + assets + deploy-ключ на места; "))
+                (tr(lang, ". Use the extracted inv.db, never the encrypted archive. Restore env, assets, deploy key, known_hosts, GeoIP, systemd units and firewall rules to their configured paths, preserving ownership and permissions; ", ". Передай распакованный inv.db, а не зашифрованный архив. Восстанови env, assets, deploy-ключ, known_hosts, GeoIP, systemd units и правила firewall на настроенные пути, сохраняя владельцев и права; "))
                 span.ed-mono { "systemctl restart vpnctld" }
                 "."
             }

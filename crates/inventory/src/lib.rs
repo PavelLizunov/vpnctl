@@ -12,8 +12,8 @@ pub use jump_resolver::{JumpResolverError, resolve_jump_host};
 pub use assurance::{AssuranceStage, AssuranceState, ProtocolAssuranceSample};
 pub use backup::{
     CheckResult, CheckStatus, DEFAULT_BACKUP_DIR, Retention, SelfTestReport, SnapshotInfo,
-    list_snapshots, parse_snapshot_filename, prune_snapshots, restore_from, snapshot_filename_at,
-    snapshot_now, snapshot_to, verify_snapshot,
+    backup_dir_from_env, list_snapshots, parse_snapshot_filename, prune_snapshots, restore_from,
+    snapshot_filename_at, snapshot_now, snapshot_to, verify_snapshot,
 };
 pub use bootstrap::bootstrap_server_secrets;
 pub use migrate::{

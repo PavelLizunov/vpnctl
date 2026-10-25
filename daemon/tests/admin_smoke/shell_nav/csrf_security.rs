@@ -484,7 +484,7 @@ async fn admin_pages_contain_no_shell_command_instructions() {
 
     let backups = fetch_html(app, "/admin/settings/backups").await;
     for command in [
-        "age -d -i /path/to/vpnctl-backup-key.age",
+        "scripts/vpnctl-restore.sh /path/to/archive.tar.zst.age /path/to/vpnctl-backup-key.age",
         "vpnctl restore /path/to/inv.db",
         "systemctl restart vpnctld",
     ] {
@@ -495,7 +495,10 @@ async fn admin_pages_contain_no_shell_command_instructions() {
         );
     }
     let backups_without_recovery_commands = backups
-        .replace("age -d -i /path/to/vpnctl-backup-key.age", "")
+        .replace(
+            "scripts/vpnctl-restore.sh /path/to/archive.tar.zst.age /path/to/vpnctl-backup-key.age",
+            "",
+        )
         .replace("vpnctl restore /path/to/inv.db", "")
         .replace("systemctl restart vpnctld", "");
     for needle in needles {

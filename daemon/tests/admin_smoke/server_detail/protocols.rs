@@ -10,6 +10,52 @@ use vpnctld::router;
 use crate::common::*;
 
 #[tokio::test]
+async fn protocol_enable_rejects_conflicting_caddy_front_without_mutation_or_audit() {
+    for (enabled, requested) in [("naive", "vless-ws"), ("vless-ws", "naive")] {
+        let dir = TempDir::new().unwrap();
+        let s = state(&dir).await;
+        let server = Server {
+            id: ServerId("caddy-conflict".into()),
+            address: "203.0.113.7".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("caddy".into()), KernelId("sing-box".into())],
+            enabled_protocols: vec![ProtocolId(enabled.into())],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        };
+        s.inv.add_server(&server).await.unwrap();
+        let before = s.inv.recent_audit(100).await.unwrap().len();
+        let response = router(s.clone())
+            .oneshot(
+                add_same_origin(Request::builder().method("POST").uri(format!(
+                    "/admin/servers/caddy-conflict/protocols/{requested}/enable"
+                )))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let message = std::str::from_utf8(&body).unwrap();
+        assert!(message.contains("naive") && message.contains("vless-ws"));
+        assert_eq!(
+            s.inv
+                .get_server(&server.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .enabled_protocols,
+            server.enabled_protocols
+        );
+        assert_eq!(s.inv.recent_audit(100).await.unwrap().len(), before);
+    }
+}
+
+#[tokio::test]
 async fn protocol_enable_noop_repost_writes_no_audit_row() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
@@ -48,7 +94,7 @@ async fn protocol_enable_noop_repost_writes_no_audit_row() {
 }
 
 #[tokio::test]
-async fn server_detail_kernels_and_protocols_banners_explain_deploy_step() {
+async fn server_detail_kernels_and_protocols_hints_explain_automatic_apply_in_both_languages() {
     let dir = TempDir::new().unwrap();
     let st = state(&dir).await;
     st.inv
@@ -67,33 +113,50 @@ async fn server_detail_kernels_and_protocols_banners_explain_deploy_step() {
         .await
         .unwrap();
     let app = router(st);
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/admin/servers/dx/protocols")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let html = std::str::from_utf8(&body).unwrap();
-
-    assert!(
-        html.contains("id=\"deploy-button\""),
-        "Deploy button container must have id=\"deploy-button\""
-    );
-    let banner_marker = "toggle here = inventory only";
-    let occurrences = html.matches(banner_marker).count();
-    assert_eq!(
-        occurrences, 2,
-        "expected the «toggle = inventory only» banner in BOTH Kernels and Protocols sections; \
-         got {occurrences}"
-    );
-    assert!(
-        html.matches("href=\"#deploy-button\"").count() >= 2,
-        "each banner must include a link to #deploy-button so click → scroll-to-top works"
-    );
+    for (cookie, banner, tooltip, stale_banner, stale_tooltip) in [
+        (
+            "vpnctl_lang=en",
+            "Changes are saved and applied automatically to the node.",
+            "Applied automatically to the node.",
+            "inventory only",
+            "Takes effect on next deploy.",
+        ),
+        (
+            "vpnctl_lang=ru",
+            "Изменения сохраняются и автоматически применяются на ноде.",
+            "Применяется автоматически на ноде.",
+            "только инвентарь",
+            "Применится при следующем деплое.",
+        ),
+    ] {
+        let html = fetch_html_with_cookie(app.clone(), "/admin/servers/dx/protocols", cookie).await;
+        assert!(html.contains("id=\"deploy-button\""));
+        assert_eq!(
+            html.matches(banner).count(),
+            2,
+            "both kernel and protocol banners must explain automatic apply: {cookie}"
+        );
+        for action in [
+            "kernels/sing-box/disable",
+            "kernels/amneziawg/enable",
+            "protocols/vless%2Breality/disable",
+            "protocols/tuic-v5/enable",
+        ] {
+            let form = html
+                .split_once(&format!("action=\"/admin/servers/dx/{action}\""))
+                .unwrap()
+                .1
+                .split_once("</form>")
+                .unwrap()
+                .0;
+            assert!(
+                form.contains(tooltip),
+                "missing automatic apply hint: {action}"
+            );
+        }
+        assert!(!html.contains(stale_banner));
+        assert!(!html.contains(stale_tooltip));
+    }
 }
 
 #[tokio::test]

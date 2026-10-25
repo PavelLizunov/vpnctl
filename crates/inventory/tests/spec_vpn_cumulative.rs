@@ -548,50 +548,92 @@ async fn duplicate_users_fail_without_advancing_any_baseline() {
 }
 
 #[tokio::test]
-async fn unknown_user_rolls_back_rows_and_all_baselines() {
+async fn unknown_users_are_skipped_without_losing_server_traffic() {
     let dir = TempDir::new().unwrap();
     let (inv, server_id) = fixture(&dir, &["alice"]).await;
 
     inv.record_vpn_cumulative_stats(
         &server_id,
-        &tick(100, 100, 10_000, 1, vec![counter("alice", 40, 40)]),
+        &tick(
+            100,
+            200,
+            10_000,
+            1,
+            vec![counter("alice", 40, 50), counter("ghost", 10, 20)],
+        ),
     )
     .await
     .unwrap();
 
-    let unknown = inv
+    assert!(rows(&dir, &server_id).await.is_empty());
+
+    let written = inv
         .record_vpn_cumulative_stats(
             &server_id,
             &tick(
                 200,
-                200,
+                400,
                 10_060,
                 2,
-                vec![counter("alice", 80, 80), counter("ghost", 10, 10)],
+                vec![counter("alice", 80, 130), counter("ghost", 20, 60)],
             ),
         )
-        .await;
-    assert!(
-        unknown.is_err(),
-        "an unknown user must reject the whole tick"
-    );
-    assert!(rows(&dir, &server_id).await.is_empty());
+        .await
+        .unwrap();
+    assert_eq!(written, 1, "known-user deltas must still be persisted");
+    assert_eq!(rows(&dir, &server_id).await.len(), 1);
 
-    inv.record_vpn_cumulative_stats(
-        &server_id,
-        &tick(200, 200, 10_060, 2, vec![counter("alice", 80, 80)]),
-    )
-    .await
-    .unwrap();
-    inv.record_vpn_cumulative_stats(
-        &server_id,
-        &tick(200, 200, 10_120, 3, vec![counter("alice", 80, 80)]),
-    )
-    .await
-    .unwrap();
+    for (uptime, expected_rows) in [(10_120, 1), (10_180, 0)] {
+        let written = inv
+            .record_vpn_cumulative_stats(
+                &server_id,
+                &tick(
+                    200,
+                    400,
+                    uptime,
+                    3,
+                    vec![counter("alice", 80, 130), counter("ghost", 20, 60)],
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(written, expected_rows, "pending remainder matures once");
+    }
     let raw = rows(&dir, &server_id).await;
-    assert_eq!(sums_for(&raw, Some("alice")), (40, 40));
-    assert_eq!(sums_for(&raw, None), (60, 60));
+    assert_eq!(raw.len(), 2);
+    assert_eq!(sums_for(&raw, Some("alice")), (40, 80));
+    assert_eq!(sums_for(&raw, None), (60, 120));
+    assert!(
+        raw.iter()
+            .all(|row| row.user_id.as_deref() != Some("ghost"))
+    );
+
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path(&dir).display()))
+        .await
+        .unwrap();
+    let baselines: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT user_id, upload_total, download_total
+         FROM vpn_user_counter_baselines WHERE server_id = ?1 ORDER BY user_id",
+    )
+    .bind(&server_id.0)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(baselines, vec![("alice".to_string(), 80, 130)]);
+    let server_baseline: (i64, i64) = sqlx::query_as(
+        "SELECT upload_total, download_total
+         FROM vpn_server_counter_baselines WHERE server_id = ?1",
+    )
+    .bind(&server_id.0)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(server_baseline, (200, 400));
+    pool.close().await;
+
+    let fleet = inv.recent_vpn_stats_fleet(1, 1).await.unwrap();
+    assert_eq!(fleet.iter().map(|row| row.upload_bytes).sum::<u64>(), 100);
+    assert_eq!(fleet.iter().map(|row| row.download_bytes).sum::<u64>(), 200);
 }
 
 #[tokio::test]

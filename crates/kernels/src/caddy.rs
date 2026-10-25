@@ -48,6 +48,14 @@ impl Kernel for Caddy {
     }
 
     fn validate_server_support(&self, server: &vpnctl_core::Server) -> Result<()> {
+        if server.enabled_protocols.iter().any(|p| p.0 == "naive")
+            && server.enabled_protocols.iter().any(|p| p.0 == "vless-ws")
+        {
+            return Err(CoreError::Render(
+                "caddy cannot serve naive and vless-ws together on one server; disable one protocol before enabling the other"
+                    .into(),
+            ));
+        }
         if server.enabled_protocols.iter().any(|p| p.0 == "vless-ws")
             && !server.kernels.iter().any(|k| k.0 == "sing-box")
         {

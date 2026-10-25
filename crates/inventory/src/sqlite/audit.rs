@@ -185,6 +185,7 @@ impl SqliteInventory {
              FROM audit_log
              WHERE target = ?1
                 OR json_extract(payload, '$.server_id') = ?1
+                OR json_extract(payload, '$.server') = ?1
              ORDER BY id DESC
              LIMIT ?2",
         )

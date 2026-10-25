@@ -104,12 +104,60 @@ fn render_config_includes_all_nine_amnezia_obfuscation_keys_with_defaults() {
         .render_config(&ctx, &[], &[&wg as &dyn Protocol])
         .unwrap();
     let text = std::str::from_utf8(&bytes).unwrap();
-    for (key, default) in DEFAULT_AMNEZIA_PARAMS {
+    for (key, default) in vpnctl_core::amneziawg::DEFAULT_AMNEZIA_PARAMS {
         let expected = format!("{key} = {default}\n");
         assert!(
             text.contains(&expected),
             "missing default obfuscation key: {expected:?}"
         );
+    }
+}
+
+#[test]
+fn partial_and_empty_awg_params_match_all_client_renderers() {
+    let server = dummy_server();
+    let wg = WireGuard::new();
+    let mut user = user_with_pubkey("alice", Some(PUBKEY_A));
+    user.wireguard_private = Some("0000000000000000000000000000000000000000000=".into());
+    let defaults = [
+        ("Jc", "4"),
+        ("Jmin", "40"),
+        ("Jmax", "70"),
+        ("S1", "50"),
+        ("S2", "100"),
+        ("H1", "1"),
+        ("H2", "2"),
+        ("H3", "3"),
+        ("H4", "4"),
+    ];
+    for supplied in [None, Some("Jc"), Some("H1")] {
+        let mut secrets = server_secrets();
+        secrets.insert("wireguard.server_public_key".into(), PUBKEY_B.into());
+        if let Some(key) = supplied {
+            secrets.insert(
+                format!("amneziawg.{}", key.to_ascii_lowercase()),
+                "123".into(),
+            );
+        }
+        let ctx = RenderCtx::new(&server, &secrets);
+        let server_bytes = AmneziaWg::new().render_config(&ctx, &[], &[&wg]).unwrap();
+        let server_conf = std::str::from_utf8(&server_bytes).unwrap();
+        let client_conf = vpnctl_protocols::render_client_conf_public(&ctx, &user).unwrap();
+        let client_json = wg.client_config(&ctx, &user).unwrap();
+        let link = vpnctl_protocols::awg_share_link(&ctx, &user).unwrap();
+        for (key, default) in defaults {
+            let value = if supplied == Some(key) {
+                "123"
+            } else {
+                default
+            };
+            let line = format!("{key} = {value}\n");
+            assert!(server_conf.contains(&line), "server: {line}");
+            assert!(client_conf.contains(&line), "client: {line}");
+            let lower = key.to_ascii_lowercase();
+            assert_eq!(client_json["interface"]["amneziawg"][lower.as_str()], value);
+            assert!(link.contains(&format!("&{lower}={value}")));
+        }
     }
 }
 

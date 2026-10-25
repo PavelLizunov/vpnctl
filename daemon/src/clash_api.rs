@@ -86,28 +86,6 @@ impl ClashClient for SshClashClient<'_> {
     }
 }
 
-impl Snapshot {
-    pub fn bytes_per_user(&self) -> std::collections::HashMap<String, (u64, u64)> {
-        let mut out: std::collections::HashMap<String, (u64, u64)> =
-            std::collections::HashMap::new();
-        for c in &self.connections {
-            if let Some(u) = c.metadata.user.as_deref() {
-                let entry = out.entry(u.to_string()).or_default();
-                entry.0 = entry.0.saturating_add(c.upload);
-                entry.1 = entry.1.saturating_add(c.download);
-            }
-        }
-        out
-    }
-
-    pub fn connection_count_for_user(&self, user: &str) -> usize {
-        self.connections
-            .iter()
-            .filter(|c| c.metadata.user.as_deref() == Some(user))
-            .count()
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -152,6 +130,8 @@ mod tests {
         assert_eq!(snap.upload_total, 1024);
         assert_eq!(snap.connections.len(), 2);
         assert_eq!(snap.connections[0].id, "conn-abc-123");
+        assert_eq!(snap.connections[0].upload, 256);
+        assert_eq!(snap.connections[0].download, 4096);
         assert_eq!(snap.connections[0].metadata.network, "tcp");
         assert_eq!(snap.connections[0].metadata.destination_ip, "1.2.3.4");
         assert_eq!(snap.connections[0].metadata.user.as_deref(), Some("alice"));
@@ -178,33 +158,6 @@ mod tests {
         .unwrap();
         assert_eq!(snap.connections.len(), 1);
         assert!(snap.connections[0].metadata.user.is_none());
-        assert!(
-            snap.bytes_per_user().is_empty(),
-            "user-less connections must not appear in per-user attribution"
-        );
-    }
-
-    #[test]
-    fn bytes_per_user_aggregates_across_connections() {
-        let snap: Snapshot = serde_json::from_str(
-            r#"{"downloadTotal":0,"uploadTotal":0,"connections":[
-                {"id":"a1","upload":100,"download":200,"start":"x","metadata":{"network":"tcp","destinationIP":"","destinationPort":"","user":"alice"}},
-                {"id":"a2","upload":50,"download":75,"start":"x","metadata":{"network":"tcp","destinationIP":"","destinationPort":"","user":"alice"}},
-                {"id":"b1","upload":10,"download":20,"start":"x","metadata":{"network":"udp","destinationIP":"","destinationPort":"","user":"bob"}}
-            ]}"#,
-        )
-        .unwrap();
-        let per_user = snap.bytes_per_user();
-        assert_eq!(per_user.get("alice"), Some(&(150, 275)));
-        assert_eq!(per_user.get("bob"), Some(&(10, 20)));
-    }
-
-    #[test]
-    fn connection_count_for_user_counts_only_matching_rows() {
-        let snap: Snapshot = serde_json::from_str(SAMPLE_RESPONSE).unwrap();
-        assert_eq!(snap.connection_count_for_user("alice"), 1);
-        assert_eq!(snap.connection_count_for_user("bob"), 1);
-        assert_eq!(snap.connection_count_for_user("eve"), 0);
     }
 
     #[tokio::test]
