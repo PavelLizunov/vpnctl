@@ -508,12 +508,14 @@ async fn make_test_transport(user: &str) -> RusshTransport {
     let client_key_path = make_test_key(&tmp);
     let port = spawn_stalled_channel_server(&server_key_path, false).await;
 
-    RusshTransportBuilder::new("127.0.0.1", user, client_key_path)
+    let transport = RusshTransportBuilder::new("127.0.0.1", user, client_key_path)
         .port(port)
         .timeout(Duration::from_secs(5))
         .connect()
         .await
-        .expect("connect succeeds")
+        .expect("connect succeeds");
+    assert_eq!(transport.target_port(), Some(port));
+    transport
 }
 
 #[tokio::test]

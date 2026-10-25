@@ -1,7 +1,11 @@
 # Spec: Mihomo YAML subscription
 
 ## 1. Intent & Invariants
-- What: add a ready Mihomo configuration for Omarchy using the existing grants, token validation, suppression, visibility, rate-limit, and access-log path.
+- What: add a Mihomo subscription for Omarchy using the existing grants, token validation, suppression, visibility, rate-limit, and access-log path.
+- The subscription supplies `proxies`, `proxy-groups` and `rules`. A GUI client
+  provides the local proxy/TUN settings; a bare core needs these merged into a
+  local configuration with a proxy listener or enabled TUN routing. It is not
+  a complete standalone core configuration.
 - Existing `/sub/{token}` default sing-box/UA behavior, `?format=sing-box`, and `/api/v1/app/config/*` responses remain byte-for-byte unchanged.
 - The canonical public URL `GET /api/v1/sub/{token}` defaults to Mihomo YAML without requiring query parameters, while preserving full compatibility with legacy `?format=mihomo` query parameters.
 - Protocol scope is strictly bounded to VLESS+REALITY and Hysteria2; unsupported protocols (XHTTP, VLESS-WS, Trojan, Naive, TUIC-v5, SS-2022, WireGuard) are omitted and not claimed.

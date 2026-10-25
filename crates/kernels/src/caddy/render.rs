@@ -345,6 +345,8 @@ pub(crate) fn vlessws_apply_script() -> String {
             set -eu
             umask 077
             BUNDLE=/etc/caddy/.vlessws-bundle.new
+            trap 'rm -f "$BUNDLE" {caddyfile}.new {sb_config}.new {deploy_env}.new' EXIT
+            trap 'exit 1' HUP INT TERM
             test -f "$BUNDLE"
 
             # Restrict stale staging files before awk truncates them; umask
@@ -386,14 +388,19 @@ pub(crate) fn vlessws_apply_script() -> String {
             rm -f "$BUNDLE" || recover ""
 
             # Firewall: open ACME :80 + the operator-chosen front port
-            # (best-effort; a host without ufw is a clean no-op). The front
-            # port comes from the rendered meta member.
+            # (absent or inactive ufw is a no-op). The front port comes
+            # from the rendered meta member; failures restore the configs.
             if command -v ufw >/dev/null 2>&1; then
-                ufw allow 80/tcp >/dev/null 2>&1 || true
-                . {deploy_env} 2>/dev/null || true
-                if [ -n "${{VLESSWS_FRONT_PORT:-}}" ]; then
-                    ufw allow "${{VLESSWS_FRONT_PORT}}/tcp" >/dev/null 2>&1 || true
-                fi
+                ufw_status=$(LC_ALL=C ufw status) || recover "caddy"
+                case "$ufw_status" in
+                    'Status: active'*)
+                        ufw allow 80/tcp || recover "caddy"
+                        . {deploy_env} 2>/dev/null || true
+                        if [ -n "${{VLESSWS_FRONT_PORT:-}}" ]; then
+                            ufw allow "${{VLESSWS_FRONT_PORT}}/tcp" || recover "caddy"
+                        fi
+                        ;;
+                esac
             fi
 
             # Restart the BACKEND (loopback sing-box) FIRST so caddy's
@@ -443,6 +450,8 @@ pub(crate) fn naive_apply_script() -> String {
     format!(
         r#"
             set -eu
+            trap 'rm -f {caddyfile}.new' EXIT
+            trap 'exit 1' HUP INT TERM
 
             # Validate the NEW Caddyfile BEFORE swapping.
             /usr/local/bin/caddy validate --config {caddyfile}.new

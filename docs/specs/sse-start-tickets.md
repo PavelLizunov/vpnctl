@@ -13,6 +13,11 @@
   another full deploy (CDX-45).
 - The wizard step-2 SSE is unchanged: it already needs a single-use wizard
   session created by a CSRF-checked POST.
+- A transport error closes the stream and keeps the start button disabled until
+  reload: the operation may still be running. Only a reported operation failure
+  or a refused start ticket permits retry from the same page.
+- Starting any button-triggered or autostart SSE cancels the pending
+  `data-reload-after` page refresh so it cannot interrupt the new live log.
 
 ## 2. Interface / Data contract
 ```text

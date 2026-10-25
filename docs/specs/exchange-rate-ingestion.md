@@ -1,6 +1,12 @@
 # Spec: Resilient, Zero-Hardcode Exchange Rate Ingestion
 
-**Status:** Design specification (pre-implementation)
+**Status:** Superseded by [currency-exchange.md](currency-exchange.md).
+This document preserves a pre-implementation proposal, not the current contract.
+The implemented poller is [daemon/src/exchange_rate_poller.rs](../../daemon/src/exchange_rate_poller.rs),
+using `SqliteInventory::upsert_currency_rate` in
+[crates/inventory/src/sqlite/servers/currency.rs](../../crates/inventory/src/sqlite/servers/currency.rs).
+The environment variables, tables and APIs proposed below are not the implemented interface.
+
 **Author:** Agent (research assignment)
 **Date:** 2026-09-12
 

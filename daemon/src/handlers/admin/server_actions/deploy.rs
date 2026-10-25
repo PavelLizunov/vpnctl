@@ -204,7 +204,7 @@ async fn server_deploy_locked(
             ssh_kernels_pushed.push(kid.0.clone());
             configs_applied += 1;
             if let Err(e) = kernel.open_firewall(&ssh, &ctx, &protocols).await {
-                tracing::warn!(target = "vpnctld::deploy", kernel = %kid.0, error = %e, "open_firewall skipped (best-effort)");
+                ssh_errors.push(format!("{}: open_firewall failed: {e}", kid.0));
             }
         }
     }

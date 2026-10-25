@@ -51,21 +51,7 @@ pub(crate) async fn run_revoke(
 
     let uid = UserId(user.to_string());
     let sid = ServerId(server.to_string());
-    let was_granted = inv
-        .servers_for_user(&uid)
-        .await?
-        .iter()
-        .any(|s| s.id == sid);
-    inv.revoke(&uid, &sid).await?;
-    if was_granted {
-        inv.audit(
-            "cli",
-            "user.revoke",
-            Some(user),
-            Some(&json!({ "server": server, "source": "cli" })),
-        )
-        .await?;
-    }
+    inv.revoke_audited(&uid, &sid, "cli", "cli").await?;
     println!("revoked '{user}' from '{server}'");
     Ok(())
 }

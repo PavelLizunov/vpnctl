@@ -152,8 +152,8 @@ impl SqliteInventory {
 
         let audit_payload = serde_json::json!({
             "server_id": server.0,
-            "old_client_uuid": old_uuid,
-            "new_client_uuid": client_uuid,
+            "old_client_uuid_set": old_uuid.is_some(),
+            "new_client_uuid_set": true,
         });
         let payload_str = serde_json::to_string(&audit_payload)?;
         sqlx::query(
@@ -202,6 +202,11 @@ impl SqliteInventory {
                         .flatten()
                 });
 
+        if old_device_id.as_deref() == Some(device_id) {
+            tx.commit().await?;
+            return Ok(());
+        }
+
         let res = map_unique(
             sqlx::query("UPDATE users SET vpn_router_device_id = ?2 WHERE id = ?1")
                 .bind(&user.0)
@@ -218,8 +223,8 @@ impl SqliteInventory {
         }
 
         let audit_payload = serde_json::json!({
-            "old_vpn_router_device_id": old_device_id,
-            "new_vpn_router_device_id": device_id,
+            "old_vpn_router_device_id_set": old_device_id.is_some(),
+            "new_vpn_router_device_id_set": true,
         });
         let payload_str = serde_json::to_string(&audit_payload)?;
         sqlx::query(

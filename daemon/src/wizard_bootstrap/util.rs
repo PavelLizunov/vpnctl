@@ -48,6 +48,56 @@ pub fn derive_server_id(address: &str) -> String {
         .collect()
 }
 
+pub(super) fn accepted_host_fingerprint(
+    host: &str,
+    port: u16,
+    known_hosts: &std::path::Path,
+) -> std::result::Result<String, String> {
+    let lookup = if port == 22 {
+        host.to_string()
+    } else {
+        format!("[{host}]:{port}")
+    };
+    let output = std::process::Command::new("ssh-keygen")
+        .args(["-F", &lookup, "-f"])
+        .arg(known_hosts)
+        .args(["-l", "-E", "sha256"])
+        .output()
+        .map_err(|e| format!("reading accepted host key: {e}"))?;
+    if !output.status.success() {
+        return Err("the password login did not record a host key in known_hosts".into());
+    }
+    let mut fingerprints = vpnctl_host_fingerprint::extract_all_sha256_tokens(
+        &String::from_utf8_lossy(&output.stdout),
+    );
+    fingerprints.sort();
+    fingerprints.dedup();
+    let mut accepted: Vec<String> = fingerprints
+        .iter()
+        .filter_map(|fp| vpnctl_host_fingerprint::canonicalize_sha256(fp))
+        .collect();
+    match accepted.len() {
+        0 => Err("accepted host key has no valid SHA256 fingerprint".into()),
+        1 => Ok(accepted.remove(0)),
+        // Several key types for this host (e.g. ED25519 and RSA): pin the one
+        // the node presents now, but only if the login already trusted it.
+        _ => {
+            let presented = vpnctl_host_fingerprint::fetch_via_keyscan(host, port)
+                .map_err(|e| format!("choosing among accepted host keys: {e}"))
+                .and_then(|fp| {
+                    vpnctl_host_fingerprint::canonicalize_sha256(&fp)
+                        .ok_or_else(|| "presented host key has no valid SHA256 fingerprint".into())
+                })?;
+            accepted
+                .into_iter()
+                .find(|fp| *fp == presented)
+                .ok_or_else(|| {
+                    "the host key the node presents is not one the password login accepted".into()
+                })
+        }
+    }
+}
+
 pub async fn ssh_password_run(
     host: &str,
     port: u16,

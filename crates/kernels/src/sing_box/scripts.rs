@@ -125,6 +125,8 @@ if [ "$changed" -eq 1 ]; then
         systemctl restart caddy-vlessws
         systemctl is-active --quiet caddy-vlessws
     fi
+elif ! systemctl is-active --quiet sing-box; then
+    systemctl start sing-box
 fi
 systemctl is-active --quiet sing-box
 apt-mark hold sing-box >/dev/null
@@ -132,6 +134,14 @@ success=1
 cleanup_stages
 trap - EXIT HUP INT TERM
 "#;
+
+pub(super) fn sing_box_setup_script(ssh_port: Option<u16>) -> String {
+    format!(
+        "VPNCTL_SSH_PORT={}\n{}",
+        ssh_port.map(|port| port.to_string()).unwrap_or_default(),
+        SING_BOX_SETUP_SCRIPT.as_str(),
+    )
+}
 
 pub(super) static SING_BOX_SETUP_SCRIPT: std::sync::LazyLock<String> = std::sync::LazyLock::new(
     || {
@@ -282,14 +292,15 @@ LR
         apt-get update -qq
         apt-get install -y --no-install-recommends fail2ban python3-systemd
     fi
-    # Bind the ban action to the EFFECTIVE sshd listen port (a node may
-    # set a custom Port via a systemd drop-in / -p, not just sshd_config).
-    # `sshd -T` dumps the resolved config; fall back to parsing sshd_config,
-    # then 22. Each step exits 0 on no-match (awk/head) — safe under set -e
-    # without pipefail.
+    # Include the connected inventory port: sshd -T does not see a daemon's
+    # command-line -p override. Keep every configured port as well.
     SSHD_BIN=$(command -v sshd || echo /usr/sbin/sshd)
-    F2B_SSH_PORT=$("$SSHD_BIN" -T 2>/dev/null | awk '$1=="port"{print $2; exit}')
-    [ -n "$F2B_SSH_PORT" ] || F2B_SSH_PORT=$(grep -oiE '^[[:space:]]*Port[[:space:]]+[0-9]+' /etc/ssh/sshd_config 2>/dev/null | grep -oE '[0-9]+' | head -1)
+    F2B_SSH_PORTS=$("$SSHD_BIN" -T 2>/dev/null | awk '$1=="port"{print $2}')
+    [ -n "$F2B_SSH_PORTS" ] || F2B_SSH_PORTS=$(grep -oiE '^[[:space:]]*Port[[:space:]]+[0-9]+' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
+    F2B_SSH_PORT=$(printf '%s\n' "${VPNCTL_SSH_PORT:-}" "$F2B_SSH_PORTS" | awk '
+        /^[0-9]+$/ && $0 > 0 && $0 <= 65535 && !seen[$0]++ {
+            printf "%s%s", sep, $0; sep=",";
+        }')
     F2B_SSH_PORT=${F2B_SSH_PORT:-22}
     # backend=systemd is REQUIRED on Debian 12+ (journald only — there's
     # no /var/log/auth.log for the default `auto` backend to tail).
@@ -327,12 +338,17 @@ F2B
 pub(super) fn sing_box_apply_script() -> &'static str {
     r#"
             set -eu
+            trap 'rm -f /etc/sing-box/config.json.new' EXIT
+            trap 'exit 1' HUP INT TERM
             /usr/bin/sing-box check -c /etc/sing-box/config.json.new
             # Snapshot the current live config so a runtime-failed restart
             # can roll back. Only if a live config exists (first deploy has
             # none); -a preserves owner/mode.
+            HAD_PREV=0
             if [ -f /etc/sing-box/config.json ]; then
-                cp -a /etc/sing-box/config.json /etc/sing-box/config.json.bak 2>/dev/null || true
+                cp -a /etc/sing-box/config.json /etc/sing-box/config.json.bak.new
+                mv /etc/sing-box/config.json.bak.new /etc/sing-box/config.json.bak
+                HAD_PREV=1
             fi
             mv /etc/sing-box/config.json.new /etc/sing-box/config.json
             chown sing-box:sing-box /etc/sing-box/config.json
@@ -367,7 +383,7 @@ pub(super) fn sing_box_apply_script() -> &'static str {
             # guarded so a failing step still reaches `exit 1`.
             echo "sing-box did not become active. Last 20 log lines:" >&2
             journalctl -u sing-box --no-pager -n 20 >&2 || true
-            if [ -f /etc/sing-box/config.json.bak ]; then
+            if [ "$HAD_PREV" = 1 ] && [ -f /etc/sing-box/config.json.bak ]; then
                 echo "rolling back to previous sing-box config" >&2
                 mv /etc/sing-box/config.json.bak /etc/sing-box/config.json || true
                 chown sing-box:sing-box /etc/sing-box/config.json || true
@@ -404,12 +420,14 @@ pub(crate) fn firewall_open_script(ports: &[(&str, u16)]) -> Option<String> {
     if uniq.is_empty() {
         return None;
     }
-    let mut s = String::from("if command -v ufw >/dev/null 2>&1; then\n");
+    // The status is captured as its own command so a failing `ufw status`
+    // stops the script (set -e) instead of reading as "inactive".
+    let mut s = String::from(
+        "set -eu\nif command -v ufw >/dev/null 2>&1; then\n  ufw_status=$(LC_ALL=C ufw status)\n  case \"$ufw_status\" in\n    'Status: active'*)\n",
+    );
     for (transport, port) in &uniq {
-        s.push_str(&format!(
-            "  ufw allow {port}/{transport} >/dev/null 2>&1 || true\n"
-        ));
+        s.push_str(&format!("      ufw allow {port}/{transport}\n"));
     }
-    s.push_str("fi\n");
+    s.push_str("      ;;\n  esac\nfi\n");
     Some(s)
 }

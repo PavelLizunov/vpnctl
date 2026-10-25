@@ -1,6 +1,8 @@
 (function () {
   "use strict";
 
+  var reloadTimer = null;
+
   function withTicket(url, onReady, onFail) {
     var path = url.split("?")[0];
     fetch("/admin/sse-ticket", {
@@ -28,6 +30,8 @@
 
     btn.addEventListener("click", function (e) {
       e.preventDefault();
+      clearTimeout(reloadTimer);
+      reloadTimer = null;
       var log = document.getElementById(logId);
       if (log) {
         log.hidden = false;
@@ -90,8 +94,8 @@
 
         es.addEventListener("error", function (ev) {
           if (done) return;
+          done = true;
           if (ev && ev.data) {
-            done = true;
             var msg = "deploy failed";
             try {
               msg = JSON.parse(ev.data).message || msg;
@@ -104,7 +108,12 @@
             }
             line("✗ " + msg, "var(--acc-bad, #97233f)");
           } else {
-            line("✗ connection lost — please retry", "var(--acc-bad, #97233f)");
+            line(document.documentElement.lang === "ru"
+              ? "✗ соединение потеряно — операция может ещё выполняться; перезагрузите страницу, чтобы увидеть её состояние"
+              : "✗ connection lost — the operation may still be running; reload the page to see its state", "var(--acc-bad, #97233f)");
+            es.close();
+            label.textContent = document.documentElement.lang === "ru" ? "соединение потеряно — перезагрузите страницу" : "connection lost — reload page";
+            return;
           }
           es.close();
           btn.disabled = false;
@@ -141,6 +150,8 @@
   function wireAutoSse(pre) {
     var url = pre.getAttribute("data-sse-autostart");
     if (!url) return;
+    clearTimeout(reloadTimer);
+    reloadTimer = null;
     var stepsBox = pre.getAttribute("data-steps-box");
     var steps = stepsBox ? document.getElementById(stepsBox) : null;
     var order = [];
@@ -156,21 +167,24 @@
       pre.appendChild(row);
       pre.scrollTop = pre.scrollHeight;
     }
-    function markPhase(phase) {
+    function markPhase(phase, finished) {
       if (!steps) return;
-      var idx = order.indexOf(phase);
+      var idx = finished ? order.length : order.indexOf(phase);
       if (idx < 0) return;
-      for (var k = 0; k <= idx; k++) {
+      for (var k = 0; k <= idx && k < order.length; k++) {
+        var complete = k < idx;
         var el = steps.querySelector('[data-step-phase="' + order[k] + '"] .step-mark');
         if (el) {
           var mark = el.querySelector(".ed-icon use");
           if (mark) {
-            mark.setAttribute("href", "/admin/assets/icons.svg#check");
+            mark.setAttribute("href", "/admin/assets/icons.svg#" + (complete ? "check" : "clock"));
           } else {
-            el.textContent = "✓";
+            el.textContent = complete ? "✓" : "…";
           }
-          el.setAttribute("aria-label", document.documentElement.lang === "ru" ? "Готово" : "Complete");
-          el.style.color = "var(--green)";
+          el.setAttribute("aria-label", complete
+            ? (document.documentElement.lang === "ru" ? "Готово" : "Complete")
+            : (document.documentElement.lang === "ru" ? "Выполняется" : "In progress"));
+          el.style.color = complete ? "var(--green)" : "var(--ink)";
         }
       }
     }
@@ -188,6 +202,7 @@
     });
     es.addEventListener("ok", function (ev) {
       done = true;
+      markPhase(null, true);
       var redirect = null;
       try {
         redirect = JSON.parse(ev.data).redirect;
@@ -389,7 +404,7 @@
     var reloads = document.querySelectorAll("[data-reload-after]");
     if (reloads.length) {
       var secs = parseInt(reloads[0].getAttribute("data-reload-after"), 10) || 5;
-      setTimeout(function () { window.location.reload(); }, secs * 1000);
+      reloadTimer = setTimeout(function () { window.location.reload(); }, secs * 1000);
     }
     var autos = document.querySelectorAll("[data-sse-autostart]");
     for (var a = 0; a < autos.length; a++) wireAutoSse(autos[a]);

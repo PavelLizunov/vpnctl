@@ -4,8 +4,27 @@ use std::collections::{HashMap, HashSet};
 use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
 
 impl SqliteInventory {
+    /// Low-level insertion for imports and existing inventory fixtures.
     pub async fn add_server(&self, s: &Server) -> Result<()> {
+        self.insert_server(s, None).await
+    }
+
+    /// Register a node once, checking its canonical address and auditing atomically.
+    pub async fn register_server(&self, s: &Server, actor: &str) -> Result<()> {
+        self.insert_server(s, Some(actor)).await
+    }
+
+    async fn insert_server(&self, s: &Server, registration_actor: Option<&str>) -> Result<()> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if registration_actor.is_some()
+            && let Some(existing) =
+                super::address::server_id_for_address_on(&mut tx, &s.address).await?
+        {
+            return Err(SqliteInventoryError::AlreadyExists(format!(
+                "address '{}' registered to server '{existing}'",
+                s.address
+            )));
+        }
         let res = sqlx::query(
             "INSERT INTO servers (id, address, ssh_port, ssh_user, hoster, jump_via, trusted_host_fingerprint, usage_coefficient)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -61,6 +80,17 @@ impl SqliteInventory {
             .await?;
         }
 
+        if let Some(actor) = registration_actor {
+            sqlx::query(
+                "INSERT INTO audit_log (actor, action, target, payload)
+                 VALUES (?1, 'server.register', ?2, ?3)",
+            )
+            .bind(actor)
+            .bind(&s.id.0)
+            .bind(serde_json::json!({ "address": s.address }).to_string())
+            .execute(&mut *tx)
+            .await?;
+        }
         tx.commit().await?;
         if s.address.parse::<std::net::IpAddr>().is_err() {
             self.refresh_server_resolved_addresses().await?;

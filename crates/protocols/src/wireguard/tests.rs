@@ -268,6 +268,123 @@ fn fake_secrets_awg() -> HashMap<String, String> {
     m
 }
 
+fn assert_amnezia_export_byte_equal(
+    server: &Server,
+    secrets: &HashMap<String, String>,
+    expected_params: &serde_json::Value,
+    expected_ini_params: &str,
+) {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let expected_conf = format!(
+        concat!(
+            "# vpnctl-rendered AmneziaWG client config.\n",
+            "# Private key was server-generated for alex — import this file as-is.\n\n",
+            "[Interface]\nPrivateKey = 0000000000000000000000000000000000000000000=\n",
+            "Address = 10.66.0.2/32\nDNS = 1.1.1.1\n{}\n",
+            "[Peer]\nPublicKey = Qhh7nQwL+0fH3iZ8VAEcvVNlEMU8r9SiH3LzAh6Kj3o=\n",
+            "Endpoint = 198.51.100.42:51820\nAllowedIPs = 0.0.0.0/0, ::/0\nPersistentKeepalive = 25\n"
+        ),
+        expected_ini_params
+    );
+    let mut expected_last_config = serde_json::json!({
+        "config": expected_conf,
+        "hostName": "198.51.100.42",
+        "port": 51820,
+        "client_ip": "10.66.0.2",
+        "client_priv_key": "0000000000000000000000000000000000000000000=",
+        "client_pub_key": "qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=",
+        "server_pub_key": "Qhh7nQwL+0fH3iZ8VAEcvVNlEMU8r9SiH3LzAh6Kj3o=",
+        "allowed_ips": ["0.0.0.0/0", "::/0"],
+        "persistent_keep_alive": "25",
+    });
+    expected_last_config
+        .as_object_mut()
+        .unwrap()
+        .extend(expected_params.as_object().unwrap().clone());
+    let expected_payload = serde_json::json!({
+        "containers": [{
+            "container": "amnezia-wireguard",
+            "wireguard": {
+                "port": "51820",
+                "transport_proto": "udp",
+                "subnet_address": "10.66.0.0",
+                "last_config": serde_json::to_string(&expected_last_config).unwrap(),
+            },
+        }],
+        "defaultContainer": "amnezia-wireguard",
+        "description": "alex",
+        "dns1": "1.1.1.1",
+        "dns2": "1.0.0.1",
+        "hostName": "198.51.100.42",
+    });
+    let expected_bytes = serde_json::to_vec(&expected_payload).unwrap();
+    let expected_link = format!(
+        "vpn://{}",
+        URL_SAFE_NO_PAD.encode(qcompress_zlib(&expected_bytes).unwrap())
+    );
+    let ctx = RenderCtx::new(server, secrets);
+    assert_eq!(
+        amnezia_share_link(&ctx, &fake_user()).unwrap().as_bytes(),
+        expected_link.as_bytes()
+    );
+}
+
+#[test]
+fn amnezia_plain_wireguard_export_byte_equal() {
+    assert_amnezia_export_byte_equal(&fake_server(), &fake_secrets(), &serde_json::json!({}), "");
+}
+
+#[test]
+fn amnezia_awg_export_byte_equal_with_complete_params() {
+    assert_amnezia_export_byte_equal(
+        &fake_server(),
+        &fake_secrets_awg(),
+        &serde_json::json!({
+            "Jc": "7", "Jmin": "60", "Jmax": "140", "S1": "30", "S2": "90",
+            "H1": "1111111111", "H2": "2022222222", "H3": "333333333", "H4": "444444444",
+            "isObfuscationEnabled": true,
+        }),
+        concat!(
+            "Jc = 7\nJmin = 60\nJmax = 140\nS1 = 30\nS2 = 90\n",
+            "H1 = 1111111111\nH2 = 2022222222\nH3 = 333333333\nH4 = 444444444\n"
+        ),
+    );
+}
+
+#[test]
+fn amnezia_awg_export_byte_equal_with_partial_params() {
+    let mut secrets = fake_secrets();
+    secrets.insert("amneziawg.h1".into(), "0012345".into());
+    assert_amnezia_export_byte_equal(
+        &fake_server(),
+        &secrets,
+        &serde_json::json!({
+            "Jc": "4", "Jmin": "40", "Jmax": "70", "S1": "50", "S2": "100",
+            "H1": "0012345", "H2": "2", "H3": "3", "H4": "4",
+            "isObfuscationEnabled": true,
+        }),
+        "Jc = 4\nJmin = 40\nJmax = 70\nS1 = 50\nS2 = 100\nH1 = 0012345\nH2 = 2\nH3 = 3\nH4 = 4\n",
+    );
+}
+
+#[test]
+fn amnezia_awg_export_byte_equal_with_kernel_defaults() {
+    let mut server = fake_server();
+    server.kernels = vec![KernelId("amneziawg".into())];
+    assert_amnezia_export_byte_equal(
+        &server,
+        &fake_secrets(),
+        &serde_json::json!({
+            "Jc": "4", "Jmin": "40", "Jmax": "70", "S1": "50", "S2": "100",
+            "H1": "1", "H2": "2", "H3": "3", "H4": "4",
+            "isObfuscationEnabled": true,
+        }),
+        "Jc = 4\nJmin = 40\nJmax = 70\nS1 = 50\nS2 = 100\nH1 = 1\nH2 = 2\nH3 = 3\nH4 = 4\n",
+    );
+}
+
 #[test]
 fn complete_awg_client_outputs_stay_byte_equal() {
     let server = fake_server();

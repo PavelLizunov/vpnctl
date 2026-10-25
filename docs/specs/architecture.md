@@ -8,7 +8,11 @@
   - Adding a kernel or protocol must NOT require changes in `core`, `ssh`,
     `crypto`, `inventory`, or `daemon` — one new module + one registration line.
   - Protocols never own mutable inventory state; secrets arrive per-render.
-  - Every inventory mutation is auditable.
+  - Every inventory mutation is auditable. Audit payloads record UUID/device-ID
+    presence with `*_set` booleans, never the credential values. User targets
+    and server IDs retain attribution. Admin HTML and CSV also redact UUID and
+    device-ID fields in legacy payloads recursively, retaining at most an
+    eight-character prefix (short values are fully redacted).
   - The workspace bans `unsafe`, `unwrap`/`expect`/`panic` outside tests, and
     `openssl-sys` / `native-tls`.
 

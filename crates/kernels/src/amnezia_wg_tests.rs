@@ -476,7 +476,7 @@ fn render_config_uses_egress_placeholder_not_hardcoded_eth0() {
 }
 
 #[test]
-fn apply_script_failed_reload_rolls_back_even_if_old_interface_stays_active() {
+fn apply_script_failed_reload_rolls_back_without_leaking_keys() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path();
     let bin = root.join("bin");
@@ -484,14 +484,18 @@ fn apply_script_failed_reload_rolls_back_even_if_old_interface_stays_active() {
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::create_dir_all(&conf_dir).unwrap();
     std::fs::write(conf_dir.join("awg0.conf"), "OLD\n").unwrap();
-    std::fs::write(conf_dir.join("awg0.conf.new"), "NEW\n").unwrap();
+    std::fs::write(
+        conf_dir.join("awg0.conf.new"),
+        "[Interface]\nPrivateKey = fixture-private-key\n[Peer]\nPresharedKey = fixture-preshared-key\n",
+    )
+    .unwrap();
     // reload fails while the old interface keeps reporting active.
     let stubs = [
         (
             "systemctl",
             "case \"$1\" in reload-or-restart) exit 1;; is-active) echo active;; esac; exit 0",
         ),
-        ("awg-quick", "exit 0"),
+        ("awg-quick", "cat \"$2\""),
         ("ip", "exit 0"),
         ("sysctl", "exit 0"),
         ("chown", "exit 0"),
@@ -518,6 +522,19 @@ fn apply_script_failed_reload_rolls_back_even_if_old_interface_stays_active() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for secret in [
+        "PrivateKey",
+        "PresharedKey",
+        "fixture-private-key",
+        "fixture-preshared-key",
+    ] {
+        assert!(
+            !stderr.contains(secret),
+            "diagnostics leaked {secret}: {stderr}"
+        );
+    }
+    assert!(stderr.contains("did not become active"));
     assert_eq!(
         std::fs::read_to_string(conf_dir.join("awg0.conf")).unwrap(),
         "OLD\n",
@@ -536,4 +553,43 @@ fn apply_script_restart_failure_reaches_rollback() {
         line.trim_end().ends_with("|| restart_rc=$?"),
         "under set -eu a failed restart must not skip the .bak rollback: {line}"
     );
+}
+
+#[test]
+fn apply_script_validation_failure_removes_staging_and_validation_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let conf_dir = root.join("etc/amnezia/amneziawg");
+    std::fs::create_dir_all(&conf_dir).unwrap();
+    std::fs::write(conf_dir.join("awg0.conf"), "OLD").unwrap();
+    std::fs::write(conf_dir.join("awg0.conf.new"), "fixture-secret").unwrap();
+    let script = awg_apply_script().replace("/etc/", &format!("{}/etc/", root.display()));
+    let mocks = r#"
+        ip() { :; }
+        sysctl() { :; }
+        mktemp() { command mktemp -d "$TEST_ROOT/validate.XXXXXX"; }
+        awg-quick() {
+            [ "$(stat -c %a "$(dirname "$2")")" = 700 ] || exit 2
+            [ "$(stat -c %a "$2")" = 600 ] || exit 2
+            return 1
+        }
+    "#;
+    let out = std::process::Command::new("bash")
+        .args(["-c", &format!("{mocks}\n{script}")])
+        .env("TEST_ROOT", root)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(!conf_dir.join("awg0.conf.new").exists());
+    assert_eq!(
+        std::fs::read_to_string(conf_dir.join("awg0.conf")).unwrap(),
+        "OLD"
+    );
+    assert!(!std::fs::read_dir(root).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("validate.")
+    }));
 }

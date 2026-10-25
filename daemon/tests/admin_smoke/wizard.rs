@@ -416,6 +416,43 @@ async fn admin_wizard_step2_page_attaches_autostart_sse_to_endpoint() {
 }
 
 #[tokio::test]
+async fn admin_wizard_step2_progress_rows_follow_bootstrap_phases() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let session_id = s
+        .wizard
+        .insert("198.51.100.42".into(), "root".into(), "pw".into(), 22);
+    let html = fetch_html_with_cookie(
+        router(s),
+        "/admin/servers/new/step-2",
+        &format!("vpnctl_wizard={session_id}"),
+    )
+    .await;
+
+    let phases: Vec<&str> = html
+        .split("data-step-phase=\"")
+        .skip(1)
+        .map(|row| row.split('"').next().unwrap())
+        .collect();
+    assert_eq!(
+        phases,
+        [
+            "setup",
+            "probe",
+            "fingerprint",
+            "push-key",
+            "verify-key",
+            "register",
+            "secrets",
+            "install",
+            "apply",
+        ],
+        "wizard rows must follow the bootstrap pipeline, with probe before deployment"
+    );
+    assert_eq!(html.matches("aria-label=\"Pending\"").count(), phases.len());
+}
+
+#[tokio::test]
 async fn admin_wizard_sse_rejects_missing_session_400() {
     let dir = TempDir::new().unwrap();
     let app = router(state(&dir).await);

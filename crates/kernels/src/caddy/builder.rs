@@ -202,12 +202,16 @@ WantedBy=multi-user.target
 VLESSWS_UNIT_EOF
         systemctl daemon-reload
 
-        # naive needs 80 (ACME HTTP) + 443. vpnctl doesn't manage the
-        # firewall elsewhere, but a closed 80/443 here means no cert and
-        # no service — so open them best-effort when ufw is present.
+        # naive needs 80 (ACME HTTP) + 443. A closed port means no cert
+        # or service, so an active firewall must accept both rules.
         if command -v ufw >/dev/null 2>&1; then
-            ufw allow 80/tcp  >/dev/null 2>&1 || true
-            ufw allow 443/tcp >/dev/null 2>&1 || true
+            ufw_status=$(LC_ALL=C ufw status)
+            case "$ufw_status" in
+                'Status: active'*)
+                    ufw allow 80/tcp
+                    ufw allow 443/tcp
+                    ;;
+            esac
         fi
 
         command -v /usr/local/bin/caddy

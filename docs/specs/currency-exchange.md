@@ -128,10 +128,8 @@ ServerBillingSummaryItem  // Per-server line in summary
 
 **Currency rates:**
 - `upsert_currency_rate(&self, rate: &CurrencyRate) → Result<()>`
-- `upsert_currency_rates(&self, rates: &[CurrencyRate]) → Result<()>` — bulk, single tx
 - `list_currency_rates(&self) → Result<Vec<CurrencyRate>>`
 - `get_rate(&self, base, target) → Result<Option<CurrencyRate>>` — checks overrides first
-- `delete_currency_rate(&self, base, target) → Result<bool>`
 
 **Settings:**
 - `get_currency_settings(&self) → Result<CurrencySettings>`
@@ -158,7 +156,8 @@ ServerBillingSummaryItem  // Per-server line in summary
 - **Inline rate override:** per-pair text input → populates `rate_overrides_json`.
 - **Markup coefficient:** global default + per-currency overrides visible as
   `"100 ₽ base + 7% fee = 107 ₽"` transparent breakdown.
-- **One-click refresh:** button to trigger rate fetch → calls `upsert_currency_rates`.
+- **One-click refresh:** button calls `exchange_rate_poller::refresh_exchange_rates`,
+  which stores each fetched pair with `upsert_currency_rate`.
 - **Fee breakdown:** every converted amount shows source amount, rate, markup,
   and final amount.
 - **Payment history:** per-server table of immutable payment records with

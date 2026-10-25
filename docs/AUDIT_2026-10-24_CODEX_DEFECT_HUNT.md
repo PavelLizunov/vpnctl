@@ -187,3 +187,53 @@ rotted: the host-key test assumed unhashed `known_hosts` lines (fixed with
 `ssh-keygen -F`), and the root round trip cannot start because the
 linuxserver image never finishes init for `USER_NAME=root`. CI skips that one
 test until it gets an image that allows root login.
+
+## Round 4 (2026-10-25): security, concurrency, scripts, UI flows
+
+Eight read-only Codex hunters at `bd83916`, one area each. The lead
+re-checked the high-impact rows against the source (R4-01, 02, 03, 07, 08);
+the rest are hunter-verified and re-checked by the implementer before fixing.
+
+| ID | Severity | Area | Finding |
+|---|---|---|---|
+| R4-01 | important | audit leak | Audit payloads store user UUIDs and VPNRouter device IDs (bearer credentials for `/api/v1/app/config`); `redact_audit_payload` masks only password/private/token/secret keys, so the audit page and CSV expose them. |
+| R4-02 | important | AWG leak | On a failed start the AWG apply script runs `awg-quick strip awg0.conf >&2`, which prints `PrivateKey`; the error reaches SSE and the `server.deploy` audit row. |
+| R4-03 | important | staging perms | `upload` writes via `base64 -d > path` under the session umask; a staged `config.json.new` with every user secret stays world-readable when `sing-box check` rejects it. |
+| R4-04 | important | Boosty | Only `sync_from_inventory` runs in the spawned task; `deploy_flipped_users` is queued after `sync.await` inside the cancellable handler, so a timed-out request flips users without a redeploy. |
+| R4-05 | important | Boosty race | The poller applies a precomputed disable after the operator unlinked the user, because `set_user_disabled` does not re-check the Boosty link. |
+| R4-06 | important | registration race | Two concurrent quick-adds of one address both pass the pre-transaction duplicate check; two server rows then get separate deploy locks for one node. |
+| R4-07 | important | remediation | Health auto-remediation runs `systemctl restart sing-box` without the node operation lock and without re-reading inventory, so it can restart a kernel a concurrent deploy just disabled. |
+| R4-08 | important | apply scripts | A failed config snapshot (`cp -a`) does not stop the apply; AWG then deletes the live config on rollback, sing-box/xray restore a partial `.bak`. |
+| R4-09 | important | firewall | `ufw allow … || true` hides firewall failures and `open_firewall` errors only warn, so a deploy reports success with the new port closed. |
+| R4-10 | important | grants | Revoke commits the grant delete and its audit row separately; a failed audit write hides the pending revoke, and a failed autodeploy is not shown when `pending_deploy` is false. |
+| R4-11 | important | wizard | After the first password login the wizard trusts a separate `ssh-keyscan` result for the next password login, instead of the key the first connection accepted. |
+| R4-12 | important | wizard | An SSH port of 443 is accepted while the default REALITY inbound also binds 443, so the first deploy fails and the half-registered server blocks a wizard retry. |
+| R4-13 | important | fail2ban | The jail port comes from `sshd -T`, not from the port the wizard actually connected on; a sshd started with `-p` gets a jail on the wrong port. |
+| R4-14 | important | SSE UI | After a dropped SSE connection the JS re-enables the button; retry starts a second full deploy instead of watching the running one. |
+| R4-15 | important | vpn:// | The AmneziaVPN `vpn://` export puts AWG params only in the nested text config; the Android client reads the structured `last_config` fields, so imports lose obfuscation. |
+| R4-16 | important | Trojan links | Trojan share links rely on `allowInsecure=1` with a self-signed cert; current Xray clients reject `allowInsecure` (needs a pinned cert hash instead). Needs confirmation against the pinned client versions. |
+| R4-17 | important | client docs | `docs/CLIENT_GUIDES.md` tells Linux users to save `/sub` output as a full sing-box/Mihomo config, but it has no inbounds/TUN, so nothing is proxied. |
+| R4-18 | minor | SSE UI | `data-reload-after` keeps its timer when another SSE action starts, so the reload cuts the kernel-update log. |
+| R4-19 | minor | wizard UI | The wizard marks deploy/apply/probe rows done as soon as the `probe` phase starts, before SSH succeeded. |
+| R4-20 | minor | sing-box install | With matching binaries and a stopped service the installer fails `is-active` and rolls back instead of starting it. |
+| R4-21 | minor | bulk grant | "Grant all" counts failures but returns a plain redirect, so per-user failures are invisible. |
+| R4-22 | minor | traffic limit | A failed limit read renders as "no limit"; saving that form then deletes the real limit. |
+| R4-23 | minor | cleanup | Unused inventory methods `upsert_currency_rates`, `delete_currency_rate`, `list_server_kernels` (spec names the unused batch method). |
+| R4-24 | minor | cleanup | `scripts/hash-admin-password.sh` duplicates `vpnctl admin hash-password` and needs the `argon2` package. |
+| R4-25 | minor | cleanup | `docs/specs/exchange-rate-ingestion.md` is a pre-implementation design (env vars, tables) that the code never implemented, filed among live specs. |
+| R4-26 | minor | cleanup | Three copies of the `fresh_keypair` SSH test helper. |
+
+26 findings; R4-04 was reported by two hunters and is merged.
+
+### Round 4 fix status
+
+Wave 4 (branch `fix/codex-wave4-20261025`): R4-01..15, 17..25 fixed by eight
+Codex implementers, integrated and reviewed by the lead plus four diff-only
+reviewers. Skipped with reasons: R4-16 (no pinned client versions and no
+server cert fingerprint in the repo; the limitation is documented in
+`docs/CLIENT_GUIDES.md`), R4-26 (no shared test-support location for the three
+test crates). Lead changes on top: firewall scripts capture `ufw status` as
+its own command so a failing status stops the deploy instead of reading as
+"inactive" (review finding); with several accepted host keys the wizard pins
+the key the node presents, only if the password login already trusted it.
+Not deployed.

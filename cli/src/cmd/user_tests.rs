@@ -98,6 +98,12 @@ async fn user_add_generates_and_persists_vpn_router_device_id() {
         .unwrap()
         .expect("user should exist");
 
+    let audit = inv.recent_audit(10).await.unwrap();
+    let row = audit.iter().find(|row| row.action == "user.add").unwrap();
+    let payload = row.payload.as_ref().unwrap();
+    assert_eq!(payload["uuid_set"], true);
+    assert!(!payload.to_string().contains(&user.uuid));
+
     let device_id = user
         .vpn_router_device_id
         .as_deref()

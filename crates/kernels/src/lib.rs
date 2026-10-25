@@ -17,6 +17,29 @@ pub use sing_box::validate_config_excludes_ports;
 
 pub use sing_box::live_config_user_uuids;
 
+async fn apply_staged_config(
+    ssh: &dyn vpnctl_core::SshTransport,
+    path: &str,
+    config: &[u8],
+    script: &str,
+) -> vpnctl_core::Result<()> {
+    let quoted = vpnctl_core::shell::single_quote(path);
+    ssh.exec(&format!(
+        "install -o root -g root -m 0600 /dev/null {quoted}"
+    ))
+    .await?;
+    let result = async {
+        ssh.upload(path, config).await?;
+        ssh.exec(script).await?;
+        Ok(())
+    }
+    .await;
+    if result.is_err() {
+        let _ = ssh.exec(&format!("rm -f -- {quoted}")).await;
+    }
+    result
+}
+
 /// Stop and disable services of `retired` kernels (ones the operator disabled
 /// on this server) that are not enabled again. Kernels vpnctl never managed on
 /// the server are not in `retired`, so unrelated node services stay untouched.
@@ -52,3 +75,6 @@ pub async fn reconcile_disabled_kernels(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod staging_tests;

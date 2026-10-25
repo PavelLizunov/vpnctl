@@ -333,7 +333,7 @@ async fn set_grant_client_uuid_rejects_malformed_uuid() {
 }
 
 #[tokio::test]
-async fn set_grant_client_uuid_writes_audit_row_with_old_and_new_uuid() {
+async fn set_grant_client_uuid_audits_presence_without_credentials() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
 
@@ -359,10 +359,12 @@ async fn set_grant_client_uuid_writes_audit_row_with_old_and_new_uuid() {
     assert_eq!(row.target.as_deref(), Some("alice"));
     let payload = row.payload.as_ref().expect("payload must be present");
     assert_eq!(payload["server_id"], serde_json::json!("vps-x"));
-    assert_eq!(payload["old_client_uuid"], serde_json::Value::Null);
-    assert_eq!(
-        payload["new_client_uuid"],
-        serde_json::json!("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+    assert_eq!(payload["old_client_uuid_set"], false);
+    assert_eq!(payload["new_client_uuid_set"], true);
+    assert!(
+        !payload
+            .to_string()
+            .contains("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
     );
 
     inv.set_grant_client_uuid(
@@ -375,19 +377,17 @@ async fn set_grant_client_uuid_writes_audit_row_with_old_and_new_uuid() {
     let recent = inv.recent_audit(10).await.unwrap();
     let row = recent
         .iter()
-        .find(|r| {
-            r.action == "grant.set_client_uuid"
-                && r.payload
-                    .as_ref()
-                    .and_then(|p| p["new_client_uuid"].as_str())
-                    == Some("11111111-2222-3333-4444-555555555555")
-        })
+        .find(|r| r.action == "grant.set_client_uuid")
         .expect("second grant.set_client_uuid audit row must be present");
     let payload = row.payload.as_ref().unwrap();
-    assert_eq!(
-        payload["old_client_uuid"],
-        serde_json::json!("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
-    );
+    assert_eq!(payload["old_client_uuid_set"], true);
+    assert_eq!(payload["new_client_uuid_set"], true);
+    for uuid in [
+        "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "11111111-2222-3333-4444-555555555555",
+    ] {
+        assert!(!payload.to_string().contains(uuid));
+    }
 }
 
 #[tokio::test]

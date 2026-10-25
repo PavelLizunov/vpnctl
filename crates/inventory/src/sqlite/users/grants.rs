@@ -161,12 +161,39 @@ impl SqliteInventory {
     }
 
     pub async fn revoke(&self, user: &UserId, server: &ServerId) -> Result<()> {
-        sqlx::query("DELETE FROM grants WHERE user_id = ?1 AND server_id = ?2")
-            .bind(&user.0)
-            .bind(&server.0)
-            .execute(&self.pool)
+        self.revoke_audited(user, server, "inventory", "inventory")
             .await?;
         Ok(())
+    }
+
+    pub async fn revoke_audited(
+        &self,
+        user: &UserId,
+        server: &ServerId,
+        actor: &str,
+        source: &str,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let deleted = sqlx::query("DELETE FROM grants WHERE user_id = ?1 AND server_id = ?2")
+            .bind(&user.0)
+            .bind(&server.0)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        if deleted > 0 {
+            sqlx::query(
+                "INSERT INTO audit_log (actor, action, target, payload)
+                 VALUES (?1, 'user.revoke', ?2, json_object('server', ?3, 'source', ?4))",
+            )
+            .bind(actor)
+            .bind(&user.0)
+            .bind(&server.0)
+            .bind(source)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(deleted > 0)
     }
 
     pub async fn users_for_server(&self, server: &ServerId) -> Result<Vec<User>> {

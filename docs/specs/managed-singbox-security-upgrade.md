@@ -9,7 +9,9 @@ package upgrade, supply the fork's features. Preserve node configuration,
 credentials, subscriptions and the existing binary/helper rollback mechanism.
 An active `caddy-vlessws` unit shares the managed binary: restart and check it
 when that binary changes, and restart it after restoring the previous artifacts
-on failure. Leave an inactive or absent backend inactive.
+on failure. Leave an inactive or absent backend inactive. Start and verify an
+inactive sing-box service even when the managed binary is unchanged; an already
+active service with an unchanged binary needs no restart.
 Do not change Xray's already-current `26.3.27` pin or reboot node operating systems.
 
 ## Interface and data contract
@@ -27,6 +29,8 @@ not update nodes. Installed binaries and running `/proc/<pid>/exe` must match.
 
 - [ ] Release archives match their pinned SHA256 values for all architectures.
 - [ ] Pin consistency regression fails on a stale acquisition-script digest.
+- [ ] Unchanged managed binaries start inactive sing-box and verify it; failed
+      start or verification returns an error through the existing rollback path.
 - [ ] Independent diff review; five canonical Cargo checks and `just ci`; CI.
 - [ ] Candidate validates every node's existing configuration before installation.
 - [ ] Canary, then sequential rollout with real client transfer checks and Stats API.

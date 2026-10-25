@@ -779,7 +779,7 @@ async fn admin_audit_csv_export_returns_well_formed_csv() {
             "admin",
             "user.add",
             Some("alice"),
-            Some(&serde_json::json!({"uuid": "uuid-with-\"quote\", and-comma"})),
+            Some(&serde_json::json!({"note": "note-with-\"quote\", and-comma"})),
         )
         .await
         .unwrap();
@@ -840,7 +840,7 @@ async fn admin_audit_csv_export_returns_well_formed_csv() {
         row.contains(",admin,user.add,alice,"),
         "row body shape drifted"
     );
-    let expected_payload = r#""{""uuid"":""uuid-with-\""quote\"", and-comma""}""#;
+    let expected_payload = r#""{""note"":""note-with-\""quote\"", and-comma""}""#;
     assert!(
         row.contains(expected_payload),
         "payload not RFC4180-escaped as expected;\n  expected to contain: {expected_payload}\n  got row:             {row}"
@@ -896,6 +896,55 @@ async fn admin_audit_csv_export_redacts_sensitive_payload_fields() {
         csv.contains("bob"),
         "CSV export missing non-secret user field"
     );
+}
+
+#[tokio::test]
+async fn admin_audit_html_and_csv_redact_legacy_credential_payloads() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let uuid = "11111111-2222-4333-8444-555555555555";
+    let device_id = "0123456789abcdef0123456789abcdef";
+    s.inv
+        .audit(
+            "admin",
+            "grant.set_client_uuid",
+            Some("alice"),
+            Some(&serde_json::json!({
+                "uuid": uuid,
+                "client_uuid": uuid,
+                "old_client_uuid": uuid,
+                "new_client_uuid": uuid,
+                "device_id": device_id,
+                "old_vpn_router_device_id": device_id,
+                "new_vpn_router_device_id": device_id,
+                "nested": [{"clientUuid": uuid, "Device-ID": device_id}],
+                "short": {"uuid": "short-id"},
+                "server": "test-node",
+                "uuid_set": true
+            })),
+        )
+        .await
+        .unwrap();
+    let app = router(s);
+    for uri in ["/admin/audit", "/admin/audit.csv"] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = std::str::from_utf8(&body).unwrap();
+        for credential in [uuid, device_id, "short-id"] {
+            assert!(!text.contains(credential), "{uri} leaked {credential}");
+        }
+        assert!(text.contains("11111111…"), "{uri} lost UUID prefix");
+        assert!(text.contains("01234567…"), "{uri} lost device prefix");
+        assert!(text.contains("alice"));
+        assert!(text.contains("grant.set_client_uuid"));
+        assert!(text.contains("test-node"));
+        assert!(text.contains("uuid_set"));
+    }
 }
 
 #[tokio::test]

@@ -141,10 +141,10 @@ pub(crate) async fn server_quick_add(State(state): State<AppState>, body: String
         usage_coefficient: 1.0,
     };
 
-    if let Err(e) = state.inv.add_server(&server).await {
+    if let Err(e) = state.inv.register_server(&server, "admin").await {
         return match e {
             vpnctl_inventory::SqliteInventoryError::AlreadyExists(what) => {
-                bad_request(&format!("{what} already exists — pick a different id"))
+                bad_request(&format!("{what} already exists"))
             }
             other => internal_error(anyhow::Error::new(other)),
         };

@@ -87,35 +87,15 @@ pub(crate) async fn user_revoke_server(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
 
-    let was_granted = match state.inv.servers_for_user(&uid).await {
-        Ok(v) => v.iter().any(|s| s.id == sid),
+    let revoked = match state
+        .inv
+        .revoke_audited(&uid, &sid, "admin", "user-detail")
+        .await
+    {
+        Ok(revoked) => revoked,
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
-    if let Err(e) = state.inv.revoke(&uid, &sid).await {
-        return internal_error(anyhow::Error::new(e));
-    }
-    if was_granted {
-        if let Err(e) = state
-            .inv
-            .audit(
-                "admin",
-                "user.revoke",
-                Some(&user_id_str),
-                Some(&serde_json::json!({
-                    "server": server_id_str,
-                    "source": "user-detail",
-                })),
-            )
-            .await
-        {
-            tracing::warn!(
-                target = "vpnctld::admin",
-                user = %user_id_str,
-                server = %server_id_str,
-                error = %e,
-                "audit write failed for user.revoke — mutation already committed"
-            );
-        }
+    if revoked {
         spawn_user_servers_redeploy(&state, vec![server], user_id_str.clone(), "user.revoke");
     }
     Redirect::to(&format!(

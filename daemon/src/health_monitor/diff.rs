@@ -31,7 +31,7 @@ fn mem_used_pct(row: &NodeHealthRow) -> Option<u8> {
     u8::try_from(used_pct.min(100)).ok()
 }
 
-fn disk_pct(row: &NodeHealthRow) -> Option<u8> {
+pub(super) fn disk_pct(row: &NodeHealthRow) -> Option<u8> {
     let used = row.disk_used_mib?;
     let total = row.disk_total_mib?;
     if total == 0 {

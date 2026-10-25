@@ -1,10 +1,14 @@
 use axum::extract::{Path, State};
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 
-use super::super::helpers::{bad_request, internal_error, not_found, user_not_found};
+use super::super::helpers::{
+    bad_request, internal_error, not_found, render_page, theme_accent_lang, user_not_found,
+};
 use super::super::legacy::spawn_user_servers_redeploy;
 use crate::AppState;
 use crate::http_util::{form_field, path_segment_encode};
+use maud::html;
 
 pub(crate) async fn server_grant_user(
     State(state): State<AppState>,
@@ -93,29 +97,15 @@ pub(crate) async fn server_revoke_user(
         Ok(None) => return user_not_found(&user_id_str),
         Err(e) => return internal_error(anyhow::Error::new(e)),
     }
-    let was_granted = match state.inv.servers_for_user(&uid).await {
-        Ok(v) => v.iter().any(|s| s.id == sid),
+    let revoked = match state
+        .inv
+        .revoke_audited(&uid, &sid, "admin", "server-detail")
+        .await
+    {
+        Ok(revoked) => revoked,
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
-    if let Err(e) = state.inv.revoke(&uid, &sid).await {
-        return internal_error(anyhow::Error::new(e));
-    }
-    if was_granted {
-        if let Err(e) = state
-            .inv
-            .audit(
-                "admin",
-                "user.revoke",
-                Some(&user_id_str),
-                Some(&serde_json::json!({
-                    "server": server_id_str,
-                    "source": "server-detail",
-                })),
-            )
-            .await
-        {
-            tracing::warn!(target = "vpnctld::admin", error = %e, "audit write failed for user.revoke");
-        }
+    if revoked {
         spawn_user_servers_redeploy(&state, vec![server], user_id_str.clone(), "user.revoke");
     }
     Redirect::to(&format!(
@@ -126,6 +116,7 @@ pub(crate) async fn server_revoke_user(
 }
 
 pub(crate) async fn server_grant_all_users(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Path(server_id_str): Path<String>,
 ) -> Response {
@@ -156,6 +147,7 @@ pub(crate) async fn server_grant_all_users(
     let mut granted: u32 = 0;
     let mut already: u32 = 0;
     let mut failed: u32 = 0;
+    let mut failures = Vec::new();
     let mut skipped_disabled: u32 = 0;
     for u in &users {
         if u.disabled {
@@ -193,6 +185,7 @@ pub(crate) async fn server_grant_all_users(
             }
             Err(e) => {
                 failed += 1;
+                failures.push((u.id.0.clone(), e.to_string()));
                 tracing::warn!(
                     target = "vpnctld::admin",
                     server = %server_id_str,
@@ -203,21 +196,22 @@ pub(crate) async fn server_grant_all_users(
             }
         }
     }
-    if let Err(e) = state
-        .inv
-        .audit(
-            "admin",
-            "server.grants.bulk_grant",
-            Some(&server_id_str),
-            Some(&serde_json::json!({
-                "granted": granted,
-                "already_granted": already,
-                "failed": failed,
-                "skipped_disabled": skipped_disabled,
-                "total_users": users.len(),
-            })),
-        )
-        .await
+    if granted > 0
+        && let Err(e) = state
+            .inv
+            .audit(
+                "admin",
+                "server.grants.bulk_grant",
+                Some(&server_id_str),
+                Some(&serde_json::json!({
+                    "granted": granted,
+                    "already_granted": already,
+                    "failed": failed,
+                    "skipped_disabled": skipped_disabled,
+                    "total_users": users.len(),
+                })),
+            )
+            .await
     {
         tracing::warn!(
             target = "vpnctld::admin",
@@ -243,14 +237,25 @@ pub(crate) async fn server_grant_all_users(
             "server.grants.bulk_grant",
         );
     }
-    Redirect::to(&format!(
-        "/admin/servers/{}/grants",
-        path_segment_encode(&server_id_str)
-    ))
-    .into_response()
+    let lang = crate::i18n::Locale::from_request(&headers);
+    bulk_grants_result(
+        &state,
+        &headers,
+        &server_id_str,
+        &format!(
+            "{} {granted}; {} {already}; {} {skipped_disabled}; {} {failed}.",
+            crate::i18n::tr(lang, "Granted:", "Выдано:"),
+            crate::i18n::tr(lang, "already granted:", "уже выдано:"),
+            crate::i18n::tr(lang, "disabled users skipped:", "отключённых пропущено:"),
+            crate::i18n::tr(lang, "failed:", "ошибок:"),
+        ),
+        &failures,
+    )
+    .await
 }
 
 pub(crate) async fn server_revoke_all_users(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Path(server_id_str): Path<String>,
     body: String,
@@ -276,34 +281,18 @@ pub(crate) async fn server_revoke_all_users(
     let total_was = granted.len();
     let mut revoked: u32 = 0;
     let mut failed: u32 = 0;
+    let mut failures = Vec::new();
     for uid in &granted {
-        match state.inv.revoke(uid, &sid).await {
-            Ok(()) => {
-                revoked += 1;
-                if let Err(e) = state
-                    .inv
-                    .audit(
-                        "admin",
-                        "user.revoke",
-                        Some(&uid.0),
-                        Some(&serde_json::json!({
-                            "server": server_id_str,
-                            "source": "server-detail.bulk",
-                        })),
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        target = "vpnctld::admin",
-                        server = %server_id_str,
-                        user = %uid,
-                        error = %e,
-                        "audit write failed for user.revoke (bulk) — mutation already committed"
-                    );
-                }
-            }
+        match state
+            .inv
+            .revoke_audited(uid, &sid, "admin", "server-detail.bulk")
+            .await
+        {
+            Ok(true) => revoked += 1,
+            Ok(false) => {}
             Err(e) => {
                 failed += 1;
+                failures.push((uid.0.clone(), e.to_string()));
                 tracing::warn!(
                     target = "vpnctld::admin",
                     server = %server_id_str,
@@ -314,19 +303,20 @@ pub(crate) async fn server_revoke_all_users(
             }
         }
     }
-    if let Err(e) = state
-        .inv
-        .audit(
-            "admin",
-            "server.grants.bulk_revoke",
-            Some(&server_id_str),
-            Some(&serde_json::json!({
-                "revoked": revoked,
-                "failed": failed,
-                "total_was": total_was,
-            })),
-        )
-        .await
+    if revoked > 0
+        && let Err(e) = state
+            .inv
+            .audit(
+                "admin",
+                "server.grants.bulk_revoke",
+                Some(&server_id_str),
+                Some(&serde_json::json!({
+                    "revoked": revoked,
+                    "failed": failed,
+                    "total_was": total_was,
+                })),
+            )
+            .await
     {
         tracing::warn!(
             target = "vpnctld::admin",
@@ -351,9 +341,47 @@ pub(crate) async fn server_revoke_all_users(
             "server.grants.bulk_revoke",
         );
     }
-    Redirect::to(&format!(
-        "/admin/servers/{}/grants",
-        path_segment_encode(&server_id_str)
-    ))
-    .into_response()
+    let lang = crate::i18n::Locale::from_request(&headers);
+    bulk_grants_result(
+        &state,
+        &headers,
+        &server_id_str,
+        &format!(
+            "{} {revoked}; {} {failed}.",
+            crate::i18n::tr(lang, "Revoked:", "Отозвано:"),
+            crate::i18n::tr(lang, "failed:", "ошибок:"),
+        ),
+        &failures,
+    )
+    .await
+}
+
+async fn bulk_grants_result(
+    state: &AppState,
+    headers: &HeaderMap,
+    server_id: &str,
+    summary: &str,
+    failures: &[(String, String)],
+) -> Response {
+    let (theme, accent, lang) = theme_accent_lang(headers);
+    let body = html! {
+        h1 { (crate::i18n::tr(lang, "Bulk access result", "Результат массового изменения доступа")) }
+        section.ed-alert role="status" {
+            p { (summary) }
+            @if !failures.is_empty() {
+                ul {
+                    @for (user, reason) in failures {
+                        li { b { (user) } ": " (reason) }
+                    }
+                }
+            }
+        }
+        p { (crate::i18n::tr(lang, "These counts describe saved access changes. Check deployment status on the server page.", "Эти числа показывают сохранённые изменения доступа. Проверь статус деплоя на странице сервера.")) }
+        a.ed-abtn href=(format!("/admin/servers/{}/grants", path_segment_encode(server_id))) {
+            (crate::i18n::tr(lang, "Back to server access", "Назад к доступам сервера"))
+        }
+    };
+    render_page(state, "servers", &theme, &accent, lang, body)
+        .await
+        .into_response()
 }

@@ -39,6 +39,106 @@ fn server(id: &str) -> Server {
 }
 
 #[tokio::test]
+async fn boosty_status_changes_recheck_link_and_audit_only_mutations() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let uid = UserId("alice".into());
+    inv.add_user(&user("alice")).await.unwrap();
+    inv.link_boosty_subscriber(&uid, 100).await.unwrap();
+
+    assert!(!inv.set_boosty_user_disabled(&uid, 200, true).await.unwrap());
+    inv.unlink_boosty_subscriber(&uid).await.unwrap();
+    assert!(!inv.set_boosty_user_disabled(&uid, 100, true).await.unwrap());
+    inv.link_boosty_subscriber(&uid, 200).await.unwrap();
+    assert!(!inv.set_boosty_user_disabled(&uid, 100, true).await.unwrap());
+    assert!(
+        !inv.set_boosty_user_disabled(&uid, 200, false)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !inv.set_boosty_user_disabled(&UserId("missing".into()), 200, true)
+            .await
+            .unwrap()
+    );
+    assert!(!inv.get_user(&uid).await.unwrap().unwrap().disabled);
+    assert!(
+        inv.recent_audit(20)
+            .await
+            .unwrap()
+            .iter()
+            .all(|row| row.action != "boosty.enable" && row.action != "boosty.disable")
+    );
+
+    for disabled in [true, false] {
+        assert!(
+            inv.set_boosty_user_disabled(&uid, 200, disabled)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !inv.set_boosty_user_disabled(&uid, 200, disabled)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            inv.get_user(&uid).await.unwrap().unwrap().disabled,
+            disabled
+        );
+    }
+    let rows: Vec<_> = inv
+        .recent_audit(20)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.action == "boosty.enable" || row.action == "boosty.disable")
+        .collect();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().any(|row| row.action == "boosty.enable"));
+    assert!(rows.iter().any(|row| row.action == "boosty.disable"));
+    for row in rows {
+        assert_eq!(row.actor, "boosty-bridge");
+        assert_eq!(row.target.as_deref(), Some("alice"));
+        assert_eq!(
+            row.payload,
+            Some(serde_json::json!({ "reason": "subscription reconcile" }))
+        );
+    }
+}
+
+#[tokio::test]
+async fn boosty_status_change_rolls_back_if_audit_insert_fails() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let uid = UserId("alice".into());
+    inv.add_user(&user("alice")).await.unwrap();
+    inv.link_boosty_subscriber(&uid, 100).await.unwrap();
+    let raw =
+        sqlx::SqlitePool::connect(&format!("sqlite://{}", dir.path().join("inv.db").display()))
+            .await
+            .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER reject_boosty_status_audit BEFORE INSERT ON audit_log
+         WHEN NEW.action IN ('boosty.enable', 'boosty.disable')
+         BEGIN SELECT RAISE(ABORT, 'test audit failure'); END",
+    )
+    .execute(&raw)
+    .await
+    .unwrap();
+    let audits_before = inv.recent_audit(20).await.unwrap().len();
+
+    assert!(inv.set_boosty_user_disabled(&uid, 100, true).await.is_err());
+    sqlx::query("DROP TRIGGER reject_boosty_status_audit")
+        .execute(&raw)
+        .await
+        .unwrap();
+    assert!(!inv.get_user(&uid).await.unwrap().unwrap().disabled);
+    assert_eq!(inv.recent_audit(20).await.unwrap().len(), audits_before);
+    assert!(inv.set_boosty_user_disabled(&uid, 100, true).await.unwrap());
+    raw.close().await;
+}
+
+#[tokio::test]
 async fn link_then_list_and_unlink() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;

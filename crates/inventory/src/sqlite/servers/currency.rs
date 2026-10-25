@@ -58,35 +58,6 @@ impl SqliteInventory {
         Ok(())
     }
 
-    pub async fn upsert_currency_rates(&self, rates: &[CurrencyRate]) -> Result<()> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        for rate in rates {
-            if rate.rate_micros <= 0 {
-                return Err(SqliteInventoryError::Invalid(format!(
-                    "rate_micros must be positive for {}/{}",
-                    rate.base_currency, rate.target_currency
-                )));
-            }
-            sqlx::query(
-                "INSERT INTO currency_rates (base_currency, target_currency, rate_micros, source, fetched_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(base_currency, target_currency) DO UPDATE SET
-                    rate_micros = excluded.rate_micros,
-                    source      = excluded.source,
-                    fetched_at  = excluded.fetched_at",
-            )
-            .bind(&rate.base_currency)
-            .bind(&rate.target_currency)
-            .bind(rate.rate_micros)
-            .bind(&rate.source)
-            .bind(&rate.fetched_at)
-            .execute(&mut *tx)
-            .await?;
-        }
-        tx.commit().await?;
-        Ok(())
-    }
-
     pub async fn list_currency_rates(&self) -> Result<Vec<CurrencyRate>> {
         let rows = sqlx::query(
             "SELECT base_currency, target_currency, rate_micros, source, fetched_at
@@ -198,17 +169,6 @@ impl SqliteInventory {
         }
 
         Ok(None)
-    }
-
-    pub async fn delete_currency_rate(&self, base: &str, target: &str) -> Result<bool> {
-        let res = sqlx::query(
-            "DELETE FROM currency_rates WHERE base_currency = ?1 AND target_currency = ?2",
-        )
-        .bind(base)
-        .bind(target)
-        .execute(&self.pool)
-        .await?;
-        Ok(res.rows_affected() > 0)
     }
 
     pub async fn get_currency_settings(&self) -> Result<CurrencySettings> {

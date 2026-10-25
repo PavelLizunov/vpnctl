@@ -403,6 +403,34 @@ async fn apply_writes_audit_row_with_summary_payload() {
 }
 
 #[tokio::test]
+async fn migration_audit_payloads_omit_user_and_grant_uuids() {
+    let inv = open_test_inv().await;
+    let original_uuid = "00000000-0000-0000-0000-000000000001";
+    let imported_uuid = "00000000-0000-0000-0000-000000000002";
+    let original = plan_with_one_user("srv-a", "alice", original_uuid);
+    apply_migration_plan(&inv, &original, false).await.unwrap();
+    let changed = plan_with_one_user("srv-a", "alice", imported_uuid);
+    apply_migration_plan(&inv, &changed, false).await.unwrap();
+    let rows = inv.recent_audit(100).await.unwrap();
+    for row in &rows {
+        let payload = serde_json::to_string(&row.payload).unwrap();
+        assert!(!payload.contains(original_uuid));
+        assert!(!payload.contains(imported_uuid));
+    }
+    let created = rows.iter().find(|row| row.action == "user.add").unwrap();
+    assert_eq!(created.payload.as_ref().unwrap()["uuid_set"], true);
+    let changed = rows
+        .iter()
+        .find(|row| row.action == "grant.set_client_uuid")
+        .unwrap();
+    assert_eq!(changed.target.as_deref(), Some("alice"));
+    let payload = changed.payload.as_ref().unwrap();
+    assert_eq!(payload["server_id"], "srv-a");
+    assert_eq!(payload["old_client_uuid_set"], false);
+    assert_eq!(payload["new_client_uuid_set"], true);
+}
+
+#[tokio::test]
 async fn apply_with_overwrite_replaces_existing_user_uuid() {
     use vpnctl_core::{User, UserId};
     let inv = open_test_inv().await;

@@ -413,21 +413,37 @@ pub(crate) async fn user_traffic_limit_section(
         .inv
         .user_traffic_this_month(uid)
         .await
+        .map(Some)
         .unwrap_or_else(|e| {
             tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "user_traffic_this_month failed");
-            0
+            None
         });
-    let (limit_opt, threshold_opt) = state
-        .inv
-        .get_user_traffic_limit(uid)
-        .await
-        .unwrap_or((None, None));
+    let (limit_opt, threshold_opt) = match state.inv.get_user_traffic_limit(uid).await {
+        Ok(limit) => limit,
+        Err(e) => {
+            tracing::warn!(target = "vpnctld::admin", user = %uid, error = %e, "get_user_traffic_limit failed");
+            return html! {
+                div.ed-rule {}
+                div.ed-art-eyebrow { (tr(lang, "Traffic limit · month-to-date", "Лимит трафика · с начала месяца")) }
+                p.ed-alert role="alert" {
+                    (tr(lang, "Traffic limit unavailable. Reload this page before editing the limit.", "Лимит трафика недоступен. Обнови страницу перед изменением лимита."))
+                }
+                p {
+                    (tr(lang, "Used this month: ", "Использовано в этом месяце: "))
+                    @match used {
+                        Some(bytes) => (humanize_bytes(bytes)),
+                        None => (tr(lang, "unknown", "неизвестно")),
+                    }
+                }
+            };
+        }
+    };
     let threshold_eff = threshold_opt.unwrap_or(DEFAULT_TRAFFIC_THRESHOLD_PCT);
     html! {
         div.ed-rule {}
         div.ed-art-eyebrow { (tr(lang, "Traffic limit · month-to-date", "Лимит трафика · с начала месяца")) }
-        @match limit_opt {
-            Some(lim) if lim > 0 => {
+        @match (limit_opt, used) {
+            (Some(lim), Some(used)) if lim > 0 => {
                 @let pct = ((used as u128 * 100) / lim as u128).min(999) as u32;
                 @let over_threshold = pct >= u32::from(threshold_eff);
                 @let over_limit = pct >= 100;
@@ -472,7 +488,15 @@ pub(crate) async fn user_traffic_limit_section(
                     }
                 }
             }
-            _ => {
+            (limit, None) => {
+                p role="status" {
+                    (tr(lang, "Used this month: unknown. Reload to retry.", "Использовано в этом месяце: неизвестно. Обнови страницу для повторной проверки."))
+                    @if let Some(lim) = limit {
+                        " " (tr(lang, "Monthly cap: ", "Месячный лимит: ")) (humanize_bytes(lim))
+                    }
+                }
+            }
+            (_, Some(used)) => {
                 p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
                     (tr(lang, "Used this month: ", "Использовано в этом месяце: "))
                     span.ed-mono { (humanize_bytes(used)) }
@@ -486,6 +510,7 @@ pub(crate) async fn user_traffic_limit_section(
         form method="post"
              action=(format!("/admin/users/{}/traffic-limit", path_segment_encode(&uid.0)))
              style="display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; padding: 10px 12px; background: var(--paper); border: 1px solid var(--rule);" {
+            input type="hidden" name="limit_loaded" value="1";
             label style="font-family: var(--mono); font-size: 11px; color: var(--mute); letter-spacing: 0.14em; text-transform: uppercase;" {
                 (tr(lang, "limit", "лимит"))
             }

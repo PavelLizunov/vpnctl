@@ -301,11 +301,17 @@ pub async fn sync_once_with_policy(
 
     let suppress_disables =
         !links.is_empty() && (subscribers.is_empty() || (active_count == 0 && excluded_unpaid > 0));
+    let linked_by_user: HashMap<&str, &LinkedUser> = links
+        .iter()
+        .map(|link| (link.user_id.as_str(), link))
+        .collect();
 
     for action in reconcile(&states, &links) {
         match action {
             Action::Enable { user_id } => {
-                apply_disabled(inv, &mut report, &user_id, false, mode).await;
+                if let Some(link) = linked_by_user.get(user_id.as_str()) {
+                    apply_disabled(inv, &mut report, link, false, mode).await;
+                }
             }
             Action::Disable { user_id } if suppress_disables => {
                 report.suppressed_disables.push(user_id);
@@ -318,8 +324,8 @@ pub async fn sync_once_with_policy(
                     let since = lapsed_by_user.get(&user_id).copied().unwrap_or(now);
                     if now.saturating_sub(since) < grace_secs {
                         report.grace_pending.push(user_id);
-                    } else {
-                        apply_disabled(inv, &mut report, &user_id, true, mode).await;
+                    } else if let Some(link) = linked_by_user.get(user_id.as_str()) {
+                        apply_disabled(inv, &mut report, link, true, mode).await;
                     }
                 }
             },
@@ -418,42 +424,97 @@ async fn provision_boosty_user(
 async fn apply_disabled(
     inv: &SqliteInventory,
     report: &mut SyncReport,
-    user_id: &str,
+    link: &LinkedUser,
     disabled: bool,
     mode: ApplyMode,
 ) {
+    let user_id = &link.user_id;
     if mode == ApplyMode::DryRun {
         report.record(disabled, user_id);
         return;
     }
 
     let uid = UserId(user_id.to_string());
-    match inv.set_user_disabled(&uid, disabled).await {
-        Ok(changed) => {
-            report.record(disabled, user_id);
-            if changed {
-                let action = if disabled {
-                    "boosty.disable"
-                } else {
-                    "boosty.enable"
-                };
-                if let Err(e) = inv
-                    .audit(
-                        "boosty-bridge",
-                        action,
-                        Some(user_id),
-                        Some(&serde_json::json!({ "reason": "subscription reconcile" })),
-                    )
-                    .await
-                {
-                    report
-                        .errors
-                        .push(format!("audit {action} for {user_id} failed: {e}"));
-                }
-            }
-        }
+    match inv
+        .set_boosty_user_disabled(&uid, link.subscriber_id, disabled)
+        .await
+    {
+        Ok(true) => report.record(disabled, user_id),
+        Ok(false) => {}
         Err(e) => report
             .errors
             .push(format!("set disabled={disabled} for {user_id} failed: {e}")),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unlink_after_reconcile_skips_stale_enable_and_disable() {
+        for disabled in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+                .await
+                .unwrap();
+            let uid = UserId("alice".into());
+            inv.add_user(&User {
+                id: uid.clone(),
+                uuid: "uuid-alice".into(),
+                tuic_password: None,
+                wireguard_pubkey: None,
+                wireguard_private: None,
+                sub_token: None,
+                vpn_router_device_id: None,
+                disabled: !disabled,
+            })
+            .await
+            .unwrap();
+            inv.link_boosty_subscriber(&uid, 100).await.unwrap();
+            let links = inv.list_boosty_links().await.unwrap();
+            let snapshot = inv.get_user(&uid).await.unwrap().unwrap();
+            let link = LinkedUser {
+                user_id: links[0].0.0.clone(),
+                subscriber_id: links[0].1,
+                disabled: snapshot.disabled,
+            };
+            let actions = reconcile(
+                &[SubscriberState {
+                    subscriber_id: 100,
+                    active: !disabled,
+                }],
+                std::slice::from_ref(&link),
+            );
+            assert_eq!(
+                actions,
+                vec![if disabled {
+                    Action::Disable {
+                        user_id: uid.0.clone(),
+                    }
+                } else {
+                    Action::Enable {
+                        user_id: uid.0.clone(),
+                    }
+                }]
+            );
+
+            // Interleave the operator's unlink after the sync decision, before its write.
+            inv.unlink_boosty_subscriber(&uid).await.unwrap();
+            let audits_before = inv.recent_audit(20).await.unwrap().len();
+            let mut report = SyncReport::default();
+            apply_disabled(&inv, &mut report, &link, disabled, ApplyMode::Full).await;
+
+            assert_eq!(
+                inv.get_user(&uid).await.unwrap().unwrap().disabled,
+                !disabled
+            );
+            assert!(inv.list_boosty_links().await.unwrap().is_empty());
+            assert!(report.enabled.is_empty());
+            assert!(report.disabled.is_empty());
+            assert!(report.errors.is_empty());
+            assert_eq!(inv.recent_audit(20).await.unwrap().len(), audits_before);
+        }
     }
 }

@@ -68,6 +68,45 @@ impl SqliteInventory {
         Ok(res.rows_affected() > 0)
     }
 
+    /// Apply a reconcile decision only while its link and opposite status still match.
+    pub async fn set_boosty_user_disabled(
+        &self,
+        user: &UserId,
+        subscriber_id: i64,
+        disabled: bool,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let result = sqlx::query(
+            "UPDATE users SET disabled = ?1
+              WHERE id = ?2 AND boosty_subscriber_id = ?3 AND disabled = ?4",
+        )
+        .bind(i64::from(disabled))
+        .bind(&user.0)
+        .bind(subscriber_id)
+        .bind(i64::from(!disabled))
+        .execute(&mut *tx)
+        .await?;
+        let changed = result.rows_affected() == 1;
+        if changed {
+            let action = if disabled {
+                "boosty.disable"
+            } else {
+                "boosty.enable"
+            };
+            sqlx::query(
+                "INSERT INTO audit_log (actor, action, target, payload)
+                 VALUES ('boosty-bridge', ?1, ?2, ?3)",
+            )
+            .bind(action)
+            .bind(&user.0)
+            .bind(serde_json::json!({ "reason": "subscription reconcile" }).to_string())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(changed)
+    }
+
     pub async fn observe_boosty_lapse(
         &self,
         user: &UserId,

@@ -138,7 +138,7 @@ pub(crate) async fn run(
         k.apply_config_with_known_users(&ssh, &config, &known_user_uuids)
             .await?;
         if let Err(e) = k.open_firewall(&ssh, &ctx, &protocols_for_k).await {
-            println!("⚠ firewall step skipped for {}: {e}", k.id());
+            anyhow::bail!("{}: open_firewall failed: {e}", k.id());
         }
         total_config_bytes += config.len();
         rendered_kernels.push(k.id().0);

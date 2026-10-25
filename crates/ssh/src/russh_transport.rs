@@ -194,6 +194,7 @@ impl RusshTransportBuilder {
         Ok(RusshTransport {
             handle: AsyncMutex::new(handle),
             address: self.address,
+            port: self.port,
             user: self.user,
             op_timeout: self.op_timeout,
             observed_fingerprint: observed,
@@ -204,6 +205,7 @@ impl RusshTransportBuilder {
 pub struct RusshTransport {
     handle: AsyncMutex<client::Handle<VerifyHandler>>,
     address: String,
+    port: u16,
     user: String,
     op_timeout: Duration,
     observed_fingerprint: Arc<AsyncMutex<Option<String>>>,
@@ -239,6 +241,10 @@ impl RusshTransport {
 
 #[async_trait]
 impl SshTransport for RusshTransport {
+    fn target_port(&self) -> Option<u16> {
+        Some(self.port)
+    }
+
     async fn exec(&self, cmd: &str) -> Result<String> {
         let session = self.handle.lock().await;
         let cmd_owned = self.privileged_command(cmd);

@@ -169,7 +169,7 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
         usage_coefficient: args.usage_coefficient,
     };
     registry.validate_server_support(&server)?;
-    inv.add_server(&server).await?;
+    inv.register_server(&server, "cli").await?;
 
     inv.audit(
         "cli",
