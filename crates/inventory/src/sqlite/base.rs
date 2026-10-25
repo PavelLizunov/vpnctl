@@ -1,7 +1,9 @@
 use super::*;
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use sqlx::{SqlitePool, migrate::Migrator};
+use sqlx::{ConnectOptions, SqlitePool, migrate::Migrator};
+use std::fs::{DirBuilder, OpenOptions};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
@@ -124,6 +126,47 @@ pub struct SqliteInventory {
     coordination_identity: std::sync::Arc<String>,
 }
 
+fn prepare_database_file(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)?;
+    }
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(file) => file.set_permissions(std::fs::Permissions::from_mode(0o600))?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    for suffix in ["", "-wal", "-shm"] {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(suffix);
+        match std::fs::metadata(Path::new(&name)) {
+            Ok(metadata) if metadata.permissions().mode() & 0o077 != 0 => {
+                // Installs created before the 0600 default: close them on open,
+                // keeping the owner.
+                if let Err(error) = std::fs::set_permissions(
+                    Path::new(&name),
+                    std::fs::Permissions::from_mode(0o600),
+                ) {
+                    eprintln!(
+                        "warning: inventory file {name:?} is accessible to other users and could not be restricted: {error}"
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 impl SqliteInventory {
     pub(crate) fn pool(&self) -> &SqlitePool {
         &self.pool
@@ -134,11 +177,23 @@ impl SqliteInventory {
             SqliteConnectOptions::from_str(path.to_str().ok_or_else(|| {
                 SqliteInventoryError::Invalid(format!("non-utf8 path: {path:?}"))
             })?)?
-            .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
             .pragma("synchronous", "NORMAL")
             .foreign_keys(true)
             .busy_timeout(Duration::from_secs(5));
+
+        // SQLx has no memory-mode getter; serialize a safe placeholder filename.
+        let in_memory = opts
+            .clone()
+            .filename("/inventory")
+            .to_url_lossy()
+            .query_pairs()
+            .any(|(key, value)| key == "mode" && value == "memory");
+        if !in_memory {
+            prepare_database_file(opts.get_filename()).map_err(|error| {
+                SqliteInventoryError::Invalid(format!("cannot prepare inventory file: {error}"))
+            })?;
+        }
 
         let pool = SqlitePoolOptions::new()
             .max_connections(8)

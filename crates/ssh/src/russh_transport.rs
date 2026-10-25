@@ -13,6 +13,28 @@ use zeroize::Zeroizing;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+async fn append_output(
+    channel: &russh::Channel<client::Msg>,
+    output: &mut Vec<u8>,
+    data: &[u8],
+    limit: usize,
+    stream: &str,
+) -> Result<()> {
+    if data.len() > limit.saturating_sub(output.len()) {
+        // Do not wait for a hostile peer to acknowledge termination.
+        let _ = timeout(Duration::from_secs(1), async {
+            let _ = channel.signal(russh::Sig::KILL).await;
+            let _ = channel.close().await;
+        })
+        .await;
+        return Err(CoreError::Transport(format!(
+            "ssh {stream} output limit exceeded ({limit} bytes; remote command termination requested)"
+        )));
+    }
+    output.extend_from_slice(data);
+    Ok(())
+}
+
 #[derive(Debug)]
 struct VerifyHandler {
     trusted_fingerprint: Option<String>,
@@ -265,9 +287,25 @@ impl SshTransport for RusshTransport {
 
             while let Some(msg) = channel.wait().await {
                 match msg {
-                    ChannelMsg::Data { ref data } => stdout.extend_from_slice(data),
+                    ChannelMsg::Data { ref data } => {
+                        append_output(
+                            &channel,
+                            &mut stdout,
+                            data,
+                            crate::MAX_STDOUT_BYTES,
+                            "stdout",
+                        )
+                        .await?;
+                    }
                     ChannelMsg::ExtendedData { ref data, ext: 1 } => {
-                        stderr.extend_from_slice(data);
+                        append_output(
+                            &channel,
+                            &mut stderr,
+                            data,
+                            crate::MAX_STDERR_BYTES,
+                            "stderr",
+                        )
+                        .await?;
                     }
                     ChannelMsg::ExitStatus { exit_status } => exit = Some(exit_status),
                     _ => {}
@@ -304,8 +342,26 @@ impl SshTransport for RusshTransport {
             let mut exit = None;
             while let Some(msg) = channel.wait().await {
                 match msg {
-                    ChannelMsg::Data { ref data } => stdout.extend_from_slice(data),
-                    ChannelMsg::ExtendedData { ref data, ext: 1 } => stderr.extend_from_slice(data),
+                    ChannelMsg::Data { ref data } => {
+                        append_output(
+                            &channel,
+                            &mut stdout,
+                            data,
+                            crate::MAX_STDOUT_BYTES,
+                            "stdout",
+                        )
+                        .await?;
+                    }
+                    ChannelMsg::ExtendedData { ref data, ext: 1 } => {
+                        append_output(
+                            &channel,
+                            &mut stderr,
+                            data,
+                            crate::MAX_STDERR_BYTES,
+                            "stderr",
+                        )
+                        .await?;
+                    }
                     ChannelMsg::ExitStatus { exit_status } => exit = Some(exit_status),
                     _ => {}
                 }
@@ -354,7 +410,14 @@ impl SshTransport for RusshTransport {
             while let Some(msg) = channel.wait().await {
                 match msg {
                     ChannelMsg::ExtendedData { ref data, ext: 1 } => {
-                        stderr.extend_from_slice(data);
+                        append_output(
+                            &channel,
+                            &mut stderr,
+                            data,
+                            crate::MAX_STDERR_BYTES,
+                            "stderr",
+                        )
+                        .await?;
                     }
                     ChannelMsg::ExitStatus { exit_status } => exit = Some(exit_status),
                     _ => {}
@@ -397,9 +460,19 @@ impl SshTransport for RusshTransport {
 
             while let Some(msg) = channel.wait().await {
                 match msg {
-                    ChannelMsg::Data { ref data } => buf.extend_from_slice(data),
+                    ChannelMsg::Data { ref data } => {
+                        append_output(&channel, &mut buf, data, crate::MAX_STDOUT_BYTES, "stdout")
+                            .await?;
+                    }
                     ChannelMsg::ExtendedData { ref data, ext: 1 } => {
-                        stderr.extend_from_slice(data);
+                        append_output(
+                            &channel,
+                            &mut stderr,
+                            data,
+                            crate::MAX_STDERR_BYTES,
+                            "stderr",
+                        )
+                        .await?;
                     }
                     ChannelMsg::ExitStatus { exit_status } => exit = Some(exit_status),
                     _ => {}

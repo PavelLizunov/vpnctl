@@ -25,6 +25,10 @@ produce neither an audit row nor a new pending-deploy state.
   `server.reality.set`; HY2 records `server.secret.set`. Both mark pending
   deploy through the existing inventory query. EN/RU copy tells the operator
   to deploy, then clients refresh their subscriptions to receive the value.
+- `POST /admin/servers/{id}/naive-config` and `vlessws-config` save their full
+  field sets through the same audited inventory API. Changed values record
+  `server.naive.set` / `server.vlessws.set` with changed key names only; saving
+  identical values after deploy creates no audit row and leaves pending clear.
 - Inventory API: `set_server_secrets_audited(&self, id: &ServerId, actor: &str,
   action: &str, values: &[(&str, &str)]) -> Result<bool>` atomically upserts
   changed entries and writes one audit row containing only changed key names.
@@ -36,6 +40,8 @@ produce neither an audit row nor a new pending-deploy state.
 - Admin smoke tests cover EN/RU forms, current/default SNI, valid save,
   no-op save, invalid hostnames, port validation, missing servers, rotation,
   disabled HY2 rejection and missing/cross-origin CSRF rejection.
+- Naive and VLESS-WS tests cover initial save, identical resave after deploy,
+  and a changed-domain save that marks pending again.
 - Verify audit/pending status and absence of secret values in audit/HTML.
 - Pin unchanged and intentionally updated share-link bytes through the web
   actions; unrelated protocol links remain byte-identical.

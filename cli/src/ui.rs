@@ -1,6 +1,7 @@
 use crate::OutputFormat;
 use comfy_table::{Cell, Row, Table, presets::UTF8_FULL};
 use serde::Serialize;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 pub(crate) fn resolve_db_path(flag: Option<PathBuf>) -> anyhow::Result<PathBuf> {
@@ -21,7 +22,10 @@ pub(crate) fn resolve_db_path(flag: Option<PathBuf>) -> anyhow::Result<PathBuf> 
 
 fn ensure_dir(p: &Path) -> anyhow::Result<()> {
     if !p.as_os_str().is_empty() && !p.exists() {
-        std::fs::create_dir_all(p)?;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(p)?;
     }
     Ok(())
 }
@@ -81,6 +85,15 @@ mod tests {
         let resolved = resolve_db_path(Some(target.clone())).expect("nested path must succeed");
         assert_eq!(resolved, target);
         assert!(target.parent().unwrap().exists());
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(target.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
     }
 
     #[test]

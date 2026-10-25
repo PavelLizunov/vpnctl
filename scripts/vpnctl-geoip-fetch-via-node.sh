@@ -7,6 +7,13 @@ KEY="${VPNCTLD_DEPLOY_KEY:-/var/lib/vpnctl/.ssh/id_ed25519}"
 DB="${VPNCTLD_INV_DB:-/var/lib/vpnctl/inv.db}"
 KNOWN_HOSTS="${VPNCTLD_KNOWN_HOSTS:-/var/lib/vpnctl/.ssh/known_hosts}"
 DEADLINE_SECS="${VPNCTLD_GEOIP_DEADLINE_SECS:-480}"
+MAX_GZ_BYTES=$((128 * 1024 * 1024))
+MAX_MMDB_BYTES=$((512 * 1024 * 1024))
+PARTIAL_FILES=()
+trap 'rm -f -- "${PARTIAL_FILES[@]}"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 this_month=$(date -u +%Y-%m)
 prev_month=$(date -u -d "${this_month}-01 -1 month" +%Y-%m)
@@ -22,9 +29,11 @@ nodes() {
 }
 
 ssh_node() { # user host port cmd...
-  local u=$1 h=$2 p=$3
+  local u=$1 h=$2 p=$3 remaining=$((DEADLINE_SECS - SECONDS))
   shift 3
-  ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=8 \
+  [ "$remaining" -gt 0 ] || return 1
+  timeout --kill-after=2 "$remaining" \
+    ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=8 \
     -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" \
     -p "$p" "${u}@${h}" "$@"
 }
@@ -32,6 +41,7 @@ ssh_node() { # user host port cmd...
 fetch() {
   local name=$1 seg=$2
   local gz="$DIR/${name}.$$.partial.gz" mmdb="$DIR/${name}.$$.partial" mon url
+  PARTIAL_FILES+=("$gz" "$mmdb")
   for mon in "$this_month" "$prev_month"; do
     url="https://download.db-ip.com/free/dbip-${seg}-lite-${mon}.mmdb.gz"
     while read -r u h p; do
@@ -42,9 +52,11 @@ fetch() {
       fi
       log "  ${name}: trying ${h} (${mon})"
       rm -f "$gz" "$mmdb"
-      if ssh_node "$u" "$h" "$p" "curl -fsSL --max-time 180 '$url'" >"$gz" 2>/dev/null &&
+      if { ssh_node "$u" "$h" "$p" "curl -fsSL --max-time 180 '$url'" 2>/dev/null | head -c "$((MAX_GZ_BYTES + 1))" >"$gz"; } &&
         [ -s "$gz" ] &&
-        gunzip -c "$gz" >"$mmdb" 2>/dev/null &&
+        [ "$(stat -c %s "$gz")" -le "$MAX_GZ_BYTES" ] &&
+        { gunzip -c "$gz" 2>/dev/null | head -c "$((MAX_MMDB_BYTES + 1))" >"$mmdb"; } &&
+        [ "$(stat -c %s "$mmdb")" -le "$MAX_MMDB_BYTES" ] &&
         tail -c 200000 "$mmdb" | grep -aq "MaxMind.com" &&
         [ "$(stat -c %s "$mmdb")" -gt 1000000 ]; then
         mv -f "$mmdb" "$DIR/$name"

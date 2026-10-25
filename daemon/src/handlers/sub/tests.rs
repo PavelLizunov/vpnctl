@@ -37,7 +37,7 @@ fn security_ip_resists_leftmost_xff_spoof_logging_ip_keeps_it() {
         ips.log_ip.map(|i| i.to_string()).as_deref(),
         Some(VICTIM_IP),
         "logging IP (sub_access_log) keeps the established richer leftmost-XFF \
-         value per CLAUDE.md 'Known gaps' — only the security decision moved"
+         value — only the security decision moved"
     );
 }
 

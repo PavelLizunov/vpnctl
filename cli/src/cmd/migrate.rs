@@ -4,15 +4,16 @@
 //! `vpnctl_inventory::migrate`. Two execution modes:
 //!
 //!   * **dry-run (default)** — read everything, print the plan, exit
-//!     without touching inv.db. Operator inspects + decides.
+//!     without applying the import. Existing inventory is opened to read host
+//!     pins (including normal schema maintenance). Operator inspects + decides.
 //!   * **`--apply`** — read everything, write to inv.db, audit, print
 //!     the outcome summary. Idempotent at SQL: existing servers /
 //!     users / grants are skipped, not overwritten.
 //!
 //! # Why dry-run is default
 //!
-//! CLAUDE.md «важно сейчас не уранить vpn не одному из пользователей»
-//! (Pavel 2026-05-17). A typo or stale `inventory/<IP>.env` can
+//! The migration must not take VPN access away from any existing user.
+//! A typo or stale `inventory/<IP>.env` can
 //! mint duplicate users with wrong UUIDs; the dry-run gate forces
 //! the operator to confirm BEFORE inv.db is mutated. The audit row
 //! captures the resolved plan as well, so post-hoc forensics are
@@ -23,10 +24,10 @@ use std::path::PathBuf;
 use clap::Args;
 
 use crate::OutputFormat;
-use vpnctl_core::SshTransport;
+use vpnctl_core::{ServerId, SshTransport};
 use vpnctl_inventory::{
     BashSingboxData, MigrationPlan, SqliteInventory, apply_migration_plan, build_migration_plan,
-    parse_bash_inventory_env, parse_bash_singbox,
+    derive_server_id_from_ip, parse_bash_inventory_env, parse_bash_singbox,
 };
 use vpnctl_ssh::RusshTransportBuilder;
 
@@ -51,6 +52,11 @@ pub(crate) struct MigrateFromBashArgs {
     /// exclusive with `--server` requiring a single bash server.
     #[arg(long, value_name = "ID")]
     pub server_id: Option<String>,
+
+    /// Trusted SHA256 host fingerprint for a first import. Obtain it from the
+    /// hoster's console. Requires --server; cannot replace an inventory pin.
+    #[arg(long, requires = "server")]
+    pub trusted_fingerprint: Option<String>,
 
     /// Apply the plan to inv.db. Without this flag the tool prints
     /// the plan and exits (dry-run = SAFE default).
@@ -123,6 +129,13 @@ pub(crate) async fn run_from_bash(
         return Ok(());
     }
 
+    let db_path = crate::ui::resolve_db_path(db)?;
+    let inventory = if db_path.exists() {
+        Some(SqliteInventory::open(&db_path).await?)
+    } else {
+        None
+    };
+
     let mut plans: Vec<MigrationPlan> = Vec::with_capacity(env_files.len());
     for env_path in &env_files {
         let env_text = std::fs::read_to_string(env_path)?;
@@ -132,11 +145,24 @@ pub(crate) async fn run_from_bash(
             "→ SSH root@{}:{} (read-only: /etc/sing-box/{{config.json,keys.env}})",
             inv.server_ip, inv.ssh_port
         );
-        let singbox = fetch_bash_singbox(&inv.server_ip, inv.ssh_port, &key_path).await?;
+        let server_id = ServerId(
+            args.server_id
+                .clone()
+                .unwrap_or_else(|| derive_server_id_from_ip(&inv.server_ip)),
+        );
+        let fingerprint = migration_fingerprint(
+            inventory.as_ref(),
+            &server_id,
+            &inv.server_ip,
+            args.trusted_fingerprint.as_deref(),
+        )
+        .await?;
+        let singbox =
+            fetch_bash_singbox(&inv.server_ip, inv.ssh_port, &key_path, &fingerprint).await?;
         let token_err: std::sync::Arc<std::sync::Mutex<Option<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(None));
         let token_err_clone = std::sync::Arc::clone(&token_err);
-        let plan = build_migration_plan(args.server_id.clone(), &inv, &singbox, |name| {
+        let mut plan = build_migration_plan(args.server_id.clone(), &inv, &singbox, |name| {
             match vpnctl_crypto::gen_password(24) {
                 Ok(s) => s,
                 Err(e) => {
@@ -148,6 +174,7 @@ pub(crate) async fn run_from_bash(
             }
         })
         .map_err(|e| anyhow::anyhow!("{}: {e}", env_path.display()))?;
+        plan.server.trusted_host_fingerprint = Some(fingerprint);
         if let Ok(g) = token_err.lock()
             && let Some(msg) = g.as_ref()
         {
@@ -161,7 +188,7 @@ pub(crate) async fn run_from_bash(
 
     if !args.apply {
         println!();
-        println!("=== DRY-RUN — no writes ===");
+        println!("=== DRY-RUN — no import writes ===");
         println!(
             "Re-run with --apply to commit {} server(s) to inv.db.",
             plans.len()
@@ -169,8 +196,10 @@ pub(crate) async fn run_from_bash(
         return Ok(());
     }
 
-    let db_path = crate::ui::resolve_db_path(db)?;
-    let inv = SqliteInventory::open(&db_path).await?;
+    let inv = match inventory {
+        Some(inv) => inv,
+        None => SqliteInventory::open(&db_path).await?,
+    };
     println!();
     let mut total_conflicts = 0usize;
     for plan in &plans {
@@ -208,6 +237,15 @@ pub(crate) async fn run_from_bash(
     let mut total_grants_made = 0usize;
     for plan in &plans {
         let outcome = apply_migration_plan(&inv, plan, args.overwrite_existing).await?;
+        if let Some(server) = inv.get_server(&plan.server.id).await?
+            && server.trusted_host_fingerprint.is_none()
+            && server.address == plan.server.address
+            && server.ssh_port == plan.server.ssh_port
+            && let Some(fingerprint) = &plan.server.trusted_host_fingerprint
+        {
+            crate::cmd::server::save_fingerprint(&inv, &server, fingerprint, "migrate.from_bash")
+                .await?;
+        }
         let server_status = if outcome.server_created {
             "CREATED"
         } else {
@@ -274,10 +312,12 @@ async fn fetch_bash_singbox(
     addr: &str,
     port: u16,
     key_path: &std::path::Path,
+    fingerprint: &str,
 ) -> anyhow::Result<BashSingboxData> {
     let ssh =
         RusshTransportBuilder::new(addr.to_string(), "root".to_string(), key_path.to_path_buf())
             .port(port)
+            .trusted_fingerprint(fingerprint)
             .connect()
             .await?;
     let cfg = ssh
@@ -290,6 +330,49 @@ async fn fetch_bash_singbox(
         .map_err(|e| anyhow::anyhow!("read keys.env on {addr}:{port}: {e}"))?;
     parse_bash_singbox(cfg.trim(), keys.trim())
         .map_err(|e| anyhow::anyhow!("parsing {addr}:{port} sing-box files: {e}"))
+}
+
+async fn migration_fingerprint(
+    inventory: Option<&SqliteInventory>,
+    server_id: &ServerId,
+    address: &str,
+    explicit: Option<&str>,
+) -> anyhow::Result<String> {
+    let mut pins = Vec::new();
+    if let Some(inventory) = inventory {
+        if let Some(server) = inventory.get_server(server_id).await?
+            && let Some(pin) = server.trusted_host_fingerprint
+        {
+            pins.push(pin);
+        }
+        if let Some(id) = inventory.server_id_for_address(address).await?
+            && let Some(server) = inventory.get_server(&ServerId(id)).await?
+            && let Some(pin) = server.trusted_host_fingerprint
+        {
+            pins.push(pin);
+        }
+    }
+    if let Some(explicit) = explicit {
+        pins.push(explicit.to_string());
+    }
+    let mut trusted = None;
+    for pin in pins {
+        let pin = vpnctl_host_fingerprint::canonicalize_sha256(&pin)
+            .ok_or_else(|| anyhow::anyhow!("invalid migration host fingerprint for {address}"))?;
+        if let Some(expected) = &trusted
+            && expected != &pin
+        {
+            anyhow::bail!(
+                "conflicting migration host fingerprints for {address}; inventory pins cannot be replaced by migration"
+            );
+        }
+        trusted = Some(pin);
+    }
+    trusted.ok_or_else(|| {
+        anyhow::anyhow!(
+            "no trusted host fingerprint for {address}; import this server separately with --server {address} --trusted-fingerprint <SHA256:...> obtained from the hoster's console"
+        )
+    })
 }
 
 /// Print a plan. Deliberately does NOT echo any uuid / tuic_password
@@ -478,6 +561,102 @@ mod tests {
         }
     }
 
+    const HOST_PIN: &str = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const OTHER_PIN: &str = "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+
+    #[tokio::test]
+    async fn first_import_requires_an_explicit_valid_host_pin() {
+        let id = ServerId("new".into());
+        let error = migration_fingerprint(None, &id, "203.0.113.7", None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--trusted-fingerprint"), "{error}");
+        assert!(
+            migration_fingerprint(None, &id, "203.0.113.7", Some("invalid"))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            migration_fingerprint(None, &id, "203.0.113.7", Some(HOST_PIN))
+                .await
+                .unwrap(),
+            HOST_PIN
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_reuses_inventory_pins_by_id_and_address_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        let mut server = fake_server("203.0.113.7", 22, "root");
+        server.trusted_host_fingerprint = Some(HOST_PIN.into());
+        inv.register_server(&server, "test").await.unwrap();
+        let before = inv.recent_audit(100).await.unwrap().len();
+
+        for (id, address) in [
+            (server.id.clone(), "203.0.113.8"),
+            (ServerId("different-id".into()), "203.0.113.7"),
+        ] {
+            assert_eq!(
+                migration_fingerprint(Some(&inv), &id, address, None)
+                    .await
+                    .unwrap(),
+                HOST_PIN
+            );
+            let error = migration_fingerprint(Some(&inv), &id, address, Some(OTHER_PIN))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("conflicting"), "{error}");
+        }
+        assert_eq!(inv.recent_audit(100).await.unwrap().len(), before);
+        let after = inv.get_server(&server.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.trusted_host_fingerprint,
+            server.trusted_host_fingerprint
+        );
+        assert_eq!(after.address, server.address);
+    }
+
+    #[tokio::test]
+    async fn conflicting_migration_pin_aborts_before_ssh_and_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("inv.db");
+        let inv = SqliteInventory::open(&db).await.unwrap();
+        let mut server = fake_server("203.0.113.7", 22, "root");
+        server.trusted_host_fingerprint = Some(HOST_PIN.into());
+        inv.register_server(&server, "test").await.unwrap();
+        let before = inv.recent_audit(100).await.unwrap().len();
+        let inventory_dir = dir.path().join("legacy");
+        std::fs::create_dir(&inventory_dir).unwrap();
+        std::fs::write(
+            inventory_dir.join("203.0.113.7.env"),
+            "SERVER_IP=203.0.113.7\nSSH_PORT=22\nSHORT_ID=SID\nREALITY_PUBLIC=PUB\nUSERS=alice\n",
+        )
+        .unwrap();
+        let args = MigrateFromBashArgs {
+            inventory_dir,
+            key: Some(dir.path().join("missing-key")),
+            server: Some(server.address.clone()),
+            server_id: Some(server.id.0.clone()),
+            trusted_fingerprint: Some(OTHER_PIN.into()),
+            apply: true,
+            overwrite_existing: false,
+            i_really_mean_overwrite_address: false,
+        };
+        let error = run_from_bash(args, Some(db), OutputFormat::Text)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("conflicting"), "{error}");
+        assert!(inv.list_users().await.unwrap().is_empty());
+        assert!(inv.users_for_server(&server.id).await.unwrap().is_empty());
+        assert_eq!(inv.recent_audit(100).await.unwrap().len(), before);
+    }
+
     #[test]
     fn no_changes_returns_all_false() {
         let a = fake_server("1.2.3.4", 22, "root");
@@ -570,11 +749,13 @@ mod tests {
                     .unwrap(),
                 );
             }
-            for plan in &plans {
+            for plan in &mut plans {
+                plan.server.trusted_host_fingerprint = Some(HOST_PIN.into());
                 apply_migration_plan(&inv, plan, overwrite).await.unwrap();
             }
             for plan in &plans {
                 let server = inv.get_server(&plan.server.id).await.unwrap().unwrap();
+                assert_eq!(server.trusted_host_fingerprint.as_deref(), Some(HOST_PIN));
                 let secrets = inv.list_server_secrets(&server.id).await.unwrap();
                 let users = inv.users_for_server(&server.id).await.unwrap();
                 let link = vpnctl_protocols::VlessReality::new()

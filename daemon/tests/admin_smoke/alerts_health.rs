@@ -704,6 +704,68 @@ async fn admin_monitoring_renders_fleet_health() {
 }
 
 #[tokio::test]
+async fn api_stats_sub_access_requires_admin_auth() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    const CHILD: &str = "VPNCTL_STATS_AUTH_SMOKE_CHILD";
+    const USER: &str = "stats-smoke";
+    const PASSWORD: &str = "test-only-not-a-deployed-password";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "alerts_health::api_stats_sub_access_requires_admin_auth",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("VPNCTLD_ADMIN_USER", USER)
+            .env("VPNCTLD_ADMIN_PASSWORD", PASSWORD)
+            .status()
+            .unwrap();
+        assert!(status.success(), "isolated stats auth smoke failed");
+        return;
+    }
+
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    for authorization in [None, Some("Basic invalid".to_string())] {
+        let mut request =
+            Request::builder().uri("/api/v1/stats/sub-access?bucket=hour&since_hours=720");
+        if let Some(value) = authorization {
+            request = request.header("authorization", value);
+        }
+        let resp = app
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(resp.headers().contains_key("www-authenticate"));
+    }
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/stats/sub-access?bucket=hour&since_hours=720")
+                .header(
+                    "authorization",
+                    format!("Basic {}", STANDARD.encode(format!("{USER}:{PASSWORD}"))),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["cache-control"], "no-store");
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        body.as_ref(),
+        br#"{"bucket":"hour","since_hours":720,"buckets":[]}"#,
+    );
+}
+
+#[tokio::test]
 async fn api_stats_sub_access_returns_well_formed_json() {
     use http_body_util::BodyExt;
     let dir = TempDir::new().unwrap();

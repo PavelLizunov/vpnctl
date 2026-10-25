@@ -66,17 +66,37 @@ traps remove both uploads and stages. A node-local
 `/run/lock/vpnctl-singbox-install.lock` (`flock -w 300`) serializes every shared
 backup, install, health-check, and rollback path.
 
-Secret-bearing node configs are uploaded only after their staging file is
-created root:root `0600`. Upload/apply errors attempt staging cleanup; apply
+Every deploy path (admin POST, SSE/autodeploy, and CLI) stops and disables
+managed service units for retired kernels and enabled kernels with no enabled
+protocols. Such kernels are not installed or rendered during that deploy, so an
+old listener cannot retain revoked users. Shutdown errors fail the deploy;
+a successful shutdown-only deploy may establish the applied revision with zero
+configs uploaded. Kernels with enabled protocols and unrelated node services
+remain untouched by shutdown reconciliation.
+
+Secret-bearing node configs are uploaded only after their directory is verified
+not to be a symlink, made root-owned, and stripped of group/other write access.
+Stale staging entries are unlinked before creating root:root `0600` files, so
+uploads cannot follow a service-planted symlink or truncate a hard-link target.
+The directory stays protected across SSH calls. Xray's directory is root:xray
+`0750`, its live config is root:xray `0640`, and its service has no writable
+config-directory exception. Upload/apply errors attempt staging cleanup; apply
 scripts also clean stages on exit and handled signals, including unpacked
 Caddy bundle members and AWG validation copies. Atomic installation keeps the
-existing live ownership/modes: sing-box and xray `0640` with their service
-owner, Caddyfile root:caddy `0640`, Caddy's sing-box backend root:root `0600`,
-and AWG root:root `0600`. AWG failure diagnostics must not print stripped
+existing live ownership/modes except for Xray's read-only ownership: sing-box
+`0640` with its service owner, Caddyfile root:caddy `0640`, Caddy's sing-box
+backend root:root `0600`, and AWG root:root `0600`. AWG failure diagnostics must not print stripped
 configs containing private or preshared keys.
 
 ## 3. Runtime constraints (learned from incidents)
 
+- **HTTP connections.** The HTTP/1 server uses a Tokio timer and a 15-second
+  deadline for reading request headers, before routing or middleware. At most
+  256 connections are active; excess accepted sockets are closed immediately.
+  This is separate from the existing 15-second handler timeout. Peer socket
+  addresses remain available through `ConnectInfo<SocketAddr>`. Shutdown stops
+  accepting sockets, drains active HTTP requests, then drains the access-log
+  writer.
 - **glibc hazard.** Prod is Debian bookworm (glibc 2.36). Any dependency that
   pulls glibc ≥ 2.38 sysroots, or `tokio::process` (`pidfd_spawnp` = 2.39),
   crash-loops the daemon. Deliberate architectural compromise: SSH runs through
@@ -95,7 +115,9 @@ configs containing private or preshared keys.
   invariant: once a proxy is trusted, `resolve_peer_real_ip` trusts its
   `X-Real-IP` — so every proxy block targeting vpnctld must authoritatively
   `header_up X-Real-IP {client_addr}`, and the site config must strip any
-  client-supplied `X-Real-IP` before routing.
+  client-supplied `X-Real-IP` before routing. For HTTPS admin access the proxy
+  must also overwrite `X-Forwarded-Proto` with the actual external scheme;
+  trusted `X-Forwarded-Proto: https` makes admin session cookies `Secure`.
 - **Admin assets.** Startup requires readable regular files `admin.js`,
   `admin.css`, `icons.svg`, and `favicon.svg` in the selected assets directory.
   Selection uses the first existing path: `assets` relative to the working
@@ -118,6 +140,17 @@ configs containing private or preshared keys.
   same directory; the daemon user needs write access. The separate encrypted
   bundle script uses `BACKUP_DIR`; set it too if those archives should share
   the custom directory.
+- **Inventory file permissions.** The shared inventory open path creates a
+  new database with mode 0600 before SQLite connects. Newly created inventory
+  parent directories use mode 0700, including CLI/daemon path resolution.
+  SQLite creates new WAL/SHM sidecars with the database's private permissions.
+  Existing database/sidecar permissions are preserved; group/world access
+  produces a warning at open rather than silently changing ownership policy.
+- **Node-proxied GeoIP refresh.** Each compressed download is capped at
+  128 MiB and each decompressed MMDB at 512 MiB on the controller. Oversized
+  responses fail without replacing the installed database. Local SSH attempts
+  share `VPNCTLD_GEOIP_DEADLINE_SECS` (default 480 seconds); exit and handled
+  HUP/INT/TERM signals remove that updater's partial files.
 - **WgTurn and DNS Tunnel decommission and node cleanup gate.** The WgTurn and
   DNS Tunnel removal release must **NOT** be deployed to production until legacy
   `wgturn.service`, `wg-quick@wgturn-be`, `dns-tunnel.service`, and
@@ -138,6 +171,9 @@ configs containing private or preshared keys.
 
 ## 4. Verification Checklist
 
+- [ ] Incomplete HTTP/1 headers expire without invoking a handler; excess
+      connections close, completed connections release their slots, and
+      graceful shutdown preserves in-flight responses and peer metadata.
 - [ ] `objdump`/provenance: build stamp `<semver>+<sha>` matches the deployed
       commit.
 - [ ] `systemctl is-active vpnctld`; health endpoint 200 with expected version.

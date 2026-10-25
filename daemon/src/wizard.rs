@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn insert_preserves_non_default_ssh_port() {
         let store = WizardStore::new();
-        let id = store.insert("104.194.156.93".into(), "root".into(), "pw".into(), 2222);
+        let id = store.insert("198.51.100.93".into(), "root".into(), "pw".into(), 2222);
         assert_eq!(store.get(&id).unwrap().ssh_port, 2222);
     }
 

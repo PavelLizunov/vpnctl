@@ -299,3 +299,70 @@ need `vpnctl deploy` rather than deploying itself (the web action redeploys).
 Not deployed. Before deploying, check that `VPNCTLD_TRUSTED_PROXIES` in
 `/etc/vpnctl/vpnctld.env` parses (IPs or CIDRs): the daemon now refuses to
 start on a bad entry instead of silently ignoring it.
+
+## Round 6 (2026-10-25): security and disputed decisions
+
+Eight read-only Codex hunters at `f7745e8`, focused on vulnerabilities by
+attacker position and on the open or declined decisions above. The lead
+confirmed R6-01, 02, 03, 05, 06, 08, 19 in the source; implementers re-verify
+each row before fixing.
+
+| ID | Severity | Area | Finding |
+|---|---|---|---|
+| R6-01 | important | node isolation | Proxy inbounds (VLESS etc.) route to `direct` with no private/loopback rule, so any VPN user can reach the node's unauthenticated Clash API (`127.0.0.1:9090`, all users' connections) and the stats API. Only AWG endpoints were isolated. |
+| R6-02 | important | SSH | The subprocess transport buffers stdout/stderr with unbounded `read_to_end`; a compromised node can exhaust the daemon's memory through a routine poll. |
+| R6-03 | important | migrate | `vpnctl migrate from-bash` connects without any host-key check and imports whatever users the peer returns. |
+| R6-04 | minor | CLI bootstrap | CDX-24 was fixed only in the web wizard; CLI bootstrap still glues the deploy key onto a last line without LF. |
+| R6-05 | important | auth | CDX-25 incomplete: the Argon2 permit is dropped when the request is cancelled while the blocking verification keeps running, so the cap of four can be exceeded. |
+| R6-06 | important | auth | The session signing key is `SHA256(prefix ‖ PHC)`: whoever reads the password hash can mint admin sessions without the password. |
+| R6-07 | minor | auth | The session cookie never carries `Secure`, even when the admin UI is served over HTTPS by a trusted proxy. |
+| R6-08 | important | public API | `/api/v1/stats/sub-access` is public: anyone can trigger month-long aggregations over the access log and read service-wide activity. |
+| R6-09 | minor | HTTP | No header read timeout: unfinished request headers hold connections indefinitely. |
+| R6-10 | important | deploy | Disabling the last protocol of a non-sing-box kernel leaves its old listener (and revoked users) running; deploy skips the kernel. |
+| R6-11 | important | node files | Root writes the Xray staging file in a directory the `xray` user can write, following a symlink planted between the SSH calls. |
+| R6-12 | important | inventory | A DB first created by the CLI under umask 022 is world-readable. |
+| R6-13 | important | restore | `vpnctl-restore.sh` reuses a predictable, possibly pre-created `/tmp` directory. |
+| R6-14 | important | GeoIP | The fetch-via-node script writes and decompresses the node's response with no size cap and leaves partial files. |
+| R6-15 | important | assurance | R5-06 incomplete: the runner starts the engine in a new session, so the daemon's process-group kill misses it and its credential-bearing temp dir stays. |
+| R6-16 | minor | audit | Saving unchanged Naive / VLESS-WS settings writes an audit row and marks the server pending. |
+| R6-17 | important | CLI | `user disable` commits the flag before its audit row; an interrupted run hides the pending deploy forever. |
+| R6-18 | minor | WireGuard | CLI `user add` does not generate a WG key pair by default and the legacy download serves a template with a paste-your-key placeholder. |
+| R6-19 | important | delivery | CDX-49 incomplete: the recommended Flow A URL is still `http://{Host}`, not the configured public base URL. |
+| R6-20 | minor | Telegram | The bot token is interpolated into a curl config without an alphabet check (admin-only injection of curl directives). |
+| R6-21 | minor | Telegram | A digest over 4096 characters is rejected whole and the manual button still reports success. |
+
+Disputed decisions, evaluated and left as they are (owner decisions):
+
+- Empty subscription falls back to `direct` / `DIRECT` (spec-pinned); a
+  fail-closed `block`/`REJECT` would change the byte contract for existing clients.
+- Boosty: a roster with zero paid members suppresses all disables (anomaly
+  guard, test-pinned); a real "last payer downgraded" case stays enabled.
+- CDX-10 (shared SS2022 PSK): per-user revocation needs multi-user SS2022 and
+  re-issuing every profile. CDX-11 (WG addresses by index): needs persisted
+  address assignment. CDX-04: the applied migration stays unchanged.
+- CDX-28: logging keeps the leftmost XFF; security decisions use X-Real-IP.
+- R4-16: Trojan keeps `allowInsecure` until certificate pinning is verified in
+  the supported clients.
+- MSRV: the manifest says 1.87 while the code uses let-chains (1.88); raising
+  it is a separate mechanical clippy change.
+- R1-2 counter-reset heuristic, CDX-64 three Telegram attempts, R5-04
+  inventory-only CLI disable: kept; limits are documented in the specs.
+
+### Round 6 fix status
+
+Hygiene pass plus wave 6 (branch `hygiene/pass-20261025`): R6-01..21 fixed by
+eight Codex implementers, integrated and reviewed by the lead plus four
+diff-only reviewers. R6-01 was reproduced and verified with the pinned
+binaries (sing-box 1.14.2, Xray 26.3.27): through a VLESS tunnel the old
+configs reached `127.0.0.1:9090`, the new ones reject loopback, `localhost`
+and CGNAT while public sites still work. Lead changes on top: hostname servers
+keep range isolation instead of failing to render (only AWG still needs a
+literal IP); an explicit deny list (`USER_TRAFFIC_DENIED_CIDRS`) covers ranges
+sing-box's `ip_is_private` misses (CGNAT, used by Tailscale); Xray resolves
+with `ForceIPv4v6` so nodes without IPv6 egress keep working; existing
+world-readable inventory files are restricted to 0600 on open; a migrate pin
+is saved only when the stored address and port match; the restore script
+accepts relative paths; Flow A keeps the `/sub/<token>` path on the public
+base. Upgrade note: existing admin session cookies are invalidated once
+(R6-06); Xray configs become `root:xray 0640` in a root-owned directory.
+Script and docs regression tests (`scripts/tests`) now run in CI.

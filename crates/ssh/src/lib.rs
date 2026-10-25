@@ -1,6 +1,10 @@
 pub mod mock;
 pub mod subprocess;
 
+// Remote commands return configuration and diagnostics, not bulk backups or downloads.
+pub(crate) const MAX_STDOUT_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_STDERR_BYTES: usize = 1024 * 1024;
+
 #[cfg(feature = "russh")]
 pub mod russh_transport;
 

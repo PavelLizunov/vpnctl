@@ -79,7 +79,10 @@
   to `user:user`, for example `chown user:user /var/lib/vpnctl/inv.db`).
 - Bundle recovery: run `scripts/vpnctl-restore.sh <archive.tar.zst.age>
   <age-private-key-file>` on the recovered host. It decrypts, unpacks and
-  verifies the bundle in a scratch directory; it does not install files.
+  verifies the bundle in a new private scratch directory (`mktemp -d` under
+  `umask 077`); it does not install files. Only the regular, non-symlink
+  `vpnctl-snap/inv.db` at the expected path is accepted. The scratch directory
+  is retained for recovery and inspection.
   Pass the extracted `vpnctl-snap/inv.db` to the full inventory restore command
   above, then restore env, assets, deploy key, known_hosts, GeoIP, systemd units and
   firewall rules to their configured paths, preserving ownership and

@@ -139,6 +139,51 @@ impl SqliteInventory {
         Ok(())
     }
 
+    pub async fn set_user_disabled_audited(
+        &self,
+        id: &UserId,
+        disabled: bool,
+        actor: &str,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let new_val: i64 = if disabled { 1 } else { 0 };
+        let res = sqlx::query("UPDATE users SET disabled = ?1 WHERE id = ?2 AND disabled != ?1")
+            .bind(new_val)
+            .bind(&id.0)
+            .execute(&mut *tx)
+            .await?;
+        let changed = res.rows_affected() > 0;
+        if changed {
+            sqlx::query(
+                "INSERT INTO audit_log (actor, action, target, payload) VALUES (?1, ?2, ?3, ?4)",
+            )
+            .bind(actor)
+            .bind(if disabled {
+                "user.disable"
+            } else {
+                "user.enable"
+            })
+            .bind(&id.0)
+            .bind(serde_json::json!({ "disabled": disabled }).to_string())
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = ?1)")
+                    .bind(&id.0)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if !exists {
+                return Err(SqliteInventoryError::Invalid(format!(
+                    "no such user: {}",
+                    id.0
+                )));
+            }
+        }
+        tx.commit().await?;
+        Ok(changed)
+    }
+
     pub async fn set_user_disabled(&self, id: &UserId, disabled: bool) -> Result<bool> {
         let new_val: i64 = if disabled { 1 } else { 0 };
         let res = sqlx::query("UPDATE users SET disabled = ?1 WHERE id = ?2 AND disabled != ?1")

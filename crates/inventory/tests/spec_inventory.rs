@@ -79,6 +79,83 @@ async fn wal_journal_mode_is_enabled() {
     inv.close().await;
 }
 
+#[test]
+fn inventory_files_are_private_under_permissive_umask() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    const CHILD_DIR: &str = "VPNCTL_TEST_PRIVATE_INVENTORY_DIR";
+    if let Some(root) = std::env::var_os(CHILD_DIR) {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let root = PathBuf::from(root);
+            let path = root.join("nested/sub/inv.db");
+            let inv = SqliteInventory::open(&path).await.unwrap();
+            for dir in [root.join("nested"), root.join("nested/sub")] {
+                assert_eq!(
+                    std::fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+                    0o700
+                );
+            }
+            for suffix in ["", "-wal", "-shm"] {
+                let file = path.with_file_name(format!("inv.db{suffix}"));
+                assert_eq!(
+                    std::fs::metadata(file).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+            inv.close().await;
+
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            for suffix in ["-wal", "-shm"] {
+                let file = path.with_file_name(format!("inv.db{suffix}"));
+                // Never truncate: a sidecar SQLite still maps must keep its size.
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&file)
+                    .unwrap();
+                std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644)).unwrap();
+            }
+            let inv = SqliteInventory::open(&path).await.unwrap();
+            for suffix in ["", "-wal", "-shm"] {
+                let file = path.with_file_name(format!("inv.db{suffix}"));
+                assert_eq!(
+                    std::fs::metadata(file).unwrap().permissions().mode() & 0o777,
+                    0o600,
+                    "existing inventory files are restricted on open"
+                );
+            }
+            inv.close().await;
+        });
+        return;
+    }
+    for mask in ["000", "022"] {
+        let dir = TempDir::new().unwrap();
+        let output = Command::new("bash")
+            .args([
+                "-c",
+                "umask \"$1\"; shift; exec \"$@\"",
+                "inventory-permissions",
+                mask,
+            ])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "inventory_files_are_private_under_permissive_umask",
+                "--nocapture",
+            ])
+            .env(CHILD_DIR, dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{:?}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
 #[tokio::test]
 async fn foreign_keys_are_enforced() {
     let dir = TempDir::new().unwrap();
@@ -500,4 +577,91 @@ async fn audited_server_secret_batch_rolls_back_when_audit_fails() {
         None
     );
     assert_eq!(inv.recent_audit(100).await.unwrap().len(), before);
+}
+
+#[tokio::test]
+async fn audited_user_disabled_changes_only_and_rejects_missing_users() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let alice = user("alice");
+    inv.add_user(&alice).await.unwrap();
+    let mut count = inv.recent_audit(100).await.unwrap().len();
+    for disabled in [true, false] {
+        assert!(
+            inv.set_user_disabled_audited(&alice.id, disabled, "cli")
+                .await
+                .unwrap()
+        );
+        count += 1;
+        let audit = inv.recent_audit(100).await.unwrap();
+        assert_eq!(audit.len(), count);
+        assert_eq!(audit[0].actor, "cli");
+        assert_eq!(audit[0].target.as_deref(), Some("alice"));
+        assert_eq!(
+            audit[0].action,
+            if disabled {
+                "user.disable"
+            } else {
+                "user.enable"
+            }
+        );
+        assert_eq!(audit[0].payload, Some(json!({"disabled": disabled})));
+        assert_eq!(
+            inv.get_user(&alice.id).await.unwrap().unwrap().disabled,
+            disabled
+        );
+        assert!(
+            !inv.set_user_disabled_audited(&alice.id, disabled, "cli")
+                .await
+                .unwrap()
+        );
+        assert!(
+            inv.set_user_disabled_audited(&UserId("missing".into()), disabled, "cli")
+                .await
+                .is_err()
+        );
+        assert_eq!(inv.recent_audit(100).await.unwrap().len(), count);
+    }
+}
+
+#[tokio::test]
+async fn audited_user_disabled_rolls_back_when_audit_fails() {
+    for disabled in [true, false] {
+        let dir = TempDir::new().unwrap();
+        let inv = open(&dir).await;
+        let mut alice = user("alice");
+        alice.disabled = !disabled;
+        inv.add_user(&alice).await.unwrap();
+        let srv = server("s0");
+        inv.add_server(&srv).await.unwrap();
+        inv.grant(&alice.id, &srv.id).await.unwrap();
+        inv.audit("test", "server.deploy", Some("s0"), None)
+            .await
+            .unwrap();
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(db_path(&dir)))
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER reject_disabled_audit BEFORE INSERT ON audit_log
+             WHEN NEW.action IN ('user.disable', 'user.enable')
+             BEGIN SELECT RAISE(ABORT, 'fixture audit failure'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let before = inv.recent_audit(100).await.unwrap().len();
+        assert!(
+            inv.set_user_disabled_audited(&alice.id, disabled, "cli")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            inv.get_user(&alice.id).await.unwrap().unwrap().disabled,
+            !disabled
+        );
+        assert_eq!(inv.recent_audit(100).await.unwrap().len(), before);
+        assert!(!inv.server_pending_deploy(&srv.id).await.unwrap());
+    }
 }

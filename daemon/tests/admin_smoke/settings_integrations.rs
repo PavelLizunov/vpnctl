@@ -822,6 +822,74 @@ async fn settings_telegram_post_rejects_malformed_token() {
 }
 
 #[tokio::test]
+async fn settings_telegram_post_rejects_curl_config_injection_without_mutation() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let app = router(s);
+    for token in [
+        "123456%3AAAAAAAAAAAAAAAAAAAAA%22%0Anext%0Aoutput%20%3D%20%22%2Ftmp%2Fkey%22",
+        "123456%3AAAAAAAAAAA%22AAAAAAAAAA",
+        "123456%3AAAAAAAAAAA%0DAAAAAAAAAA",
+        "123456%3AAAAAAAAAAA%0AAAAAAAAAAA",
+        "123456%3AAAAAAAAAAA%5CAAAAAAAAAA",
+        "abcdef%3AAAAAAAAAAAAAAAAAAAAA",
+        "123456%3AAAAAAAAAAA%3AAAAAAAAAAA",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                add_same_origin(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/admin/settings/telegram")
+                        .header("content-type", "application/x-www-form-urlencoded"),
+                )
+                .body(Body::from(format!(
+                    "telegram_bot_token={token}&telegram_chat_id=987654321"
+                )))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let cfg = inv.get_telegram_config().await.unwrap().unwrap();
+        assert!(cfg.token.is_none());
+        assert!(cfg.chat_id.is_none());
+        assert!(inv.recent_audit(20).await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn settings_telegram_post_rejects_retained_injected_token() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let token = "123456:AAAAAAAAAAAAAAAAAAAA\"\nnext";
+    inv.set_telegram_config(Some(token), Some("987"), None)
+        .await
+        .unwrap();
+    let response = router(s)
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/settings/telegram")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("telegram_bot_token=&telegram_chat_id=123"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let cfg = inv.get_telegram_config().await.unwrap().unwrap();
+    assert_eq!(cfg.token.as_deref(), Some(token));
+    assert_eq!(cfg.chat_id.as_deref(), Some("987"));
+    assert!(inv.recent_audit(20).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn settings_telegram_post_rejects_garbage_chat_id() {
     let dir = TempDir::new().unwrap();
     let app = router(state(&dir).await);
@@ -1982,10 +2050,93 @@ async fn settings_digest_now_method_and_csrf_gates() {
 }
 
 #[tokio::test]
-async fn settings_digest_now_fires_audits_and_redirects_to_anchor() {
+async fn settings_digest_now_disabled_returns_error_without_success_audit() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
+    let response = router(s)
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/settings/digest-now"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(inv.recent_audit(20).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn settings_digest_now_splits_messages_and_reports_delivery_result() {
+    const MODE: &str = "VPNCTL_DIGEST_DELIVERY_TEST_MODE";
+    if std::env::var_os(MODE).is_none() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin = TempDir::new().unwrap();
+        let curl = bin.path().join("curl");
+        std::fs::write(
+            &curl,
+            r#"#!/bin/bash
+/bin/cat >/dev/null
+while (( $# )); do
+    if [[ "$1" == "--data" ]]; then
+        printf '%s\n' "$2" >> "$VPNCTL_DIGEST_TEST_CALLS"
+        break
+    fi
+    shift
+done
+count=$(/usr/bin/wc -l < "$VPNCTL_DIGEST_TEST_CALLS")
+if [[ "$count" -eq 2 ]]; then
+    case "$VPNCTL_DIGEST_DELIVERY_TEST_MODE" in
+        transport) printf '%s\n' 'digest test transport failure' >&2; exit 7 ;;
+        api) printf '%s\n' '{"ok":false,"description":"digest test API failure"}'; exit 0 ;;
+    esac
+fi
+printf '%s\n' '{"ok":true,"result":{"message_id":42}}'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for mode in ["success", "transport", "api"] {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "settings_integrations::settings_digest_now_splits_messages_and_reports_delivery_result",
+                    "--nocapture",
+                ])
+                .env(MODE, mode)
+                .env("VPNCTL_DIGEST_TEST_CALLS", bin.path().join(format!("{mode}.jsonl")))
+                .env(
+                    "PATH",
+                    format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap_or_default()),
+                )
+                .status()
+                .unwrap();
+            assert!(status.success(), "digest delivery case {mode}");
+        }
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    inv.set_telegram_config(Some("1234567890:ABCDEFghijklmn"), Some("987654321"), None)
+        .await
+        .unwrap();
+    for n in 0..50 {
+        inv.insert_alert(
+            &format!("server.singbox.down:{n:02}{}", "x".repeat(62)),
+            None,
+            "critical",
+            "sing-box down",
+            None,
+        )
+        .await
+        .unwrap();
+    }
     let app = router(s);
 
     let resp = app
@@ -2002,6 +2153,34 @@ async fn settings_digest_now_fires_audits_and_redirects_to_anchor() {
         .await
         .unwrap();
 
+    let requests =
+        std::fs::read_to_string(std::env::var_os("VPNCTL_DIGEST_TEST_CALLS").unwrap()).unwrap();
+    assert!(
+        requests.lines().count() > 1,
+        "long digest must use multiple requests"
+    );
+    for line in requests.lines() {
+        let body: serde_json::Value = serde_json::from_str(line).unwrap();
+        let text = body["text"].as_str().unwrap();
+        assert!(vpnctld::alert_text::to_plain(text).encode_utf16().count() <= 4096);
+        assert_eq!(text.matches("<b>").count(), text.matches("</b>").count());
+    }
+    if std::env::var(MODE).unwrap() != "success" {
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert!(resp.headers().get("location").is_none());
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let error = std::str::from_utf8(&bytes).unwrap();
+        assert!(error.contains("digest delivery failed"));
+        assert!(error.contains("digest test"));
+        assert!(
+            !inv.recent_audit(20)
+                .await
+                .unwrap()
+                .iter()
+                .any(|a| a.action == "settings.digest.send")
+        );
+        return;
+    }
     assert_eq!(
         resp.status(),
         StatusCode::SEE_OTHER,

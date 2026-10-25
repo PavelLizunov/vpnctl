@@ -3,7 +3,7 @@
 //!
 //! # When the CLI matters vs the web
 //!
-//! `Web is the ONLY operator surface` (CLAUDE.md) — and indeed the
+//! `The web admin UI is the ONLY operator surface` (AGENTS.md) — and indeed the
 //! Settings page covers the everyday cases (list snapshots, take a
 //! snapshot now, download for off-site copy). The CLI exists for the
 //! one case that fundamentally can't go through the web:

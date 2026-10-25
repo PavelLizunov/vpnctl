@@ -245,11 +245,21 @@ the reverse-proxy path as well. This endpoint reports `vpnctld` process
 liveness only: it does not read or mutate inventory and does not probe VPN
 nodes.
 
+`GET /api/v1/stats/sub-access` requires the same authentication as the admin
+UI; its URL and JSON format are unchanged. The HTTP server allows up to 256
+active connections and gives clients 15 seconds to finish request headers.
+See the [deployment contract](docs/specs/deployment.md) for runtime limits.
+
 ## Operator flows (all web-driven)
 
 Every action below has both a CLI subcommand and a web button. The web
 form is the canonical operator surface; CLI is for automation /
 scripting / disaster recovery.
+
+User creation generates a WireGuard keypair by default in both web and CLI.
+`vpnctl user add <name> --wireguard-pubkey <key>` keeps an external public key;
+legacy `.conf` download requires both halves, otherwise use Generate/Rotate on
+the user's Delivery tab and deploy the server.
 
 | Goal | Web | CLI |
 |---|---|---|
@@ -265,6 +275,11 @@ scripting / disaster recovery.
 | Ack all infra alerts | `/admin/alerts` → «ack all (N)» button | (none; web-only) |
 | Restore a decrypted SQLite snapshot | `/admin/settings/backups` self-test, then CLI restore with vpnctld stopped | `vpnctl restore <snapshot>` |
 | Unpack an encrypted recovery bundle | Recovery host; restore extracted `inv.db` and the other files before starting vpnctld | `scripts/vpnctl-restore.sh <archive.tar.zst.age> <age-private-key-file>` |
+
+CLI `migrate from-bash` verifies inventory-pinned SSH host keys. For a first
+import without a pin, pass `--server <IP> --trusted-fingerprint <SHA256:...>`
+using the fingerprint from the hoster's console. See the
+[migration contract](docs/specs/migration-compatibility.md).
 
 CLI `user disable` and `user enable` save inventory state and list the pending
 `vpnctl deploy <id>` commands needed to apply node access changes. CLI `sub`

@@ -10,8 +10,8 @@ const TUIC_PASSWORD_BYTES: usize = 24;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum UserCmd {
-    /// Add a user. Auto-generates UUID v4 and a 24-byte URL-safe TUIC password
-    /// unless they are passed explicitly.
+    /// Add a user. Auto-generates UUID v4, a 24-byte URL-safe TUIC password,
+    /// and a WireGuard keypair unless they are passed explicitly.
     Add {
         /// Stable id, e.g. "alex-laptop".
         id: String,
@@ -30,7 +30,7 @@ pub(crate) enum UserCmd {
         /// Mutually exclusive with `--gen-wireguard`.
         #[arg(long, conflicts_with = "gen_wireguard")]
         wireguard_pubkey: Option<String>,
-        /// Generate a fresh WireGuard / AmneziaWG keypair server-side
+        /// Generate a fresh WireGuard / AmneziaWG keypair server-side (the default)
         /// and store BOTH halves (the recipient gets a single
         /// ready-to-import `.conf` via `/sub/<token>` with no
         /// keygen step on their device). Mutually exclusive with
@@ -177,6 +177,7 @@ pub(crate) async fn run(
                     pk.len()
                 );
             }
+            let gen_wireguard = gen_wireguard || wireguard_pubkey.is_none();
             let (wg_pub, wg_priv) = if gen_wireguard {
                 let (priv_b64, pub_b64) = gen_wireguard_keypair();
                 (Some(pub_b64), Some(priv_b64))
@@ -318,17 +319,8 @@ pub(crate) async fn run(
 
         UserCmd::Disable { id } => {
             let uid = UserId(id.clone());
-            let changed = inv.set_user_disabled(&uid, true).await?;
+            let changed = inv.set_user_disabled_audited(&uid, true, "cli").await?;
             if changed {
-                inv.audit(
-                    "cli",
-                    "user.disable",
-                    Some(&id),
-                    Some(&json!({
-                        "disabled": true,
-                    })),
-                )
-                .await?;
                 println!("user '{id}' disabled in inventory");
             } else {
                 println!("user '{id}' is already disabled in inventory");
@@ -339,17 +331,8 @@ pub(crate) async fn run(
 
         UserCmd::Enable { id } => {
             let uid = UserId(id.clone());
-            let changed = inv.set_user_disabled(&uid, false).await?;
+            let changed = inv.set_user_disabled_audited(&uid, false, "cli").await?;
             if changed {
-                inv.audit(
-                    "cli",
-                    "user.enable",
-                    Some(&id),
-                    Some(&json!({
-                        "disabled": false,
-                    })),
-                )
-                .await?;
                 println!("user '{id}' enabled in inventory");
             } else {
                 println!("user '{id}' is already enabled in inventory");

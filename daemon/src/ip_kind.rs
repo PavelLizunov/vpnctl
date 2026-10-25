@@ -58,7 +58,7 @@ mod tests {
         assert_eq!(classify_ip("fc00::1"), IpKind::Ula);
         assert_eq!(classify_ip("fd12:3456::1"), IpKind::Ula);
         assert_eq!(classify_ip("::"), IpKind::Unspecified);
-        assert_eq!(classify_ip("104.194.156.93"), IpKind::Public);
+        assert_eq!(classify_ip("198.51.100.93"), IpKind::Public);
         assert_eq!(classify_ip("8.8.8.8"), IpKind::Public);
         assert_eq!(classify_ip("2001:4860:4860::8888"), IpKind::Public);
         assert_eq!(classify_ip("not-an-ip"), IpKind::Public);

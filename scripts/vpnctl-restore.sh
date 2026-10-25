@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+umask 077
 
 if [ $# -ne 2 ]; then
     cat >&2 <<USAGE
@@ -16,14 +17,16 @@ fi
 ARCHIVE=$1
 KEY=$2
 STAMP=$(date -u +%Y-%m-%dT%H-%M-%SZ)
-WORK="/tmp/vpnctl-restore-${STAMP}"
 
 [ -f "$ARCHIVE" ] || { echo "missing archive: $ARCHIVE" >&2; exit 65; }
 [ -f "$KEY" ]     || { echo "missing key: $KEY" >&2;       exit 66; }
+# Absolute paths: the work below runs inside the scratch directory.
+ARCHIVE=$(realpath -- "$ARCHIVE")
+KEY=$(realpath -- "$KEY")
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] vpnctl-restore: $*" >&2; }
 
-mkdir -p "$WORK"
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/vpnctl-restore-${STAMP}.XXXXXX")
 cd "$WORK"
 
 log "decrypting $ARCHIVE → snap.tar.zst"
@@ -37,8 +40,9 @@ log "extracting snap.tar"
 tar -xf snap.tar
 rm -f snap.tar
 
-INV=$(find "$WORK" -name inv.db -type f | head -1)
-[ -n "$INV" ] || { log "FAIL: no inv.db inside archive"; exit 67; }
+INV="$WORK/vpnctl-snap/inv.db"
+[ ! -L "$WORK/vpnctl-snap" ] && [ ! -L "$INV" ] && [ -f "$INV" ] \
+    || { log "FAIL: no regular vpnctl-snap/inv.db inside archive"; exit 67; }
 
 log "verifying $INV via sqlite3 (PRAGMA integrity_check)"
 INTEGRITY=$(sqlite3 "$INV" 'PRAGMA integrity_check' 2>&1)

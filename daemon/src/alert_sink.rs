@@ -35,7 +35,7 @@ pub enum AlertSinkError {
         stderr: String,
     },
 
-    #[error("alert-sink: misconfigured (token or chat_id empty)")]
+    #[error("alert-sink: misconfigured (invalid bot token or chat_id)")]
     Misconfigured,
 }
 
@@ -120,13 +120,37 @@ impl std::fmt::Debug for TelegramSink {
     }
 }
 
+pub(crate) fn valid_telegram_bot_token(token: &str) -> bool {
+    let Some((bot_id, auth)) = token.split_once(':') else {
+        return false;
+    };
+    token.len() >= 20
+        && !bot_id.is_empty()
+        && bot_id.bytes().all(|c| c.is_ascii_digit())
+        && !auth.is_empty()
+        && auth
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+}
+
+pub(crate) fn valid_telegram_chat_id(chat_id: &str) -> bool {
+    let numeric = chat_id.strip_prefix('-').unwrap_or(chat_id);
+    (!numeric.is_empty() && numeric.bytes().all(|c| c.is_ascii_digit()))
+        || chat_id.strip_prefix('@').is_some_and(|channel| {
+            !channel.is_empty()
+                && channel
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+        })
+}
+
 impl TelegramSink {
     pub fn new(
         token: String,
         chat_id: String,
         proxy: Option<String>,
     ) -> Result<Self, AlertSinkError> {
-        if token.is_empty() || chat_id.is_empty() {
+        if !valid_telegram_bot_token(&token) || !valid_telegram_chat_id(&chat_id) {
             return Err(AlertSinkError::Misconfigured);
         }
         Ok(Self {
@@ -158,17 +182,22 @@ impl TelegramSink {
         s.replace(&self.token, &format!("••••{last4}"))
     }
 
+    fn curl_config(&self, method: &str) -> Vec<u8> {
+        let url = format!("https://api.telegram.org/bot{}/{method}", self.token)
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\r', "\\r")
+            .replace('\n', "\\n");
+        format!("url = \"{url}\"\n").into_bytes()
+    }
+
     pub fn build_remote_curl_invocation(&self, method: &str, body_json: &str) -> (String, Vec<u8>) {
         let cmd = format!(
             "curl -sS --connect-timeout 10 --max-time 20 -X POST \
              -H 'Content-Type: application/json' --data {body} -K -",
             body = single_quote(body_json),
         );
-        let stdin = format!(
-            "url = \"https://api.telegram.org/bot{}/{method}\"\n",
-            self.token
-        )
-        .into_bytes();
+        let stdin = self.curl_config(method);
         (cmd, stdin)
     }
 
@@ -196,11 +225,7 @@ impl TelegramSink {
         }
         args.push("-K".into());
         args.push("-".into());
-        let stdin = format!(
-            "url = \"https://api.telegram.org/bot{}/{method}\"\n",
-            self.token
-        )
-        .into_bytes();
+        let stdin = self.curl_config(method);
         (args, stdin)
     }
 
@@ -368,29 +393,87 @@ mod tests {
     #[test]
     fn telegram_sink_rejects_empty_chat_id() {
         assert!(matches!(
-            TelegramSink::new("1234567890:ABCDEF".into(), String::new(), None),
+            TelegramSink::new("1234567890:ABCDEFghijklmn".into(), String::new(), None),
             Err(AlertSinkError::Misconfigured)
         ));
     }
 
     #[test]
     fn telegram_sink_constructs_with_both_halves() {
-        let s = TelegramSink::new("1234567890:ABCDEF".into(), "987".into(), None).unwrap();
+        let s = TelegramSink::new("1234567890:ABCDEFghijklmn".into(), "987".into(), None).unwrap();
         assert_eq!(s.name(), "telegram");
     }
 
     #[test]
+    fn telegram_sink_rejects_malformed_credentials() {
+        for token in [
+            "123456:AAAAAAAAAAAAAAAAAAAA\"\nnext\noutput = \"/tmp/key\"",
+            "123456:AAAAAAAAAA\"AAAAAAAAAA",
+            "123456:AAAAAAAAAA\rAAAAAAAAAA",
+            "123456:AAAAAAAAAA\nAAAAAAAAAA",
+            "123456:AAAAAAAAAA\\AAAAAAAAAA",
+            "123456:AAAAAAAAAA/AAAAAAAAAA",
+            "123456:AAAAAAAAAA:AAAAAAAAAA",
+            "abcdef:AAAAAAAAAAAAAAAAAAAA",
+        ] {
+            assert!(matches!(
+                TelegramSink::new(token.into(), "987".into(), None),
+                Err(AlertSinkError::Misconfigured)
+            ));
+        }
+        for chat_id in [
+            "987\"\noutput = \"/tmp/key\"",
+            "98\r7",
+            "98\n7",
+            "-",
+            "@",
+            "CHAT",
+        ] {
+            assert!(matches!(
+                TelegramSink::new("123456:AAAAAAAAAAAAAAAAAAAA".into(), chat_id.into(), None),
+                Err(AlertSinkError::Misconfigured)
+            ));
+        }
+        for chat_id in ["987", "-100123", "@test_channel"] {
+            assert!(
+                TelegramSink::new("123456:Abc_012-DEFghijklmnop".into(), chat_id.into(), None)
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn curl_config_escapes_method_without_adding_directives() {
+        let sink =
+            TelegramSink::new("123456:AAAAAAAAAAAAAAAAAAAA".into(), "987".into(), None).unwrap();
+        let method = "sendMessage\"\r\nnext\noutput = \"/tmp/key\"\\";
+        let (_, local) = sink.build_curl_local_invocation(method, "{}");
+        let (_, remote) = sink.build_remote_curl_invocation(method, "{}");
+        assert_eq!(local, remote);
+        let config = String::from_utf8(local).unwrap();
+        assert_eq!(config.lines().count(), 1);
+        assert_eq!(config.matches('\r').count(), 0);
+        assert_eq!(config.matches('\n').count(), 1);
+        assert!(config.contains(r#"sendMessage\"\r\nnext\noutput = \"/tmp/key\"\\"#));
+    }
+
+    #[test]
     fn local_invocation_argv_contains_no_token() {
-        let s = TelegramSink::new("SECRETTOKEN".into(), "CHAT".into(), None).unwrap();
+        let s = TelegramSink::new(
+            "1234567890:SECRETTOKEN".into(),
+            "@test_channel".into(),
+            None,
+        )
+        .unwrap();
         let (args, stdin) = s.build_curl_local_invocation("sendMessage", r#"{"x":1}"#);
         let joined = args.join(" ");
         assert!(
-            !joined.contains("SECRETTOKEN"),
+            !joined.contains("1234567890:SECRETTOKEN"),
             "token MUST NOT appear in argv: {joined}"
         );
         let stdin_str = std::str::from_utf8(&stdin).unwrap();
         assert!(
-            stdin_str.contains("SECRETTOKEN"),
+            stdin_str.contains("1234567890:SECRETTOKEN"),
             "token MUST appear in stdin config: {stdin_str:?}"
         );
         assert!(args.iter().any(|a| a == "POST"));
@@ -408,27 +491,32 @@ mod tests {
 
     #[test]
     fn local_invocation_stdin_is_curl_config_url_line() {
-        let s = TelegramSink::new("TOK123".into(), "987".into(), None).unwrap();
+        let s = TelegramSink::new("1234567890:FAKETOK123".into(), "987".into(), None).unwrap();
         let (_args, stdin) = s.build_curl_local_invocation("sendMessage", "{}");
         let stdin_str = std::str::from_utf8(&stdin).unwrap();
         assert_eq!(
-            stdin_str, "url = \"https://api.telegram.org/botTOK123/sendMessage\"\n",
+            stdin_str, "url = \"https://api.telegram.org/bot1234567890:FAKETOK123/sendMessage\"\n",
             "stdin must be valid curl config syntax"
         );
     }
 
     #[test]
     fn remote_invocation_does_not_embed_token_in_shell_command() {
-        let s = TelegramSink::new("SECRETTOKEN".into(), "CHAT".into(), None).unwrap();
+        let s = TelegramSink::new(
+            "1234567890:SECRETTOKEN".into(),
+            "@test_channel".into(),
+            None,
+        )
+        .unwrap();
         let (cmd, stdin) = s.build_remote_curl_invocation("sendMessage", r#"{"x":1}"#);
         assert!(
-            !cmd.contains("SECRETTOKEN"),
+            !cmd.contains("1234567890:SECRETTOKEN"),
             "token MUST NOT appear in the remote shell command \
              (would be visible via ps on the proxy server): {cmd}"
         );
         let stdin_str = std::str::from_utf8(&stdin).unwrap();
         assert!(
-            stdin_str.contains("SECRETTOKEN"),
+            stdin_str.contains("1234567890:SECRETTOKEN"),
             "token MUST appear in stdin config piped to remote curl"
         );
         assert!(cmd.contains(" -K -"), "must use config-from-stdin: {cmd}");
@@ -440,21 +528,22 @@ mod tests {
 
     #[test]
     fn local_invocation_edit_message_text_builds_valid_url_and_data() {
-        let s = TelegramSink::new("TOK123".into(), "987".into(), None).unwrap();
+        let s = TelegramSink::new("1234567890:FAKETOK123".into(), "987".into(), None).unwrap();
         let (_args, stdin) = s.build_curl_local_invocation(
             "editMessageText",
             r#"{"chat_id":"987","message_id":42,"text":"recovered"}"#,
         );
         let stdin_str = std::str::from_utf8(&stdin).unwrap();
         assert_eq!(
-            stdin_str, "url = \"https://api.telegram.org/botTOK123/editMessageText\"\n",
+            stdin_str,
+            "url = \"https://api.telegram.org/bot1234567890:FAKETOK123/editMessageText\"\n",
             "stdin must target editMessageText endpoint"
         );
     }
 
     #[tokio::test]
     async fn edit_text_rejects_non_numeric_message_id_synchronously() {
-        let s = TelegramSink::new("TOK123".into(), "987".into(), None).unwrap();
+        let s = TelegramSink::new("1234567890:FAKETOK123".into(), "987".into(), None).unwrap();
         let err = s.edit_text("not-a-number", "text").await.unwrap_err();
         match err {
             AlertSinkError::NonZeroExit { stderr, .. } => {
@@ -467,8 +556,8 @@ mod tests {
     #[test]
     fn local_invocation_includes_proxy_when_set() {
         let s = TelegramSink::new(
-            "TOK".into(),
-            "CHAT".into(),
+            "1234567890:FAKETOKEN".into(),
+            "@test_channel".into(),
             Some("http://192.168.0.142:18080".into()),
         )
         .unwrap();
@@ -479,18 +568,24 @@ mod tests {
 
     #[test]
     fn local_invocation_omits_proxy_when_none() {
-        let s = TelegramSink::new("TOK".into(), "CHAT".into(), None).unwrap();
+        let s =
+            TelegramSink::new("1234567890:FAKETOKEN".into(), "@test_channel".into(), None).unwrap();
         let (args, _stdin) = s.build_curl_local_invocation("sendMessage", "{}");
         assert!(!args.iter().any(|a| a == "--proxy"));
     }
 
     #[test]
     fn redact_token_replaces_with_last4_marker() {
-        let s = TelegramSink::new("SECRETtoken12abcd".into(), "CHAT".into(), None).unwrap();
-        let leaked = "curl error: https://api.telegram.org/botSECRETtoken12abcd/sendMessage failed";
+        let s = TelegramSink::new(
+            "1234567890:SECRETtoken12abcd".into(),
+            "@test_channel".into(),
+            None,
+        )
+        .unwrap();
+        let leaked = "curl error: https://api.telegram.org/bot1234567890:SECRETtoken12abcd/sendMessage failed";
         let safe = s.redact_token(leaked);
         assert!(
-            !safe.contains("SECRETtoken12abcd"),
+            !safe.contains("1234567890:SECRETtoken12abcd"),
             "token must be replaced: {safe}"
         );
         assert!(
@@ -502,29 +597,43 @@ mod tests {
     }
 
     #[test]
-    fn redact_token_handles_short_token_gracefully() {
-        let s = TelegramSink::new("abc".into(), "CHAT".into(), None).unwrap();
-        let safe = s.redact_token("curl: abc fail");
-        assert!(!safe.contains("abc fail") || safe.contains("••••abc"));
+    fn telegram_sink_rejects_short_token() {
+        assert!(matches!(
+            TelegramSink::new("123:abc".into(), "987".into(), None),
+            Err(AlertSinkError::Misconfigured)
+        ));
     }
 
     #[test]
     fn new_treats_empty_proxy_as_none() {
-        let s = TelegramSink::new("TOK".into(), "CHAT".into(), Some(String::new())).unwrap();
+        let s = TelegramSink::new(
+            "1234567890:FAKETOKEN".into(),
+            "@test_channel".into(),
+            Some(String::new()),
+        )
+        .unwrap();
         let (args, _stdin) = s.build_curl_local_invocation("sendMessage", "{}");
         assert!(!args.iter().any(|a| a == "--proxy"));
     }
 
     #[test]
     fn debug_redacts_token_length_only() {
-        let s = TelegramSink::new("12345SECRETtoken67890".into(), "CHAT".into(), None).unwrap();
+        let s = TelegramSink::new(
+            "1234567890:SECRETtoken67890".into(),
+            "@test_channel".into(),
+            None,
+        )
+        .unwrap();
         let dbg = format!("{s:?}");
         assert!(
             !dbg.contains("SECRET"),
             "token bytes must NOT appear in Debug"
         );
         assert!(dbg.contains("••••"), "must include redaction marker");
-        assert!(dbg.contains("21 chars"), "must include token length");
+        assert!(
+            dbg.contains(&format!("{} chars", s.token.len())),
+            "must include token length"
+        );
     }
 
     #[test]
@@ -582,7 +691,8 @@ mod tests {
 
     #[test]
     fn name_reflects_via_ssh_mode() {
-        let direct = TelegramSink::new("TOK".into(), "CHAT".into(), None).unwrap();
+        let direct =
+            TelegramSink::new("1234567890:FAKETOKEN".into(), "@test_channel".into(), None).unwrap();
         assert_eq!(direct.name(), "telegram");
         let ssh = SubprocessSshTransport::new(
             String::from("203.0.113.7"),

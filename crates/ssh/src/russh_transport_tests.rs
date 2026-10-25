@@ -354,6 +354,40 @@ impl russh::server::Handler for StalledChannelHandler {
         reply.accept().await;
         Ok(())
     }
+
+    async fn exec_request(
+        &mut self,
+        channel: russh::ChannelId,
+        data: &[u8],
+        session: &mut russh::server::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        session.channel_success(channel)?;
+        let stderr = String::from_utf8_lossy(data).contains("stderr");
+        let limit = if stderr {
+            crate::MAX_STDERR_BYTES
+        } else {
+            crate::MAX_STDOUT_BYTES
+        };
+        let handle = session.handle();
+        tokio::spawn(async move {
+            let mut remaining = limit + 1;
+            while remaining > 0 {
+                let chunk = vec![b'x'; remaining.min(16 * 1024)];
+                remaining -= chunk.len();
+                let result = if stderr {
+                    handle.extended_data(channel, 1, chunk).await
+                } else {
+                    handle.data(channel, chunk).await
+                };
+                if result.is_err() {
+                    return;
+                }
+            }
+            let _ = handle.exit_status_request(channel, 0).await;
+            let _ = handle.close(channel).await;
+        });
+        Ok(())
+    }
 }
 
 async fn spawn_stalled_channel_server(
@@ -382,6 +416,40 @@ async fn spawn_stalled_channel_server(
 
     tokio::time::sleep(Duration::from_millis(20)).await;
     port
+}
+
+#[tokio::test]
+async fn remote_output_is_capped_in_all_russh_read_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let key_path = make_test_key(&tmp);
+    let port = spawn_stalled_channel_server(&key_path, false).await;
+    let transport = RusshTransportBuilder::new("127.0.0.1", "root", &key_path)
+        .port(port)
+        .timeout(Duration::from_secs(30))
+        .connect()
+        .await
+        .unwrap();
+
+    for stream in ["stdout", "stderr"] {
+        let error = transport.exec(stream).await.unwrap_err().to_string();
+        assert!(error.contains("output limit exceeded"), "{error}");
+        assert!(error.contains(stream), "{error}");
+        assert!(error.len() < 256);
+        let error = transport
+            .exec_unprivileged(stream)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("output limit exceeded"), "{error}");
+        let error = transport.read_file(stream).await.unwrap_err().to_string();
+        assert!(error.contains("output limit exceeded"), "{error}");
+    }
+    let error = transport
+        .upload("stderr", b"test")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("output limit exceeded"), "{error}");
 }
 
 #[tokio::test]

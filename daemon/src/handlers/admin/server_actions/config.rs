@@ -133,30 +133,16 @@ pub(crate) async fn server_set_naive_config(
 
     if let Err(e) = state
         .inv
-        .set_server_secret(&sid, "naive.domain", domain)
-        .await
-    {
-        return internal_error(anyhow::Error::new(e));
-    }
-    if let Err(e) = state
-        .inv
-        .set_server_secret(&sid, "naive.acme_email", email)
-        .await
-    {
-        return internal_error(anyhow::Error::new(e));
-    }
-    let _ = state
-        .inv
-        .audit(
+        .set_server_secrets_audited(
+            &sid,
             "admin",
             "server.naive.set",
-            Some(&server_id),
-            Some(&serde_json::json!({
-                "domain": domain,
-                "acme_email_set": !email.is_empty(),
-            })),
+            &[("naive.domain", domain), ("naive.acme_email", email)],
         )
-        .await;
+        .await
+    {
+        return internal_error(anyhow::Error::new(e));
+    }
 
     Redirect::to(&format!(
         "/admin/servers/{}/protocols",
@@ -211,28 +197,22 @@ pub(crate) async fn server_set_vlessws_config(
         return bad_request(&format!("{e}"));
     }
 
-    for (key, val) in [
-        ("vlessws.domain", domain),
-        ("vlessws.acme_email", email),
-        ("vlessws.listen_port", port),
-    ] {
-        if let Err(e) = state.inv.set_server_secret(&sid, key, val).await {
-            return internal_error(anyhow::Error::new(e));
-        }
-    }
-    let _ = state
+    if let Err(e) = state
         .inv
-        .audit(
+        .set_server_secrets_audited(
+            &sid,
             "admin",
             "server.vlessws.set",
-            Some(&server_id),
-            Some(&serde_json::json!({
-                "domain": domain,
-                "acme_email_set": !email.is_empty(),
-                "listen_port": port,
-            })),
+            &[
+                ("vlessws.domain", domain),
+                ("vlessws.acme_email", email),
+                ("vlessws.listen_port", port),
+            ],
         )
-        .await;
+        .await
+    {
+        return internal_error(anyhow::Error::new(e));
+    }
 
     Redirect::to(&format!(
         "/admin/servers/{}/protocols",

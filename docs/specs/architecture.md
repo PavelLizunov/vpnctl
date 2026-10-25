@@ -69,8 +69,29 @@ when new kernels are registered.
 Kernel dependency checks and protocol setting checks are dispatched by the
 registry to their owning implementations. Context-aware secret declarations
 keep method-dependent key sizes in the protocol; inventory only mints declared
-missing secrets and preserves existing values. See
-[node kernel installation and rendering validation](node-kernel-rendering-validation.md).
+missing secrets and preserves existing values.
+
+Managed sing-box and Xray user traffic must not reach loopback, private,
+link-local, unspecified or other service ranges, or the server's inventory IP.
+The rule applies to TCP and UDP, including domain destinations such as
+`localhost` and domains resolving to a denied IP. The server-IP rule needs a
+literal inventory address: a hostname server keeps the range isolation without
+it, while AWG endpoints still require a literal IP. Client configuration and
+share-link bytes do not change.
+
+Sing-box resolves proxy destinations before applying `ip_is_private`, the
+explicit `USER_TRAFFIC_DENIED_CIDRS` list (`ip_is_private` misses CGNAT
+`100.64.0.0/10`, which Tailscale uses) and the server `/32` or `/128` rejection to every user inbound and AWG endpoint. Direct
+egress uses those resolved addresses; the existing AWG-only rules are unchanged.
+This uses the documented [resolve action](https://sing-box.sagernet.org/configuration/route/rule_action/#resolve),
+supported by the managed `1.14.2-vpnctl.2` release. Xray `26.3.27` uses a default
+[loopback outbound](https://xtls.github.io/en/config/outbounds/loopback.html)
+with `targetStrategy: ForceIPv4v6` (IPv4 first, for nodes without IPv6 egress) to resolve once and re-enter routing with the
+actual destination IP. Explicit IPv4/IPv6 CIDRs and the server IP route to a
+blackhole before the resolved inbound may use direct egress. This avoids both
+external GeoIP files and a second DNS lookup after the security decision.
+The Clash and Stats listeners remain on loopback, reachable by the daemon's
+existing SSH pollers.
 
 ## 3. Verification Checklist
 
@@ -84,3 +105,7 @@ missing secrets and preserves existing values. See
       emit none.
 - [ ] A new secret-bearing protocol renders without `MissingSecret` after
       `bootstrap_server_secrets` (regression guard: all-protocols server).
+- [ ] Rendering tests cover every sing-box user inbound, unchanged AWG-only
+      guards, IPv4/IPv6 server isolation and Xray's resolve/block/direct order.
+      Native kernel checks must reject literal and domain-resolved local targets
+      over TCP/UDP while allowing public egress; client output stays unchanged.

@@ -77,7 +77,7 @@ static XRAY_SETUP_SCRIPT: std::sync::LazyLock<String> = std::sync::LazyLock::new
 
             id -u xray >/dev/null 2>&1 \
                 || useradd --system --no-create-home --shell /usr/sbin/nologin xray
-            install -d -m 0750 -o xray -g xray {config_dir}
+            install -d -m 0750 -o root -g xray {config_dir}
 
             cat > /etc/systemd/system/xray.service <<'UNIT'
 [Unit]
@@ -99,7 +99,6 @@ PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths={config_dir}
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true
@@ -155,7 +154,7 @@ fn xray_apply_script() -> String {
                 HAD_PREV=1
             fi
             mv {staging_path} {config_path}
-            chown xray:xray {config_path}
+            chown root:xray {config_path}
             chmod 0640 {config_path}
             # A failed reload/restart goes straight to the rollback below: under
             # set -eu it would otherwise exit first, and an old process that is
@@ -179,7 +178,7 @@ fn xray_apply_script() -> String {
             if [ "$HAD_PREV" = 1 ] && [ -f {config_path}.bak ]; then
                 echo "rolling back to previous xray config" >&2
                 mv {config_path}.bak {config_path} || true
-                chown xray:xray {config_path} || true
+                chown root:xray {config_path} || true
                 chmod 0640 {config_path} || true
                 systemctl reload-or-restart xray || true
             fi
@@ -248,11 +247,42 @@ impl Kernel for Xray {
                 )
             })?;
         let inbound = proto.server_inbound(ctx, users)?;
+        let mut denied_ips: Vec<String> = crate::USER_TRAFFIC_DENIED_CIDRS
+            .iter()
+            .map(|cidr| (*cidr).to_owned())
+            .collect();
+        if let Ok(address) = ctx.server.address.parse::<std::net::IpAddr>() {
+            let prefix = if address.is_ipv4() { 32 } else { 128 };
+            denied_ips.push(format!("{address}/{prefix}"));
+        }
 
+        // Resolve once, then re-enter routing with the actual IP to prevent DNS rebinding.
         let cfg = json!({
             "log": { "loglevel": "warning" },
+            "dns": { "servers": ["localhost"] },
             "inbounds": [inbound],
-            "outbounds": [{ "protocol": "freedom", "tag": "direct" }]
+            "outbounds": [
+                {
+                    "protocol": "loopback", "tag": "resolve",
+                    "targetStrategy": "ForceIPv4v6",
+                    "settings": { "inboundTag": "vpnctl-resolved" }
+                },
+                { "protocol": "freedom", "tag": "direct" },
+                { "protocol": "blackhole", "tag": "block" }
+            ],
+            "routing": {
+                "domainStrategy": "AsIs",
+                "rules": [
+                    {
+                        "type": "field", "outboundTag": "block",
+                        "ip": denied_ips
+                    },
+                    {
+                        "type": "field", "inboundTag": ["vpnctl-resolved"],
+                        "outboundTag": "direct"
+                    }
+                ]
+            }
         });
         serde_json::to_vec_pretty(&cfg).map_err(CoreError::from)
     }
@@ -311,6 +341,28 @@ mod tests {
     use vpnctl_core::{Server, ServerId};
 
     #[test]
+    fn service_can_read_but_cannot_replace_managed_config() {
+        let setup = XRAY_SETUP_SCRIPT.as_str();
+        assert!(setup.contains(&format!(
+            "install -d -m 0750 -o root -g xray {XRAY_CONFIG_DIR}"
+        )));
+        assert!(!setup.contains("ReadWritePaths="));
+        let apply = xray_apply_script();
+        assert_eq!(
+            apply
+                .matches(&format!("chown root:xray {XRAY_CONFIG_PATH}"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            apply
+                .matches(&format!("chmod 0640 {XRAY_CONFIG_PATH}"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn setup_stages_binary_before_atomic_rename() {
         let script = XRAY_SETUP_SCRIPT.as_str();
         assert!(!script.contains(&format!(
@@ -367,7 +419,7 @@ mod tests {
             XRAY_CONFIG_PATH,
             "xray run -test",
         );
-        assert!(script.contains(&format!("chown xray:xray {XRAY_CONFIG_PATH}")));
+        assert!(script.contains(&format!("chown root:xray {XRAY_CONFIG_PATH}")));
         assert!(script.contains(&format!("chmod 0640 {XRAY_CONFIG_PATH}")));
     }
 
@@ -416,29 +468,87 @@ mod tests {
         }
     }
 
-    #[test]
-    fn render_config_happy_path_uses_xray_top_level_shape() {
+    fn render_for_server(server: &Server) -> Result<Vec<u8>> {
         use vpnctl_protocols::VlessXhttp;
 
-        let s = dummy_server();
         let mut secrets = HashMap::new();
         secrets.insert("vless.private_key".into(), "priv".into());
         secrets.insert("vless.public_key".into(), "pub".into());
         secrets.insert("vless.short_id".into(), "deadbeef".into());
         secrets.insert("vlessxhttp.path".into(), "Ab3x9Zq2Kp7Lm".into());
-        let ctx = RenderCtx::new(&s, &secrets);
+        let ctx = RenderCtx::new(server, &secrets);
         let proto = VlessXhttp::new();
-        let bytes = Xray::new()
-            .render_config(&ctx, &[], &[&proto as &dyn Protocol])
-            .unwrap();
+        Xray::new().render_config(&ctx, &[], &[&proto as &dyn Protocol])
+    }
+
+    #[test]
+    fn render_config_happy_path_uses_xray_top_level_shape() {
+        let bytes = render_for_server(&dummy_server()).unwrap();
         let cfg: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
         assert_eq!(cfg["log"]["loglevel"], "warning");
-        assert_eq!(cfg["outbounds"][0]["protocol"], "freedom");
+        assert_eq!(cfg["outbounds"][1]["protocol"], "freedom");
         assert_eq!(cfg["inbounds"][0]["protocol"], "vless");
         assert_eq!(cfg["inbounds"][0]["port"], 9443);
         assert_eq!(cfg["inbounds"][0]["streamSettings"]["network"], "xhttp");
         assert_eq!(cfg["inbounds"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn render_config_resolves_once_before_isolation_without_geoip_files() {
+        let bytes = render_for_server(&dummy_server()).unwrap();
+        let cfg: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(cfg["dns"], json!({"servers":["localhost"]}));
+        assert_eq!(
+            cfg["outbounds"],
+            json!([
+                {"protocol":"loopback","tag":"resolve","targetStrategy":"ForceIPv4v6",
+                 "settings":{"inboundTag":"vpnctl-resolved"}},
+                {"protocol":"freedom","tag":"direct"},
+                {"protocol":"blackhole","tag":"block"}
+            ])
+        );
+        assert_eq!(
+            cfg["routing"],
+            json!({"domainStrategy":"AsIs","rules":[
+                {"type":"field","outboundTag":"block","ip":[
+                    "0.0.0.0/8","10.0.0.0/8","100.64.0.0/10","127.0.0.0/8",
+                    "169.254.0.0/16","172.16.0.0/12","192.0.0.0/24","192.168.0.0/16",
+                    "198.18.0.0/15","224.0.0.0/4","240.0.0.0/4",
+                    "::/128","::1/128","fc00::/7","fe80::/10","fec0::/10","ff00::/8",
+                    "203.0.113.9/32"
+                ]},
+                {"type":"field","inboundTag":["vpnctl-resolved"],"outboundTag":"direct"}
+            ]})
+        );
+    }
+
+    #[test]
+    fn render_config_isolates_ipv6_server_address() {
+        let mut server = dummy_server();
+        server.address = "2001:db8::9".into();
+        let bytes = render_for_server(&server).unwrap();
+        let cfg: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            cfg["routing"]["rules"][0]["ip"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("2001:db8::9/128"))
+        );
+    }
+
+    #[test]
+    fn render_config_hostname_server_keeps_private_range_isolation() {
+        let mut server = dummy_server();
+        server.address = "vpn.example.com".into();
+        let bytes = render_for_server(&server).unwrap();
+        let cfg: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let ips = cfg["routing"]["rules"][0]["ip"].as_array().unwrap();
+        assert!(ips.contains(&json!("127.0.0.0/8")));
+        assert!(
+            ips.iter()
+                .all(|ip| !ip.as_str().unwrap().contains("example"))
+        );
     }
 
     #[test]

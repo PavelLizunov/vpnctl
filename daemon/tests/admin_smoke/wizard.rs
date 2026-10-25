@@ -581,7 +581,7 @@ async fn admin_wizard_submit_carries_ssh_port_2222_into_session() {
                     .header("content-type", "application/x-www-form-urlencoded"),
             )
             .body(Body::from(
-                "address=104.194.156.93&root_password=pw&ssh_port=2222",
+                "address=198.51.100.93&root_password=pw&ssh_port=2222",
             ))
             .unwrap(),
         )

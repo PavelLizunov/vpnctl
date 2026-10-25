@@ -2,8 +2,12 @@
 import importlib.util
 import json
 import os
+import signal
+import socket
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -32,7 +36,7 @@ class RunnerTest(unittest.TestCase):
         self.engine.chmod(0o755)
         self.curl = self.root / "curl"
         self.curl.write_text(
-            "#!/bin/sh\n"
+            "#!/bin/bash\n"
             "args=\" $* \"\n"
             "case \"$args\" in *' --socks5-hostname '*) ;; *) exit 90;; esac\n"
             "case \"$args\" in *' --noproxy '*) exit 91;; esac\n"
@@ -62,7 +66,7 @@ class RunnerTest(unittest.TestCase):
         env.update(extra_env)
         if "FAKE_HTTP_CODE" in extra_env or "FAKE_CURL_EXIT" in extra_env:
             self.curl.write_text(
-                "#!/bin/sh\n"
+                "#!/bin/bash\n"
                 "args=\" $* \"\n"
                 "case \"$args\" in *' --socks5-hostname '*) ;; *) exit 90;; esac\n"
                 "case \"$args\" in *' --noproxy '*) exit 91;; esac\n"
@@ -154,7 +158,7 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(result["failure_code"], "probe_engine_invalid")
 
     def test_engine_crash_is_blocked(self):
-        self.engine.write_text("#!/bin/sh\nexit 1\n")
+        self.engine.write_text("#!/bin/bash\nexit 1\n")
         self.engine.chmod(0o755)
         result = self.run_runner(
             {"server": "192.0.2.1", "protocol": "hysteria2", "ports": []},
@@ -163,7 +167,7 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(result["failure_code"], "client_start_failed")
 
     def test_engine_without_listener_times_out(self):
-        self.engine.write_text("#!/bin/sh\nsleep 5\n")
+        self.engine.write_text("#!/bin/bash\nexec sleep 5\n")
         self.engine.chmod(0o755)
         result = self.run_runner(
             {"server": "192.0.2.1", "protocol": "hysteria2", "ports": []},
@@ -194,6 +198,86 @@ class RunnerTest(unittest.TestCase):
             extra_env={"VPNCTL_ASSURANCE_SING_BOX": str(self.root / "missing")},
         )
         self.assertEqual(result["failure_code"], "probe_engine_missing")
+
+    def test_outer_timeout_kills_engine_in_runner_group(self):
+        try:
+            with socket.socket():
+                pass
+        except PermissionError:
+            self.skipTest("sandbox prohibits sockets required by the real runner")
+        record = self.root / "engine.json"
+        self.engine.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json,os,signal,socket,sys,time\n"
+            "config_path=sys.argv[-1]\n"
+            "config=json.load(open(config_path))\n"
+            "s=socket.socket();s.bind(('127.0.0.1',config['port']));s.listen()\n"
+            "with open(config['record'],'w') as f:\n"
+            " json.dump({'pid':os.getpid(),'group':os.getpgrp(),'config':config_path},f)\n"
+            "os.kill(os.getppid(),signal.SIGSTOP)\n"
+            "time.sleep(60)\n"
+        )
+        request = {"server": "192.0.2.1", "protocol": "hysteria2"}
+        name = __import__("hashlib").sha256(request["server"].encode()).hexdigest() + ".hysteria2.json"
+        template = self.configs / name
+        template.write_text(json.dumps({"engine": "sing-box", "config": {"port": "__PORT__", "record": str(record)}}))
+        template.chmod(0o600)
+        env = dict(os.environ, VPNCTL_ASSURANCE_CONFIG_DIR=str(self.configs),
+                   VPNCTL_ASSURANCE_SING_BOX=str(self.engine), TMPDIR=str(self.root))
+        runner = subprocess.Popen([sys.executable, str(RUNNER)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, env=env, start_new_session=True)
+        engine = None
+        try:
+            runner.stdin.write(json.dumps(request).encode())
+            runner.stdin.close()
+            runner.stdin = None
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                status = Path(f"/proc/{runner.pid}/stat").read_text().rsplit(") ", 1)[1]
+                if record.exists() and status.startswith("T"):
+                    break
+                time.sleep(0.01)
+            engine = json.loads(record.read_text())
+            self.assertTrue(Path(engine["config"]).exists())
+            os.killpg(runner.pid, signal.SIGKILL)
+            runner.communicate(timeout=5)
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                status = Path(f"/proc/{engine['pid']}/stat")
+                if not status.exists() or status.read_text().rsplit(") ", 1)[1].startswith("Z"):
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail("engine survived the outer runner timeout")
+            self.assertEqual(engine["group"], runner.pid)
+        finally:
+            if runner.poll() is None:
+                os.killpg(runner.pid, signal.SIGKILL)
+                runner.communicate(timeout=5)
+            if engine is not None:
+                try:
+                    os.kill(engine["pid"], signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_stop_process_reaps_engine_in_inherited_group(self):
+        process = subprocess.Popen(["bash", "-c", "exec sleep 60"])
+        try:
+            self.assertEqual(os.getpgid(process.pid), os.getpgrp())
+            RUNNER_MODULE.stop_process(process)
+            self.assertEqual(process.poll(), -signal.SIGTERM)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+
+    def test_stop_process_escalates_after_termination_timeout(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = [subprocess.TimeoutExpired("engine", 2), None]
+        RUNNER_MODULE.stop_process(process)
+        process.terminate.assert_called_once_with()
+        process.kill.assert_called_once_with()
 
 
 if __name__ == "__main__":

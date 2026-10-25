@@ -19,7 +19,10 @@ impl DaemonConfig {
                         anyhow::anyhow!("cannot resolve XDG data dir; pass --db / VPNCTL_DB")
                     })?
                     .join("vpnctl");
-                tokio::fs::create_dir_all(&dir)
+                tokio::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(&dir)
                     .await
                     .with_context(|| format!("create {}", dir.display()))?;
                 dir.join("inv.db")

@@ -30,7 +30,6 @@ pub fn router(state: AppState) -> Router {
 
     let public_router = Router::new()
         .route("/api/v1/health", get(handlers::health::get))
-        .route("/api/v1/stats/sub-access", get(handlers::stats::sub_access))
         .route("/sub/{token}", get(handlers::sub::get))
         .route("/api/v1/sub/{token}", get(handlers::sub::get_mihomo))
         .route(
@@ -114,8 +113,18 @@ pub(crate) fn admin_router(state: AppState) -> Router {
     use crate::handlers::admin;
 
     let assets_dir = admin_assets_dir();
+    let auth = BasicAuth::from_env(&state.admin_session_secret);
 
     let with_admin = Router::new()
+        .route(
+            "/api/v1/stats/sub-access",
+            get(handlers::stats::sub_access).layer(
+                tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+                    axum::http::header::CACHE_CONTROL,
+                    axum::http::HeaderValue::from_static("no-store"),
+                ),
+            ),
+        )
         .route("/admin", get(admin::dashboard))
         .route("/admin/", get(admin::dashboard))
         .route("/admin/overview", get(admin::dashboard))
@@ -482,7 +491,7 @@ pub(crate) fn admin_router(state: AppState) -> Router {
             ),
         );
 
-    match BasicAuth::from_env() {
+    match auth {
         Ok(Some(auth)) => with_security_headers.route_layer(axum::middleware::from_fn_with_state(
             auth,
             crate::handlers::auth::require_basic_auth,

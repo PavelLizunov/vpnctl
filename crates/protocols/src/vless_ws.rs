@@ -164,7 +164,7 @@ mod tests {
     fn server() -> Server {
         Server {
             id: ServerId("de".into()),
-            address: "104.194.156.93".into(),
+            address: "198.51.100.93".into(),
             ssh_port: 2222,
             ssh_user: "root".into(),
             kernels: vec![],
@@ -309,7 +309,7 @@ mod tests {
             .unwrap();
         assert_eq!(cfg["type"], "vless");
         assert_eq!(cfg["server"], "de.ninitux.top");
-        assert_ne!(cfg["server"], "104.194.156.93");
+        assert_ne!(cfg["server"], "198.51.100.93");
         assert_eq!(cfg["server_port"], 8443);
         assert_eq!(cfg["uuid"], "u-1");
         assert!(cfg.get("flow").is_none());

@@ -794,3 +794,114 @@ async fn user_add_rejects_invalid_ids_before_mutation() {
         assert!(inv.get_user(&UserId(id.into())).await.unwrap().is_some());
     }
 }
+
+#[tokio::test]
+async fn user_add_generates_wireguard_by_default_and_preserves_external_pubkey() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("inv.db");
+    let (_, external_pubkey) = gen_wireguard_keypair();
+    for (id, public, generate) in [
+        ("default", None, false),
+        ("explicit", None, true),
+        ("external", Some(external_pubkey.clone()), false),
+    ] {
+        run(
+            UserCmd::Add {
+                id: id.into(),
+                uuid: None,
+                tuic_password: None,
+                wireguard_pubkey: public,
+                gen_wireguard: generate,
+            },
+            Some(db_path.clone()),
+            OutputFormat::Json,
+        )
+        .await
+        .unwrap();
+        let inv = SqliteInventory::open(&db_path).await.unwrap();
+        let user = inv.get_user(&UserId(id.into())).await.unwrap().unwrap();
+        let provenance = if id == "external" {
+            assert_eq!(
+                user.wireguard_pubkey.as_deref(),
+                Some(external_pubkey.as_str())
+            );
+            assert!(user.wireguard_private.is_none());
+            "operator-provided"
+        } else {
+            assert!(vpnctl_crypto::wireguard_keypair_matches(
+                user.wireguard_private.as_deref().unwrap(),
+                user.wireguard_pubkey.as_deref().unwrap(),
+            ));
+            "server-generated"
+        };
+        let audit = inv.recent_audit(1).await.unwrap();
+        assert_eq!(
+            audit[0].payload.as_ref().unwrap()["wg_keypair_provenance"],
+            provenance
+        );
+    }
+}
+
+#[tokio::test]
+async fn user_disable_enable_retry_after_reopen_preserves_pending_deploy() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("inv.db");
+    let inv = SqliteInventory::open(&db_path).await.unwrap();
+    let uid = UserId("alice".into());
+    let sid = ServerId("s0".into());
+    inv.add_user(&user_with_secrets()).await.unwrap();
+    inv.add_server(&Server {
+        id: sid.clone(),
+        address: "203.0.113.10".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![ProtocolId("vless+reality".into())],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    inv.grant(&uid, &sid).await.unwrap();
+    inv.close().await;
+
+    for disabled in [true, false] {
+        let inv = SqliteInventory::open(&db_path).await.unwrap();
+        inv.audit("test", "server.deploy", Some("s0"), None)
+            .await
+            .unwrap();
+        inv.close().await;
+        // Persist the change before the CLI can report its pending-deploy output.
+        let inv = SqliteInventory::open(&db_path).await.unwrap();
+        assert!(
+            inv.set_user_disabled_audited(&uid, disabled, "cli")
+                .await
+                .unwrap()
+        );
+        let latest = inv.recent_audit(1).await.unwrap()[0].id;
+        inv.close().await;
+        let cmd = if disabled {
+            UserCmd::Disable { id: "alice".into() }
+        } else {
+            UserCmd::Enable { id: "alice".into() }
+        };
+        run(cmd, Some(db_path.clone()), OutputFormat::Text)
+            .await
+            .unwrap();
+        let inv = SqliteInventory::open(&db_path).await.unwrap();
+        assert_eq!(
+            inv.get_user(&uid).await.unwrap().unwrap().disabled,
+            disabled
+        );
+        assert_eq!(inv.recent_audit(1).await.unwrap()[0].id, latest);
+        assert_eq!(
+            inv.servers_pending_deploy_for_user(&uid, std::slice::from_ref(&sid))
+                .await
+                .unwrap(),
+            vec![sid.clone()]
+        );
+        inv.close().await;
+    }
+}

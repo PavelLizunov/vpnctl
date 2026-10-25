@@ -460,6 +460,10 @@ fn run_runner_process_with_timeout(
     runner_timeout: Duration,
 ) -> anyhow::Result<Option<RunnerResult>> {
     let deadline = Instant::now() + runner_timeout;
+    // The daemon owns cleanup even when SIGKILL prevents the runner's finally block.
+    let work = tempfile::Builder::new()
+        .prefix("vpnctl-assurance-owner-")
+        .tempdir()?;
     let mut child = {
         let mut last_error = None;
         let mut child = None;
@@ -468,6 +472,7 @@ fn run_runner_process_with_timeout(
                 return Ok(None);
             }
             match Command::new(runner)
+                .env("TMPDIR", work.path())
                 .process_group(0)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -896,6 +901,25 @@ mod tests {
         let result =
             run_runner_process_with_timeout(&runner, b"{}", Duration::from_millis(50)).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn runner_timeout_removes_credentials_owned_by_daemon() {
+        let (dir, runner) = script("");
+        let record = dir.path().join("workdir");
+        std::fs::write(
+            &runner,
+            format!(
+                "#!/bin/bash\nmkdir \"$TMPDIR/credentials\"\nprintf 'test credential' > \"$TMPDIR/credentials/config.json\"\nprintf '%s' \"$TMPDIR\" > '{}'\nkill -STOP $$\n",
+                record.display(),
+            ),
+        )
+        .unwrap();
+        let result =
+            run_runner_process_with_timeout(&runner, b"{}", Duration::from_secs(1)).unwrap();
+        assert!(result.is_none());
+        let work = std::fs::read_to_string(record).unwrap();
+        assert!(!std::path::Path::new(&work).exists());
     }
 
     #[test]
