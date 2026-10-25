@@ -5,58 +5,58 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 420 (279 prod / 141 test)
-- **Total Rust LOC:** 139,495 (79,283 prod / 60,212 test)
-- **Database Migrations:** 61
+- **Tracked Rust Files:** 423 (280 prod / 143 test)
+- **Total Rust LOC:** 142,652 (81,264 prod / 61,388 test)
+- **Database Migrations:** 64
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 130
 
 ## Workspace Crates & Targets
 
 | Crate | Path | Version | Targets | Prod LOC (Files) | Test LOC (Files) | Total LOC |
 |---|---|---|---|---|---|---|
-| `vpnctl` | `cli` | 0.9.0 | bin, 2 tests | 5,884 (20) | 1,019 (3) | **6,903** |
-| `vpnctl-boosty-bridge` | `crates/boosty-bridge` | 0.9.0 | lib, 2 tests | 1,374 (6) | 1,012 (2) | **2,386** |
-| `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,337 (13) | 0 (0) | **1,337** |
+| `vpnctl` | `cli` | 0.9.0 | bin, 2 tests | 6,091 (20) | 1,349 (3) | **7,440** |
+| `vpnctl-boosty-bridge` | `crates/boosty-bridge` | 0.9.0 | lib, 2 tests | 1,473 (6) | 1,012 (2) | **2,485** |
+| `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,402 (13) | 0 (0) | **1,402** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 318 (1) | 125 (1) | **443** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 193 (1) | 454 (2) | **647** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 46 tests | 14,520 (52) | 18,048 (50) | **32,568** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 47 tests | 15,334 (53) | 18,583 (51) | **33,917** |
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 6,476 (14) | 1,330 (6) | **7,806** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 3,977 (20) | 4,515 (12) | **8,492** |
-| `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,496 (4) | 1,123 (5) | **2,619** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 9 tests | 43,708 (148) | 32,586 (60) | **76,294** |
-| **Total** | | | | **79,283 (279)** | **60,212 (141)** | **139,495** |
+| `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,612 (4) | 1,123 (5) | **2,735** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 10 tests | 44,388 (148) | 32,897 (61) | **77,285** |
+| **Total** | | | | **81,264 (280)** | **61,388 (143)** | **142,652** |
 
 ## Largest Rust Modules (Top 25)
 
 | File | LOC | Crate | Role |
 |---|---|---|---|
-| `daemon/tests/admin_smoke/settings_integrations.rs` | 2,197 | `daemon` | Test |
+| `daemon/tests/admin_smoke/settings_integrations.rs` | 2,281 | `daemon` | Test |
+| `daemon/src/health_monitor/tests.rs` | 1,845 | `daemon` | Prod |
 | `crates/kernels/src/caddy/tests.rs` | 1,800 | `crates/kernels` | Prod |
-| `daemon/src/health_monitor/tests.rs` | 1,793 | `daemon` | Prod |
+| `crates/inventory/src/sqlite/tests.rs` | 1,746 | `crates/inventory` | Prod |
 | `crates/kernels/src/sing_box/tests.rs` | 1,638 | `crates/kernels` | Prod |
-| `crates/inventory/src/sqlite/tests.rs` | 1,515 | `crates/inventory` | Prod |
 | `daemon/tests/admin_smoke/alerts_health.rs` | 1,452 | `daemon` | Test |
 | `daemon/tests/admin_smoke/server_detail/setup_config.rs` | 1,318 | `daemon` | Test |
+| `daemon/tests/admin_smoke/servers.rs` | 1,303 | `daemon` | Test |
 | `daemon/tests/admin_smoke/dashboard.rs` | 1,227 | `daemon` | Test |
-| `daemon/tests/admin_smoke/servers.rs` | 1,215 | `daemon` | Test |
 | `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,200 | `daemon` | Test |
 | `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,164 | `daemon` | Test |
+| `crates/inventory/tests/spec_node_health.rs` | 1,097 | `crates/inventory` | Test |
+| `daemon/src/protocol_assurance_poller.rs` | 1,075 | `daemon` | Prod |
+| `crates/ssh/src/subprocess.rs` | 1,059 | `crates/ssh` | Prod |
 | `daemon/src/handlers/admin/boosty.rs` | 1,057 | `daemon` | Prod |
-| `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,034 | `daemon` | Prod |
-| `crates/inventory/src/sqlite/health.rs` | 1,027 | `crates/inventory` | Prod |
+| `cli/src/cmd/server.rs` | 1,048 | `cli` | Prod |
+| `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,042 | `daemon` | Prod |
+| `crates/inventory/src/sqlite/health.rs` | 1,019 | `crates/inventory` | Prod |
 | `daemon/tests/admin_smoke/user_detail/traffic_activity.rs` | 1,018 | `daemon` | Test |
 | `daemon/tests/admin_smoke/shell_nav/shell_assets_nav.rs` | 1,014 | `daemon` | Test |
 | `daemon/src/quality_poller.rs` | 992 | `daemon` | Prod |
-| `crates/inventory/tests/spec_node_health.rs` | 984 | `crates/inventory` | Test |
 | `daemon/src/handlers/admin/billing.rs` | 968 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/user_detail/wireguard.rs` | 959 | `daemon` | Test |
 | `crates/boosty-bridge/tests/sync_integration.rs` | 952 | `crates/boosty-bridge` | Test |
-| `daemon/src/protocol_assurance_poller.rs` | 952 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/users.rs` | 947 | `daemon` | Test |
-| `crates/ssh/src/subprocess.rs` | 943 | `crates/ssh` | Prod |
-| `daemon/src/handlers/auth.rs` | 917 | `daemon` | Prod |
 
-## Database Migrations (61)
+## Database Migrations (64)
 
 | Version | Migration Name | File | Lines |
 |---|---|---|---|
@@ -121,6 +121,9 @@
 | `0059` | public base url | `crates/inventory/migrations/0059_public_base_url.sql` | 6 |
 | `0060` | retired user uuids | `crates/inventory/migrations/0060_retired_user_uuids.sql` | 38 |
 | `0061` | audit payload server name | `crates/inventory/migrations/0061_audit_payload_server_name.sql` | 4 |
+| `0062` | retention indexes | `crates/inventory/migrations/0062_retention_indexes.sql` | 8 |
+| `0063` | user last activity | `crates/inventory/migrations/0063_user_last_activity.sql` | 54 |
+| `0064` | node health server seq | `crates/inventory/migrations/0064_node_health_server_seq.sql` | 3 |
 
 ## `daemon/src/app/routes.rs` `.route(...)` Registrations (130)
 

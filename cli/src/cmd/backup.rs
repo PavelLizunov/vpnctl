@@ -171,15 +171,40 @@ mod tests {
 
     #[test]
     fn restore_docs_distinguish_snapshots_from_encrypted_bundles() {
-        for doc in [
-            include_str!("../../../README.md"),
-            include_str!("../../../docs/specs/backup-restore.md"),
-        ] {
-            assert!(doc.contains("vpnctl restore <snapshot>"));
-            assert!(!doc.contains("vpnctl restore <bundle>"));
-            assert!(doc.contains("scripts/vpnctl-restore.sh <archive.tar.zst.age>"));
-            assert!(doc.contains("vpnctl-snap/inv.db"));
-        }
+        let doc = include_str!("../../../docs/specs/backup-restore.md");
+        assert!(doc.contains("vpnctl restore <snapshot>"));
+        assert!(doc.contains("vpnctl --db /var/lib/vpnctl/inv.db restore <snapshot>"));
+        assert!(!doc.contains("vpnctl restore <bundle>"));
+        assert!(doc.contains("scripts/vpnctl-restore.sh <archive.tar.zst.age>"));
+        assert!(doc.contains("vpnctl-snap/inv.db"));
+    }
+
+    #[test]
+    fn backup_docs_separate_snapshot_and_bundle_retention() {
+        let doc = include_str!("../../../docs/specs/backup-restore.md");
+        let snapshots = doc
+            .split_once("### Daemon SQLite snapshots")
+            .unwrap()
+            .1
+            .split_once("### Daily encrypted disaster-recovery bundles")
+            .unwrap();
+        assert!(snapshots.0.contains("VACUUM INTO"));
+        assert!(snapshots.0.contains("runs hourly"));
+        assert!(snapshots.0.contains("24 newest snapshots"));
+        assert!(snapshots.0.contains("last-verified.db"));
+        assert!(!snapshots.0.contains("vpnctl-backup.sh"));
+        assert!(snapshots.1.contains("scripts/vpnctl-backup.sh"));
+        assert!(snapshots.1.contains("00:00 UTC daily"));
+        assert!(snapshots.1.contains("RETENTION_DAYS` (default 14)"));
+        assert!(snapshots.1.contains("OFFSITE_RETENTION_DAYS` (default 30)"));
+        assert!(
+            include_str!("../../../README.md")
+                .contains("[backup/restore contract](docs/specs/backup-restore.md)")
+        );
+        assert!(
+            include_str!("../../../docs/specs/commercial-operations.md")
+                .contains("[backup/restore contract](backup-restore.md)")
+        );
     }
 
     #[tokio::test]

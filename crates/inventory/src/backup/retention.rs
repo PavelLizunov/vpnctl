@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use crate::sqlite::SqliteInventoryError;
@@ -24,12 +25,29 @@ impl Default for Retention {
 
 pub fn prune_snapshots(dir: &Path, policy: Retention) -> Result<u64, SqliteInventoryError> {
     let snapshots = list_snapshots(dir)?;
+    let protected = match std::fs::metadata(dir.join("last-verified.db")) {
+        Ok(metadata) => Some(metadata),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(SqliteInventoryError::Invalid(format!(
+                "stat last verified snapshot: {e}"
+            )));
+        }
+    };
     let mut kept_hourly = 0usize;
     let mut kept_daily_days: HashSet<String> = HashSet::new();
     let mut kept_monthly_months: HashSet<String> = HashSet::new();
     let mut removed = 0u64;
 
     for snap in snapshots {
+        if let Some(protected) = &protected {
+            let metadata = std::fs::metadata(&snap.path).map_err(|e| {
+                SqliteInventoryError::Invalid(format!("stat snapshot {}: {e}", snap.path.display()))
+            })?;
+            if metadata.dev() == protected.dev() && metadata.ino() == protected.ino() {
+                continue;
+            }
+        }
         let Some(ts) = snap.created.as_deref() else {
             continue;
         };

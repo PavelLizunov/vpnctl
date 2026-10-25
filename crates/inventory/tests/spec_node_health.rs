@@ -86,6 +86,119 @@ async fn empty_inventory_returns_empty_and_none() {
 }
 
 #[tokio::test]
+async fn health_order_and_transitions_survive_a_backwards_clock_step() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let server_id = ServerId("s1".into());
+    inv.add_server(&srv("s1")).await.unwrap();
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path(&dir).display()))
+        .await
+        .unwrap();
+    let now = Utc::now();
+    for (id, minutes, active, rx, tx, versions) in [
+        (
+            "before-step",
+            1,
+            true,
+            100_i64,
+            200_i64,
+            r#"{"sing-box":"old"}"#,
+        ),
+        ("after-step", -1, false, 150, 300, r#"{"sing-box":"new"}"#),
+        (
+            "steady-down",
+            -2,
+            false,
+            200,
+            400,
+            r#"{"sing-box":"latest"}"#,
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO node_health
+             (sample_id, ts, server_id, sing_box_active, kernel_versions_json,
+              nic_iface, nic_rx_bytes, nic_tx_bytes)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'eth0', ?6, ?7)",
+        )
+        .bind(id)
+        .bind((now + chrono::Duration::minutes(minutes)).to_rfc3339())
+        .bind(&server_id.0)
+        .bind(i64::from(active))
+        .bind(versions)
+        .bind(rx)
+        .bind(tx)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    pool.close().await;
+
+    let rows = inv
+        .recent_node_health_for_server(&server_id, 24)
+        .await
+        .unwrap();
+    let ids: Vec<_> = rows.iter().map(|row| row.sample_id.as_deref()).collect();
+    assert_eq!(
+        ids,
+        [Some("steady-down"), Some("after-step"), Some("before-step")]
+    );
+    assert_eq!(rows[1].sing_box_active, Some(false));
+    assert_eq!(rows[2].sing_box_active, Some(true));
+    let latest = inv.latest_node_health(&server_id).await.unwrap().unwrap();
+    assert_eq!(latest, rows[0]);
+    assert_eq!(
+        inv.latest_node_health_fleet().await.unwrap()[&server_id],
+        latest
+    );
+    assert_eq!(
+        inv.kernel_versions_fleet().await.unwrap(),
+        vec![(server_id.clone(), latest.kernel_versions_json.clone())]
+    );
+    let uptime = inv.uptime_for_server(&server_id, 24).await.unwrap();
+    assert_eq!(uptime.last_probe_at, Some(latest.ts));
+    assert_eq!(uptime.last_outage_at, Some(latest.ts));
+    let traffic = inv.server_traffic_breakdown(&server_id, 24).await.unwrap();
+    assert_eq!(traffic.nic_rx_bytes, 100);
+    assert_eq!(traffic.nic_tx_bytes, 200);
+}
+
+#[tokio::test]
+async fn latest_fleet_matches_per_server_latest_with_interleaved_history() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    for id in ["s1", "s2", "s3", "no-samples"] {
+        inv.add_server(&srv(id)).await.unwrap();
+    }
+    for sample in 0..20 {
+        for id in ["s1", "s2", "s3"] {
+            rec(
+                &inv,
+                id,
+                Some(sample % 2 == 0),
+                Some(true),
+                Some(sample),
+                Some(100),
+                None,
+                None,
+                None,
+                Some(r#"["tcp/22"]"#),
+                None,
+            )
+            .await;
+        }
+    }
+    let fleet = inv.latest_node_health_fleet().await.unwrap();
+    assert_eq!(fleet.len(), 3);
+    for id in ["s1", "s2", "s3"] {
+        let server_id = ServerId(id.into());
+        let latest = inv.latest_node_health(&server_id).await.unwrap().unwrap();
+        assert_eq!(latest.disk_used_mib, Some(19));
+        assert_eq!(fleet[&server_id], latest);
+    }
+    assert!(!fleet.contains_key(&ServerId("no-samples".into())));
+}
+
+#[tokio::test]
 async fn single_insert_roundtrips_all_fields_and_ts_is_now() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;

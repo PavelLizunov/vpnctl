@@ -157,6 +157,8 @@ impl SqliteInventory {
                   WHERE user_id = ?1 AND (upload_bytes > 0 OR download_bytes > 0 OR active_connections > 0)
                  UNION ALL
                  SELECT MAX(last_seen) AS latest_ts FROM vpn_user_sessions WHERE user_id = ?1
+                 UNION ALL
+                 SELECT last_activity_at AS latest_ts FROM users WHERE id = ?1
              )",
         )
         .bind(&user.0)

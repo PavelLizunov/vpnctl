@@ -18,7 +18,7 @@ use crate::AppState;
 use crate::handlers::admin::helpers::{internal_error, render_page, theme_accent_lang};
 use crate::handlers::admin::legacy::server_detail::detail_tabs;
 use crate::handlers::admin::legacy::user_sections::{
-    pick_vpn_sparkline_window, vpn_traffic_chart, window_picker_section,
+    fit_vpn_sparkline_window, pick_vpn_sparkline_window, vpn_traffic_chart, window_picker_section,
 };
 
 struct DashboardStats {
@@ -162,7 +162,11 @@ async fn dashboard_render(
 ) -> Result<Markup, Response> {
     let (theme, accent, lang) = theme_accent_lang(&headers);
     let window = pick_vpn_sparkline_window(query.vpn_window.as_deref());
-    let since_hours = window.cells * window.bucket_hours;
+    let since_hours = if window.slug == "all" {
+        u32::MAX
+    } else {
+        window.cells * window.bucket_hours
+    };
     let fleet_rows = state
         .inv
         .recent_vpn_stats_fleet(since_hours.saturating_mul(2), window.bucket_hours)
@@ -172,6 +176,7 @@ async fn dashboard_render(
             Vec::new()
         });
 
+    let window = fit_vpn_sparkline_window(window, &fleet_rows);
     let stats = collect_dashboard_data(&state)
         .await
         .map_err(internal_error)?;
@@ -179,7 +184,14 @@ async fn dashboard_render(
     let heavy_users = if window.bucket_hours >= 24 {
         state
             .inv
-            .top_users_by_daily_traffic(since_hours.div_ceil(24), 5)
+            .top_users_by_daily_traffic(
+                if window.slug == "all" {
+                    u32::MAX
+                } else {
+                    since_hours.div_ceil(24)
+                },
+                5,
+            )
             .await
     } else {
         state.inv.top_users_by_traffic(since_hours, 5).await

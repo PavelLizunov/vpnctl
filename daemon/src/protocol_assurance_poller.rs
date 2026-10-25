@@ -1,11 +1,14 @@
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use nix::sys::signal::{Signal, killpg};
+use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpStream, lookup_host};
 use tokio::time::{MissedTickBehavior, interval, timeout};
@@ -157,7 +160,7 @@ async fn sample_protocol(
             Some("probe_data_unavailable"),
         ));
     };
-    if Utc::now().signed_duration_since(health.ts) > NODE_HEALTH_MAX_AGE {
+    if !node_health_is_fresh(health.ts, Utc::now()) {
         return Ok(sample(
             server,
             protocol,
@@ -329,6 +332,11 @@ async fn sample_protocol(
     ))
 }
 
+fn node_health_is_fresh(ts: chrono::DateTime<Utc>, now: chrono::DateTime<Utc>) -> bool {
+    let age = now.signed_duration_since(ts);
+    age >= chrono::Duration::zero() && age <= NODE_HEALTH_MAX_AGE
+}
+
 fn sample(
     server: &Server,
     protocol: &dyn Protocol,
@@ -451,11 +459,16 @@ fn run_runner_process_with_timeout(
     request: &[u8],
     runner_timeout: Duration,
 ) -> anyhow::Result<Option<RunnerResult>> {
+    let deadline = Instant::now() + runner_timeout;
     let mut child = {
         let mut last_error = None;
         let mut child = None;
         for _ in 0..3 {
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
             match Command::new(runner)
+                .process_group(0)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -467,7 +480,10 @@ fn run_runner_process_with_timeout(
                 }
                 Err(error) if error.raw_os_error() == Some(26) => {
                     last_error = Some(error);
-                    std::thread::sleep(Duration::from_millis(10));
+                    std::thread::sleep(
+                        Duration::from_millis(10)
+                            .min(deadline.saturating_duration_since(Instant::now())),
+                    );
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -478,14 +494,15 @@ fn run_runner_process_with_timeout(
             (None, None) => anyhow::bail!("runner spawn produced no result"),
         }
     };
+    let group = Pid::from_raw(child.id() as i32);
     let request = request.to_vec();
-    let mut writer = child.stdin.take().map(|mut stdin| {
+    let writer = child.stdin.take().map(|mut stdin| {
         std::thread::spawn(move || {
             let _ = stdin.write_all(&request);
         })
     });
     let stdout = child.stdout.take();
-    let mut reader = stdout.map(|mut stdout| {
+    let reader = stdout.map(|mut stdout| {
         std::thread::spawn(move || {
             let mut kept = Vec::new();
             let mut buf = [0u8; 1024];
@@ -502,34 +519,67 @@ fn run_runner_process_with_timeout(
             kept
         })
     });
-    let deadline = Instant::now() + runner_timeout;
+    let status = wait_for_runner_exit(&mut child, deadline);
+    // A runner can exit while its descendants still own the pipes.
+    let killed = killpg(group, Signal::SIGKILL);
+    if !matches!(&status, Ok(Some(_))) {
+        let _ = child.kill();
+        // Reap without extending the poller's deadline after a timeout/error.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
+    if let Some(writer) = writer {
+        let _ = join_runner_thread_before(writer, deadline);
+    }
+    let output = reader.and_then(|reader| join_runner_thread_before(reader, deadline));
+    if let Err(error) = killed
+        && error != nix::errno::Errno::ESRCH
+    {
+        return Err(error.into());
+    }
+    let Some(status) = status? else {
+        return Ok(None);
+    };
+    let Some(output) = output else {
+        return Ok(None);
+    };
+    if !status.success() || output.len() > 4096 {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_slice(&output)?))
+}
+
+fn wait_for_runner_exit(
+    child: &mut std::process::Child,
+    deadline: Instant,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
     loop {
         if let Some(status) = child.try_wait()? {
-            if let Some(writer) = writer.take() {
-                let _ = writer.join();
-            }
-            let output = reader
-                .take()
-                .and_then(|reader| reader.join().ok())
-                .unwrap_or_default();
-            if !status.success() || output.len() > 4096 {
-                return Ok(None);
-            }
-            return Ok(Some(serde_json::from_slice(&output)?));
+            return Ok(Some(status));
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            if let Some(writer) = writer.take() {
-                let _ = writer.join();
-            }
-            if let Some(reader) = reader.take() {
-                let _ = reader.join();
-            }
             return Ok(None);
         }
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(
+            Duration::from_millis(25).min(deadline.saturating_duration_since(Instant::now())),
+        );
     }
+}
+
+fn join_runner_thread_before<T>(
+    thread: std::thread::JoinHandle<T>,
+    deadline: Instant,
+) -> Option<T> {
+    while !thread.is_finished() {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(
+            Duration::from_millis(1).min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+    thread.join().ok()
 }
 
 fn is_retryable_handshake_failure(result: &RunnerResult) -> bool {
@@ -701,11 +751,29 @@ mod tests {
     fn script(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("runner.sh");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::write(&path, format!("#!/bin/bash\n{body}\n")).unwrap();
         let mut permissions = std::fs::metadata(&path).unwrap().permissions();
         permissions.set_mode(0o700);
         std::fs::set_permissions(&path, permissions).unwrap();
         (dir, path)
+    }
+
+    #[test]
+    fn node_health_freshness_rejects_future_samples_after_clock_step() {
+        let sampled_at = Utc::now();
+        assert!(node_health_is_fresh(sampled_at, sampled_at));
+        assert!(node_health_is_fresh(
+            sampled_at,
+            sampled_at + NODE_HEALTH_MAX_AGE
+        ));
+        assert!(!node_health_is_fresh(
+            sampled_at,
+            sampled_at - chrono::Duration::milliseconds(1)
+        ));
+        assert!(!node_health_is_fresh(
+            sampled_at,
+            sampled_at + NODE_HEALTH_MAX_AGE + chrono::Duration::milliseconds(1)
+        ));
     }
 
     #[test]
@@ -828,6 +896,61 @@ mod tests {
         let result =
             run_runner_process_with_timeout(&runner, b"{}", Duration::from_millis(50)).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn runner_exit_and_timeout_kill_background_stdout_holders() {
+        for timed_out in [false, true] {
+            let (dir, runner) = script("");
+            let pid_file = dir.path().join("child.pid");
+            std::fs::write(
+                &runner,
+                format!(
+                    "#!/bin/bash\nsleep 10 &\nprintf '%s' \"$!\" > '{}'\ncat >/dev/null\nprintf '%s' '{{\"stage\":\"transfer\",\"state\":\"verified\"}}'\n{}\n",
+                    pid_file.display(),
+                    if timed_out { "wait" } else { "exit 0" },
+                ),
+            )
+            .unwrap();
+            let (done, result) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let result =
+                    run_runner_process_with_timeout(&runner, b"{}", Duration::from_millis(250));
+                let _ = done.send(result);
+            });
+            let result = result
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.is_none(), timed_out);
+
+            let pid = std::fs::read_to_string(&pid_file).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(1);
+            loop {
+                let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"));
+                if stat.is_err()
+                    || stat.is_ok_and(|stat| {
+                        stat.rsplit_once(") ")
+                            .is_some_and(|(_, fields)| fields.starts_with('Z'))
+                    })
+                {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "runner descendant survived");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    #[test]
+    fn runner_thread_join_obeys_deadline_without_pipe_eof() {
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let reader = std::thread::spawn(move || wait.recv());
+        let started = Instant::now();
+        let result = join_runner_thread_before(reader, started + Duration::from_millis(25));
+        release.send(()).unwrap();
+        assert!(result.is_none());
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

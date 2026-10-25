@@ -54,10 +54,10 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 | Protocols — `vless+reality`, `tuic-v5`, `hysteria2`, `shadowsocks-2022`, `wireguard`, `amneziawg2`, `amneziawg3`, `anytls`, `trojan`, `naive`, `vless-ws`, `vless+xhttp` | ✅ (12 across 4 kernels) |
 | Hosters — DigitalOcean / Cloudzy / Generic (SSH port quirks) | ✅ |
 | Add-server **wizard** (Phase E) — paste IP+root password, SSE-streamed bootstrap | ✅ |
-| Backups — VACUUM INTO snapshot + hourly retention + off-site copy + restore CLI/web self-test + CI-protected byte-equality (`restore_e2e`) + in-product Disaster Recovery section | ✅ |
+| Backups — [hourly SQLite snapshots and daily encrypted DR bundles](docs/specs/backup-restore.md), restore CLI/web self-test + CI-protected byte-equality (`restore_e2e`) + in-product Disaster Recovery section | ✅ |
 | Subscription endpoint — byte-equivalent migration from legacy Python server | ✅ |
 | Chain-capable subscriptions — stock sing-box JSON plus capability-gated VPNRouter app-config metadata, both with fail-closed entry filtering | ✅ |
-| Boosty subscription bridge — auto-creates complete users for new paid subscribers, grants every server, and supports a configurable disable grace period | ✅ |
+| Boosty subscription bridge — optionally auto-creates complete users for new eligible paid subscribers, grants current VPN-exit servers at creation, preserves existing users’ grants, and supports a configurable disable grace period | ✅ |
 | Protocol visibility — per-(server, protocol) hide + per-(user, server, protocol) deny with OR-semantics | ✅ |
 | DPI-risk tiers — Strong: `naive`, `vless+reality`, `vless+xhttp`, `vless-ws`; Moderate: `amneziawg2`, `amneziawg3`, `anytls`, `tuic-v5`; Weak: `hysteria2`, `shadowsocks-2022`, `trojan`, `wireguard` | ✅ |
 | Monitoring — 24h sub-fetch sparkline + heavy-users heatmap + filtered `/admin/sharing` risk page + per-user UA fingerprint heuristic | ✅ |
@@ -89,23 +89,11 @@ Migration 0056 is additive; binary rollback must use the documented
 [pre-upgrade snapshot restore procedure](docs/specs/backup-restore.md), not assume
 an older binary accepts a database containing a newer migration.
 
-### Scheduled recovery bundles
+### Backups and recovery
 
-The scheduled `scripts/vpnctl-backup.sh` creates an encrypted recovery bundle
-separately from the daemon's hourly SQLite snapshots. It requires a nonempty,
-readable deploy key and uses zstd level 3. Failed uploads preserve the local
-archive; an enabled off-site delivery failure exits 14, and retention failure
-exits 15 unless a delivery failure takes precedence. These failures are visible
-in the systemd job result and stage logs, not a new Web status panel.
-`OFFSITE_HOST=""` explicitly disables off-site delivery; it is not proof of an
-off-site copy. See the [backup/restore contract](docs/specs/backup-restore.md).
-
-For bundle recovery, `scripts/vpnctl-restore.sh <archive.tar.zst.age>
-<age-private-key-file>` decrypts, unpacks and verifies files in a scratch
-directory. With vpnctld stopped, pass the extracted `vpnctl-snap/inv.db` to
-`vpnctl restore <snapshot>`, then restore env, assets, deploy key, known_hosts,
-GeoIP, systemd units and firewall rules to their configured paths with their
-ownership and permissions preserved before starting vpnctld.
+See the [backup/restore contract](docs/specs/backup-restore.md) for the daemon's
+hourly SQLite snapshots, the separate daily encrypted DR bundles, their
+retention and off-site delivery, and the full recovery procedure.
 
 ### AmneziaWG 2.0 / 3.1 integration
 
@@ -277,6 +265,11 @@ scripting / disaster recovery.
 | Ack all infra alerts | `/admin/alerts` → «ack all (N)» button | (none; web-only) |
 | Restore a decrypted SQLite snapshot | `/admin/settings/backups` self-test, then CLI restore with vpnctld stopped | `vpnctl restore <snapshot>` |
 | Unpack an encrypted recovery bundle | Recovery host; restore extracted `inv.db` and the other files before starting vpnctld | `scripts/vpnctl-restore.sh <archive.tar.zst.age> <age-private-key-file>` |
+
+CLI `user disable` and `user enable` save inventory state and list the pending
+`vpnctl deploy <id>` commands needed to apply node access changes. CLI `sub`
+exits nonzero if a selected share link cannot be generated. See the
+[CLI correctness contract](docs/specs/cli-correctness.md).
 
 ### Client setup guides
 

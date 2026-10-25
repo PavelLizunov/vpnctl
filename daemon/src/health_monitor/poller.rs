@@ -1,5 +1,7 @@
-use std::time::Duration;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
+use vpnctl_core::Server;
 use vpnctl_inventory::SqliteInventory;
 
 use super::diff::{SINGBOX_LOG_TRIGGER_BYTES, diff_rows, is_one_shot_event};
@@ -10,6 +12,7 @@ use super::specialized_checks::{
 };
 
 const ONE_SHOT_PUSH_COOLDOWN: chrono::Duration = chrono::Duration::minutes(30);
+pub(super) const REMEDIATION_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 
 static LAST_ONE_SHOT_PUSH: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>>,
@@ -26,12 +29,13 @@ pub fn spawn_health_monitor(inv: SqliteInventory) -> tokio::task::JoinHandle<()>
     );
 
     tokio::spawn(async move {
+        let mut remediation_attempts = HashMap::new();
         let mut tick = interval(Duration::from_secs(interval_secs));
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         tick.tick().await;
         loop {
             tick.tick().await;
-            if let Err(e) = scan_once_inner(&inv, true).await {
+            if let Err(e) = scan_once_inner(&inv, true, &mut remediation_attempts).await {
                 tracing::warn!(
                     target = "vpnctld::health_monitor",
                     error = %e,
@@ -45,17 +49,39 @@ pub fn spawn_health_monitor(inv: SqliteInventory) -> tokio::task::JoinHandle<()>
 pub async fn scan_once(
     inv: &SqliteInventory,
 ) -> Result<(), vpnctl_inventory::SqliteInventoryError> {
-    scan_once_inner(inv, false).await
+    scan_once_inner(inv, false, &mut HashMap::new()).await
 }
 
-async fn scan_once_inner(
+pub(super) async fn scan_once_inner(
     inv: &SqliteInventory,
     auto_remediate: bool,
+    remediation_attempts: &mut HashMap<i64, Instant>,
 ) -> Result<(), vpnctl_inventory::SqliteInventoryError> {
     let servers = inv.list_fleet_servers().await?;
+    let open_alerts = if auto_remediate {
+        inv.recent_alerts(-1, false).await?
+    } else {
+        Vec::new()
+    };
+    remediation_attempts.retain(|id, _| open_alerts.iter().any(|alert| alert.id == *id));
     for server in &servers {
         if !crate::node_probe_poller::probeable(server) {
             continue;
+        }
+        for alert in open_alerts.iter().filter(|alert| {
+            alert.server_id.as_ref() == Some(&server.id)
+                && Remediation::for_kind(&alert.kind).is_some()
+        }) {
+            let subject = crate::node_probe_poller::server_subject(inv, &server.id).await;
+            remediate_if_due(
+                inv,
+                server,
+                alert.id,
+                &alert.kind,
+                &subject,
+                remediation_attempts,
+            )
+            .await;
         }
         let rows = match inv.recent_node_health_for_server(&server.id, 24).await {
             Ok(v) => v,
@@ -280,12 +306,15 @@ async fn scan_once_inner(
                         .await;
                     } else {
                         let fixed = if auto_remediate {
-                            if let Some(plan) = Remediation::for_kind(ev.kind) {
-                                auto_remediate_alert(inv, server, alert_id, ev.kind, plan, &subject)
-                                    .await
-                            } else {
-                                false
-                            }
+                            remediate_if_due(
+                                inv,
+                                server,
+                                alert_id,
+                                ev.kind,
+                                &subject,
+                                remediation_attempts,
+                            )
+                            .await
                         } else {
                             false
                         };
@@ -350,6 +379,28 @@ async fn scan_once_inner(
         );
     }
     Ok(())
+}
+
+async fn remediate_if_due(
+    inv: &SqliteInventory,
+    server: &Server,
+    alert_id: i64,
+    kind: &str,
+    subject: &str,
+    attempts: &mut HashMap<i64, Instant>,
+) -> bool {
+    let Some(plan) = Remediation::for_kind(kind) else {
+        return false;
+    };
+    let now = Instant::now();
+    if attempts
+        .get(&alert_id)
+        .is_some_and(|last| now.duration_since(*last) < REMEDIATION_RETRY_INTERVAL)
+    {
+        return false;
+    }
+    attempts.insert(alert_id, now);
+    auto_remediate_alert(inv, server, alert_id, kind, plan, subject).await
 }
 
 pub(super) fn claim_one_shot_push(

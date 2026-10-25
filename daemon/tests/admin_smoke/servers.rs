@@ -599,6 +599,94 @@ async fn admin_server_delete_confirm_page_shows_form_and_grant_count() {
         html.contains("2 grant(s)"),
         "must disclose the exact cascade grant count (2)"
     );
+    assert!(!html.contains("This server is the Telegram alert relay"));
+}
+
+#[tokio::test]
+async fn admin_server_delete_confirm_translates_warnings_and_controls() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 2, &[(0, 0), (1, 0)]).await;
+    s.inv
+        .set_telegram_config(
+            Some("1234567890:ABCDEFghijklmn"),
+            Some("987654321"),
+            Some("s0"),
+        )
+        .await
+        .unwrap();
+    let app = router(s);
+    let en = fetch_html(app.clone(), "/admin/servers/s0/delete-confirm").await;
+    let ru =
+        fetch_html_with_cookie(app, "/admin/servers/s0/delete-confirm", "vpnctl_lang=ru").await;
+    for (english, russian) in [
+        ("back to server", "назад к серверу"),
+        ("  ·  delete", "  ·  удаление"),
+        (
+            "delete <em>s0</em> — really?",
+            "удалить <em>s0</em> — точно?",
+        ),
+        ("Drops the server (", "Удаляет сервер ("),
+        (") from the inventory.", ") из инвентаря."),
+        ("2 grant(s)", "2 разрешений доступа"),
+        (
+            "cascade-delete — those users lose this server from their subscription on the next pull.",
+            "удаляются каскадно — эти пользователи потеряют сервер в подписке при следующем обновлении.",
+        ),
+        ("Secrets", "Секреты"),
+        (
+            "are deleted — re-adding the server later generates BRAND-NEW ones.",
+            "удаляются — при повторном добавлении сервера будут созданы НОВЫЕ.",
+        ),
+        (
+            "Protocols, kernels, probe history + alerts also cascade.",
+            "Протоколы, ядра, история проверок и алерты тоже удаляются.",
+        ),
+        (
+            "If another server uses this one as a ProxyJump host, that link is cleared.",
+            "Если другой сервер использует этот как ProxyJump, эта связь будет сброшена.",
+        ),
+        (
+            "The sing-box on the node itself is NOT touched",
+            "Сам sing-box на ноде НЕ затрагивается",
+        ),
+        (
+            "if the VPS stays running, stop or remove sing-box through the hosting provider",
+            "если VPS продолжает работать, останови или удали sing-box через консоль хостера.",
+        ),
+        (
+            "This server is the Telegram alert relay",
+            "Этот сервер пересылает алерты в Telegram",
+        ),
+        (
+            "Settings → Notifications → egress",
+            "Настройки → Уведомления → выход",
+        ),
+        (
+            "Deleting it breaks every alert send until you pick another relay or clear the setting.",
+            "После удаления отправка всех алертов перестанет работать, пока ты не выберешь другой сервер или не очистишь настройку.",
+        ),
+        ("Type the server-id ", "Введи ID сервера "),
+        (
+            "in the box below to confirm. Exact match — copy/paste counts.",
+            "в поле ниже для подтверждения. Нужно точное совпадение — можно скопировать и вставить.",
+        ),
+        ("confirm id", "подтверди ID"),
+        (
+            "Delete server s0 from the inventory permanently",
+            "Удалить сервер s0 из инвентаря навсегда",
+        ),
+        ("delete forever", "удалить навсегда"),
+        ("cancel", "отмена"),
+    ] {
+        assert!(en.contains(english), "missing English copy: {english}");
+        assert!(ru.contains(russian), "missing Russian copy: {russian}");
+        assert!(!ru.contains(english), "untranslated copy: {english}");
+    }
+    for html in [&en, &ru] {
+        assert!(html.contains(r#"action="/admin/servers/s0/delete""#));
+        assert!(html.contains(r#"name="confirm" required="required""#));
+    }
 }
 
 #[tokio::test]

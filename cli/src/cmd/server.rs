@@ -321,18 +321,29 @@ pub(crate) async fn run(
         }
 
         ServerCmd::Secret { server, key, value } => {
+            let value = if key.ends_with(".listen_port") {
+                let port = value.trim();
+                if !port.is_empty() && !matches!(port.parse::<u16>(), Ok(p) if p != 0) {
+                    anyhow::bail!("invalid listen port (1..=65535) for '{key}'");
+                }
+                port.to_string()
+            } else {
+                value
+            };
             let sid = ServerId(server.clone());
             if inv.get_server(&sid).await?.is_none() {
                 return Err(anyhow::anyhow!("no such server: {server}"));
             }
-            inv.set_server_secret(&sid, &key, &value).await?;
-            inv.audit(
-                "cli",
-                "server.secret.set",
-                Some(&server),
-                Some(&json!({ "key": key })),
-            )
-            .await?;
+            if inv.list_server_secrets(&sid).await?.get(&key) != Some(&value) {
+                inv.set_server_secret(&sid, &key, &value).await?;
+                inv.audit(
+                    "cli",
+                    "server.secret.set",
+                    Some(&server),
+                    Some(&json!({ "key": key })),
+                )
+                .await?;
+            }
             println!("set secret '{key}' on server '{server}'");
             Ok(())
         }
@@ -367,21 +378,17 @@ pub(crate) async fn run(
                      output of `ssh-keyscan -t ed25519 <host> | ssh-keygen -lf -` (the 2nd column)"
                 );
             }
-            let previous = server.trusted_host_fingerprint.clone();
-            inv.update_trusted_fingerprint(&sid, &fp).await?;
-            if previous.as_deref() != Some(fp.as_str()) {
-                inv.audit(
-                    "cli",
-                    "server.fingerprint.set",
-                    Some(&id),
-                    Some(&json!({
-                        "fingerprint": fp,
-                        "previous": previous,
-                        "source": if from_keyscan { "ssh-keyscan" } else { "operator-provided" },
-                    })),
-                )
-                .await?;
-            }
+            save_fingerprint(
+                &inv,
+                &server,
+                &fp,
+                if from_keyscan {
+                    "ssh-keyscan"
+                } else {
+                    "operator-provided"
+                },
+            )
+            .await?;
             println!("set trusted_host_fingerprint on server '{id}' to {fp}");
             Ok(())
         }
@@ -464,6 +471,17 @@ pub(crate) async fn run(
             Ok(())
         }
     }
+}
+
+pub(crate) async fn save_fingerprint(
+    inv: &SqliteInventory,
+    server: &Server,
+    fingerprint: &str,
+    source: &str,
+) -> anyhow::Result<()> {
+    inv.update_trusted_fingerprint_audited(&server.id, fingerprint, "cli", source)
+        .await?;
+    Ok(())
 }
 
 /// Parse a comma-separated port list into a sorted-dedup Vec<u16>.
@@ -614,6 +632,125 @@ mod tests {
         };
         inv.add_server(&server).await.unwrap();
         inv
+    }
+
+    #[tokio::test]
+    async fn server_secret_validates_listen_ports_before_mutation() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("inv.db");
+        let inv = setup_test_server(&db_path).await;
+        let sid = ServerId("s1".into());
+        for key in [
+            "vless.listen_port",
+            "vlessws.listen_port",
+            "wireguard.listen_port",
+        ] {
+            for value in ["abc", "0", "65536", "-1"] {
+                let error = run(
+                    ServerCmd::Secret {
+                        server: sid.0.clone(),
+                        key: key.into(),
+                        value: value.into(),
+                    },
+                    Some(db_path.clone()),
+                    OutputFormat::Text,
+                )
+                .await
+                .unwrap_err();
+                assert!(error.to_string().contains("1..=65535"), "{error}");
+            }
+        }
+        assert!(inv.list_server_secrets(&sid).await.unwrap().is_empty());
+        assert!(inv.recent_audit(10).await.unwrap().is_empty());
+
+        for value in ["1", " 65535 "] {
+            run(
+                ServerCmd::Secret {
+                    server: sid.0.clone(),
+                    key: "vless.listen_port".into(),
+                    value: value.into(),
+                },
+                Some(db_path.clone()),
+                OutputFormat::Text,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                inv.list_server_secrets(&sid).await.unwrap()["vless.listen_port"],
+                value.trim()
+            );
+        }
+        run(
+            ServerCmd::Secret {
+                server: sid.0.clone(),
+                key: "vless.listen_port".into(),
+                value: "65535".into(),
+            },
+            Some(db_path.clone()),
+            OutputFormat::Text,
+        )
+        .await
+        .unwrap();
+        for value in ["", "  "] {
+            run(
+                ServerCmd::Secret {
+                    server: sid.0.clone(),
+                    key: "vless.listen_port".into(),
+                    value: value.into(),
+                },
+                Some(db_path.clone()),
+                OutputFormat::Text,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                inv.list_server_secrets(&sid).await.unwrap()["vless.listen_port"],
+                ""
+            );
+        }
+        let audit = inv.recent_audit(10).await.unwrap();
+        assert_eq!(audit.len(), 3, "no audit on rejected values or a no-op");
+        assert!(audit.iter().all(|row| row.action == "server.secret.set"));
+    }
+
+    #[tokio::test]
+    async fn save_fingerprint_audits_changes_but_not_noops_or_invalid_values() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("inv.db");
+        let inv = setup_test_server(&db_path).await;
+        let sid = ServerId("s1".into());
+        let server = inv.get_server(&sid).await.unwrap().unwrap();
+        assert!(
+            save_fingerprint(&inv, &server, "invalid", "ssh-keyscan")
+                .await
+                .is_err()
+        );
+        assert!(inv.recent_audit(10).await.unwrap().is_empty());
+        let fp = format!("SHA256:{}", "A".repeat(43));
+        save_fingerprint(&inv, &server, &fp, "ssh-keyscan")
+            .await
+            .unwrap();
+        let pinned = inv.get_server(&sid).await.unwrap().unwrap();
+        assert_eq!(
+            pinned.trusted_host_fingerprint.as_deref(),
+            Some(fp.as_str())
+        );
+        save_fingerprint(&inv, &pinned, &fp, "ssh-keyscan")
+            .await
+            .unwrap();
+        let audit = inv.recent_audit(10).await.unwrap();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].actor, "cli");
+        assert_eq!(audit[0].action, "server.fingerprint.set");
+        assert_eq!(audit[0].target.as_deref(), Some("s1"));
+        assert_eq!(
+            audit[0].payload,
+            Some(json!({
+                "fingerprint": fp,
+                "previous": null,
+                "source": "ssh-keyscan",
+            }))
+        );
     }
 
     #[tokio::test]

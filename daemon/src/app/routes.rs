@@ -1,6 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use anyhow::Context;
 use axum::Router;
 use axum::extract::MatchedPath;
 use axum::http::Request;
@@ -89,6 +90,24 @@ pub(crate) fn admin_assets_dir() -> PathBuf {
     .into_iter()
     .find(|p| p.exists())
     .unwrap_or_else(|| PathBuf::from("daemon/assets"))
+}
+
+pub(super) fn validate_admin_assets(dir: &Path) -> anyhow::Result<()> {
+    for name in ["admin.js", "admin.css", "icons.svg", "favicon.svg"] {
+        let path = dir.join(name);
+        let file = std::fs::File::open(&path).with_context(|| {
+            format!(
+                "vpnctld refuses to start: required admin asset {} is missing or unreadable",
+                path.display()
+            )
+        })?;
+        anyhow::ensure!(
+            file.metadata()?.is_file(),
+            "vpnctld refuses to start: required admin asset {} is not a regular file",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn admin_router(state: AppState) -> Router {
@@ -479,5 +498,26 @@ pub(crate) fn admin_router(state: AppState) -> Router {
                 crate::handlers::auth::deny_all_misconfigured,
             ))
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_admin_assets_accepts_complete_directory_and_rejects_directory_as_file() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["admin.js", "admin.css", "icons.svg", "favicon.svg"] {
+            std::fs::write(dir.path().join(name), "test asset").unwrap();
+        }
+        validate_admin_assets(dir.path()).unwrap();
+
+        let js = dir.path().join("admin.js");
+        std::fs::remove_file(&js).unwrap();
+        std::fs::create_dir(&js).unwrap();
+        let err = validate_admin_assets(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("admin.js"), "{err}");
     }
 }

@@ -82,8 +82,12 @@ where RATE_SCALE  = 1_000_000
       MARKUP_SCALE = 10_000
 ```
 
-Intermediate arithmetic uses `i128` to prevent overflow. Result is rounded
-to nearest (half-up).
+Intermediate arithmetic uses checked `i128` operations. The implemented rule in
+`convert_minor` is `(wide + divisor / 2) / divisor`, using Rust integer division
+(truncation toward zero). For nonnegative monetary amounts this is rounding to
+nearest with ties up (half-up), not banker's rounding. This section owns the
+financial rounding contract; `monthly_equivalent` uses the same add-half-then-divide
+rule with the number of months as divisor.
 
 **Edge cases:**
 | Case | Behaviour |
@@ -169,6 +173,17 @@ ServerBillingSummaryItem  // Per-server line in summary
   with a warning listing the missing source currencies. Profit and cost
   coverage remain unavailable until every configured cost can be converted.
 
+### 2.7 Implemented exchange-rate refresh
+
+The running [exchange-rate poller](../../daemon/src/exchange_rate_poller.rs) is
+spawned during daemon startup. When `auto_refresh = 1`, it first refreshes after
+30 seconds and then every 12 hours. It fetches EUR-based pairs from Frankfurter,
+falling back to open.er-api.com; each HTTP request has a 20-second timeout.
+Failed refreshes preserve cached rates. Manual rate overrides in settings retain
+precedence over fetched table rows. The web refresh button invokes the same
+refresh function. This section owns the current ingestion contract;
+[exchange-rate-ingestion.md](exchange-rate-ingestion.md) is a historical proposal.
+
 ## 3. Verification Checklist (Definition of Done)
 
 - [x] Migration `0058_currency_exchange.sql` creates all three tables, FKs
@@ -185,4 +200,4 @@ ServerBillingSummaryItem  // Per-server line in summary
 - [x] `cargo check -p vpnctl-inventory` passes clean.
 - [x] `cargo test -p vpnctl-inventory --lib "servers::currency"` — 10/10 pass.
 - [ ] Web admin UI controls (future implementation per UI controls contract).
-- [ ] Daemon periodic rate fetch (when `auto_refresh = 1`, future task).
+- [x] Daemon periodic rate fetch (when `auto_refresh = 1`, as specified in §2.7).

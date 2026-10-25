@@ -1491,6 +1491,58 @@ fn remediation_requires_a_verified_healthy_probe() {
 }
 
 #[tokio::test]
+async fn scan_retries_busy_remediation_without_duplicate_alerts() {
+    let (_dir, inv) = fresh_inv().await;
+    let server = probeable_server("remediation-retry");
+    inv.add_server(&server).await.unwrap();
+    record_singbox_health(&inv, &server.id, true).await;
+    record_singbox_health(&inv, &server.id, false).await;
+    let held = crate::wizard_bootstrap::DeployGuard::try_acquire(&server.id.0).unwrap();
+    let mut attempts = std::collections::HashMap::new();
+
+    scan_once_inner(&inv, true, &mut attempts).await.unwrap();
+    let alerts = inv.recent_alerts(10, false).await.unwrap();
+    assert_eq!(alerts.len(), 1);
+    let alert_id = alerts[0].id;
+    let first_attempt = attempts[&alert_id];
+
+    scan_once_inner(&inv, true, &mut attempts).await.unwrap();
+    assert_eq!(attempts[&alert_id], first_attempt, "retry is rate limited");
+
+    let expired = std::time::Instant::now() - REMEDIATION_RETRY_INTERVAL;
+    attempts.insert(alert_id, expired);
+    // Retry even after the original transition leaves retained history.
+    inv.purge_node_health_older_than(0).await.unwrap();
+    record_singbox_health(&inv, &server.id, false).await;
+    scan_once_inner(&inv, true, &mut attempts).await.unwrap();
+    assert!(attempts[&alert_id] > expired, "open alert must be retried");
+    assert_eq!(inv.recent_alerts(10, true).await.unwrap().len(), 1);
+    let audit = inv.recent_audit(20).await.unwrap();
+    assert_eq!(audit.iter().filter(|a| a.action == "alert.fire").count(), 1);
+    assert!(!audit.iter().any(|a| a.action == "server.auto_remediate"));
+
+    drop(held);
+    let prepared = prepare_remediation(&inv, &server.id, Remediation::RestartSingbox).await;
+    assert!(
+        prepared.is_some(),
+        "released node lock must allow remediation"
+    );
+    drop(prepared);
+    record_singbox_health(&inv, &server.id, true).await;
+    attempts.insert(alert_id, expired);
+    scan_once_inner(&inv, true, &mut attempts).await.unwrap();
+    assert_eq!(inv.unacked_alert_count().await.unwrap(), 0);
+    assert!(
+        !inv.recent_audit(20)
+            .await
+            .unwrap()
+            .iter()
+            .any(|a| a.action == "server.auto_remediate"),
+        "recovered health must prevent a stale remote action"
+    );
+}
+
+#[tokio::test]
 async fn remediation_skips_a_busy_node_without_waiting() {
     let (_dir, inv) = fresh_inv().await;
     let server = probeable_server("remediation-busy");

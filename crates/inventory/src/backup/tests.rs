@@ -172,6 +172,64 @@ async fn restore_rejects_non_sqlite_file() {
     );
 }
 
+#[tokio::test]
+async fn restore_preserves_destination_owner_group_and_mode() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, chown};
+
+    let (dir, snapshot) = populated_snapshot().await;
+    let target = dir.path().join("restored.db");
+    std::fs::write(&target, b"old database").unwrap();
+    if target.metadata().unwrap().uid() == 0 {
+        chown(&target, Some(65534), Some(65534)).unwrap();
+    }
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let before = target.metadata().unwrap();
+    restore_from(&snapshot, &target).await.unwrap();
+    let after = target.metadata().unwrap();
+    assert_eq!(after.uid(), before.uid());
+    assert_eq!(after.gid(), before.gid());
+    assert_eq!(after.mode() & 0o7777, before.mode() & 0o7777);
+    let restored = SqliteInventory::open(&target).await.unwrap();
+    assert_eq!(restored.list_servers().await.unwrap().len(), 1);
+    restored.close().await;
+}
+
+#[tokio::test]
+async fn restore_without_destination_preserves_snapshot_mode() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let (dir, snapshot) = populated_snapshot().await;
+    std::fs::set_permissions(&snapshot, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let target = dir.path().join("new.db");
+    restore_from(&snapshot, &target).await.unwrap();
+    assert_eq!(target.metadata().unwrap().mode() & 0o7777, 0o640);
+}
+
+#[tokio::test]
+async fn verify_snapshot_warns_on_healthy_empty_inventory() {
+    let dir = tempfile::tempdir().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let snapshot = snapshot_now(&inv, dir.path()).await.unwrap();
+    let report = verify_snapshot(&snapshot).await.unwrap();
+    assert_eq!(report.overall, CheckStatus::Warn, "{report:?}");
+    for name in ["users_present", "servers_present"] {
+        let check = report
+            .checks
+            .iter()
+            .find(|check| check.name == name)
+            .unwrap();
+        assert_eq!(check.status, CheckStatus::Warn, "{check:?}");
+    }
+    assert!(
+        report
+            .checks
+            .iter()
+            .all(|check| check.status != CheckStatus::Fail)
+    );
+}
+
 async fn populated_snapshot() -> (tempfile::TempDir, std::path::PathBuf) {
     use vpnctl_core::{KernelId, ProtocolId, Server, ServerId, User, UserId};
     let dir = tempfile::tempdir().unwrap();

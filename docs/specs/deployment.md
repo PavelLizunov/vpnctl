@@ -85,12 +85,31 @@ configs containing private or preshared keys.
   Do not reintroduce an in-process SSH library without resolving the target
   glibc first.
 - **Trusted proxies.** Behind any reverse proxy set `VPNCTLD_TRUSTED_PROXIES`
-  in `/etc/vpnctl/vpnctld.env`; otherwise client IPs log as the proxy and the
-  suspicious-local-ip detector fires on every legit request. Security
+  in `/etc/vpnctl/vpnctld.env` as a comma-separated list of exact IPv4/IPv6
+  addresses or CIDR ranges, for example `127.0.0.1/32,10.0.0.0/8,::1/128`.
+  Surrounding whitespace is ignored; unset or whitespace-only values trust
+  no proxies. Invalid entries (including empty entries between commas) stop
+  startup with an error naming the bad entry. Without this setting, client
+  IPs log as the proxy and the suspicious-local-ip detector fires on every
+  legit request. Security
   invariant: once a proxy is trusted, `resolve_peer_real_ip` trusts its
   `X-Real-IP` — so every proxy block targeting vpnctld must authoritatively
   `header_up X-Real-IP {client_addr}`, and the site config must strip any
   client-supplied `X-Real-IP` before routing.
+- **Admin assets.** Startup requires readable regular files `admin.js`,
+  `admin.css`, `icons.svg`, and `favicon.svg` in the selected assets directory.
+  Selection uses the first existing path: `assets` relative to the working
+  directory, the build-time daemon crate's `assets`, then `daemon/assets`
+  relative to the working directory. An incomplete selected directory stops
+  startup with the missing file's path; it does not fall back to another
+  directory. Ship the full assets tree, including fonts (font loading retains
+  the stylesheet's fallback fonts).
+- **Deploy key readiness.** Startup reports the daemon deploy key ready only
+  after deriving its public key from the private key and checking that the
+  `.pub` file matches (comments may differ). A missing `.pub` is regenerated
+  without replacing the private key. An unreadable, invalid, or mismatched
+  pair produces a startup warning instead of a ready message; mismatched
+  files are not overwritten.
 - **Inventory snapshot directory.** The CLI backup commands, daemon hourly
   scheduler and Web snapshot creation, listing, download and self-test use
   `vpnctl_inventory::backup_dir_from_env()`: `VPNCTLD_BACKUP_DIR` overrides

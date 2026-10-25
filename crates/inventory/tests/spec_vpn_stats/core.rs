@@ -293,20 +293,16 @@ async fn purge_vpn_stats_older_than_boundary() {
         "recent row must survive purge_vpn_stats_older_than(30)"
     );
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let removed_all = inv.purge_vpn_stats_older_than(0).await.unwrap();
+    let removed = inv.purge_vpn_stats_older_than(0).await.unwrap();
     assert_eq!(
-        removed_all, 1,
-        "purge with days=0 must drop the single existing row, got removed={removed_all}"
+        removed, 0,
+        "even purge(0) must retain the incomplete UTC day"
     );
     let after = inv
         .recent_vpn_stats_for_user(&UserId("u1".into()), 24)
         .await
         .unwrap();
-    assert!(
-        after.is_empty(),
-        "after purging everything, the user query must return empty"
-    );
+    assert_eq!(after, still_there);
 }
 
 #[tokio::test]

@@ -51,6 +51,8 @@ pub fn deploy_key_path() -> std::path::PathBuf {
 pub const DEFAULT_BACKUP_DIR: &str = vpnctl_inventory::DEFAULT_BACKUP_DIR;
 
 pub async fn build(config: DaemonConfig) -> anyhow::Result<(Router, tokio::task::JoinHandle<()>)> {
+    crate::real_ip::init_trusted_proxies()?;
+    super::routes::validate_admin_assets(&super::routes::admin_assets_dir())?;
     let inv = SqliteInventory::open(&config.db_path).await?;
     let registry = Arc::new(build_registry()?);
 
@@ -60,7 +62,7 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<(Router, tokio::task:
             target = "vpnctld::startup",
             path = %deploy_key_path.display(),
             error = %e,
-            "deploy key auto-generation failed — web deploy + poller will fall back to logging warnings until resolved. Most common cause: vpnctld user lacks write access to /var/lib/vpnctl/.ssh/"
+            "deploy key initialization failed — web deploy + poller will fall back to logging warnings until resolved. Most common cause: vpnctld user lacks write access to /var/lib/vpnctl/.ssh/"
         );
     } else {
         tracing::info!(

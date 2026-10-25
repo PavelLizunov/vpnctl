@@ -1,5 +1,13 @@
 # Spec: S5 Google Flow via Iceland Hop
 
+**Status:** Historical workload-only deployment proposal, superseded for the
+client VPN chain by [client-detour.md](client-detour.md). That contract owns
+current role and grant requirements. A workload-only server remains excluded
+from grants/subscriptions; enabling a client chain requires an explicit operator
+transition to `vpn-exit` and grants. No role or grant is changed automatically.
+The proposal below describes the former workload-only arrangement, not additional
+requirements on the client chain.
+
 ## 1. Intent & Invariants
 - What: route S5 management and Google Flow workload only through Iceland; S5 is not a user VPN exit.
 - Invariants: pinned host keys on both SSH hops; grants/subscriptions exclude S5; Flow traffic has no direct fallback; DNS/QUIC/WebRTC/IPv4/IPv6 bypasses fail closed; no paid generation in automated verification.

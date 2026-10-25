@@ -1,4 +1,5 @@
 use crate::{OutputFormat, ui};
+use anyhow::Context;
 use qrcode::QrCode;
 use qrcode::render::unicode;
 use serde::Serialize;
@@ -133,18 +134,17 @@ async fn collect_links(
         let per_server_user = inv.user_with_per_server_uuid(user, &server.id).await?;
 
         for pid in protocols {
-            let Some(proto) = registry.protocol(pid) else {
-                eprintln!("warn: protocol '{pid}' not registered, skipping");
-                continue;
-            };
-            match proto.share_link(&ctx, &per_server_user) {
-                Ok(link) => entries.push(LinkEntry {
-                    server: server.id.0.clone(),
-                    protocol: pid.0.clone(),
-                    link,
-                }),
-                Err(e) => eprintln!("warn: cannot build link for {}/{}: {e}", server.id.0, pid.0),
-            }
+            let proto = registry
+                .protocol(pid)
+                .ok_or_else(|| anyhow::anyhow!("protocol '{pid}' not registered"))?;
+            let link = proto
+                .share_link(&ctx, &per_server_user)
+                .with_context(|| format!("cannot build link for {}/{}", server.id.0, pid.0))?;
+            entries.push(LinkEntry {
+                server: server.id.0.clone(),
+                protocol: pid.0.clone(),
+                link,
+            });
         }
     }
     Ok(entries)
@@ -237,6 +237,28 @@ mod tests {
             .await
             .unwrap();
         flatten(&t)
+    }
+
+    #[tokio::test]
+    async fn link_generation_errors_are_propagated() {
+        let (_dir, inv) = setup().await;
+        let user = inv
+            .get_user(&UserId("alice".into()))
+            .await
+            .unwrap()
+            .unwrap();
+        let registry = crate::registry::build().unwrap();
+        let error = collect_links(&inv, &registry, &user, false)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("cannot build link for de/"));
+        let empty_registry = Registry::new();
+        let error = collect_links(&inv, &empty_registry, &user, false)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("not registered"));
     }
 
     #[tokio::test]

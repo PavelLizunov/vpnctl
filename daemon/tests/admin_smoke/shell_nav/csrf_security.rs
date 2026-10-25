@@ -485,7 +485,7 @@ async fn admin_pages_contain_no_shell_command_instructions() {
     let backups = fetch_html(app, "/admin/settings/backups").await;
     for command in [
         "scripts/vpnctl-restore.sh /path/to/archive.tar.zst.age /path/to/vpnctl-backup-key.age",
-        "vpnctl restore /path/to/inv.db",
+        "vpnctl --db /var/lib/vpnctl/inv.db restore /path/to/inv.db",
         "systemctl restart vpnctld",
     ] {
         assert_eq!(
@@ -499,7 +499,10 @@ async fn admin_pages_contain_no_shell_command_instructions() {
             "scripts/vpnctl-restore.sh /path/to/archive.tar.zst.age /path/to/vpnctl-backup-key.age",
             "",
         )
-        .replace("vpnctl restore /path/to/inv.db", "")
+        .replace(
+            "vpnctl --db /var/lib/vpnctl/inv.db restore /path/to/inv.db",
+            "",
+        )
         .replace("systemctl restart vpnctld", "");
     for needle in needles {
         assert!(

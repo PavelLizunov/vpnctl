@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::OnceLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use boosty_api::api_client::ApiClient;
 use vpnctl_core::{User, UserId};
@@ -13,6 +14,7 @@ use crate::types::{ApplyMode, BridgeError, NewSubscriberInfo, SubscriberSnapshot
 
 const MAX_AUTO_PROVISION_PER_TICK: usize = 5;
 const SYNC_LEASE_SECS: i64 = 600;
+const SYNC_LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(200);
 
 fn sync_gate() -> &'static tokio::sync::Mutex<()> {
     static GATE: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -49,14 +51,39 @@ pub async fn sync_from_inventory(
         ));
     }
 
-    let result = match inv.get_boosty_settings().await {
-        Ok(settings) => sync_from_settings(inv, &settings, mode).await,
-        Err(error) => Err(error.into()),
+    let sync = async {
+        let settings = inv.get_boosty_settings().await?;
+        sync_from_settings(inv, &settings, mode).await
     };
+    let result = run_with_sync_lease(inv, &owner, sync, SYNC_LEASE_RENEW_INTERVAL).await;
     if let Err(error) = inv.release_boosty_sync_lease(&owner).await {
         tracing::warn!(target = "boosty_bridge", %error, "releasing Boosty sync lease failed");
     }
     result
+}
+
+async fn run_with_sync_lease(
+    inv: &SqliteInventory,
+    owner: &str,
+    sync: impl Future<Output = Result<SyncReport, BridgeError>>,
+    renew_interval: Duration,
+) -> Result<SyncReport, BridgeError> {
+    let mut renew = tokio::time::interval(renew_interval);
+    renew.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    renew.tick().await;
+    tokio::pin!(sync);
+    loop {
+        if !inv.renew_boosty_sync_lease(owner, SYNC_LEASE_SECS).await? {
+            return Err(BridgeError::Config("Boosty sync lease was lost".into()));
+        }
+        // Poll the sync first: with the tick first, a renewal that takes
+        // longer than the interval would keep the tick ready and starve it.
+        tokio::select! {
+            biased;
+            result = &mut sync => return result,
+            _ = renew.tick() => {}
+        }
+    }
 }
 
 pub async fn sync_from_settings_at(
@@ -451,6 +478,78 @@ async fn apply_disabled(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sync_renews_lease_before_polling_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inv.db");
+        let inv = SqliteInventory::open(&path).await.unwrap();
+        let other = SqliteInventory::open(&path).await.unwrap();
+        assert!(inv.acquire_boosty_sync_lease("first", 60).await.unwrap());
+
+        let sync = async {
+            assert!(
+                inv.recent_audit(10)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|row| row.action == "boosty.sync_lease.renewed")
+            );
+            assert!(!other.acquire_boosty_sync_lease("second", 60).await.unwrap());
+            Ok(SyncReport::default())
+        };
+        run_with_sync_lease(&inv, "first", sync, SYNC_LEASE_RENEW_INTERVAL)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn sync_does_not_apply_results_after_lease_takeover() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inv.db");
+        let inv = SqliteInventory::open(&path).await.unwrap();
+        let other = SqliteInventory::open(&path).await.unwrap();
+        assert!(inv.acquire_boosty_sync_lease("first", 60).await.unwrap());
+        inv.release_boosty_sync_lease("first").await.unwrap();
+        assert!(other.acquire_boosty_sync_lease("second", 60).await.unwrap());
+        let audits_before = inv.recent_audit(20).await.unwrap().len();
+
+        let sync = async {
+            inv.set_boosty_last_report("stale report").await?;
+            Ok(SyncReport::default())
+        };
+        let result = run_with_sync_lease(&inv, "first", sync, SYNC_LEASE_RENEW_INTERVAL).await;
+        assert!(matches!(result, Err(BridgeError::Config(_))));
+        assert!(inv.boosty_last_report().await.unwrap().is_none());
+        inv.release_boosty_sync_lease("first").await.unwrap();
+        assert!(!inv.acquire_boosty_sync_lease("third", 60).await.unwrap());
+        assert_eq!(inv.recent_audit(20).await.unwrap().len(), audits_before);
+    }
+
+    #[tokio::test]
+    async fn running_sync_stops_when_renewal_loses_ownership() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inv.db");
+        let inv = SqliteInventory::open(&path).await.unwrap();
+        let other = SqliteInventory::open(&path).await.unwrap();
+        assert!(inv.acquire_boosty_sync_lease("first", 60).await.unwrap());
+
+        let sync = async {
+            inv.release_boosty_sync_lease("first").await?;
+            assert!(other.acquire_boosty_sync_lease("second", 60).await.unwrap());
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            inv.set_boosty_last_report("stale report").await?;
+            Ok(SyncReport::default())
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            run_with_sync_lease(&inv, "first", sync, Duration::from_millis(10)),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(BridgeError::Config(_))));
+        assert!(inv.boosty_last_report().await.unwrap().is_none());
+    }
 
     #[tokio::test]
     async fn unlink_after_reconcile_skips_stale_enable_and_disable() {

@@ -170,6 +170,132 @@ async fn migrations_apply_and_tables_exist() -> Result<()> {
     Ok(())
 }
 
+async fn pre_0013_pool(path: &std::path::Path) -> Result<sqlx::SqlitePool> {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(path)
+                .create_if_missing(true),
+        )
+        .await?;
+    let legacy = sqlx::migrate::Migrator {
+        migrations: std::borrow::Cow::Owned(
+            migrator()
+                .iter()
+                .filter(|migration| migration.version < 13)
+                .cloned()
+                .collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    legacy.run(&pool).await?;
+    Ok(pool)
+}
+
+#[tokio::test]
+async fn pre_0013_duplicate_alerts_open_restore_and_verify() -> Result<()> {
+    for operation in ["open", "restore", "verify"] {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("legacy.db");
+        let pool = pre_0013_pool(&path).await?;
+        sqlx::query(
+            "INSERT INTO servers (id, address, ssh_user, hoster)
+             VALUES ('legacy', '192.0.2.1', 'root', 'generic')",
+        )
+        .execute(&pool)
+        .await?;
+        for server_id in [None, Some("legacy")] {
+            for (created_at, acked_at) in [
+                ("2026-01-03T00:00:00Z", None),
+                ("2026-01-01T00:00:00Z", None),
+                ("2026-01-03T00:00:00Z", None),
+                ("2026-01-04T00:00:00Z", Some("2026-01-05T00:00:00Z")),
+            ] {
+                sqlx::query(
+                    "INSERT INTO admin_alerts (kind, server_id, summary, created_at, acked_at)
+                     VALUES ('test.duplicate', ?1, 'test alert', ?2, ?3)",
+                )
+                .bind(server_id)
+                .bind(created_at)
+                .bind(acked_at)
+                .execute(&pool)
+                .await?;
+            }
+        }
+        pool.close().await;
+        let target = if operation == "restore" {
+            let target = dir.path().join("restored.db");
+            crate::backup::restore_from(&path, &target).await?;
+            target
+        } else {
+            if operation == "verify" {
+                let before = std::fs::read(&path).unwrap();
+                let report = crate::backup::verify_snapshot(&path).await?;
+                assert_ne!(report.overall, crate::backup::CheckStatus::Fail);
+                assert_eq!(std::fs::read(&path).unwrap(), before);
+            }
+            path
+        };
+        let inv = SqliteInventory::open(&target).await?;
+        let open: Vec<i64> =
+            sqlx::query_scalar("SELECT id FROM admin_alerts WHERE acked_at IS NULL ORDER BY id")
+                .fetch_all(inv.pool())
+                .await?;
+        assert_eq!(open, vec![3, 7], "{operation}");
+        let audit: String = sqlx::query_scalar(
+            "SELECT payload FROM audit_log WHERE action = 'migration.admin_alerts.deduplicate'",
+        )
+        .fetch_one(inv.pool())
+        .await?;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&audit)?,
+            json!({ "acked": 4 })
+        );
+        let acked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM admin_alerts WHERE acked_at = '2026-01-05T00:00:00Z'",
+        )
+        .fetch_one(inv.pool())
+        .await?;
+        assert_eq!(acked, 2);
+        let duplicate = sqlx::query(
+            "INSERT INTO admin_alerts (kind, summary) VALUES ('test.duplicate', 'test alert')",
+        )
+        .execute(inv.pool())
+        .await;
+        assert!(duplicate.is_err(), "0013 must still enforce uniqueness");
+        inv.close().await;
+        let reopened = SqliteInventory::open(&target).await?;
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'migration.admin_alerts.deduplicate'",
+        )
+        .fetch_one(reopened.pool())
+        .await?;
+        assert_eq!(audits, 1, "reopen must not audit a no-op");
+        reopened.close().await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn pre_0013_unique_alerts_do_not_write_deduplication_audit() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("legacy.db");
+    let pool = pre_0013_pool(&path).await?;
+    sqlx::query("INSERT INTO admin_alerts (kind, summary) VALUES ('test.unique', 'test alert')")
+        .execute(&pool)
+        .await?;
+    pool.close().await;
+    let inv = SqliteInventory::open(&path).await?;
+    let audits: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_log WHERE action = 'migration.admin_alerts.deduplicate'",
+    )
+    .fetch_one(inv.pool())
+    .await?;
+    assert_eq!(audits, 0);
+    Ok(())
+}
+
 #[tokio::test]
 async fn sub_fetch_without_traffic_flags_regression_then_clears() -> Result<()> {
     let inv = fresh().await;
@@ -1511,5 +1637,110 @@ async fn concurrent_revokes_audit_one_mutation_and_mark_server_pending() -> Resu
     assert_eq!(revokes[0].target.as_deref(), Some("alice"));
     assert_eq!(revokes[0].payload.as_ref().unwrap()["server"], "srv");
     assert_eq!(revokes[0].payload.as_ref().unwrap()["source"], "test");
+    Ok(())
+}
+
+#[tokio::test]
+async fn subscription_render_inputs_match_individual_lookups() -> Result<()> {
+    let inv = fresh().await;
+    let user = sample_user("reader");
+    let peer = sample_user("peer");
+    inv.add_user(&user).await?;
+    inv.add_user(&peer).await?;
+    for id in ["a", "b", "c"] {
+        let mut server = sample_server(id);
+        server
+            .enabled_protocols
+            .push(ProtocolId("wireguard".into()));
+        inv.add_server(&server).await?;
+        inv.grant(&user.id, &server.id).await?;
+        inv.grant(&peer.id, &server.id).await?;
+        inv.set_server_secret(&server.id, "vless.public_key", id)
+            .await?;
+    }
+    let a = ServerId("a".into());
+    let b = ServerId("b".into());
+    inv.set_grant_client_uuid(&user.id, &a, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        .await?;
+    inv.set_server_display_name(&a, Some("Custom label"))
+        .await?;
+    inv.set_server_udp_pair_enabled(&a, true).await?;
+    inv.set_server_protocol_hidden(&a, &ProtocolId("tuic-v5".into()), true)
+        .await?;
+    inv.set_grant_protocol_override(&user.id, &b, &ProtocolId("tuic-v5".into()), true)
+        .await?;
+    inv.set_client_detour_via_as("test", &ServerId("c".into()), Some(&a))
+        .await?;
+    inv.set_server_auto_suppress(&b, true).await?;
+    inv.set_server_suppressed(&b, true).await?;
+    let inputs = inv.subscription_render_inputs(&user.id, true).await?;
+    assert_eq!(
+        inputs
+            .iter()
+            .map(|i| i.server.id.0.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b", "c"]
+    );
+    for input in inputs {
+        let id = &input.server.id;
+        assert_eq!(input.suppressed, inv.is_server_auto_suppressed(id).await?);
+        assert_eq!(input.detour_via, inv.client_detour_via(id).await?);
+        assert_eq!(input.display_name, inv.server_display_name(id).await?);
+        assert_eq!(input.udp_pair, inv.is_server_udp_pair_enabled(id).await?);
+        assert_eq!(
+            Some(input.client_uuid),
+            inv.client_uuid_for(&user.id, id).await?
+        );
+        assert_eq!(
+            input.visible,
+            inv.visible_protocols_for_subscription(&user.id, id).await?
+        );
+        assert_eq!(input.secrets, inv.list_server_secrets(id).await?);
+        let expected = inv.users_for_server(id).await?;
+        assert_eq!(
+            serde_json::to_value(&input.peers)?,
+            serde_json::to_value(expected)?
+        );
+    }
+    assert!(
+        inv.subscription_render_inputs(&user.id, false)
+            .await?
+            .iter()
+            .all(|i| i.peers.is_empty())
+    );
+    assert!(
+        inv.subscription_render_inputs(&UserId("absent".into()), true)
+            .await?
+            .is_empty()
+    );
+    sqlx::query("DROP TABLE server_secrets")
+        .execute(inv.pool())
+        .await?;
+    assert!(
+        inv.subscription_render_inputs(&user.id, false)
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_address_lookups_ignore_access_log_and_do_not_need_a_write_lock() -> Result<()> {
+    let inv = fresh().await;
+    inv.add_server(&sample_server("node")).await?;
+    sqlx::query("ALTER TABLE sub_access_log RENAME TO unused_access_log")
+        .execute(inv.pool())
+        .await?;
+    sqlx::query("CREATE VIEW sub_access_log AS SELECT * FROM missing_access_log")
+        .execute(inv.pool())
+        .await?;
+    let tx = inv.pool().begin_with("BEGIN IMMEDIATE").await?;
+    assert_eq!(
+        inv.server_id_for_address("1.2.3.4").await?.as_deref(),
+        Some("node")
+    );
+    assert!(inv.is_known_server_address("1.2.3.4").await?);
+    assert_eq!(inv.server_id_for_address("192.0.2.1").await?, None);
+    tx.rollback().await?;
     Ok(())
 }

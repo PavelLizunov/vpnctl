@@ -280,3 +280,22 @@ important rows; implementers re-verify each row before fixing.
 | R5-33 | minor | specs | The running exchange-rate poller is still described as future work. |
 | R5-34 | minor | specs | Finance specs give different rounding rules. |
 | R5-35 | minor | README | README still promises the old Boosty grant behaviour. |
+
+### Round 5 fix status
+
+Wave 5 (branch `fix/codex-wave5-20261025`): R5-01..16, 18..35 fixed by eight
+Codex implementers, integrated and reviewed by the lead plus four diff-only
+reviewers. R5-17 skipped: the address lookups already read `servers`, not the
+access log, and the duplicate check must stay inside the registration
+transaction (a test now pins both). Lead changes on top: the node-health
+sequence migration is 0064 (two groups both picked 0062); the hourly purge
+rolls up only the days it is about to delete, and missed retained days are
+caught up once at daemon start; a fresh restore takes the owner of the DB directory; the CLI TOFU
+fingerprint save and its audit row share one transaction; the Boosty lease
+renewal polls the sync before its timer so a slow renewal cannot starve it;
+the "all" traffic window counts cells from the truncated oldest bucket.
+Kept by design: `vpnctl user disable` tells the operator which servers still
+need `vpnctl deploy` rather than deploying itself (the web action redeploys).
+Not deployed. Before deploying, check that `VPNCTLD_TRUSTED_PROXIES` in
+`/etc/vpnctl/vpnctld.env` parses (IPs or CIDRs): the daemon now refuses to
+start on a bad entry instead of silently ignoring it.
