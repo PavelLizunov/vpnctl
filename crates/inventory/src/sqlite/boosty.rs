@@ -174,14 +174,35 @@ impl SqliteInventory {
         .await;
         map_unique(inserted, format!("user {}", user.id.0))?;
 
-        let grants = sqlx::query(
-            "INSERT INTO grants (user_id, server_id, granted_at)
-             SELECT ?1, id, datetime('now') FROM servers WHERE role = 'vpn-exit'",
-        )
-        .bind(&user.id.0)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
+        let servers: Vec<(String,)> =
+            sqlx::query_as("SELECT id FROM servers WHERE role = 'vpn-exit' ORDER BY id")
+                .fetch_all(&mut *tx)
+                .await?;
+        let mut grants = 0;
+        for (server,) in servers {
+            let server = vpnctl_core::ServerId(server);
+            let octet = Self::next_wg_octet(&mut tx, &server).await?;
+            grants += sqlx::query(
+                "INSERT INTO grants (user_id, server_id, granted_at, wg_octet)
+                 VALUES (?1, ?2, datetime('now'), ?3)",
+            )
+            .bind(&user.id.0)
+            .bind(&server.0)
+            .bind(octet.map(i64::from))
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            sqlx::query(
+                "INSERT INTO audit_log (actor, action, target, payload)
+                 VALUES ('boosty', 'user.grant', ?1,
+                         json_object('server', ?2, 'source', 'boosty', 'wg_octet', ?3))",
+            )
+            .bind(&user.id.0)
+            .bind(&server.0)
+            .bind(octet.map(i64::from))
+            .execute(&mut *tx)
+            .await?;
+        }
         tx.commit().await?;
         Ok(grants)
     }

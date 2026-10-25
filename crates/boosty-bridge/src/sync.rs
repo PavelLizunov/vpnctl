@@ -144,16 +144,15 @@ pub async fn sync_from_settings_at(
             settings.auto_create_users,
         )
         .await;
-        if result.is_ok() {
-            if let Some(stale_token) = settings.access_token.as_deref() {
-                if let Err(e) = inv.clear_boosty_access_token(stale_token).await {
-                    tracing::warn!(
-                        target = "boosty_bridge",
-                        error = %e,
-                        "clearing stale access token after refresh recovery failed"
-                    );
-                }
-            }
+        if result.is_ok()
+            && let Some(stale_token) = settings.access_token.as_deref()
+            && let Err(e) = inv.clear_boosty_access_token(stale_token).await
+        {
+            tracing::warn!(
+                target = "boosty_bridge",
+                error = %e,
+                "clearing stale access token after refresh recovery failed"
+            );
         }
     }
 
@@ -326,8 +325,6 @@ pub async fn sync_once_with_policy(
         ..Default::default()
     };
 
-    let suppress_disables =
-        !links.is_empty() && (subscribers.is_empty() || (active_count == 0 && excluded_unpaid > 0));
     let linked_by_user: HashMap<&str, &LinkedUser> = links
         .iter()
         .map(|link| (link.user_id.as_str(), link))
@@ -340,7 +337,12 @@ pub async fn sync_once_with_policy(
                     apply_disabled(inv, &mut report, link, false, mode).await;
                 }
             }
-            Action::Disable { user_id } if suppress_disables => {
+            Action::Disable { user_id }
+                if active_count == 0
+                    && linked_by_user.get(user_id.as_str()).is_some_and(|link| {
+                        !subscriber_by_id.contains_key(&link.subscriber_id)
+                    }) =>
+            {
                 report.suppressed_disables.push(user_id);
             }
             Action::Disable { user_id } => match mode {
@@ -388,7 +390,7 @@ pub async fn sync_once_with_policy(
             target = "boosty_bridge",
             users = ?report.suppressed_disables,
             total_subscribers = subscribers.len(),
-            "roster yielded ZERO vpn-eligible subscribers — suppressed all disables (blog_url typo, expired token, or Boosty price serialization quirk?)"
+            "roster yielded zero VPN-eligible subscribers — suppressed disables for absent subscribers"
         );
     }
 

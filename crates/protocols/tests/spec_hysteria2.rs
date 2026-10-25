@@ -6,7 +6,7 @@ use serde_json::Value;
 use vpnctl_core::{
     DpiRisk, KernelId, Protocol, ProtocolId, RenderCtx, Server, ServerId, User, UserId,
 };
-use vpnctl_protocols::Hysteria2;
+use vpnctl_protocols::{AnyTls, Hysteria2, Trojan, TuicV5};
 
 fn srv() -> Server {
     Server {
@@ -38,6 +38,71 @@ fn user(name: &str, pw: Option<&str>) -> User {
 
 fn ctx_with<'a>(server: &'a Server, secrets: &'a HashMap<String, String>) -> RenderCtx<'a> {
     RenderCtx::new(server, secrets)
+}
+
+#[test]
+fn certificate_pin_share_links_and_legacy_client_json_byte_equal() {
+    let server = srv();
+    let user = user("alice", Some("pw1"));
+    let protocol = Hysteria2::new();
+    let pin = "ab".repeat(32);
+    for obfs in [false, true] {
+        let mut secrets = HashMap::new();
+        let obfs_suffix = if obfs {
+            secrets.insert("hysteria2.obfs.password".into(), "obfs-pass".into());
+            "&obfs=salamander&obfs-password=obfs-pass"
+        } else {
+            ""
+        };
+        let legacy = format!(
+            "hysteria2://pw1@203.0.113.7:8444/?sni=203.0.113.7&insecure=1{obfs_suffix}#alice"
+        );
+        let ctx = ctx_with(&server, &secrets);
+        assert_eq!(
+            protocol.share_link(&ctx, &user).unwrap().as_bytes(),
+            legacy.as_bytes()
+        );
+        let client = serde_json::to_vec(&protocol.client_config(&ctx, &user).unwrap()).unwrap();
+        let inbound = serde_json::to_vec(&protocol.server_inbound(&ctx, &[]).unwrap()).unwrap();
+        secrets.insert("tls.cert_sha256".into(), pin.clone());
+        let ctx = ctx_with(&server, &secrets);
+        let pinned = format!(
+            "hysteria2://pw1@203.0.113.7:8444/?sni=203.0.113.7&insecure=1{obfs_suffix}&pinSHA256={pin}#alice"
+        );
+        assert_eq!(
+            protocol.share_link(&ctx, &user).unwrap().as_bytes(),
+            pinned.as_bytes()
+        );
+        assert_eq!(
+            serde_json::to_vec(&protocol.client_config(&ctx, &user).unwrap()).unwrap(),
+            client
+        );
+        assert_eq!(
+            serde_json::to_vec(&protocol.server_inbound(&ctx, &[]).unwrap()).unwrap(),
+            inbound
+        );
+    }
+}
+
+#[test]
+fn certificate_pin_keeps_other_tls_protocol_links_and_json_byte_equal() {
+    let server = srv();
+    let user = user("alice", Some("pw1"));
+    let mut secrets = HashMap::new();
+    let protocols: [&dyn Protocol; 3] = [&Trojan::new(), &AnyTls::new(), &TuicV5::new()];
+    for protocol in protocols {
+        secrets.clear();
+        let ctx = ctx_with(&server, &secrets);
+        let link = protocol.share_link(&ctx, &user).unwrap().into_bytes();
+        let client = serde_json::to_vec(&protocol.client_config(&ctx, &user).unwrap()).unwrap();
+        secrets.insert("tls.cert_sha256".into(), "ab".repeat(32));
+        let ctx = ctx_with(&server, &secrets);
+        assert_eq!(protocol.share_link(&ctx, &user).unwrap().into_bytes(), link);
+        assert_eq!(
+            serde_json::to_vec(&protocol.client_config(&ctx, &user).unwrap()).unwrap(),
+            client
+        );
+    }
 }
 
 #[test]

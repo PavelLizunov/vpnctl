@@ -213,10 +213,25 @@ client/core that still honors this option; compatibility with versions that
 reject it is not guaranteed. Removing the option alone cannot make a
 self-signed certificate trusted.
 
-vpnctl stores the node's TLS certificate paths, not its certificate fingerprint,
-so it cannot currently export a pinned-certificate Trojan link. The stored SSH
-host fingerprint is unrelated. If the client rejects this link, select another
-issued protocol supported by that client. The Mihomo subscription omits Trojan.
+Deploying or redeploying sing-box collects the node certificate's SHA-256
+fingerprint over the existing SSH connection and stores it as `tls.cert_sha256`.
+The stored SSH host fingerprint is unrelated. Certificate collection preserves
+the certificate, existing credentials and insecure flags; already imported
+profiles keep working. Refresh the subscription after deployment to obtain pins.
+
+The Mihomo subscription adds `fingerprint` for Hysteria2, Trojan, AnyTLS and TUIC
+when the pin exists. Trojan, AnyTLS and TUIC remain omitted on nodes without a
+collected pin, preserving the previous subscription output. Hysteria2 share
+links add `pinSHA256` as 64 lowercase hex characters without colons, alongside
+`insecure=1`, as supported by the
+[official Hysteria 2 URI scheme](https://v2.hysteria.network/docs/developers/URI-Scheme/).
+
+Trojan, AnyTLS and TUIC share links retain their existing format. Sing-box JSON
+exports do not add pin fields because older Hiddify/sing-box versions reject
+unknown fields. The app-config JSON wrapper keeps its existing fields; its
+embedded Hysteria2 URI receives the pin. If a client rejects a Trojan link,
+select another issued protocol supported by that client or import the pinned
+Mihomo subscription in a compatible client.
 
 ### 1. Как обновить список серверов (если добавился новый сервер или изменился адрес)?
 * В **Happ / Hiddify**: проведите пальцем сверху вниз по списку серверов для обновления или нажмите значок стрелочек обновления рядом с подпиской.

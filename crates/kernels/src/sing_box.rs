@@ -96,10 +96,10 @@ impl Kernel for SingBox {
         ssh.exec(&sing_box_setup_script(ssh.target_port())).await?;
 
         let check_cmd = "sha256sum /usr/bin/sing-box /usr/local/libexec/vpnctl/singbox-stats-helper 2>/dev/null; systemctl is-active --quiet sing-box 2>/dev/null && echo 'active' || true";
-        if let Ok(output) = ssh.exec(check_cmd).await {
-            if is_artifact_up_to_date(&output, &sb_digest, &sh_digest) {
-                return Ok(());
-            }
+        if let Ok(output) = ssh.exec(check_cmd).await
+            && is_artifact_up_to_date(&output, &sb_digest, &sh_digest)
+        {
+            return Ok(());
         }
 
         let (remote_sing_box, remote_stats_helper) = remote_artifact_paths();
@@ -302,6 +302,25 @@ impl Kernel for SingBox {
         Ok(())
     }
 
+    async fn deployed_server_secrets(
+        &self,
+        ssh: &dyn SshTransport,
+        ctx: &RenderCtx<'_>,
+    ) -> Result<Vec<(String, String)>> {
+        let path = vpnctl_core::shell::single_quote(
+            ctx.or_default("tuic.cert_path", "/etc/sing-box/cert.pem"),
+        );
+        let output = ssh
+            .exec(&format!(
+                "openssl x509 -in {path} -noout -fingerprint -sha256"
+            ))
+            .await?;
+        let fingerprint = parse_cert_sha256(&output).ok_or_else(|| {
+            CoreError::Transport("invalid node TLS certificate SHA-256 fingerprint".into())
+        })?;
+        Ok(vec![("tls.cert_sha256".into(), fingerprint)])
+    }
+
     async fn status(&self, ssh: &dyn SshTransport) -> Result<KernelStatus> {
         let active = ssh
             .exec("systemctl is-active sing-box 2>/dev/null || true")
@@ -320,6 +339,22 @@ impl Kernel for SingBox {
             uptime_seconds: None,
         })
     }
+}
+
+fn parse_cert_sha256(output: &str) -> Option<String> {
+    let line = output.strip_suffix('\n').unwrap_or(output);
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    let digest = line
+        .strip_prefix("sha256 Fingerprint=")
+        .or_else(|| line.strip_prefix("SHA256 Fingerprint="))?;
+    if digest.len() != 95
+        || !digest
+            .split(':')
+            .all(|octet| octet.len() == 2 && octet.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return None;
+    }
+    Some(digest.replace(':', "").to_ascii_lowercase())
 }
 
 pub(crate) fn is_artifact_up_to_date(

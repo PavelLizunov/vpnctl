@@ -331,7 +331,7 @@ each row before fixing.
 | R6-20 | minor | Telegram | The bot token is interpolated into a curl config without an alphabet check (admin-only injection of curl directives). |
 | R6-21 | minor | Telegram | A digest over 4096 characters is rejected whole and the manual button still reports success. |
 
-Disputed decisions, evaluated and left as they are (owner decisions):
+Disputed decisions, evaluated (the owner later asked to fix them; see wave 7):
 
 - Empty subscription falls back to `direct` / `DIRECT` (spec-pinned); a
   fail-closed `block`/`REJECT` would change the byte contract for existing clients.
@@ -366,3 +366,29 @@ accepts relative paths; Flow A keeps the `/sub/<token>` path on the public
 base. Upgrade note: existing admin session cookies are invalidated once
 (R6-06); Xray configs become `root:xray 0640` in a root-owned directory.
 Script and docs regression tests (`scripts/tests`) now run in CI.
+
+## Wave 7 (2026-10-25): disputed decisions resolved
+
+The owner asked to fix the disputed items. Seven Codex implementers worked to
+a lead-written design, then the lead integrated, ran the pinned client cores
+and four diff-only reviewers.
+
+| ID | Item | Resolution |
+|---|---|---|
+| D7-01 | CDX-10 shared SS2022 PSK | Per-server `ss2022.mode`: `shared` (default, byte-identical) or `multi-user` (SIP022 EIH, user key = HMAC of the server PSK and the user's UUID). Switched per server in the web UI; users re-import after the next deploy. An empty user list renders a placeholder user with an independent random secret (`ss2022.no_users_psk`): with no users sing-box would otherwise fall back to single-user mode and accept every old shared link (reproduced with sing-box 1.14.2). |
+| D7-02 | CDX-11 WG addresses by index | `grants.wg_octet` (migration 0066) backfilled to today's index addresses; new grants take the lowest free octet, disabled users keep theirs, revoke frees it. A full /24 still grants (other protocols work); only WireGuard rendering for that grant waits for a free slot. |
+| D7-03 | R4-16 `allowInsecure` | After deploy the node certificate SHA-256 is stored (`tls.cert_sha256`). Mihomo proxies carry `fingerprint`, Hysteria2 links `pinSHA256`; verified with mihomo 1.19.15 (right pin connects, wrong pin is refused). sing-box JSON is unchanged: older clients reject unknown fields. |
+| D7-04 | Empty subscription `direct` | Empty sing-box configs end in `block`, empty Mihomo configs in `REJECT`; non-empty bytes unchanged (validated with sing-box 1.14.2 and mihomo). |
+| D7-05 | CDX-28 log IP | Access logs use the trusted resolver's IP, not the leftmost XFF. |
+| D7-06 | Boosty zero-paid guard | A subscriber present in the roster with a free status is a confirmed downgrade and is disabled after grace; absent subscribers and empty rosters stay protected. |
+| D7-07 | R5-04 CLI disable | `vpnctl user disable/enable --deploy` applies the change to the listed servers. |
+| D7-08 | CDX-04 migration 0043 | Migration 0067 corrects only untouched seeds (the `T23:59:59.999Z` marker plus equal totals and other hours that day). |
+| D7-09 | R1-2 restart heuristic | The stats collection reports `boot_id` + sing-box start time (migration 0068); a changed generation counts as a restart. Old rows keep the heuristic. |
+| D7-10 | CDX-64 Telegram | Delivery state persists (migration 0069); undelivered open alerts are retried with 1 min–1 h backoff for 24 h. |
+| D7-11 | MSRV | `rust-version = "1.88"`; the newly enabled clippy lints are fixed. |
+
+Lead changes on top of the implementers: the placeholder secret above; the
+low-level `grant()` stays unaudited (only `grant_audited` audits); a full WG
+subnet no longer blocks grants; migration 0067 requires the seed marker and
+indexes its temporary table; Flow A tests lift the per-token rate limit.
+Not deployed.

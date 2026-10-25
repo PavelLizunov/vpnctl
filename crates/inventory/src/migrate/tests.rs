@@ -745,3 +745,40 @@ async fn import_without_overwrite_keeps_an_existing_pinned_grant_uuid() {
     );
     assert_eq!(inv.recent_audit(100).await.unwrap().len(), audit_before);
 }
+
+#[tokio::test]
+async fn import_assigns_wg_octets_and_overwrite_preserves_existing_reservations() {
+    use vpnctl_core::{ServerId, UserId};
+
+    let inv = open_test_inv().await;
+    let bob = plan_with_one_user("srv-a", "bob", "uuid-bob");
+    apply_migration_plan(&inv, &bob, false).await.unwrap();
+    for server in ["srv-a", "srv-b"] {
+        let plan = plan_with_one_user(server, "alice", "uuid-alice");
+        apply_migration_plan(&inv, &plan, false).await.unwrap();
+    }
+    inv.revoke(&UserId("bob".into()), &ServerId("srv-a".into()))
+        .await
+        .unwrap();
+    let before: Vec<(String, Option<i64>)> = sqlx::query_as(
+        "SELECT server_id, wg_octet FROM grants WHERE user_id = 'alice' ORDER BY server_id",
+    )
+    .fetch_all(&inv.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        before,
+        vec![("srv-a".into(), Some(3)), ("srv-b".into(), Some(2))]
+    );
+    let replacement = plan_with_one_user("srv-a", "alice", "uuid-alice-replaced");
+    apply_migration_plan(&inv, &replacement, true)
+        .await
+        .unwrap();
+    let after: Vec<(String, Option<i64>)> = sqlx::query_as(
+        "SELECT server_id, wg_octet FROM grants WHERE user_id = 'alice' ORDER BY server_id",
+    )
+    .fetch_all(&inv.pool)
+    .await
+    .unwrap();
+    assert_eq!(before, after);
+}

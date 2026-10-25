@@ -273,8 +273,8 @@ pub(crate) async fn alert_ack(
         Ok(b) => b,
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
-    if changed {
-        if let Err(e) = state
+    if changed
+        && let Err(e) = state
             .inv
             .audit(
                 "admin",
@@ -283,14 +283,13 @@ pub(crate) async fn alert_ack(
                 Some(&serde_json::json!({"alert_id": id})),
             )
             .await
-        {
-            tracing::warn!(
-                target = "vpnctld::admin::alert_ack",
-                alert_id = id,
-                error = %e,
-                "ack succeeded but audit row failed; timeline will be missing this entry"
-            );
-        }
+    {
+        tracing::warn!(
+            target = "vpnctld::admin::alert_ack",
+            alert_id = id,
+            error = %e,
+            "ack succeeded but audit row failed; timeline will be missing this entry"
+        );
     }
     Redirect::to("/admin/alerts").into_response()
 }
@@ -326,8 +325,8 @@ pub(crate) async fn alert_ack_all(State(state): State<AppState>) -> Response {
         Ok(n) => n,
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
-    if count > 0 {
-        if let Err(e) = state
+    if count > 0
+        && let Err(e) = state
             .inv
             .audit(
                 "admin",
@@ -336,14 +335,13 @@ pub(crate) async fn alert_ack_all(State(state): State<AppState>) -> Response {
                 Some(&serde_json::json!({ "count": count })),
             )
             .await
-        {
-            tracing::warn!(
-                target = "vpnctld::admin::alert_ack_all",
-                count = count,
-                error = %e,
-                "ack-all succeeded but audit row failed; timeline will be missing this entry"
-            );
-        }
+    {
+        tracing::warn!(
+            target = "vpnctld::admin::alert_ack_all",
+            count = count,
+            error = %e,
+            "ack-all succeeded but audit row failed; timeline will be missing this entry"
+        );
     }
     Redirect::to("/admin/alerts").into_response()
 }

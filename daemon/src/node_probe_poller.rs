@@ -7,7 +7,8 @@ mod scheduler;
 mod tests;
 
 pub(crate) use alerts::{
-    audit_alert_fire, auto_ack, push_alert, recover_alert, send_digest, server_subject,
+    audit_alert_fire, auto_ack, push_alert, recover_alert, retry_alert_deliveries, send_digest,
+    server_subject,
 };
 pub use alerts::{build_alert_sink, dispatch_alerts};
 pub(crate) use fail_state::DEFAULT_UNREACHABLE_THRESHOLD;

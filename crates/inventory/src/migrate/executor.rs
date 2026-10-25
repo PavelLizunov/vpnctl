@@ -224,14 +224,22 @@ async fn import_grant(
             "imported UUID conflicts with another user on the importing server".into(),
         ));
     }
+    let octet = if existing.is_none() {
+        SqliteInventory::next_wg_octet(&mut tx, server)
+            .await?
+            .map(i64::from)
+    } else {
+        None
+    };
     sqlx::query(
-        "INSERT INTO grants (user_id, server_id, client_uuid, granted_at)
-         VALUES (?1, ?2, ?3, datetime('now'))
+        "INSERT INTO grants (user_id, server_id, client_uuid, granted_at, wg_octet)
+         VALUES (?1, ?2, ?3, datetime('now'), ?4)
          ON CONFLICT(user_id, server_id) DO UPDATE SET client_uuid = excluded.client_uuid",
     )
     .bind(&user.0)
     .bind(&server.0)
     .bind(client_uuid)
+    .bind(octet)
     .execute(&mut *tx)
     .await?;
     let (action, payload) = match &existing {
@@ -243,7 +251,10 @@ async fn import_grant(
                 "new_client_uuid_set": client_uuid.is_some(),
             }),
         ),
-        None => ("user.grant", serde_json::json!({ "server": server.0 })),
+        None => (
+            "user.grant",
+            serde_json::json!({ "server": server.0, "wg_octet": octet }),
+        ),
     };
     sqlx::query(
         "INSERT INTO audit_log (actor, action, target, payload) VALUES ('migrate', ?1, ?2, ?3)",
@@ -269,8 +280,9 @@ async fn replace_user(
         _ => vpnctl_crypto::gen_sub_token().map_err(SqliteInventoryError::CryptoIo)?,
     };
     let mut tx = inv.pool.begin_with("BEGIN IMMEDIATE").await?;
-    let grants: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT g.server_id, COALESCE(g.client_uuid, u.uuid), g.created_at, g.granted_at
+    type PreservedGrant = (String, String, String, Option<String>, Option<i64>);
+    let grants: Vec<PreservedGrant> = sqlx::query_as(
+        "SELECT g.server_id, COALESCE(g.client_uuid, u.uuid), g.created_at, g.granted_at, g.wg_octet
          FROM grants g JOIN users u ON u.id = g.user_id
          WHERE g.user_id = ?1 ORDER BY g.server_id",
     )
@@ -279,7 +291,7 @@ async fn replace_user(
     .await?;
     if grants
         .iter()
-        .any(|(server, _, _, _)| server == &importing_server.0)
+        .any(|(server, _, _, _, _)| server == &importing_server.0)
     {
         let collision: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM grants g JOIN users u ON u.id = g.user_id
@@ -317,18 +329,19 @@ async fn replace_user(
     .execute(&mut *tx)
     .await?;
     let mut preserved = Vec::with_capacity(grants.len());
-    for (server, uuid, created_at, granted_at) in grants {
+    for (server, uuid, created_at, granted_at, wg_octet) in grants {
         let importing = server == importing_server.0;
         let uuid = if importing { user.uuid.clone() } else { uuid };
         sqlx::query(
-            "INSERT INTO grants (user_id, server_id, client_uuid, created_at, granted_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO grants (user_id, server_id, client_uuid, created_at, granted_at, wg_octet)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )
         .bind(&user.id.0)
         .bind(&server)
         .bind(uuid)
         .bind(created_at)
         .bind(granted_at)
+        .bind(wg_octet)
         .execute(&mut *tx)
         .await?;
         if !importing {

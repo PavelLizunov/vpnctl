@@ -63,11 +63,11 @@ impl WizardStore {
         let Ok(mut g) = self.inner.lock() else {
             return None;
         };
-        if let Some(s) = g.get(id) {
-            if s.created.elapsed() > SESSION_TTL {
-                g.remove(id);
-                return None;
-            }
+        if let Some(s) = g.get(id)
+            && s.created.elapsed() > SESSION_TTL
+        {
+            g.remove(id);
+            return None;
         }
         g.get(id).cloned()
     }

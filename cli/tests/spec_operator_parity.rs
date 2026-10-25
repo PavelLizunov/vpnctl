@@ -281,6 +281,7 @@ async fn user_disable_enable_reports_only_pending_granted_deploys() {
         let help = command(&temp, ["user", action, "--help"]).output().unwrap();
         assert!(help.status.success(), "{}", text(&help));
         assert!(text(&help).contains("Deploy the listed servers"));
+        assert!(text(&help).contains("--deploy"));
         let output = command(&temp, ["user", action, "alice"]).output().unwrap();
         assert!(output.status.success(), "{}", text(&output));
         let stdout = String::from_utf8(output.stdout).unwrap();
@@ -319,6 +320,87 @@ async fn user_disable_enable_reports_only_pending_granted_deploys() {
         let deployed = command(&temp, ["user", action, "alice"]).output().unwrap();
         assert!(deployed.status.success(), "{}", text(&deployed));
         assert!(!text(&deployed).contains("vpnctl deploy"));
+    }
+}
+
+#[tokio::test]
+async fn user_disable_enable_deploys_only_pending_granted_servers_and_reports_failures() {
+    use vpnctl_core::{ServerId, UserId};
+
+    let temp = TempDir::new("user-immediate-deploy");
+    // Unsupported protocols fail validation before any SSH connection.
+    let inv = setup_granted_server(&temp, &[MISSING_PROTOCOL]).await;
+    let uid = UserId("alice".into());
+    let template = inv
+        .get_server(&ServerId("node".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    for (id, address, granted) in [
+        ("second", "203.0.113.11", true),
+        ("applied", "203.0.113.12", true),
+        ("unrelated", "203.0.113.13", false),
+    ] {
+        let mut server = template.clone();
+        server.id = ServerId(id.into());
+        server.address = address.into();
+        inv.add_server(&server).await.unwrap();
+        if granted {
+            inv.grant(&uid, &server.id).await.unwrap();
+        }
+    }
+
+    for (action, disabled) in [("disable", true), ("enable", false)] {
+        let audit_count = inv.recent_audit(100).await.unwrap().len();
+        let saved = command(&temp, ["user", action, "alice", "--deploy"])
+            .env("VPNCTLD_NODE_LOCK_DIR", temp.path().join("locks"))
+            .output()
+            .unwrap();
+        assert!(!saved.status.success(), "{}", text(&saved));
+        assert!(text(&saved).contains(MISSING_PROTOCOL), "{}", text(&saved));
+        assert_eq!(inv.recent_audit(100).await.unwrap().len(), audit_count + 1);
+        inv.audit("cli", "server.deploy", Some("applied"), None)
+            .await
+            .unwrap();
+        let audit_count = inv.recent_audit(100).await.unwrap().len();
+
+        let output = command(&temp, ["user", action, "alice", "--deploy"])
+            .env("VPNCTLD_NODE_LOCK_DIR", temp.path().join("locks"))
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{}", text(&output));
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains(MISSING_PROTOCOL), "{stderr}");
+        for id in ["node", "second"] {
+            assert!(
+                stdout.contains(&format!("  vpnctl deploy {id}\n")),
+                "{stdout}"
+            );
+            assert!(stderr.contains(&format!("{id}:")), "{stderr}");
+        }
+        for id in ["applied", "unrelated"] {
+            assert!(!stdout.contains(&format!("vpnctl deploy {id}")), "{stdout}");
+            assert!(!stderr.contains(&format!("{id}:")), "{stderr}");
+        }
+        assert_eq!(
+            inv.get_user(&uid).await.unwrap().unwrap().disabled,
+            disabled
+        );
+        assert_eq!(inv.recent_audit(100).await.unwrap().len(), audit_count);
+
+        for id in ["node", "second"] {
+            inv.audit("cli", "server.deploy", Some(id), None)
+                .await
+                .unwrap();
+        }
+        let audit_count = inv.recent_audit(100).await.unwrap().len();
+        let applied = command(&temp, ["user", action, "alice", "--deploy"])
+            .output()
+            .unwrap();
+        assert!(applied.status.success(), "{}", text(&applied));
+        assert!(!text(&applied).contains("vpnctl deploy"));
+        assert_eq!(inv.recent_audit(100).await.unwrap().len(), audit_count);
     }
 }
 

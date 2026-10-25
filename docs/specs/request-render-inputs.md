@@ -3,7 +3,8 @@
 ## Intent & Invariants
 
 - App-config loads per-server render inputs once per request, in a bounded number
-  of inventory queries independent of server/protocol count. No cross-request
+  of inventory queries independent of server/protocol count, except for lazy
+  allocation of missing legacy WG addresses. No cross-request
   cache or mutable protocol state is introduced.
 - Existing app-config bytes and ordering, visibility, suppression, per-server UUIDs,
   detour metadata and AWG peer ordering remain unchanged for valid inventory.
@@ -18,8 +19,10 @@
 returns server-ordered `SubscriptionServer` values containing metadata, effective
 UUID, visible protocols and secrets. Peer lists retain `users_for_server` ordering
 and effective UUID semantics, and are loaded only when requested, for servers
-with AWG/WireGuard protocols. Missing users return an empty list; database errors
-propagate to the handler's existing empty-response fallback. Collectors render
+with AWG/WireGuard protocols. Legacy WG inputs also carry persisted peer octets;
+NULL enabled grants are assigned in audited `BEGIN IMMEDIATE` transactions
+([address contract](wireguard-peer-addresses.md)). Missing users return an empty
+list; database errors propagate to the handler's existing empty-response fallback. Collectors render
 from these inputs without inventory queries.
 
 ## Verification Checklist

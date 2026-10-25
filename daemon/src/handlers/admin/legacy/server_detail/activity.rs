@@ -155,14 +155,14 @@ pub(super) fn server_detail_live_connections_section(
 
     let mut ip_to_log_user: HashMap<&str, HashMap<&str, u32>> = HashMap::new();
     for c in &snap.connections {
-        if let Some(user) = c.metadata.user.as_deref() {
-            if !c.metadata.source_ip.is_empty() {
-                *ip_to_log_user
-                    .entry(c.metadata.source_ip.as_str())
-                    .or_default()
-                    .entry(user)
-                    .or_insert(0) += 1;
-            }
+        if let Some(user) = c.metadata.user.as_deref()
+            && !c.metadata.source_ip.is_empty()
+        {
+            *ip_to_log_user
+                .entry(c.metadata.source_ip.as_str())
+                .or_default()
+                .entry(user)
+                .or_insert(0) += 1;
         }
     }
     let log_ip_winner: HashMap<&str, &str> = ip_to_log_user

@@ -365,18 +365,18 @@ pub(crate) async fn user_detail_render(
             std::collections::HashMap::new()
         });
         for ip_str in &ips {
-            if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
-                if let Some(info) = state.geo.lookup(ip) {
-                    let country = info.country_iso.clone();
-                    let asn = info.asn_label();
-                    if country.is_some() || asn.is_some() {
-                        let e = map.entry(ip_str.clone()).or_insert((None, None));
-                        if country.is_some() {
-                            e.0 = country;
-                        }
-                        if asn.is_some() {
-                            e.1 = asn;
-                        }
+            if let Ok(ip) = ip_str.parse::<std::net::IpAddr>()
+                && let Some(info) = state.geo.lookup(ip)
+            {
+                let country = info.country_iso.clone();
+                let asn = info.asn_label();
+                if country.is_some() || asn.is_some() {
+                    let e = map.entry(ip_str.clone()).or_insert((None, None));
+                    if country.is_some() {
+                        e.0 = country;
+                    }
+                    if asn.is_some() {
+                        e.1 = asn;
                     }
                 }
             }

@@ -142,15 +142,15 @@ async fn poll_one_wg_server(
     let peers = parse_wg_dump(&dump);
 
     let ip_pairs = attribute_peers(&peers, pubkey_to_user);
-    if !ip_pairs.is_empty() {
-        if let Err(e) = inv.record_user_source_ips(&ip_pairs).await {
-            tracing::warn!(
-                target = "vpnctld::wg_poller",
-                server = %server.id.0,
-                error = %e,
-                "record_user_source_ips failed (will retry next tick)"
-            );
-        }
+    if !ip_pairs.is_empty()
+        && let Err(e) = inv.record_user_source_ips(&ip_pairs).await
+    {
+        tracing::warn!(
+            target = "vpnctld::wg_poller",
+            server = %server.id.0,
+            error = %e,
+            "record_user_source_ips failed (will retry next tick)"
+        );
     }
 
     if let Err(e) = record_byte_deltas(inv, &server.id, &peers, pubkey_to_user, byte_state).await {

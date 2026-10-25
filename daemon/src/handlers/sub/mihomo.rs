@@ -133,7 +133,7 @@ pub(super) async fn render_mihomo(
                         val: Value::Object(map),
                     });
                 }
-                "hysteria2" => {
+                "hysteria2" | "trojan" | "anytls" | "tuic" => {
                     let Some(tag) = outbound.get("tag").and_then(Value::as_str) else {
                         continue;
                     };
@@ -168,11 +168,29 @@ pub(super) async fn render_mihomo(
 
                     let mut map = serde_json::Map::new();
                     map.insert("name".to_string(), json!(tag));
-                    map.insert("type".to_string(), json!("hysteria2"));
+                    map.insert("type".to_string(), json!(out_type));
                     map.insert("server".to_string(), json!(server));
                     map.insert("port".to_string(), json!(port));
                     map.insert("password".to_string(), json!(password));
                     map.insert("udp".to_string(), json!(true));
+
+                    if let Some(pin) = outbound.get("fingerprint").and_then(Value::as_str) {
+                        map.insert("fingerprint".to_string(), json!(pin));
+                    }
+                    if out_type == "tuic" {
+                        let Some(uuid) = outbound.get("uuid").and_then(Value::as_str) else {
+                            continue;
+                        };
+                        map.insert("uuid".to_string(), json!(uuid));
+                        for (source, target) in [
+                            ("congestion_control", "congestion-controller"),
+                            ("udp_relay_mode", "udp-relay-mode"),
+                        ] {
+                            if let Some(value) = outbound.get(source).and_then(Value::as_str) {
+                                map.insert(target.to_string(), json!(value));
+                            }
+                        }
+                    }
 
                     if let Some(scv) = skip_cert_verify {
                         map.insert("skip-cert-verify".to_string(), json!(scv));
@@ -240,7 +258,7 @@ pub(super) async fn render_mihomo(
     }
 
     let proxy_group_proxies = if proxy_names.is_empty() {
-        vec!["DIRECT".to_string()]
+        vec!["REJECT".to_string()]
     } else {
         proxy_names
     };

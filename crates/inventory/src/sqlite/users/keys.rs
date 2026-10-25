@@ -113,21 +113,20 @@ impl SqliteInventory {
                 .flatten()
         });
 
-        if grant_exists {
-            if let Some((other, other_disabled)) =
+        if grant_exists
+            && let Some((other, other_disabled)) =
                 find_effective_uuid_conflict(&mut *tx, &server.0, client_uuid, &user.0).await?
-            {
-                let dis = if other_disabled {
-                    " (disabled — hidden in the UI)"
-                } else {
-                    ""
-                };
-                return Err(SqliteInventoryError::AlreadyExists(format!(
-                    "client_uuid {client_uuid} is already used by user {other}{dis} on server {}; \
+        {
+            let dis = if other_disabled {
+                " (disabled — hidden in the UI)"
+            } else {
+                ""
+            };
+            return Err(SqliteInventoryError::AlreadyExists(format!(
+                "client_uuid {client_uuid} is already used by user {other}{dis} on server {}; \
                      refusing to set it for {} — they would collide on the node",
-                    server.0, user.0
-                )));
-            }
+                server.0, user.0
+            )));
         }
 
         let res = sqlx::query(

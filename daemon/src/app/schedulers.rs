@@ -66,10 +66,20 @@ pub(crate) fn spawn_digest_scheduler(inv: SqliteInventory) -> tokio::task::JoinH
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(secs));
         tick.tick().await;
+        let mut retries = tokio::time::interval(Duration::from_secs(60));
+        retries.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            tick.tick().await;
-            if let Err(e) = crate::node_probe_poller::send_digest(&inv).await {
-                tracing::warn!(target = "vpnctld::alert_sink", error = %e, "digest push failed");
+            tokio::select! {
+                _ = tick.tick() => {
+                    if let Err(e) = crate::node_probe_poller::send_digest(&inv).await {
+                        tracing::warn!(target = "vpnctld::alert_sink", error = %e, "digest push failed");
+                    }
+                }
+                _ = retries.tick() => {
+                    if let Err(e) = crate::node_probe_poller::retry_alert_deliveries(&inv).await {
+                        tracing::warn!(target = "vpnctld::alert_sink", error = %e, "alert retries failed");
+                    }
+                }
             }
         }
     })

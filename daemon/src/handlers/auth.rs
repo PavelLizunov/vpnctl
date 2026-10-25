@@ -285,10 +285,10 @@ pub(crate) async fn require_basic_auth(
 ) -> Response {
     let now = now_unix();
 
-    if let Some(value) = extract_cookie(req.headers(), SESSION_COOKIE) {
-        if auth.verify_session(value, now) {
-            return next.run(req).await;
-        }
+    if let Some(value) = extract_cookie(req.headers(), SESSION_COOKIE)
+        && auth.verify_session(value, now)
+    {
+        return next.run(req).await;
     }
 
     if let Some(header) = req.headers().get(header::AUTHORIZATION).cloned() {

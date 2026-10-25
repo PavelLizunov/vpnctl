@@ -73,13 +73,18 @@ impl Protocol for WireGuard {
                     u.id.0
                 )));
             }
-            let peer_octet = 2_u16.saturating_add(u16::try_from(idx).unwrap_or(u16::MAX));
-            if peer_octet > 254 {
-                return Err(CoreError::Render(format!(
-                    "wireguard /24 has only 253 peer slots; user '{}' would overflow at index {idx}",
-                    u.id.0
-                )));
-            }
+            let peer_octet = if ctx.wg_octets.is_some() {
+                peer_octet_for(ctx, u)?
+            } else {
+                let octet = 2_u16.saturating_add(u16::try_from(idx).unwrap_or(u16::MAX));
+                if octet > 254 {
+                    return Err(CoreError::Render(format!(
+                        "wireguard /24 has only 253 peer slots; user '{}' would overflow at index {idx}",
+                        u.id.0
+                    )));
+                }
+                octet
+            };
             peers.push(json!({
                 "name": u.id.0,
                 "public_key": pubkey,

@@ -320,6 +320,7 @@ pub struct VpnCumulativeTick {
     pub server_upload_total: u64,
     pub server_download_total: u64,
     pub uptime_seconds: u64,
+    pub generation: Option<String>,
     pub active_connections: u32,
     pub users: Vec<VpnCumulativeCounter>,
 }

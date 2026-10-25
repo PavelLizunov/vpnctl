@@ -40,7 +40,30 @@ where
 }
 
 impl SqliteInventory {
+    /// Low-level grant for imports and fixtures; callers write their own audit.
     pub async fn grant(&self, user: &UserId, server: &ServerId) -> Result<()> {
+        self.insert_grant(user, server, None).await?;
+        Ok(())
+    }
+
+    /// Grant and write its `user.grant` audit row in one transaction; a no-op
+    /// (already granted) writes nothing and returns `false`.
+    pub async fn grant_audited(
+        &self,
+        user: &UserId,
+        server: &ServerId,
+        actor: &str,
+        source: &str,
+    ) -> Result<bool> {
+        self.insert_grant(user, server, Some((actor, source))).await
+    }
+
+    async fn insert_grant(
+        &self,
+        user: &UserId,
+        server: &ServerId,
+        audit: Option<(&str, &str)>,
+    ) -> Result<bool> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let server_role: Option<(String,)> =
@@ -71,7 +94,7 @@ impl SqliteInventory {
             .is_some();
         if already {
             tx.commit().await?;
-            return Ok(());
+            return Ok(false);
         }
 
         let user_uuid: String = sqlx::query("SELECT uuid FROM users WHERE id = ?1")
@@ -99,17 +122,32 @@ impl SqliteInventory {
             )));
         }
 
+        let octet = Self::next_wg_octet(&mut tx, server).await?;
         sqlx::query(
-            "INSERT INTO grants (user_id, server_id, granted_at)
-             VALUES (?1, ?2, datetime('now'))
-             ON CONFLICT(user_id, server_id) DO NOTHING",
+            "INSERT INTO grants (user_id, server_id, granted_at, wg_octet)
+             VALUES (?1, ?2, datetime('now'), ?3)",
         )
         .bind(&user.0)
         .bind(&server.0)
+        .bind(octet.map(i64::from))
         .execute(&mut *tx)
         .await?;
+        if let Some((actor, source)) = audit {
+            sqlx::query(
+                "INSERT INTO audit_log (actor, action, target, payload)
+                 VALUES (?1, 'user.grant', ?2,
+                         json_object('server', ?3, 'source', ?4, 'wg_octet', ?5))",
+            )
+            .bind(actor)
+            .bind(&user.0)
+            .bind(&server.0)
+            .bind(source)
+            .bind(octet.map(i64::from))
+            .execute(&mut *tx)
+            .await?;
+        }
         tx.commit().await?;
-        Ok(())
+        Ok(true)
     }
 
     pub async fn grant_dates_for_server(

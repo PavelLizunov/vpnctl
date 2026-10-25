@@ -127,14 +127,12 @@ pub fn spawn_exchange_rate_poller(inv: SqliteInventory) -> tokio::task::JoinHand
             Err(_) => false,
         };
 
-        if should_initial {
-            if let Err(e) = refresh_exchange_rates(&inv).await {
-                tracing::warn!(
-                    target = "vpnctld::currency",
-                    error = %e,
-                    "initial exchange rate refresh failed; cached rates will be used"
-                );
-            }
+        if should_initial && let Err(e) = refresh_exchange_rates(&inv).await {
+            tracing::warn!(
+                target = "vpnctld::currency",
+                error = %e,
+                "initial exchange rate refresh failed; cached rates will be used"
+            );
         }
         if let Err(e) = inv.advance_auto_renew_servers().await {
             tracing::warn!(
@@ -152,14 +150,12 @@ pub fn spawn_exchange_rate_poller(inv: SqliteInventory) -> tokio::task::JoinHand
                 Err(_) => false,
             };
 
-            if should_refresh {
-                if let Err(e) = refresh_exchange_rates(&inv).await {
-                    tracing::warn!(
-                        target = "vpnctld::currency",
-                        error = %e,
-                        "periodic exchange rate refresh failed; existing cached rates preserved"
-                    );
-                }
+            if should_refresh && let Err(e) = refresh_exchange_rates(&inv).await {
+                tracing::warn!(
+                    target = "vpnctld::currency",
+                    error = %e,
+                    "periodic exchange rate refresh failed; existing cached rates preserved"
+                );
             }
             if let Err(e) = inv.advance_auto_renew_servers().await {
                 tracing::warn!(

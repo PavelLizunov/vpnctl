@@ -243,8 +243,11 @@ class RunnerTest(unittest.TestCase):
             runner.communicate(timeout=5)
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
-                status = Path(f"/proc/{engine['pid']}/stat")
-                if not status.exists() or status.read_text().rsplit(") ", 1)[1].startswith("Z"):
+                try:
+                    state = Path(f"/proc/{engine['pid']}/stat").read_text().rsplit(") ", 1)[1]
+                except (FileNotFoundError, ProcessLookupError):
+                    break  # the process vanished between checks
+                if state.startswith("Z"):
                     break
                 time.sleep(0.01)
             else:

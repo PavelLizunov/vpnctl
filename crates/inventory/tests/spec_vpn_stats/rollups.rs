@@ -4,6 +4,109 @@ use vpnctl_core::{ServerId, UserId};
 use crate::common::{open, raw_pool, server, server_coeff, ud, user};
 
 #[tokio::test]
+async fn migration_0067_corrects_only_provable_daily_seeds() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    for id in ["s1", "s2"] {
+        inv.add_server(&server(id)).await.unwrap();
+    }
+    for id in ["alice", "bob"] {
+        inv.add_user(&user(id)).await.unwrap();
+    }
+    let pool = raw_pool(&dir).await;
+    sqlx::raw_sql(
+        "INSERT INTO vpn_user_daily (date, user_id, server_id, upload_bytes, download_bytes)
+         VALUES ('2026-01-01', 'alice', 's1', 60, 120),
+                ('2026-01-01', 'bob', 's1', 40, 80),
+                ('2026-01-02', 'alice', 's1', 100, 200),
+                ('2026-01-03', 'alice', 's1', 100, 200),
+                ('2026-01-04', 'alice', 's1', 100, 200),
+                ('2026-01-01', 'alice', 's2', 500, 600);
+         INSERT INTO vpn_connection_stats
+             (ts, server_id, user_id, upload_bytes, download_bytes, active_connections)
+         VALUES ('2026-01-01T01:10:00.000Z', 's1', 'alice', 30, 40, 2),
+                ('2026-01-01T23:10:00.000Z', 's1', 'bob', 20, 30, 3),
+                ('2026-01-03T00:10:00.000Z', 's1', 'alice', 100, 20, 4),
+                ('2026-01-03T01:10:00.000Z', 's1', 'alice', 90, 180, 5),
+                ('2026-01-04T01:10:00.000Z', 's1', NULL, 150, 250, 6);
+         DROP TABLE vpn_server_hourly;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!("../../migrations/0043_vpn_server_hourly.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    // A real midnight bucket that happens to equal the day's total (all user
+    // traffic at 00:xx) plus later unattributed traffic is not a seed.
+    sqlx::raw_sql(
+        "INSERT INTO vpn_user_daily (date, user_id, server_id, upload_bytes, download_bytes)
+         VALUES ('2026-01-05', 'alice', 's1', 100, 200);
+         INSERT INTO vpn_server_hourly
+             (hour, server_id, upload_bytes, download_bytes, active_connections_peak, last_sample_ts)
+         VALUES ('2026-01-05T00:00:00.000Z', 's1', 100, 200, 1, '2026-01-05T00:40:00.000Z'),
+                ('2026-01-05T03:00:00.000Z', 's1', 50, 70, 1, '2026-01-05T03:40:00.000Z');",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let before: Vec<(String, String, i64, i64, i64, String)> = sqlx::query_as(
+        "SELECT server_id, hour, upload_bytes, download_bytes,
+                active_connections_peak, last_sample_ts
+         FROM vpn_server_hourly ORDER BY server_id, hour",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let mut expected = before.clone();
+    for row in &mut expected {
+        if row.0 == "s1" && row.1 == "2026-01-01T00:00:00.000Z" {
+            row.2 = 50;
+            row.3 = 130;
+        } else if row.0 == "s1" && row.1 == "2026-01-04T00:00:00.000Z" {
+            row.2 = 0;
+            row.3 = 0;
+        }
+    }
+    assert_ne!(before, expected);
+
+    for _ in 0..2 {
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0067_vpn_server_hourly_seed_fix.sql"
+        ))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let after: Vec<(String, String, i64, i64, i64, String)> = sqlx::query_as(
+            "SELECT server_id, hour, upload_bytes, download_bytes,
+                    active_connections_peak, last_sample_ts
+             FROM vpn_server_hourly ORDER BY server_id, hour",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            after, expected,
+            "raw midnight and isolated daily rows stay intact"
+        );
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_log
+             WHERE action = 'migration.vpn_server_hourly.seed_fix'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(audits, 2, "only changed midnight rows are audited");
+    }
+    pool.close().await;
+    inv.close().await;
+}
+
+#[tokio::test]
 async fn recent_fleet_stats_collapse_users_per_chart_bucket_without_losing_bytes() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;

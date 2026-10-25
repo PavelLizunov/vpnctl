@@ -128,7 +128,8 @@ async fn sample_protocol(
 ) -> anyhow::Result<ProtocolAssuranceSample> {
     let secrets = inv.list_server_secrets(&server.id).await?;
     let users = inv.users_for_server(&server.id).await?;
-    let ctx = RenderCtx::with_peers(server, &secrets, &users);
+    let ctx = RenderCtx::with_peers(server, &secrets, &users)
+        .with_wg_octets(inv.wg_octets_for_server(&server.id).await?);
     let client_render_ok = users
         .iter()
         .filter(|user| !user.disabled)
@@ -410,14 +411,14 @@ async fn run_external_runner(
             .skip(1)
             .take_while(|path| !path.as_os_str().is_empty())
         {
-            if let Ok(parent_meta) = std::fs::metadata(parent) {
-                if parent_meta.uid() != 0 || parent_meta.mode() & 0o022 != 0 {
-                    tracing::warn!(
-                        target = "vpnctld::assurance",
-                        "runner parent directory is not trusted"
-                    );
-                    return Ok(RunnerAttempt::Failed("runner_unsafe_path"));
-                }
+            if let Ok(parent_meta) = std::fs::metadata(parent)
+                && (parent_meta.uid() != 0 || parent_meta.mode() & 0o022 != 0)
+            {
+                tracing::warn!(
+                    target = "vpnctld::assurance",
+                    "runner parent directory is not trusted"
+                );
+                return Ok(RunnerAttempt::Failed("runner_unsafe_path"));
             }
         }
     }

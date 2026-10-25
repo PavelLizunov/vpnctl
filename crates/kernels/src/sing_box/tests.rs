@@ -27,6 +27,79 @@ fn dummy_server() -> Server {
 }
 
 #[test]
+fn certificate_sha256_parser_accepts_only_openssl_sha256_octets() {
+    let digest = ["Ab"; 32].join(":");
+    for label in ["sha256", "SHA256"] {
+        for ending in ["", "\n", "\r\n"] {
+            assert_eq!(
+                parse_cert_sha256(&format!("{label} Fingerprint={digest}{ending}")),
+                Some("ab".repeat(32))
+            );
+        }
+    }
+    for invalid in [
+        String::new(),
+        format!("SHA1 Fingerprint={digest}"),
+        format!("sha256 Fingerprint={}", ["AB"; 31].join(":")),
+        format!("sha256 Fingerprint={}", ["AB"; 33].join(":")),
+        format!("sha256 Fingerprint={}", "ab".repeat(32)),
+        format!("sha256 Fingerprint={}", digest.replace(':', "-")),
+        format!("sha256 Fingerprint={}", digest.replacen("Ab", "GG", 1)),
+        format!("sha256 Fingerprint={digest} \n"),
+        format!("sha256 Fingerprint={digest}\nextra output\n"),
+        format!("sha256 Fingerprint={digest}\n\n"),
+    ] {
+        assert_eq!(parse_cert_sha256(&invalid), None, "{invalid:?}");
+    }
+}
+
+#[tokio::test]
+async fn deployed_certificate_pin_reads_default_and_quoted_override_paths() {
+    let server = dummy_server();
+    let ssh = vpnctl_ssh::MockTransport::new();
+    for path in ["/etc/sing-box/cert.pem", "/etc/custom/cert's file.pem"] {
+        let secrets = HashMap::from([("tuic.cert_path".into(), path.into())]);
+        let command = format!(
+            "openssl x509 -in {} -noout -fingerprint -sha256",
+            vpnctl_core::shell::single_quote(path)
+        );
+        ssh.expect(
+            &command,
+            &format!("sha256 Fingerprint={}\n", ["AB"; 32].join(":")),
+        );
+        let observed = SingBox::new()
+            .deployed_server_secrets(&ssh, &dummy_ctx(&server, &secrets))
+            .await
+            .unwrap();
+        assert_eq!(observed, vec![("tls.cert_sha256".into(), "ab".repeat(32))]);
+        assert_eq!(ssh.executed_commands().unwrap().last(), Some(&command));
+    }
+    let secrets = HashMap::new();
+    assert_eq!(
+        SingBox::new()
+            .deployed_server_secrets(&ssh, &dummy_ctx(&server, &secrets))
+            .await
+            .unwrap(),
+        vec![("tls.cert_sha256".into(), "ab".repeat(32))]
+    );
+}
+
+#[tokio::test]
+async fn deployed_certificate_pin_rejects_missing_or_invalid_output() {
+    let server = dummy_server();
+    let secrets = HashMap::new();
+    let ssh = vpnctl_ssh::MockTransport::new();
+    let kernel = SingBox::new();
+    let ctx = dummy_ctx(&server, &secrets);
+    assert!(kernel.deployed_server_secrets(&ssh, &ctx).await.is_err());
+    ssh.expect(
+        "openssl x509 -in '/etc/sing-box/cert.pem' -noout -fingerprint -sha256",
+        "sha256 Fingerprint=not-a-fingerprint\n",
+    );
+    assert!(kernel.deployed_server_secrets(&ssh, &ctx).await.is_err());
+}
+
+#[test]
 fn render_config_includes_clash_api_on_loopback() {
     let s = dummy_server();
     let secrets = HashMap::new();

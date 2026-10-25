@@ -79,7 +79,12 @@ pub(crate) async fn user_wireguard_conf_download(
         Ok(m) => m,
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
-    let ctx = vpnctl_core::RenderCtx::with_peers(&server, &secrets, &peers);
+    let wg_octets = match state.inv.wg_octets_for_server(&sid).await {
+        Ok(octets) => octets,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    let ctx =
+        vpnctl_core::RenderCtx::with_peers(&server, &secrets, &peers).with_wg_octets(wg_octets);
     let conf = match vpnctl_protocols::render_client_conf_public(&ctx, &user) {
         Ok(c) => c,
         Err(e) => return internal_error(anyhow::anyhow!(e)),

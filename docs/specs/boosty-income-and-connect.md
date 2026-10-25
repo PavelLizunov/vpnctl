@@ -28,6 +28,12 @@
     the expected opposite disabled state still match. The conditional update and
     its audit row commit in one transaction. Stale decisions add neither an audit
     row nor an enabled/disabled report entry or redeploy request.
+  - An empty roster suppresses all disables. When a non-empty roster has no
+    VPN-eligible subscribers, absent linked subscribers remain protected by the
+    anomaly guard. A linked subscriber explicitly present as unpaid/free or
+    inactive is a confirmed lapse and follows the normal apply mode and grace
+    period, even when the last payer downgrades. Reports distinguish these
+    suppressed, unconfirmed lapses from confirmed disables.
   - Резервный спойлер: ручная форма настройки токенов скрыта под спойлером (`details.ed-spoiler`), основным интерфейсом остаётся 1-Click подключение.
   - Financial amounts use integer hundredths (`i64` minor units); conversion and
     rounding follow the owning [currency-exchange.md §2.2](currency-exchange.md#22-financial-precision)
@@ -71,6 +77,9 @@
       - Карточка 3: Чистая прибыль (Net Margin P&L) и коэффициент покрытия расходов (`покрытие расходов: X% (Y×)`).
 
 ## 3. Verification Checklist (Definition of Done)
+- [ ] The last payer's confirmed free downgrade disables after grace, with one
+  audit row and no duplicate on retry. Absent subscribers in a zero-paid roster
+  and all linked users in an empty roster remain enabled without a disable audit.
 - [ ] Injected-time lease tests cover renewal beyond the original expiry,
   takeover at expiry, stale owners and audit rollback. Sync tests cover renewal
   before work and cancellation before stale results can be applied.

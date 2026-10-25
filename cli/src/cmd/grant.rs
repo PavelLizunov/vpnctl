@@ -1,5 +1,4 @@
 use crate::ui;
-use serde_json::json;
 use std::path::PathBuf;
 use vpnctl_core::{ProtocolId, ServerId, UserId};
 use vpnctl_inventory::SqliteInventory;
@@ -22,21 +21,7 @@ pub(crate) async fn run_grant(
         return Err(anyhow::anyhow!("no such server: {server}"));
     }
 
-    let was_granted = inv
-        .servers_for_user(&uid)
-        .await?
-        .iter()
-        .any(|s| s.id == sid);
-    inv.grant(&uid, &sid).await?;
-    if !was_granted {
-        inv.audit(
-            "cli",
-            "user.grant",
-            Some(user),
-            Some(&json!({ "server": server, "source": "cli" })),
-        )
-        .await?;
-    }
+    inv.grant_audited(&uid, &sid, "cli", "cli").await?;
     println!("granted '{user}' access to '{server}'");
     Ok(())
 }

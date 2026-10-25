@@ -155,10 +155,10 @@ fn parameters(
         .zip(
             [1_u32, 0x4000_0001, 0x8000_0001, 0xc000_0001]
                 .into_iter()
-                .zip(seed[8..24].chunks_exact(4)),
+                .zip(seed[8..24].as_chunks::<4>().0),
         )
     {
-        let offset = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) % 0x3fff_ff00;
+        let offset = u32::from_be_bytes(*chunk) % 0x3fff_ff00;
         let start = base + offset;
         fields.push((key, ini, json!(format!("{start}-{}", start + 255))));
     }

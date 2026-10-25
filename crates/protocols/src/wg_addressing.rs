@@ -7,6 +7,21 @@ pub(crate) fn peer_octet_in_slash24(
     user: &User,
     base_octet: u16,
 ) -> Result<u16> {
+    if let Some(octets) = &ctx.wg_octets {
+        let octet = octets.get(&user.id).copied().ok_or_else(|| {
+            CoreError::Render(format!(
+                "missing persisted WireGuard address for user '{}' on server '{}'",
+                user.id.0, ctx.server.id.0
+            ))
+        })?;
+        if !(2..=MAX_HOST_OCTET).contains(&octet) {
+            return Err(CoreError::Render(format!(
+                "WireGuard /24 address overflow: invalid octet {octet} for user '{}'",
+                user.id.0
+            )));
+        }
+        return Ok(octet);
+    }
     if ctx.peers.is_empty() {
         return Ok(base_octet);
     }

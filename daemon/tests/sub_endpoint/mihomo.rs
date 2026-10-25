@@ -3,14 +3,14 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
 use vpnctl_core::{KernelId, ProtocolId, Registry, Server, ServerId, User, UserId};
 use vpnctl_inventory::SqliteInventory;
 use vpnctl_kernels::SingBox;
-use vpnctl_protocols::{Hysteria2, TuicV5, VlessReality, VlessXhttp, WireGuard};
+use vpnctl_protocols::{AnyTls, Hysteria2, Trojan, TuicV5, VlessReality, VlessXhttp, WireGuard};
 use vpnctld::router;
 
 async fn setup_mihomo_env(dir: &TempDir) -> (vpnctld::AppState, String, SqliteInventory) {
@@ -25,6 +25,8 @@ async fn setup_mihomo_env(dir: &TempDir) -> (vpnctld::AppState, String, SqliteIn
     reg.register_protocol(Box::new(Hysteria2::new())).unwrap();
     reg.register_protocol(Box::new(TuicV5::new())).unwrap();
     reg.register_protocol(Box::new(WireGuard::new())).unwrap();
+    reg.register_protocol(Box::new(Trojan::new())).unwrap();
+    reg.register_protocol(Box::new(AnyTls::new())).unwrap();
 
     let server_direct = Server {
         id: ServerId("srv-direct".into()),
@@ -151,6 +153,419 @@ async fn request_sub(
     let headers = resp.headers().clone();
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     (status, headers, body.to_vec())
+}
+
+fn expected_mihomo_bytes(proxies: Vec<Value>, names: Vec<&str>) -> Vec<u8> {
+    #[derive(serde::Serialize)]
+    struct Config<'a> {
+        proxies: Vec<Value>,
+        #[serde(rename = "proxy-groups")]
+        proxy_groups: Vec<Group<'a>>,
+        rules: Vec<&'static str>,
+    }
+
+    #[derive(serde::Serialize)]
+    struct Group<'a> {
+        name: &'static str,
+        #[serde(rename = "type")]
+        group_type: &'static str,
+        proxies: Vec<&'a str>,
+    }
+
+    serde_saphyr::to_string(&Config {
+        proxies,
+        proxy_groups: vec![Group {
+            name: "VPN",
+            group_type: "select",
+            proxies: names,
+        }],
+        rules: vec!["MATCH,VPN"],
+    })
+    .unwrap()
+    .into_bytes()
+}
+
+#[tokio::test]
+async fn empty_mihomo_subscriptions_fail_closed_byte_equal() {
+    for disabled in [false, true] {
+        let dir = TempDir::new().unwrap();
+        let (state, token) = super::common::seed(&dir).await;
+        let user_id = UserId("alice".into());
+        if disabled {
+            state
+                .inv
+                .set_user_disabled_audited(&user_id, true, "test")
+                .await
+                .unwrap();
+        } else {
+            state
+                .inv
+                .revoke(&user_id, &ServerId("srv".into()))
+                .await
+                .unwrap();
+        }
+        for uri in [
+            format!("/api/v1/sub/{token}"),
+            format!("/api/v1/sub/{token}?format=mihomo"),
+            format!("/sub/{token}?format=mihomo"),
+        ] {
+            let (status, _, body) = request_sub(state.clone(), &uri, None).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body, expected_mihomo_bytes(vec![], vec!["REJECT"]));
+        }
+    }
+}
+
+#[tokio::test]
+async fn nonempty_mihomo_subscriptions_keep_legacy_bytes() {
+    let dir = TempDir::new().unwrap();
+    let (state, token) = super::common::seed(&dir).await;
+    let expected = expected_mihomo_bytes(
+        vec![serde_json::json!({
+            "name": "SRV VLESS ~alice", "type": "vless", "server": "10.0.0.1",
+            "port": 443, "uuid": "uuid-alice", "network": "tcp", "udp": true,
+            "tls": true, "servername": "yahoo.com", "flow": "xtls-rprx-vision",
+            "client-fingerprint": "random", "packet-encoding": "xudp",
+            "reality-opts": {"public-key": "PUB_TEST", "short-id": "12345678"}
+        })],
+        vec!["SRV VLESS ~alice"],
+    );
+    for uri in [
+        format!("/api/v1/sub/{token}"),
+        format!("/api/v1/sub/{token}?format=mihomo"),
+        format!("/sub/{token}?format=mihomo"),
+    ] {
+        let (status, _, body) = request_sub(state.clone(), &uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, expected);
+    }
+}
+
+async fn setup_tls_env(dir: &TempDir) -> (vpnctld::AppState, String, SqliteInventory) {
+    let (state, token, inv) = setup_mihomo_env(dir).await;
+    let uid = UserId("alice".into());
+    for sid in ["srv-entry", "srv-target"] {
+        inv.revoke(&uid, &ServerId(sid.into())).await.unwrap();
+    }
+    for pid in ["trojan", "anytls"] {
+        inv.add_server_protocol(&ServerId("srv-direct".into()), &ProtocolId(pid.into()))
+            .await
+            .unwrap();
+    }
+    (state, token, inv)
+}
+
+fn expected_tls_mihomo(pin: Option<&str>) -> Vec<u8> {
+    #[derive(serde::Serialize)]
+    struct Config {
+        proxies: Vec<Value>,
+        #[serde(rename = "proxy-groups")]
+        proxy_groups: Vec<Group>,
+        rules: Vec<&'static str>,
+    }
+    #[derive(serde::Serialize)]
+    struct Group {
+        name: &'static str,
+        #[serde(rename = "type")]
+        group_type: &'static str,
+        proxies: Vec<Value>,
+    }
+    let mut hy2 = json!({
+        "name": "SRV-DIRECT HY2 ~alice", "type": "hysteria2", "server": "198.51.100.10",
+        "port": 8444, "password": "pw-alice", "udp": true, "skip-cert-verify": true,
+        "alpn": ["h3"], "obfs": "salamander", "obfs-password": "obfs-pass"
+    });
+    let reality = json!({
+        "name": "SRV-DIRECT VLESS ~alice", "type": "vless", "server": "198.51.100.10",
+        "port": 443, "uuid": "11111111-2222-3333-4444-555555555555", "network": "tcp",
+        "udp": true, "tls": true, "servername": "yahoo.com", "flow": "xtls-rprx-vision",
+        "client-fingerprint": "random", "packet-encoding": "xudp",
+        "reality-opts": {"public-key": "PUB_DIRECT", "short-id": "12345678"}
+    });
+    let proxies = if let Some(pin) = pin {
+        hy2["fingerprint"] = json!(pin);
+        vec![
+            json!({
+                "name": "SRV-DIRECT AnyTLS ~alice", "type": "anytls", "server": "198.51.100.10",
+                "port": 8843, "password": "pw-alice", "udp": true,
+                "skip-cert-verify": true, "fingerprint": pin
+            }),
+            hy2,
+            json!({
+                "name": "SRV-DIRECT Trojan ~alice", "type": "trojan", "server": "198.51.100.10",
+                "port": 8643, "password": "pw-alice", "udp": true,
+                "skip-cert-verify": true, "fingerprint": pin
+            }),
+            json!({
+                "name": "SRV-DIRECT TUIC ~alice", "type": "tuic", "server": "198.51.100.10",
+                "port": 8443, "password": "pw-alice", "uuid": "11111111-2222-3333-4444-555555555555",
+                "udp": true, "skip-cert-verify": true, "fingerprint": pin, "alpn": ["h3"],
+                "congestion-controller": "bbr", "udp-relay-mode": "native"
+            }),
+            reality,
+        ]
+    } else {
+        vec![hy2, reality]
+    };
+    let names = proxies.iter().map(|proxy| proxy["name"].clone()).collect();
+    serde_saphyr::to_string(&Config {
+        proxies,
+        proxy_groups: vec![Group {
+            name: "VPN",
+            group_type: "select",
+            proxies: names,
+        }],
+        rules: vec!["MATCH,VPN"],
+    })
+    .unwrap()
+    .into_bytes()
+}
+
+#[tokio::test]
+async fn certificate_pin_mihomo_tls_proxies_and_legacy_output_byte_equal() {
+    let dir = TempDir::new().unwrap();
+    let (state, token, inv) = setup_tls_env(&dir).await;
+    let uri = format!("/api/v1/sub/{token}");
+    let (status, _, body) = request_sub(state.clone(), &uri, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, expected_tls_mihomo(None));
+
+    let pin = "ab".repeat(32);
+    inv.set_server_secrets_audited(
+        &ServerId("srv-direct".into()),
+        "admin",
+        "server.deployed_secrets.set",
+        &[("tls.cert_sha256", &pin)],
+    )
+    .await
+    .unwrap();
+    let (status, _, body) = request_sub(state.clone(), &uri, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, expected_tls_mihomo(Some(&pin)));
+    let (status, _, alias) = request_sub(state, &format!("/sub/{token}?format=mihomo"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(alias, body);
+}
+
+#[tokio::test]
+async fn certificate_pin_keeps_singbox_json_byte_equal() {
+    let dir = TempDir::new().unwrap();
+    let (state, token, inv) = setup_tls_env(&dir).await;
+    let uris = [
+        format!("/sub/{token}"),
+        format!("/sub/{token}?format=sing-box"),
+    ];
+    let mut before = Vec::new();
+    for uri in &uris {
+        let (status, _, body) = request_sub(state.clone(), uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        for kind in ["trojan", "anytls", "hysteria2", "tuic"] {
+            assert!(
+                value["outbounds"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|out| out["type"] == kind)
+            );
+        }
+        before.push(body);
+    }
+    let pin = "ab".repeat(32);
+    inv.set_server_secret(&ServerId("srv-direct".into()), "tls.cert_sha256", &pin)
+        .await
+        .unwrap();
+    for (uri, expected) in uris.iter().zip(before) {
+        let (status, _, body) = request_sub(state.clone(), uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, expected);
+    }
+}
+
+#[tokio::test]
+async fn certificate_pin_app_and_sub_changed_and_unaffected_payloads_byte_equal() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    let pin = "ab".repeat(32);
+    let device = "0123456789abcdef0123456789abcdef";
+    for protocol in ["hysteria2", "vless+reality"] {
+        let dir = TempDir::new().unwrap();
+        let (state, token, inv) = setup_tls_env(&dir).await;
+        let sid = ServerId("srv-direct".into());
+        let server = inv.get_server(&sid).await.unwrap().unwrap();
+        for pid in &server.enabled_protocols {
+            if pid.0 != protocol {
+                inv.remove_server_protocol(&sid, pid).await.unwrap();
+            }
+        }
+        inv.set_vpn_router_device_id(&UserId("alice".into()), device)
+            .await
+            .unwrap();
+        let uri = format!("/api/v1/app/config/{device}");
+        let sub_uri = format!("/sub/{token}");
+        let (status, _, before) = request_sub(state.clone(), &uri, Some("HiddifyNext/1.0.0")).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _, sub_before) =
+            request_sub(state.clone(), &sub_uri, Some("HiddifyNext/1.0.0")).await;
+        assert_eq!(status, StatusCode::OK);
+        inv.set_server_secret(&sid, "tls.cert_sha256", &pin)
+            .await
+            .unwrap();
+        let (status, _, after) = request_sub(state.clone(), &uri, Some("HiddifyNext/1.0.0")).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _, sub_after) = request_sub(state, &sub_uri, Some("HiddifyNext/1.0.0")).await;
+        assert_eq!(status, StatusCode::OK);
+        if protocol == "hysteria2" {
+            let prefix = "hysteria2://pw-alice@198.51.100.10:8444/?sni=198.51.100.10&insecure=1&obfs=salamander&obfs-password=obfs-pass";
+            let fragment = "#SRV-DIRECT%20HY2%20~alice";
+            assert_eq!(
+                before,
+                STANDARD.encode(format!("{prefix}{fragment}")).as_bytes()
+            );
+            assert_eq!(
+                after,
+                STANDARD
+                    .encode(format!("{prefix}&pinSHA256={pin}{fragment}"))
+                    .as_bytes()
+            );
+            assert_eq!(
+                sub_before,
+                STANDARD.encode(format!("{prefix}#alice")).as_bytes()
+            );
+            assert_eq!(
+                sub_after,
+                STANDARD
+                    .encode(format!("{prefix}&pinSHA256={pin}#alice"))
+                    .as_bytes()
+            );
+        } else {
+            assert!(!before.is_empty());
+            assert_eq!(after, before);
+            assert!(!sub_before.is_empty());
+            assert_eq!(sub_after, sub_before);
+        }
+    }
+}
+
+#[tokio::test]
+async fn deployed_certificate_pin_persists_and_audits_only_changes() {
+    use vpnctl_core::{Kernel, RenderCtx};
+    use vpnctl_inventory::bootstrap::refresh_deployed_server_secrets;
+
+    let dir = TempDir::new().unwrap();
+    let (_, _, inv) = setup_tls_env(&dir).await;
+    let sid = ServerId("srv-direct".into());
+    let server = inv.get_server(&sid).await.unwrap().unwrap();
+    let secrets = inv.list_server_secrets(&sid).await.unwrap();
+    let ctx = RenderCtx::new(&server, &secrets);
+    let revision = inv.deploy_input_revision(&sid).await.unwrap();
+    let kernel = SingBox::new();
+    let ssh = vpnctl_ssh::MockTransport::new();
+    let command = "openssl x509 -in '/etc/sing-box/cert.pem' -noout -fingerprint -sha256";
+    let before = inv.recent_audit(100).await.unwrap().len();
+    assert!(
+        !refresh_deployed_server_secrets(&inv, &vpnctl_kernels::Xray::new(), &ssh, &ctx, "admin")
+            .await
+            .unwrap()
+    );
+    assert!(ssh.executed_commands().unwrap().is_empty());
+    assert_eq!(inv.recent_audit(100).await.unwrap().len(), before);
+    for (octet, changed, audit_count) in [("AB", true, 1), ("AB", false, 1), ("CD", true, 2)] {
+        kernel.apply_config(&ssh, b"{}").await.unwrap();
+        kernel.open_firewall(&ssh, &ctx, &[]).await.unwrap();
+        ssh.expect(
+            command,
+            &format!("sha256 Fingerprint={}\n", [octet; 32].join(":")),
+        );
+        assert_eq!(
+            refresh_deployed_server_secrets(&inv, &kernel, &ssh, &ctx, "admin")
+                .await
+                .unwrap(),
+            changed
+        );
+        assert_eq!(
+            inv.get_server_secret(&sid, "tls.cert_sha256")
+                .await
+                .unwrap(),
+            Some(octet.to_ascii_lowercase().repeat(32))
+        );
+        let audit = inv.recent_audit(100).await.unwrap();
+        assert_eq!(audit.len(), before + audit_count);
+        assert_eq!(audit[0].action, "server.deployed_secrets.set");
+        assert_eq!(audit[0].actor, "admin");
+        assert_eq!(audit[0].target.as_deref(), Some("srv-direct"));
+        assert_eq!(audit[0].payload, Some(json!({"keys": ["tls.cert_sha256"]})));
+        assert_eq!(inv.deploy_input_revision(&sid).await.unwrap(), revision);
+    }
+    ssh.expect(command, "sha256 Fingerprint=invalid\n");
+    assert!(
+        refresh_deployed_server_secrets(&inv, &kernel, &ssh, &ctx, "admin")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        inv.get_server_secret(&sid, "tls.cert_sha256")
+            .await
+            .unwrap(),
+        Some("cd".repeat(32))
+    );
+    assert_eq!(inv.recent_audit(100).await.unwrap().len(), before + 2);
+    assert!(
+        inv.audit_deploy_if_revision("admin", &sid, &revision, &json!({}))
+            .await
+            .unwrap()
+    );
+    assert!(!inv.server_pending_deploy(&sid).await.unwrap());
+
+    inv.set_server_secret(&sid, "hysteria2.obfs.password", "changed-input")
+        .await
+        .unwrap();
+    assert_ne!(inv.deploy_input_revision(&sid).await.unwrap(), revision);
+}
+
+#[tokio::test]
+async fn certificate_pin_follows_server_identity_with_shared_address_and_detour() {
+    let dir = TempDir::new().unwrap();
+    let (state, token, inv) = setup_mihomo_env(&dir).await;
+    for (sid, octet) in [("srv-entry", "ab"), ("srv-target", "cd")] {
+        let sid = ServerId(sid.into());
+        inv.add_server_protocol(&sid, &ProtocolId("hysteria2".into()))
+            .await
+            .unwrap();
+        inv.set_server_secret(&sid, "tls.cert_sha256", &octet.repeat(32))
+            .await
+            .unwrap();
+    }
+    inv.update_server_address(&ServerId("srv-target".into()), "198.51.100.20", 22, "root")
+        .await
+        .unwrap();
+    let (status, _, body) = request_sub(state, &format!("/api/v1/sub/{token}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let config: Value = serde_saphyr::from_str(std::str::from_utf8(&body).unwrap()).unwrap();
+    let proxies = config["proxies"].as_array().unwrap();
+    let entry = proxies
+        .iter()
+        .find(|p| p["name"] == "SRV-ENTRY HY2 ~alice")
+        .unwrap();
+    let target = proxies
+        .iter()
+        .find(|p| p["name"] == "SRV-TARGET HY2 ~alice")
+        .unwrap();
+    assert_eq!(entry["server"], target["server"]);
+    assert_eq!(entry["fingerprint"], "ab".repeat(32));
+    assert_eq!(target["fingerprint"], "cd".repeat(32));
+    assert_eq!(target["dialer-proxy"], entry["name"]);
+    let direct = proxies
+        .iter()
+        .find(|p| p["name"] == "SRV-DIRECT HY2 ~alice")
+        .unwrap();
+    assert!(direct.get("fingerprint").is_none());
+    assert!(
+        proxies
+            .iter()
+            .filter(|p| p["type"] == "vless")
+            .all(|p| p.get("fingerprint").is_none())
+    );
 }
 
 #[tokio::test]
@@ -813,7 +1228,7 @@ async fn disabled_no_grant_user_and_unknown_token() {
             .expect("VPN group");
         assert_eq!(vpn_group["type"], "select");
         let g_proxies = vpn_group["proxies"].as_array().expect("VPN group proxies");
-        assert_eq!(g_proxies, &vec![Value::String("DIRECT".into())]);
+        assert_eq!(g_proxies, &vec![Value::String("REJECT".into())]);
 
         let rules = val["rules"].as_array().expect("rules array");
         assert!(rules.iter().any(|r| r == "MATCH,VPN"));
@@ -871,7 +1286,7 @@ async fn disabled_no_grant_user_and_unknown_token() {
             .expect("VPN group");
         assert_eq!(vpn_group["type"], "select");
         let g_proxies = vpn_group["proxies"].as_array().expect("VPN group proxies");
-        assert_eq!(g_proxies, &vec![Value::String("DIRECT".into())]);
+        assert_eq!(g_proxies, &vec![Value::String("REJECT".into())]);
 
         let rules = val["rules"].as_array().expect("rules array");
         assert!(rules.iter().any(|r| r == "MATCH,VPN"));

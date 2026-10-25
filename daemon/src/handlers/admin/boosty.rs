@@ -151,11 +151,11 @@ pub(crate) async fn boosty_page(
         @if let Some(r) = report {
             @if !r.suppressed_disables.is_empty() {
                 div style="border: 1px solid var(--red); border-left-width: 3px; background: color-mix(in oklab, var(--red) 8%, var(--paper)); padding: 8px 12px; margin: 12px 0; font-family: var(--serif); font-size: 12px; line-height: 1.5;" {
-                    b style="color: var(--red);" { (icon("triangle-alert")) (tr(lang, "Empty roster — disables suppressed.", "Пустой ростер — отключения подавлены.")) }
+                    b style="color: var(--red);" { (icon("triangle-alert")) (tr(lang, "Unconfirmed subscription loss — disables suppressed.", "Потеря подписки не подтверждена — отключения подавлены.")) }
                     " "
                     (tr(lang,
-                        "The last sync got zero subscribers back (likely a wrong blog url or expired token). No one was disabled. Untouched: ",
-                        "Последний синк вернул ноль подписчиков (скорее всего неверный blog url или протухший токен). Никто не отключён. Не тронуты: "))
+                        "The last roster had no VPN-eligible subscribers. Access was preserved for linked users absent from the roster. Untouched: ",
+                        "В последнем ростере нет подписчиков с правом на VPN. Доступ сохранён связанным пользователям, отсутствующим в ростере. Не тронуты: "))
                     span.ed-mono { (r.suppressed_disables.join(", ")) }
                 }
             }
@@ -736,12 +736,12 @@ pub(crate) async fn boosty_settings_save(State(state): State<AppState>, body: St
         return internal_error(anyhow::Error::new(e));
     }
 
-    if form_field(&body, "quick_sync_now").is_some() && s.enabled {
-        if let Err(resp) =
+    if form_field(&body, "quick_sync_now").is_some()
+        && s.enabled
+        && let Err(resp) =
             run_boosty_sync_and_deploy(&state, s.auto_disable_lapsed, "boosty.quick_connect").await
-        {
-            return resp;
-        }
+    {
+        return resp;
     }
 
     Redirect::to("/admin/boosty").into_response()

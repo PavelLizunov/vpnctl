@@ -374,7 +374,7 @@ async fn linked_free_follower_under_enable_only_is_pending_not_disabled() {
 }
 
 #[tokio::test]
-async fn all_active_free_roster_suppresses_disable_of_linked_payer() {
+async fn all_active_free_roster_disables_only_confirmed_downgrades() {
     let mut server = mockito::Server::new_async().await;
     let body = json!({
         "data": [
@@ -402,21 +402,136 @@ async fn all_active_free_roster_suppresses_disable_of_linked_payer() {
     inv.link_boosty_subscriber(&UserId("carol".into()), 600)
         .await
         .unwrap();
+    inv.add_user(&user("missing", false)).await.unwrap();
+    inv.link_boosty_subscriber(&UserId("missing".into()), 602)
+        .await
+        .unwrap();
 
     let report = sync_once(&client, &inv, "ninitux", ApplyMode::Full)
         .await
         .unwrap();
 
-    assert!(
-        report.disabled.is_empty(),
-        "must NOT disable on zero-eligible anomaly"
-    );
-    assert_eq!(report.suppressed_disables, vec!["carol"]);
+    assert_eq!(report.disabled, vec!["carol"]);
+    assert_eq!(report.suppressed_disables, vec!["missing"]);
     let users = inv.list_users().await.unwrap();
     let carol = users.iter().find(|u| u.id.0 == "carol").unwrap();
     assert!(
-        !carol.disabled,
-        "carol kept enabled pending operator confirm"
+        carol.disabled,
+        "confirmed downgrade must disable the last payer"
+    );
+    assert!(
+        !users.iter().find(|u| u.id.0 == "missing").unwrap().disabled,
+        "an absent subscriber stays protected in the same sync"
+    );
+}
+
+#[tokio::test]
+async fn confirmed_free_downgrade_waits_for_grace_then_disables_once() {
+    let mut server = mockito::Server::new_async().await;
+    let body = json!({
+        "data": [follower(600, "NowFree", "active")],
+        "total": 1, "limit": 100, "offset": 0
+    })
+    .to_string();
+    let _m = server
+        .mock("GET", "/v1/blog/ninitux/subscribers")
+        .match_query(mockito::Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(body)
+        .create_async()
+        .await;
+
+    let client = ApiClient::new(reqwest::Client::new(), server.url());
+    let dir = tempfile::tempdir().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let uid = UserId("carol".into());
+    inv.add_user(&user("carol", false)).await.unwrap();
+    inv.link_boosty_subscriber(&uid, 600).await.unwrap();
+
+    let first = sync_once_with_policy(&client, &inv, "ninitux", ApplyMode::Full, 14, false)
+        .await
+        .unwrap();
+    assert_eq!(first.grace_pending, vec!["carol"]);
+    assert!(first.disabled.is_empty());
+    assert!(first.suppressed_disables.is_empty());
+    assert!(!inv.get_user(&uid).await.unwrap().unwrap().disabled);
+    assert!(
+        inv.recent_audit(20)
+            .await
+            .unwrap()
+            .iter()
+            .all(|row| row.action != "boosty.disable")
+    );
+
+    inv.observe_boosty_lapse(&uid, Some(first.observed_at - 15 * 86_400))
+        .await
+        .unwrap();
+    let expired = sync_once_with_policy(&client, &inv, "ninitux", ApplyMode::Full, 14, false)
+        .await
+        .unwrap();
+    assert_eq!(expired.disabled, vec!["carol"]);
+    assert!(expired.grace_pending.is_empty());
+    assert!(expired.suppressed_disables.is_empty());
+    assert!(expired.errors.is_empty());
+    assert!(inv.get_user(&uid).await.unwrap().unwrap().disabled);
+
+    let retry = sync_once_with_policy(&client, &inv, "ninitux", ApplyMode::Full, 14, false)
+        .await
+        .unwrap();
+    assert!(retry.disabled.is_empty());
+    let audits = inv.recent_audit(20).await.unwrap();
+    assert_eq!(
+        audits
+            .iter()
+            .filter(|row| row.action == "boosty.disable" && row.target.as_deref() == Some("carol"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn zero_paid_roster_suppresses_disable_of_absent_subscriber() {
+    let mut server = mockito::Server::new_async().await;
+    let body = json!({
+        "data": [follower(601, "FreeFollower", "active")],
+        "total": 1, "limit": 100, "offset": 0
+    })
+    .to_string();
+    let _m = server
+        .mock("GET", "/v1/blog/ninitux/subscribers")
+        .match_query(mockito::Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(body)
+        .create_async()
+        .await;
+
+    let client = ApiClient::new(reqwest::Client::new(), server.url());
+    let dir = tempfile::tempdir().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let uid = UserId("carol".into());
+    inv.add_user(&user("carol", false)).await.unwrap();
+    inv.link_boosty_subscriber(&uid, 600).await.unwrap();
+    inv.observe_boosty_lapse(&uid, Some(1)).await.unwrap();
+
+    let report = sync_once_with_policy(&client, &inv, "ninitux", ApplyMode::Full, 14, false)
+        .await
+        .unwrap();
+    assert!(report.disabled.is_empty());
+    assert!(report.grace_pending.is_empty());
+    assert_eq!(report.suppressed_disables, vec!["carol"]);
+    assert!(!inv.get_user(&uid).await.unwrap().unwrap().disabled);
+    assert!(
+        inv.recent_audit(20)
+            .await
+            .unwrap()
+            .iter()
+            .all(|row| row.action != "boosty.disable")
     );
 }
 
@@ -452,6 +567,13 @@ async fn empty_roster_suppresses_disables() {
     assert_eq!(report.suppressed_disables, vec!["bob"]);
     let users = inv.list_users().await.unwrap();
     assert!(!users[0].disabled, "empty roster must not disable bob");
+    assert!(
+        inv.recent_audit(20)
+            .await
+            .unwrap()
+            .iter()
+            .all(|row| row.action != "boosty.disable")
+    );
 }
 
 #[tokio::test]

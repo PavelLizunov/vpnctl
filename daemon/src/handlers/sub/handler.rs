@@ -105,65 +105,65 @@ pub(crate) async fn get(
         }
     }
 
-    if let Some(addr) = per_ip_ip {
-        if let Err((retry, denial_count)) = state.rate_limiter.try_acquire_ip(addr) {
-            if denial_count == crate::rate_limit::K_DENIALS_TO_BAN {
-                let ip_str = addr.to_string();
-                let reason = format!("{denial_count} consecutive 429s on /sub");
-                match state
-                    .inv
-                    .add_ban(
-                        "ip",
-                        &ip_str,
-                        crate::rate_limit::DEFAULT_BAN_TTL_SECS,
-                        &reason,
-                    )
-                    .await
-                {
-                    Ok(()) => {
+    if let Some(addr) = per_ip_ip
+        && let Err((retry, denial_count)) = state.rate_limiter.try_acquire_ip(addr)
+    {
+        if denial_count == crate::rate_limit::K_DENIALS_TO_BAN {
+            let ip_str = addr.to_string();
+            let reason = format!("{denial_count} consecutive 429s on /sub");
+            match state
+                .inv
+                .add_ban(
+                    "ip",
+                    &ip_str,
+                    crate::rate_limit::DEFAULT_BAN_TTL_SECS,
+                    &reason,
+                )
+                .await
+            {
+                Ok(()) => {
+                    tracing::warn!(
+                        target = "vpnctld::sub",
+                        ip = %ip_str,
+                        denials = denial_count,
+                        ttl_secs = crate::rate_limit::DEFAULT_BAN_TTL_SECS,
+                        "escalated to 24h persistent ban after consecutive 429s"
+                    );
+                    if let Err(e) = state
+                        .inv
+                        .audit(
+                            "daemon",
+                            "rate.ban.add",
+                            Some(&ip_str),
+                            Some(&serde_json::json!({
+                                "kind": "ip",
+                                "ttl_secs": crate::rate_limit::DEFAULT_BAN_TTL_SECS,
+                                "reason": reason,
+                            })),
+                        )
+                        .await
+                    {
                         tracing::warn!(
                             target = "vpnctld::sub",
                             ip = %ip_str,
-                            denials = denial_count,
-                            ttl_secs = crate::rate_limit::DEFAULT_BAN_TTL_SECS,
-                            "escalated to 24h persistent ban after consecutive 429s"
-                        );
-                        if let Err(e) = state
-                            .inv
-                            .audit(
-                                "daemon",
-                                "rate.ban.add",
-                                Some(&ip_str),
-                                Some(&serde_json::json!({
-                                    "kind": "ip",
-                                    "ttl_secs": crate::rate_limit::DEFAULT_BAN_TTL_SECS,
-                                    "reason": reason,
-                                })),
-                            )
-                            .await
-                        {
-                            tracing::warn!(
-                                target = "vpnctld::sub",
-                                ip = %ip_str,
-                                error = %e,
-                                "audit row for rate.ban.add(ip) failed; ban already persisted"
-                            );
-                        }
-                        state.rate_limiter.reset_denials_ip(addr);
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            target = "vpnctld::sub",
-                            ip = %ip_str,
                             error = %e,
-                            "add_ban(ip) failed; clamping denial counter to K-1 to retry on next denial"
+                            "audit row for rate.ban.add(ip) failed; ban already persisted"
                         );
-                        state.rate_limiter.clamp_denials_ip(addr);
                     }
+                    state.rate_limiter.reset_denials_ip(addr);
+                }
+                Err(e) => {
+                    tracing::error!(
+                        target = "vpnctld::sub",
+                        ip = %ip_str,
+                        error = %e,
+                        "add_ban(ip) failed; clamping denial counter to K-1 to retry on next denial"
+                    );
+                    state.rate_limiter.clamp_denials_ip(addr);
                 }
             }
-            return rate_limited(retry, "ip");
         }
+        return rate_limited(retry, "ip");
     }
 
     let ua_wants_v2ray_subscription = ua

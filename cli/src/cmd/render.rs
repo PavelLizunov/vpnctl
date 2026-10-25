@@ -90,7 +90,8 @@ pub(crate) async fn render_server_configs<W1: Write, W2: Write>(
         .ok_or_else(|| anyhow::anyhow!("kernel not registered: {target_kid}"))?;
 
     let users = inv.users_for_server(sid).await?;
-    let ctx = RenderCtx::new(&server_row, &secrets);
+    let ctx = RenderCtx::with_peers(&server_row, &secrets, &users)
+        .with_wg_octets(inv.wg_octets_for_server(sid).await?);
 
     let supported = kernel.supported_protocols();
     let protocols: Vec<&dyn Protocol> = server_row

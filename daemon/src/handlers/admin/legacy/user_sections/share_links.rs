@@ -175,7 +175,15 @@ pub(crate) async fn collect_amnezia_links(
             .get(&server.id)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let ctx = vpnctl_core::RenderCtx::with_peers(server, secrets, peers);
+        let wg_octets = match state.inv.wg_octets_for_server(&server.id).await {
+            Ok(octets) => octets,
+            Err(e) => {
+                tracing::warn!(target = "vpnctld::admin", server = %server.id, error = %e, "WireGuard address assignment failed");
+                continue;
+            }
+        };
+        let ctx =
+            vpnctl_core::RenderCtx::with_peers(server, secrets, peers).with_wg_octets(wg_octets);
         let per_server_user = user_for_server_render(user, peers, &server.id);
         match vpnctl_protocols::amnezia_share_link(&ctx, &per_server_user) {
             Ok(link) => out.push((server.id.clone(), link)),
@@ -234,7 +242,15 @@ pub(crate) async fn collect_awg_links(
             .get(&server.id)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let ctx = vpnctl_core::RenderCtx::with_peers(server, secrets, peers);
+        let wg_octets = match state.inv.wg_octets_for_server(&server.id).await {
+            Ok(octets) => octets,
+            Err(e) => {
+                tracing::warn!(target = "vpnctld::admin", server = %server.id, error = %e, "WireGuard address assignment failed");
+                continue;
+            }
+        };
+        let ctx =
+            vpnctl_core::RenderCtx::with_peers(server, secrets, peers).with_wg_octets(wg_octets);
         let per_server_user = user_for_server_render(user, peers, &server.id);
         match vpnctl_protocols::awg_share_link(&ctx, &per_server_user) {
             Ok(link) => out.push((server.id.clone(), link)),
@@ -288,7 +304,15 @@ pub(crate) async fn collect_share_links(
             .get(&server.id)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let ctx = vpnctl_core::RenderCtx::with_peers(server, secrets, peers);
+        let wg_octets = match state.inv.wg_octets_for_server(&server.id).await {
+            Ok(octets) => octets,
+            Err(e) => {
+                tracing::warn!(target = "vpnctld::admin", server = %server.id, error = %e, "WireGuard address assignment failed");
+                continue;
+            }
+        };
+        let ctx =
+            vpnctl_core::RenderCtx::with_peers(server, secrets, peers).with_wg_octets(wg_octets);
         let per_server_user = user_for_server_render(user, peers, &server.id);
         for pid in &server.enabled_protocols {
             if !visible_set.contains(pid) {

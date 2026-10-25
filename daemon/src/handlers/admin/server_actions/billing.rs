@@ -54,10 +54,11 @@ pub(crate) async fn server_set_billing(
     let billing_url = form_field(&body, "billing_url")
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    if let Some(ref u) = billing_url {
-        if !u.starts_with("http://") && !u.starts_with("https://") {
-            return bad_request("billing_url must start with http:// or https://");
-        }
+    if let Some(ref u) = billing_url
+        && !u.starts_with("http://")
+        && !u.starts_with("https://")
+    {
+        return bad_request("billing_url must start with http:// or https://");
     }
 
     let notes = form_field(&body, "notes")

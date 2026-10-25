@@ -117,7 +117,11 @@ async fn render_singbox_with(
             let compatible = match compatibility {
                 Compatibility::Legacy => proto.appears_in_sing_box_sub(),
                 Compatibility::Stock => proto.appears_in_stock_sing_box_sub(),
-                Compatibility::Mihomo => matches!(pid.0.as_str(), "vless+reality" | "hysteria2"),
+                Compatibility::Mihomo => {
+                    matches!(pid.0.as_str(), "vless+reality" | "hysteria2")
+                        || (secrets.contains_key("tls.cert_sha256")
+                            && matches!(pid.0.as_str(), "trojan" | "anytls" | "tuic-v5"))
+                }
             };
             if !compatible {
                 tracing::debug!(
@@ -138,6 +142,16 @@ async fn render_singbox_with(
                     );
                     if let Some(obj) = value.as_object_mut() {
                         obj.insert("tag".into(), json!(tag));
+                        // Internal Mihomo conversion metadata; never exported as sing-box JSON.
+                        if matches!(compatibility, Compatibility::Mihomo)
+                            && matches!(
+                                pid.0.as_str(),
+                                "trojan" | "anytls" | "hysteria2" | "tuic-v5"
+                            )
+                            && let Some(pin) = secrets.get("tls.cert_sha256")
+                        {
+                            obj.insert("fingerprint".into(), json!(pin));
+                        }
                     }
                     rendered.push((server.id.clone(), value, tag));
                 }
@@ -311,9 +325,9 @@ fn empty_singbox_config() -> Value {
         ],
         "route": {
             "rules": [
-                { "protocol": "dns", "outbound": "direct" }
+                { "protocol": "dns", "outbound": "block" }
             ],
-            "final": "direct",
+            "final": "block",
             "auto_detect_interface": true
         }
     })

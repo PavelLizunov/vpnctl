@@ -288,7 +288,7 @@ async fn protocol_settings_posts_require_csrf_and_existing_enabled_server() {
         .await
         .unwrap();
     let latest = s.inv.recent_audit(1).await.unwrap()[0].id;
-    for suffix in ["reality-config", "hysteria2-obfs-rotate"] {
+    for suffix in ["reality-config", "hysteria2-obfs-rotate", "ss2022-mode"] {
         for origin in [None, Some("https://evil.example")] {
             let mut req = Request::builder()
                 .method("POST")
@@ -414,4 +414,171 @@ async fn naive_and_vlessws_equal_saves_do_not_audit_or_mark_pending() {
             }]}))
         );
     }
+}
+
+async fn ss2022_fixture(dir: &TempDir) -> AppState {
+    let s = fixture(dir).await;
+    let sid = ServerId("s0".into());
+    s.inv
+        .add_server_protocol(&sid, &ProtocolId("shadowsocks-2022".into()))
+        .await
+        .unwrap();
+    s.inv
+        .set_server_secret(&sid, "ss2022.psk", "AAECAwQFBgcICQoLDA0ODw==")
+        .await
+        .unwrap();
+    s.inv
+        .audit("test", "server.deploy", Some("s0"), None)
+        .await
+        .unwrap();
+    s
+}
+
+#[tokio::test]
+async fn ss2022_mode_form_explains_reimport_in_both_languages() {
+    let dir = TempDir::new().unwrap();
+    let s = ss2022_fixture(&dir).await;
+    let en = fetch_html(router(s.clone()), "/admin/servers/s0/protocols").await;
+    assert!(en.contains(r#"action="/admin/servers/s0/ss2022-mode""#));
+    assert!(en.contains(r#"name="mode" value="multi-user""#));
+    assert!(en.contains("every SS2022 user must re-import their profile"));
+    assert!(en.contains("shared key (legacy)"));
+    assert!(!en.contains("AAECAwQFBgcICQoLDA0ODw=="));
+    assert_eq!(
+        post(&s, "ss2022-mode", "mode=multi-user").await.status(),
+        StatusCode::SEE_OTHER
+    );
+    let ru = fetch_html_with_cookie(
+        router(s.clone()),
+        "/admin/servers/s0/protocols",
+        "vpnctl_lang=ru",
+    )
+    .await;
+    assert!(ru.contains(r#"name="mode" value="shared""#));
+    assert!(ru.contains("каждый пользователь SS2022 должен заново импортировать профиль"));
+    assert!(ru.contains("персональные ключи"));
+    let disabled = fetch_html(router(s), "/admin/servers/s1/protocols").await;
+    assert!(!disabled.contains("/ss2022-mode"));
+}
+
+#[tokio::test]
+async fn ss2022_mode_switch_audits_changes_only_and_restores_legacy_bytes() {
+    let dir = TempDir::new().unwrap();
+    let s = ss2022_fixture(&dir).await;
+    let sid = ServerId("s0".into());
+    let unchanged = share_links(&s).await;
+    let latest = s.inv.recent_audit(1).await.unwrap()[0].id;
+    assert_eq!(
+        post(&s, "ss2022-mode", "mode=shared").await.status(),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(
+        s.inv.get_server_secret(&sid, "ss2022.mode").await.unwrap(),
+        None
+    );
+    assert_eq!(s.inv.recent_audit(1).await.unwrap()[0].id, latest);
+    assert!(!s.inv.server_pending_deploy(&sid).await.unwrap());
+
+    let mut user = mk_user("alice", false);
+    user.uuid = "00000000-0000-0000-0000-000000000001".into();
+    let protocol = s
+        .registry
+        .protocol(&ProtocolId("shadowsocks-2022".into()))
+        .unwrap();
+    for (mode, expected) in [
+        (
+            "multi-user",
+            "ss://2022-blake3-aes-128-gcm:AAECAwQFBgcICQoLDA0ODw==%3AGjw%2FMOzkwdF8pDO05jE0+g==@10.0.0.0:8388/#alice",
+        ),
+        (
+            "shared",
+            "ss://2022-blake3-aes-128-gcm:AAECAwQFBgcICQoLDA0ODw==@10.0.0.0:8388/#alice",
+        ),
+    ] {
+        let response = post(&s, "ss2022-mode", &format!("mode={mode}")).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers()["location"],
+            "/admin/servers/s0/protocols"
+        );
+        assert!(s.inv.server_pending_deploy(&sid).await.unwrap());
+        let audit = s.inv.recent_audit(1).await.unwrap();
+        assert_eq!(audit[0].action, "server.secret.set");
+        assert_eq!(audit[0].target.as_deref(), Some("s0"));
+        assert_eq!(
+            audit[0].payload,
+            Some(serde_json::json!({"keys": ["ss2022.mode"]}))
+        );
+        let server = s.inv.get_server(&sid).await.unwrap().unwrap();
+        let secrets = s.inv.list_server_secrets(&sid).await.unwrap();
+        let ctx = RenderCtx::new(&server, &secrets);
+        assert_eq!(
+            protocol.share_link(&ctx, &user).unwrap().as_bytes(),
+            expected.as_bytes()
+        );
+        assert_eq!(share_links(&s).await, unchanged);
+        s.inv
+            .audit("test", "server.deploy", Some("s0"), None)
+            .await
+            .unwrap();
+        let latest = s.inv.recent_audit(1).await.unwrap()[0].id;
+        assert_eq!(
+            post(&s, "ss2022-mode", &format!("mode={mode}"))
+                .await
+                .status(),
+            StatusCode::SEE_OTHER
+        );
+        assert_eq!(s.inv.recent_audit(1).await.unwrap()[0].id, latest);
+        assert!(!s.inv.server_pending_deploy(&sid).await.unwrap());
+    }
+}
+
+#[tokio::test]
+async fn ss2022_mode_rejects_chacha_invalid_mode_and_disabled_protocol_without_mutation() {
+    let dir = TempDir::new().unwrap();
+    let s = ss2022_fixture(&dir).await;
+    let sid = ServerId("s0".into());
+    s.inv
+        .set_server_secret(&sid, "ss2022.method", "2022-blake3-chacha20-poly1305")
+        .await
+        .unwrap();
+    s.inv
+        .set_server_secret(
+            &sid,
+            "ss2022.psk",
+            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        )
+        .await
+        .unwrap();
+    s.inv
+        .audit("test", "server.deploy", Some("s0"), None)
+        .await
+        .unwrap();
+    let before = s.inv.list_server_secrets(&sid).await.unwrap();
+    let latest = s.inv.recent_audit(1).await.unwrap()[0].id;
+    for body in ["mode=multi-user", "mode=invalid", ""] {
+        let response = post(&s, "ss2022-mode", body).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        if body == "mode=multi-user" {
+            let bytes = http_body_util::BodyExt::collect(response.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
+            assert!(String::from_utf8_lossy(&bytes).contains("chacha20 does not support EIH"));
+        }
+    }
+    assert_eq!(s.inv.list_server_secrets(&sid).await.unwrap(), before);
+    assert_eq!(s.inv.recent_audit(1).await.unwrap()[0].id, latest);
+    assert!(!s.inv.server_pending_deploy(&sid).await.unwrap());
+    s.inv
+        .remove_server_protocol(&sid, &ProtocolId("shadowsocks-2022".into()))
+        .await
+        .unwrap();
+    let latest = s.inv.recent_audit(1).await.unwrap()[0].id;
+    assert_eq!(
+        post(&s, "ss2022-mode", "mode=multi-user").await.status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(s.inv.list_server_secrets(&sid).await.unwrap(), before);
+    assert_eq!(s.inv.recent_audit(1).await.unwrap()[0].id, latest);
 }

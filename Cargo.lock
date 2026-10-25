@@ -5271,8 +5271,10 @@ version = "0.9.0"
 dependencies = [
  "base64",
  "flate2",
+ "hmac 0.12.1",
  "percent-encoding",
  "serde_json",
+ "sha2 0.10.9",
  "vpnctl-core",
 ]
 

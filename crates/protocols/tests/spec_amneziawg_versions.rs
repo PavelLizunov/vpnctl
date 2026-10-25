@@ -906,4 +906,47 @@ mod spec {
             assert!(render_amnezia_conf(version, &ctx, &peers[0]).is_err());
         }
     }
+
+    #[test]
+    fn persisted_legacy_wg_octets_do_not_change_awg2_or_awg3_bytes() {
+        let server = server();
+        let peers = [user("alice", 258, 1), user("bob", 772, 2)];
+        for version in [2, 3] {
+            let secrets = secrets(version);
+            let legacy = RenderCtx::with_peers(&server, &secrets, &peers);
+            let persisted =
+                RenderCtx::with_peers(&server, &secrets, &peers).with_wg_octets(HashMap::from([
+                    (peers[0].id.clone(), 42),
+                    (peers[1].id.clone(), 254),
+                ]));
+            let protocol = protocol(version);
+            assert_eq!(
+                serde_json::to_vec(&protocol.server_inbound(&legacy, &peers).unwrap()).unwrap(),
+                serde_json::to_vec(&protocol.server_inbound(&persisted, &peers).unwrap()).unwrap()
+            );
+            for peer in &peers {
+                assert_eq!(
+                    serde_json::to_vec(&protocol.client_config(&legacy, peer).unwrap()).unwrap(),
+                    serde_json::to_vec(&protocol.client_config(&persisted, peer).unwrap()).unwrap()
+                );
+                assert_eq!(
+                    render_amnezia_conf(version, &legacy, peer)
+                        .unwrap()
+                        .as_bytes(),
+                    render_amnezia_conf(version, &persisted, peer)
+                        .unwrap()
+                        .as_bytes()
+                );
+                let link = if version == 2 {
+                    vpnctl_protocols::awg2_share_link
+                } else {
+                    vpnctl_protocols::awg3_share_link
+                };
+                assert_eq!(
+                    link(&legacy, peer).unwrap().as_bytes(),
+                    link(&persisted, peer).unwrap().as_bytes()
+                );
+            }
+        }
+    }
 }

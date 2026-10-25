@@ -16,6 +16,30 @@ fn user_with_secrets() -> User {
 }
 
 #[test]
+fn user_disable_enable_parse_optional_deploy() {
+    use clap::Parser;
+
+    for action in ["disable", "enable"] {
+        for immediate in [false, true] {
+            let mut args = vec!["vpnctl", "user", action, "alice"];
+            if immediate {
+                args.push("--deploy");
+            }
+            let cli = crate::Cli::try_parse_from(args).unwrap();
+            let crate::Cmd::User { cmd } = cli.cmd else {
+                panic!("expected user command");
+            };
+            let (id, deploy) = match cmd {
+                UserCmd::Disable { id, deploy } | UserCmd::Enable { id, deploy } => (id, deploy),
+                other => panic!("unexpected command: {other:?}"),
+            };
+            assert_eq!(id, "alice");
+            assert_eq!(deploy, immediate);
+        }
+    }
+}
+
+#[test]
 fn render_secret_field_redacts_present_secret_by_default() {
     assert_eq!(
         render_secret_field(Some("supersecret"), false, "(none)"),
@@ -233,7 +257,10 @@ async fn user_disable_and_enable_mutates_and_audits() {
     assert!(!u.disabled, "user starts enabled");
 
     run(
-        UserCmd::Disable { id: "david".into() },
+        UserCmd::Disable {
+            id: "david".into(),
+            deploy: false,
+        },
         Some(db_path.clone()),
         OutputFormat::Text,
     )
@@ -258,7 +285,10 @@ async fn user_disable_and_enable_mutates_and_audits() {
 
     let count_before = audit.iter().filter(|a| a.action == "user.disable").count();
     run(
-        UserCmd::Disable { id: "david".into() },
+        UserCmd::Disable {
+            id: "david".into(),
+            deploy: false,
+        },
         Some(db_path.clone()),
         OutputFormat::Text,
     )
@@ -275,7 +305,10 @@ async fn user_disable_and_enable_mutates_and_audits() {
     );
 
     run(
-        UserCmd::Enable { id: "david".into() },
+        UserCmd::Enable {
+            id: "david".into(),
+            deploy: false,
+        },
         Some(db_path.clone()),
         OutputFormat::Text,
     )
@@ -303,7 +336,10 @@ async fn user_disable_and_enable_mutates_and_audits() {
         .filter(|a| a.action == "user.enable")
         .count();
     run(
-        UserCmd::Enable { id: "david".into() },
+        UserCmd::Enable {
+            id: "david".into(),
+            deploy: false,
+        },
         Some(db_path.clone()),
         OutputFormat::Text,
     )
@@ -328,6 +364,7 @@ async fn user_disable_enable_unknown_user_errors() {
     let err_disable = run(
         UserCmd::Disable {
             id: "nonexistent".into(),
+            deploy: false,
         },
         Some(db_path.clone()),
         OutputFormat::Text,
@@ -341,6 +378,7 @@ async fn user_disable_enable_unknown_user_errors() {
     let err_enable = run(
         UserCmd::Enable {
             id: "nonexistent".into(),
+            deploy: false,
         },
         Some(db_path.clone()),
         OutputFormat::Text,
@@ -883,9 +921,15 @@ async fn user_disable_enable_retry_after_reopen_preserves_pending_deploy() {
         let latest = inv.recent_audit(1).await.unwrap()[0].id;
         inv.close().await;
         let cmd = if disabled {
-            UserCmd::Disable { id: "alice".into() }
+            UserCmd::Disable {
+                id: "alice".into(),
+                deploy: false,
+            }
         } else {
-            UserCmd::Enable { id: "alice".into() }
+            UserCmd::Enable {
+                id: "alice".into(),
+                deploy: false,
+            }
         };
         run(cmd, Some(db_path.clone()), OutputFormat::Text)
             .await

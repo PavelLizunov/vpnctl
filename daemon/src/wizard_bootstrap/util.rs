@@ -118,14 +118,14 @@ pub async fn ssh_password_run(
     .exec_password(password, remote_cmd)
     .await
     .map_err(|e| {
-        if let vpnctl_core::CoreError::Transport(message) = &e {
-            if message.starts_with("spawning ssh ") {
-                return format!(
-                    "vpnctld cannot run sshpass on its own host ({}); this is a daemon \
+        if let vpnctl_core::CoreError::Transport(message) = &e
+            && message.starts_with("spawning ssh ")
+        {
+            return format!(
+                "vpnctld cannot run sshpass on its own host ({}); this is a daemon \
                      installation problem — the vpnctld host needs the sshpass package",
-                    redact_password(message, password)
-                );
-            }
+                redact_password(message, password)
+            );
         }
         redact_password(&e.to_string(), password)
     })

@@ -229,6 +229,50 @@ pub(crate) fn server_detail_hysteria2_obfs_section(
     }
 }
 
+pub(crate) fn server_detail_ss2022_mode_section(
+    server: &vpnctl_core::Server,
+    secrets: &HashMap<String, String>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    if !server
+        .enabled_protocols
+        .iter()
+        .any(|p| p.0 == "shadowsocks-2022")
+    {
+        return html! {};
+    }
+    let sid_enc = path_segment_encode(&server.id.0);
+    let multi_user = secrets
+        .get("ss2022.mode")
+        .is_some_and(|v| v == "multi-user");
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow { "SHADOWSOCKS-2022" }
+        p {
+            (tr(lang, "Key mode: ", "Режим ключей: "))
+            (if multi_user {
+                tr(lang, "per-user keys", "персональные ключи")
+            } else {
+                tr(lang, "shared key (legacy)", "общий ключ (прежний режим)")
+            })
+        }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 10px;" {
+            (tr(lang,
+                "After changing the mode and the next deploy, every SS2022 user must re-import their profile. Per-user keys allow revocation on deploy and require an AES method; chacha20 does not support them.",
+                "После смены режима и следующего деплоя каждый пользователь SS2022 должен заново импортировать профиль. Персональные ключи позволяют отзывать доступ при деплое и требуют метод AES; chacha20 их не поддерживает."))
+        }
+        form method="post" action=(format!("/admin/servers/{sid_enc}/ss2022-mode")) {
+            input type="hidden" name="mode" value=(if multi_user { "shared" } else { "multi-user" });
+            button type="submit" class="ed-abtn" {
+                (tr(lang,
+                    if multi_user { "switch to shared key" } else { "switch to per-user keys" },
+                    if multi_user { "перейти на общий ключ" } else { "перейти на персональные ключи" }))
+            }
+        }
+    }
+}
+
 pub(crate) fn server_detail_display_name_section(
     server: &vpnctl_core::Server,
     current: Option<&str>,
