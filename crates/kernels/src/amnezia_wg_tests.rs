@@ -574,7 +574,7 @@ fn apply_script_validation_failure_removes_staging_and_validation_copy() {
             return 1
         }
     "#;
-    let out = std::process::Command::new("sh")
+    let out = std::process::Command::new("bash")
         .args(["-c", &format!("{mocks}\n{script}")])
         .env("TEST_ROOT", root)
         .output()
