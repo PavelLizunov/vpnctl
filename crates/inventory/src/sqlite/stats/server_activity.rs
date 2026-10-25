@@ -66,6 +66,7 @@ impl SqliteInventory {
         &self,
         server_id: &ServerId,
         since_hours: u32,
+        max_age_secs: u64,
     ) -> Result<ServerLiveActivity> {
         let since = format!("-{since_hours} hours");
         let row = sqlx::query(
@@ -82,10 +83,12 @@ impl SqliteInventory {
                 (SELECT COUNT(DISTINCT user_id) FROM win WHERE user_id IS NOT NULL) AS attributed,
                 (SELECT active_connections FROM vpn_connection_stats
                  WHERE server_id = ?1 AND user_id IS NULL
-                 ORDER BY ts DESC LIMIT 1)                          AS active_now",
+                   AND ts >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?3)
+                 ORDER BY ts DESC, rowid DESC LIMIT 1)              AS active_now",
         )
         .bind(&server_id.0)
         .bind(&since)
+        .bind(format!("-{max_age_secs} seconds"))
         .fetch_one(&self.pool)
         .await?;
 
@@ -94,10 +97,7 @@ impl SqliteInventory {
         let last_ts_s: Option<String> = row.try_get("last_ts")?;
         let attributed: i64 = row.try_get("attributed")?;
         let active_now_opt: Option<i64> = row.try_get("active_now")?;
-        let active_now: u32 = match active_now_opt {
-            Some(v) => u32::try_from(v.max(0)).unwrap_or(u32::MAX),
-            None => 0,
-        };
+        let active_now = active_now_opt.map(|v| u32::try_from(v.max(0)).unwrap_or(u32::MAX));
 
         Ok(ServerLiveActivity {
             active_now,
@@ -157,6 +157,7 @@ impl SqliteInventory {
     pub async fn all_servers_live_activity(
         &self,
         since_hours: u32,
+        max_age_secs: u64,
     ) -> Result<Vec<(ServerId, ServerLiveActivity)>> {
         let server_ids = sqlx::query("SELECT id FROM servers ORDER BY id")
             .fetch_all(&self.pool)
@@ -165,7 +166,9 @@ impl SqliteInventory {
         for r in server_ids {
             let id: String = r.try_get("id")?;
             let sid = ServerId(id);
-            let activity = self.server_live_activity(&sid, since_hours).await?;
+            let activity = self
+                .server_live_activity(&sid, since_hours, max_age_secs)
+                .await?;
             out.push((sid, activity));
         }
         Ok(out)

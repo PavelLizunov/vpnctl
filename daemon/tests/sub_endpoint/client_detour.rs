@@ -350,3 +350,179 @@ async fn clearing_detour_restores_original_subscription_bytes() {
         "detour clear must restore exact legacy bytes"
     );
 }
+
+#[tokio::test]
+async fn duplicate_display_names_keep_tags_and_references_unique_byte_equal() {
+    for format in ["", "?format=sing-box", "?format=mihomo"] {
+        let dir = TempDir::new().unwrap();
+        let (state, token, _writer) = seed(&dir, true).await;
+        let mut unique = state
+            .inv
+            .get_server(&ServerId("is".into()))
+            .await
+            .unwrap()
+            .unwrap();
+        unique.id = ServerId("zz".into());
+        unique.address = "198.51.100.99".into();
+        state.inv.add_server(&unique).await.unwrap();
+        state
+            .inv
+            .set_server_secret(&unique.id, "vless.public_key", "PUB_zz")
+            .await
+            .unwrap();
+        state
+            .inv
+            .set_server_secret(&unique.id, "vless.short_id", "12345678")
+            .await
+            .unwrap();
+        state
+            .inv
+            .grant(&UserId("alice".into()), &unique.id)
+            .await
+            .unwrap();
+        let uri = format!("/sub/{token}{format}");
+        let (status, original) = get_sub_at(state.clone(), &uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let original = String::from_utf8(original).unwrap();
+        assert!(original.contains("Iceland VLESS ~alice"));
+        assert!(original.contains("S5 VLESS ~alice"));
+        assert!(original.contains("ZZ VLESS ~alice"));
+        for id in ["is", "s5"] {
+            state
+                .inv
+                .set_server_display_name(&ServerId(id.into()), Some("Shared"))
+                .await
+                .unwrap();
+        }
+        let (status, actual) = get_sub_at(state.clone(), &uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let expected = original
+            .replace("Iceland VLESS ~alice", "Shared VLESS ~alice (is)")
+            .replace("S5 VLESS ~alice", "Shared VLESS ~alice (s5)");
+        // Full response equality also pins the selector/group, detour, and ZZ bytes.
+        assert_eq!(actual, expected.as_bytes(), "{format}");
+        let value: Value = if format == "?format=mihomo" {
+            serde_saphyr::from_str(std::str::from_utf8(&actual).unwrap()).unwrap()
+        } else {
+            serde_json::from_slice(&actual).unwrap()
+        };
+        if format == "?format=mihomo" {
+            let proxies = value["proxies"].as_array().unwrap();
+            assert_eq!(proxies.len(), 3);
+            assert_eq!(proxies[0]["name"], "Shared VLESS ~alice (is)");
+            assert_eq!(proxies[1]["name"], "Shared VLESS ~alice (s5)");
+            assert_eq!(proxies[1]["dialer-proxy"], proxies[0]["name"]);
+            assert_eq!(
+                value["proxy-groups"][0]["proxies"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                3
+            );
+        } else {
+            let outbounds = value["outbounds"].as_array().unwrap();
+            assert_eq!(outbounds[1]["tag"], "Shared VLESS ~alice (is)");
+            assert_eq!(outbounds[2]["tag"], "Shared VLESS ~alice (s5)");
+            assert_eq!(outbounds[2]["detour"], outbounds[1]["tag"]);
+            assert_eq!(outbounds[0]["outbounds"].as_array().unwrap().len(), 3);
+        }
+        for _ in 0..2 {
+            let (status, repeated) = get_sub_at(state.clone(), &uri, None).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(actual, repeated, "deterministic bytes: {format}");
+        }
+        for id in ["is", "s5"] {
+            state
+                .inv
+                .set_server_display_name(&ServerId(id.into()), None)
+                .await
+                .unwrap();
+        }
+        let (status, restored) = get_sub_at(state, &uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(restored, original.as_bytes(), "unique names: {format}");
+    }
+}
+
+#[tokio::test]
+async fn unique_singbox_tags_keep_legacy_response_byte_equal() {
+    let dir = TempDir::new().unwrap();
+    let (state, token, _writer) = seed(&dir, true).await;
+    let (status, actual) = get_sub(state, &token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let expected = serde_json::json!({
+        "log": {"level": "info", "timestamp": true},
+        "outbounds": [
+            {
+                "type": "selector", "tag": "proxy",
+                "outbounds": ["Iceland VLESS ~alice", "S5 VLESS ~alice"],
+                "default": "Iceland VLESS ~alice"
+            },
+            {
+                "type": "vless", "tag": "Iceland VLESS ~alice",
+                "server": "198.51.100.10", "server_port": 443,
+                "uuid": "11111111-2222-3333-4444-555555555555",
+                "flow": "xtls-rprx-vision", "packet_encoding": "xudp",
+                "tls": {
+                    "enabled": true, "server_name": "yahoo.com",
+                    "utls": {"enabled": true, "fingerprint": "randomized"},
+                    "reality": {"enabled": true, "public_key": "PUB_is", "short_id": "12345678"}
+                }
+            },
+            {
+                "type": "vless", "tag": "S5 VLESS ~alice",
+                "server": "198.51.100.50", "server_port": 443,
+                "uuid": "11111111-2222-3333-4444-555555555555",
+                "flow": "xtls-rprx-vision", "packet_encoding": "xudp",
+                "detour": "Iceland VLESS ~alice",
+                "tls": {
+                    "enabled": true, "server_name": "yahoo.com",
+                    "utls": {"enabled": true, "fingerprint": "randomized"},
+                    "reality": {"enabled": true, "public_key": "PUB_s5", "short_id": "12345678"}
+                }
+            },
+            {"type": "direct", "tag": "direct"},
+            {"type": "block", "tag": "block"}
+        ],
+        "route": {
+            "rules": [{"protocol": "dns", "outbound": "direct"}],
+            "final": "proxy", "auto_detect_interface": true
+        }
+    });
+    assert_eq!(actual, expected.to_string().as_bytes());
+}
+
+#[tokio::test]
+async fn omitted_target_name_collision_keeps_direct_subscription_byte_equal() {
+    for format in ["?format=sing-box", "?format=mihomo"] {
+        let dir = TempDir::new().unwrap();
+        let (state, token, _writer) = seed(&dir, true).await;
+        let mut missing_entry = state
+            .inv
+            .get_server(&ServerId("is".into()))
+            .await
+            .unwrap()
+            .unwrap();
+        missing_entry.id = ServerId("ungranted-entry".into());
+        state.inv.add_server(&missing_entry).await.unwrap();
+        state
+            .inv
+            .set_client_detour_via_as("test", &ServerId("s5".into()), Some(&missing_entry.id))
+            .await
+            .unwrap();
+        let uri = format!("/sub/{token}{format}");
+        let (status, before) = get_sub_at(state.clone(), &uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        state
+            .inv
+            .set_server_display_name(&ServerId("s5".into()), Some("Iceland"))
+            .await
+            .unwrap();
+        let (status, after) = get_sub_at(state, &uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            after, before,
+            "omitted target must not rename the entry: {format}"
+        );
+    }
+}

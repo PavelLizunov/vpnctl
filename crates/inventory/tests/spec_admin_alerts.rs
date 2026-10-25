@@ -36,6 +36,84 @@ async fn fire(inv: &SqliteInventory, kind: &str, server: Option<&ServerId>) -> O
 }
 
 #[tokio::test]
+async fn acked_source_insert_is_atomic_and_scoped_per_server() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&srv("s1")).await.unwrap();
+    inv.add_server(&srv("s2")).await.unwrap();
+    let s1 = sid("s1");
+    let s2 = sid("s2");
+    let payload = Some(r#"{"_source_event":"sample-a:sample-b"}"#);
+    let (first, second) = tokio::join!(
+        inv.insert_alert_acked_if_new_source(
+            "server.singbox.restarted",
+            Some(&s1),
+            "warning",
+            "restart",
+            payload
+        ),
+        inv.insert_alert_acked_if_new_source(
+            "server.singbox.restarted",
+            Some(&s1),
+            "warning",
+            "restart",
+            payload
+        ),
+    );
+    assert_eq!(
+        usize::from(first.unwrap().is_some()) + usize::from(second.unwrap().is_some()),
+        1
+    );
+    assert!(
+        inv.insert_alert_acked_if_new_source(
+            "server.singbox.restarted",
+            Some(&s2),
+            "warning",
+            "restart",
+            payload,
+        )
+        .await
+        .unwrap()
+        .is_some()
+    );
+    assert!(
+        inv.insert_alert_acked_if_new_source(
+            "server.singbox.restarted",
+            Some(&s1),
+            "warning",
+            "restart",
+            Some(r#"{"_source_event":"sample-b:sample-c"}"#),
+        )
+        .await
+        .unwrap()
+        .is_some()
+    );
+
+    let alerts = inv.recent_alerts(10, true).await.unwrap();
+    assert_eq!(alerts.len(), 3);
+    assert!(alerts.iter().all(|alert| alert.acked_at.is_some()));
+    assert!(inv.recent_alerts(10, false).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn acked_source_insert_reports_missing_server() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    assert!(
+        inv.insert_alert_acked_if_new_source(
+            "server.singbox.restarted",
+            Some(&sid("missing")),
+            "warning",
+            "restart",
+            Some(r#"{"_source_event":"sample-a:sample-b"}"#),
+        )
+        .await
+        .is_err()
+    );
+    assert!(inv.recent_alerts(10, true).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn protocol_assurance_alerts_dedupe_per_protocol_kind() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;

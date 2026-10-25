@@ -659,12 +659,6 @@ async fn persist_and_alert(
 
 fn recovers_open_alert(sample: &ProtocolAssuranceSample) -> bool {
     sample.state == AssuranceState::Verified
-        || (sample.client_kind == CLIENT_KIND
-            && sample.state == AssuranceState::Unknown
-            && matches!(
-                sample.failure_code.as_deref(),
-                Some("tcp_path_only" | "udp_path_unverified" | "no_probe_identity")
-            ))
 }
 
 async fn resolve_unprobed_alerts(
@@ -715,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn safe_builtin_unknown_codes_are_recoverable() {
+    fn unknown_results_never_recover_alerts() {
         let builtin = |code: &str| ProtocolAssuranceSample {
             ts: Utc::now(),
             server_id: vpnctl_core::ServerId("s".into()),
@@ -726,10 +720,10 @@ mod tests {
             latency_ms: None,
             failure_code: Some(code.into()),
         };
-        for code in ["tcp_path_only", "udp_path_unverified", "no_probe_identity"] {
-            assert!(recovers_open_alert(&builtin(code)), "{code}");
-        }
         for code in [
+            "tcp_path_only",
+            "udp_path_unverified",
+            "no_probe_identity",
             "probe_template_missing",
             "probe_data_stale",
             "runner_failed",
@@ -742,6 +736,63 @@ mod tests {
     fn wireguard_runner_is_deliberately_not_configured() {
         assert!(!protocol_uses_external_runner("wireguard"));
         assert!(protocol_uses_external_runner("hysteria2"));
+    }
+
+    #[tokio::test]
+    async fn unknown_path_checks_preserve_failure_until_verified() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        let srv = server("unknown-recovery");
+        inv.add_server(&srv).await.unwrap();
+        let mut sample = ProtocolAssuranceSample {
+            ts: Utc::now(),
+            server_id: srv.id.clone(),
+            protocol_id: vpnctl_core::ProtocolId("vless+reality".into()),
+            client_kind: "xray".into(),
+            stage: AssuranceStage::Handshake,
+            state: AssuranceState::Blocked,
+            latency_ms: None,
+            failure_code: Some("handshake_timeout".into()),
+        };
+        for tick in 0..ALERT_FAILURE_TICKS {
+            sample.ts =
+                Utc::now() - chrono::Duration::seconds(i64::from(ALERT_FAILURE_TICKS - tick));
+            persist_and_alert(&inv, &sample).await.unwrap();
+        }
+        let kind = assurance_alert_kind(&sample.protocol_id.0);
+        assert!(inv.has_unacked_alert(&kind, Some(&srv.id)).await.unwrap());
+
+        sample.client_kind = CLIENT_KIND.into();
+        sample.stage = AssuranceStage::ExternalPath;
+        sample.state = AssuranceState::Unknown;
+        for code in ["tcp_path_only", "udp_path_unverified", "no_probe_identity"] {
+            sample.ts = Utc::now();
+            sample.failure_code = Some(code.into());
+            persist_and_alert(&inv, &sample).await.unwrap();
+            assert!(
+                inv.has_unacked_alert(&kind, Some(&srv.id)).await.unwrap(),
+                "{code}"
+            );
+        }
+
+        sample.ts = Utc::now();
+        sample.client_kind = "xray".into();
+        sample.stage = AssuranceStage::Transfer;
+        sample.state = AssuranceState::Verified;
+        sample.failure_code = None;
+        persist_and_alert(&inv, &sample).await.unwrap();
+        assert!(!inv.has_unacked_alert(&kind, Some(&srv.id)).await.unwrap());
+        assert_eq!(
+            inv.recent_audit(20)
+                .await
+                .unwrap()
+                .iter()
+                .filter(|a| a.action == "alert.auto_ack")
+                .count(),
+            1
+        );
     }
 
     #[test]

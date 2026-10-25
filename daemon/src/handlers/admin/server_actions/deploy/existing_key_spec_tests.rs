@@ -50,7 +50,10 @@ for arg in "$@"; do
     while read -r keyword value rest; do
       if [ "$keyword" = IdentityFile ]; then
         value=${value#\"}; value=${value%\"}
-        [ -f "$value" ] || exit 255
+        case "$*" in
+          *PubkeyAuthentication=no*) ;;
+          *) [ -f "$value" ] || exit 255 ;;
+        esac
       fi
     done < "$arg"
   fi
@@ -65,6 +68,12 @@ case "$* $input" in
 esac
 case "$VPNCTL_EXISTING_KEY_SPEC_CASE" in
   timeout) exec /bin/sleep 30 ;;
+  password_timeout)
+    printf '%s\n' "$$" > "$VPNCTL_SPEC_DIR/ssh.pid"
+    exec /bin/sleep 30 ;;
+  deploy_cancel)
+    : > "$VPNCTL_SPEC_DIR/ssh-started"
+    while [ ! -f "$VPNCTL_SPEC_DIR/ssh-release" ]; do /bin/sleep 0.02; done ;;
   key_failure) printf 'Permission denied (publickey). SPEC_SECRET_MUST_NOT_LEAK\n' >&2; exit 255 ;;
   sudo_failure)
     case "$* $input" in
@@ -84,14 +93,28 @@ printf '[203.0.113.71]:2222 %s %s\n' "$kind" "$key"
 printf '203.0.113.72 %s %s\n' "$kind" "$key"
 "#,
         );
-        for name in ["scp", "sftp", "rsync", "sshpass"] {
+        executable(
+            &bin.join("sshpass"),
+            r#"#!/bin/sh
+case "$VPNCTL_EXISTING_KEY_SPEC_CASE" in
+  password_*)
+    : > "$VPNCTL_SPEC_DIR/sshpass-called"
+    [ "$1" = -e ] || exit 99
+    shift
+    exec "$@" ;;
+  *) printf '%s\n' "$0" >> "$VPNCTL_SPEC_DIR/forbidden.log"; exit 99 ;;
+esac
+"#,
+        );
+        for name in ["scp", "sftp", "rsync"] {
             executable(
                 &bin.join(name),
                 "#!/bin/sh\nprintf '%s\\n' \"$0\" >> \"$VPNCTL_SPEC_DIR/forbidden.log\"\nexit 99\n",
             );
         }
         let module = module_path!().split_once("::").unwrap().1;
-        let output = Command::new(std::env::current_exe().unwrap())
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child
             .args([
                 "--exact",
                 &format!("{module}::isolated_child"),
@@ -106,9 +129,11 @@ printf '203.0.113.72 %s %s\n' "$kind" "$key"
             .env("HOME", dir.path())
             .env("TMPDIR", dir.path())
             .env("XDG_CONFIG_HOME", dir.path())
-            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-            .output()
-            .unwrap();
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+        if case == "password_reference_pin_failure" {
+            child.env("VPNCTLD_REFERENCE_SSH_KEY", dir.path().join("deploy"));
+        }
+        let output = child.output().unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
             output.status.success() && stdout.contains("1 passed"),
@@ -185,6 +210,36 @@ printf '203.0.113.72 %s %s\n' "$kind" "$key"
     #[test]
     fn unknown_server_is_not_created_or_contacted() {
         run_case("unknown_server");
+    }
+
+    #[test]
+    fn password_push_uses_inventory_pin_without_shared_known_hosts() {
+        run_case("password_pin");
+    }
+
+    #[test]
+    fn password_push_rejects_mismatched_pin_before_sending_password() {
+        run_case("password_pin_failure");
+    }
+
+    #[test]
+    fn reference_key_fallback_does_not_bypass_password_host_pin() {
+        run_case("password_reference_pin_failure");
+    }
+
+    #[test]
+    fn password_first_contact_retains_tofu() {
+        run_case("password_tofu");
+    }
+
+    #[test]
+    fn password_command_timeout_kills_child() {
+        run_case("password_timeout");
+    }
+
+    #[test]
+    fn cancelled_deploy_keeps_guard_until_ssh_finishes() {
+        run_case("deploy_cancel");
     }
 
     fn read_log(root: &FsPath, name: &str) -> String {
@@ -319,19 +374,35 @@ printf '203.0.113.72 %s %s\n' "$kind" "$key"
             .unwrap()
             .block_on(async {
                 let root = PathBuf::from(std::env::var("VPNCTL_SPEC_DIR").unwrap());
-                assert!(std::env::var_os("VPNCTLD_REFERENCE_SSH_KEY").is_none());
+                assert_eq!(
+                    std::env::var_os("VPNCTLD_REFERENCE_SSH_KEY").is_some(),
+                    case == "password_reference_pin_failure"
+                );
                 let inv = SqliteInventory::open(&root.join("inventory.db"))
                     .await
                     .unwrap();
+                let mut registry = Registry::new();
+                if case == "deploy_cancel" {
+                    registry
+                        .register_kernel(Box::new(vpnctl_kernels::Xray::new()))
+                        .unwrap();
+                }
                 let (state, _writer) =
-                    crate::app::make_app_state_for_tests(inv, Arc::new(Registry::new()));
+                    crate::app::make_app_state_for_tests(inv, Arc::new(registry));
                 let fingerprint = Command::new("ssh-keygen")
                     .args(["-lf"])
-                    .arg(root.join(if case == "pin_failure" {
-                        "deploy.pub"
-                    } else {
-                        "host.pub"
-                    }))
+                    .arg(root.join(
+                        if matches!(
+                            case.as_str(),
+                            "pin_failure"
+                                | "password_pin_failure"
+                                | "password_reference_pin_failure"
+                        ) {
+                            "deploy.pub"
+                        } else {
+                            "host.pub"
+                        },
+                    ))
                     .output()
                     .unwrap();
                 assert!(fingerprint.status.success());
@@ -347,9 +418,16 @@ printf '203.0.113.72 %s %s\n' "$kind" "$key"
                     address: HOST.into(),
                     ssh_port: 2222,
                     ssh_user: OLD_USER.into(),
-                    kernels: vec![],
+                    kernels: if case == "deploy_cancel" {
+                        vec![vpnctl_core::KernelId("xray".into())]
+                    } else {
+                        vec![]
+                    },
                     enabled_protocols: vec![],
-                    trusted_host_fingerprint: if case == "missing_pin" {
+                    trusted_host_fingerprint: if matches!(
+                        case.as_str(),
+                        "missing_pin" | "password_tofu"
+                    ) {
                         None
                     } else {
                         Some(fingerprint.clone())
@@ -370,6 +448,80 @@ printf '203.0.113.72 %s %s\n' "$kind" "$key"
                 state.inv.add_server(&server).await.unwrap();
                 let audit_before = state.inv.recent_audit(100).await.unwrap().len();
                 let id = "existing-key-spec";
+                if case == "deploy_cancel" {
+                    let request_state = state.clone();
+                    let request = tokio::spawn(async move {
+                        server_deploy(State(request_state), Path("existing-key-spec".into())).await
+                    });
+                    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        while !root.join("ssh-started").exists() {
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    request.abort();
+                    assert!(request.await.unwrap_err().is_cancelled());
+                    let guard_retained =
+                        crate::wizard_bootstrap::DeployGuard::try_acquire(id).is_none();
+                    // Release SSH before asserting so a regression cannot hang runtime shutdown.
+                    if !guard_retained {
+                        fs::write(root.join("ssh-release"), "").unwrap();
+                    }
+                    assert!(
+                        guard_retained,
+                        "cancelling the handler released the deploy guard"
+                    );
+                    let second = server_deploy(State(state.clone()), Path(id.into())).await;
+                    fs::write(root.join("ssh-release"), "").unwrap();
+                    assert_eq!(second.status(), StatusCode::CONFLICT);
+                    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        loop {
+                            if let Some(guard) =
+                                crate::wizard_bootstrap::DeployGuard::try_acquire(id)
+                            {
+                                drop(guard);
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    return;
+                }
+                if case.starts_with("password_") {
+                    // Exercise both the ordinary password path and reference-key fallback.
+                    let started = std::time::Instant::now();
+                    let response =
+                        call(&state, id, "ssh_user=debian&root_password=SPEC_PASSWORD").await;
+                    let log = read_log(&root, "transport.log");
+                    if case.ends_with("pin_failure") {
+                        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+                        assert!(!root.join("sshpass-called").exists());
+                        assert!(log.is_empty(), "host pin mismatch must prevent remote work");
+                    } else if case == "password_timeout" {
+                        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+                        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+                        let pid = fs::read_to_string(root.join("ssh.pid")).unwrap();
+                        assert!(!PathBuf::from(format!("/proc/{}", pid.trim())).exists());
+                        let body = axum::body::to_bytes(response.into_body(), 1_048_576)
+                            .await
+                            .unwrap();
+                        assert!(String::from_utf8_lossy(&body).contains("timed out"));
+                    } else {
+                        assert_success(&response);
+                        assert!(root.join("sshpass-called").exists());
+                        if case == "password_tofu" {
+                            assert!(log.contains("StrictHostKeyChecking=accept-new"));
+                        } else {
+                            assert!(log.contains("StrictHostKeyChecking yes"));
+                            assert!(log.contains("BatchMode=no"));
+                            assert!(!log.contains("accept-new"));
+                        }
+                    }
+                    return;
+                }
                 if case == "invalid_users" {
                     for user in [
                         "",

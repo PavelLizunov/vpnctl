@@ -76,6 +76,10 @@ if [ -e "$LIVE_HELPER" ]; then
 else
     rm -f "$PREV_HELPER" "$PREV_HELPER.new"
 fi
+restart_vlessws=0
+if systemctl is-active --quiet caddy-vlessws 2>/dev/null; then
+    restart_vlessws=1
+fi
 success=0
 rollback() {
     status=$?
@@ -94,6 +98,9 @@ rollback() {
         rm -f /usr/bin/sing-box.rollback-new "$LIVE_HELPER.rollback-new"
         if [ "$restored" -eq 1 ]; then
             systemctl restart sing-box >/dev/null 2>&1 || true
+            if [ "$restart_vlessws" -eq 1 ]; then
+                systemctl restart caddy-vlessws >/dev/null 2>&1 || true
+            fi
         fi
     fi
     cleanup_stages
@@ -114,6 +121,10 @@ if ! cmp -s "$MANAGED_SB" /usr/bin/sing-box; then
 fi
 if [ "$changed" -eq 1 ]; then
     systemctl restart sing-box
+    if [ "$restart_vlessws" -eq 1 ]; then
+        systemctl restart caddy-vlessws
+        systemctl is-active --quiet caddy-vlessws
+    fi
 fi
 systemctl is-active --quiet sing-box
 apt-mark hold sing-box >/dev/null
@@ -388,7 +399,7 @@ pub(super) fn sing_box_apply_script() -> &'static str {
         "#
 }
 
-pub(super) fn firewall_open_script(ports: &[(&str, u16)]) -> Option<String> {
+pub(crate) fn firewall_open_script(ports: &[(&str, u16)]) -> Option<String> {
     let uniq: std::collections::BTreeSet<(&str, u16)> = ports.iter().copied().collect();
     if uniq.is_empty() {
         return None;

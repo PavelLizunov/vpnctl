@@ -104,7 +104,7 @@ fn tuic_ipv6_authority_is_bracketed() {
 fn shadowsocks_ipv6_authority_is_bracketed() {
     let s = srv_ipv6();
     let mut secrets = HashMap::new();
-    secrets.insert("ss2022.psk".into(), "PSK_BASE64".into());
+    secrets.insert("ss2022.psk".into(), "AAECAwQFBgcICQoLDA0ODw==".into());
     let ctx = ctx_with(&s, &secrets);
     let link = Shadowsocks2022::new()
         .share_link(&ctx, &user("alice", None))

@@ -9,7 +9,23 @@ pub async fn dispatch_alerts(
     outcome: &ProbeOutcome,
     fail_state: &mut FailState,
 ) {
-    match fail_state.observe(&server.id, outcome) {
+    let mut transition = fail_state.observe(&server.id, outcome);
+    if matches!(outcome, ProbeOutcome::Ok(_)) {
+        match inv
+            .has_unacked_alert("server.unreachable", Some(&server.id))
+            .await
+        {
+            Ok(true) => transition = UnreachableTransition::Recovered,
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                target = "vpnctld::node_probe",
+                server = %server.id.0,
+                error = %e,
+                "could not read open server.unreachable alert"
+            ),
+        }
+    }
+    match transition {
         UnreachableTransition::BecameUnreachable {
             consecutive_failures,
             threshold,
@@ -256,7 +272,16 @@ pub(crate) async fn push_alert(
     let inv = inv.clone();
     tokio::spawn(async move {
         let sink_name = sink.name();
-        match sink.send_text(&kind, &severity, &text, silent).await {
+        match send_with_retry(
+            sink.as_ref(),
+            &kind,
+            &severity,
+            &text,
+            silent,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        {
             Ok(message_id) => {
                 tracing::info!(
                     target = "vpnctld::alert_sink",
@@ -286,6 +311,33 @@ pub(crate) async fn push_alert(
             }
         }
     });
+}
+
+async fn send_with_retry(
+    sink: &dyn crate::alert_sink::AlertSink,
+    kind: &str,
+    severity: &str,
+    text: &str,
+    silent: bool,
+    retry_delay: std::time::Duration,
+) -> Result<Option<String>, crate::alert_sink::AlertSinkError> {
+    let mut retries_left = 2;
+    loop {
+        match sink.send_text(kind, severity, text, silent).await {
+            Err(error) if retries_left > 0 => {
+                retries_left -= 1;
+                tracing::warn!(
+                    target = "vpnctld::alert_sink",
+                    kind,
+                    retries_left,
+                    %error,
+                    "alert push failed; retrying after delay"
+                );
+                tokio::time::sleep(retry_delay).await;
+            }
+            result => return result,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -536,5 +588,89 @@ pub(crate) async fn auto_ack(
             error = %e,
             "ack_open_alerts failed"
         ),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FlakySink {
+        calls: AtomicUsize,
+        failures: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::alert_sink::AlertSink for FlakySink {
+        async fn send_text(
+            &self,
+            _kind: &str,
+            _severity: &str,
+            _text: &str,
+            _silent: bool,
+        ) -> Result<Option<String>, crate::alert_sink::AlertSinkError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) < self.failures {
+                Err(crate::alert_sink::AlertSinkError::Misconfigured)
+            } else {
+                Ok(Some("123".into()))
+            }
+        }
+
+        async fn edit_text(
+            &self,
+            _message_id: &str,
+            _text: &str,
+        ) -> Result<(), crate::alert_sink::AlertSinkError> {
+            Ok(())
+        }
+
+        fn name(&self) -> &'static str {
+            "flaky"
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_push_retries_and_returns_message_id() {
+        for failures in 0..=2 {
+            let sink = FlakySink {
+                calls: AtomicUsize::new(0),
+                failures,
+            };
+            let message_id = send_with_retry(
+                &sink,
+                "test",
+                "warning",
+                "test alert",
+                false,
+                std::time::Duration::ZERO,
+            )
+            .await
+            .unwrap();
+            assert_eq!(message_id.as_deref(), Some("123"));
+            assert_eq!(sink.calls.load(Ordering::SeqCst), failures + 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_push_stops_after_three_attempts() {
+        let sink = FlakySink {
+            calls: AtomicUsize::new(0),
+            failures: usize::MAX,
+        };
+        assert!(
+            send_with_retry(
+                &sink,
+                "test",
+                "warning",
+                "test alert",
+                false,
+                std::time::Duration::ZERO,
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(sink.calls.load(Ordering::SeqCst), 3);
     }
 }

@@ -396,3 +396,31 @@ fn check_status_label_is_lowercase_for_html_class_compatibility() {
     assert_eq!(CheckStatus::Warn.label(), "warn");
     assert_eq!(CheckStatus::Fail.label(), "fail");
 }
+
+#[tokio::test]
+async fn restore_rejects_foreign_sqlite_without_replacing_target() {
+    for schema in [
+        "CREATE TABLE foreign_data (id INTEGER)",
+        "CREATE TABLE users (id TEXT); CREATE TABLE servers (id TEXT)",
+        "CREATE TABLE _sqlx_migrations (version INTEGER)",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = dir.path().join("foreign.db");
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(&snapshot)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::raw_sql(schema).execute(&pool).await.unwrap();
+        pool.close().await;
+        let target = dir.path().join("inv.db");
+        std::fs::write(&target, b"original target").unwrap();
+        let err = restore_from(&snapshot, &target).await.unwrap_err();
+        assert!(err.to_string().contains("not a vpnctl backup"), "{err}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"original target");
+        assert!(!dir.path().join("inv.db.restore.tmp").exists());
+    }
+}

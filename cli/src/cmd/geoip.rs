@@ -110,8 +110,7 @@ async fn fetch_one(
 ) -> Result<PathBuf> {
     let url = url_for(kind, month);
     let final_path = dir.join(kind.output_filename());
-    let tmp_gz = dir.join(format!("{}.partial.gz", kind.output_filename()));
-    let tmp_mmdb = dir.join(format!("{}.partial", kind.output_filename()));
+    let (tmp_gz, tmp_mmdb) = partial_paths(dir, kind);
 
     let resp = client
         .get(&url)
@@ -151,6 +150,14 @@ async fn fetch_one(
     Ok(final_path)
 }
 
+fn partial_paths(dir: &Path, kind: DbKind) -> (PathBuf, PathBuf) {
+    let prefix = format!("{}.{}", kind.output_filename(), std::process::id());
+    (
+        dir.join(format!("{prefix}.partial.gz")),
+        dir.join(format!("{prefix}.partial")),
+    )
+}
+
 fn validate_mmdb(path: &Path, kind: DbKind) -> Result<()> {
     use maxminddb::geoip2;
     let reader = maxminddb::Reader::open_readfile(path)
@@ -180,6 +187,16 @@ fn validate_mmdb(path: &Path, kind: DbKind) -> Result<()> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn partial_paths_are_scoped_to_the_updater_process() {
+        let dir = Path::new("/tmp/geoip");
+        let (gz, mmdb) = partial_paths(dir, DbKind::City);
+        let prefix = format!("GeoLite2-City.mmdb.{}", std::process::id());
+        assert_eq!(gz, dir.join(format!("{prefix}.partial.gz")));
+        assert_eq!(mmdb, dir.join(format!("{prefix}.partial")));
+        assert_ne!(partial_paths(dir, DbKind::Asn), (gz, mmdb));
+    }
 
     #[test]
     fn url_for_january_uses_two_digit_month() {

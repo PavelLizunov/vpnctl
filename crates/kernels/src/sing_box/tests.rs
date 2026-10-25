@@ -1371,3 +1371,111 @@ fn apply_script_restart_failure_reaches_rollback() {
         "under set -eu a failed restart must not skip the .bak rollback: {line}"
     );
 }
+
+#[test]
+fn managed_install_restarts_active_vlessws_and_rolls_back_on_failure() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for (active, fail_restart) in [(false, false), (true, false), (true, true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("usr/bin")).unwrap();
+        std::fs::create_dir_all(root.join("run/lock")).unwrap();
+        let live = root.join("usr/bin/sing-box");
+        let uploaded = root.join("uploaded-sing-box");
+        let helper = root.join("uploaded-helper");
+        let old = "#!/bin/sh\necho old-with_v2ray_api\n";
+        let new = "#!/bin/sh\necho new-with_v2ray_api\n";
+        std::fs::write(&live, old).unwrap();
+        std::fs::write(&uploaded, new).unwrap();
+        std::fs::write(&helper, "fixture helper").unwrap();
+        std::fs::set_permissions(&live, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = install_managed_artifacts_script(
+            &uploaded.to_string_lossy(),
+            &helper.to_string_lossy(),
+        )
+        .replace(
+            "/usr/local/libexec",
+            &format!("{}/usr/local/libexec", root.display()),
+        )
+        .replace("/usr/bin/sing-box", &live.to_string_lossy())
+        .replace("/run/lock", &format!("{}/run/lock", root.display()));
+        let log = root.join("systemctl.log");
+        let failed = root.join("restart-failed");
+        let mocks = format!(
+            r#"
+            systemctl() {{
+                echo "$*" >> '{log}'
+                if [ "$1" = is-active ] && [ "$3" = caddy-vlessws ]; then
+                    return {active_status}
+                fi
+                if [ "$1" = restart ] && [ "$2" = caddy-vlessws ] \
+                    && [ '{fail_restart}' = true ] && [ ! -f '{failed}' ]; then
+                    touch '{failed}'
+                    return 1
+                fi
+                return 0
+            }}
+            apt-mark() {{ :; }}
+            "#,
+            log = log.display(),
+            failed = failed.display(),
+            active_status = if active { 0 } else { 3 },
+        );
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!("{mocks}\n{script}"))
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            !fail_restart,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&live).unwrap(),
+            if fail_restart { old } else { new }
+        );
+        let commands = std::fs::read_to_string(log).unwrap();
+        let restarts = commands
+            .lines()
+            .filter(|line| *line == "restart caddy-vlessws")
+            .count();
+        assert_eq!(restarts, if fail_restart { 2 } else { usize::from(active) });
+    }
+}
+
+#[tokio::test]
+async fn ensure_installed_refuses_non_amd64_before_mutating_node() {
+    #[derive(Debug)]
+    struct ArchOnlyTransport(&'static str);
+
+    #[async_trait::async_trait]
+    impl SshTransport for ArchOnlyTransport {
+        async fn exec(&self, cmd: &str) -> Result<String> {
+            assert_eq!(cmd, "uname -m");
+            Ok(self.0.into())
+        }
+        async fn exec_unprivileged(&self, _: &str) -> Result<String> {
+            panic!("must not execute node mutations");
+        }
+        async fn upload(&self, _: &str, _: &[u8]) -> Result<()> {
+            panic!("must not upload amd64 artifacts");
+        }
+        async fn read_file(&self, _: &str) -> Result<Vec<u8>> {
+            panic!("must not read node files");
+        }
+    }
+
+    for arch in ["aarch64", "armv7l", "riscv64", ""] {
+        let err = SingBox::new()
+            .ensure_installed(&ArchOnlyTransport(arch))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("stats helper is linux/amd64"),
+            "{err}"
+        );
+    }
+}

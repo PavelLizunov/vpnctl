@@ -2,7 +2,7 @@ use chrono::Utc;
 use tempfile::TempDir;
 use vpnctl_core::{ServerId, UserId};
 
-use crate::common::{open, server, server_coeff, ud, user};
+use crate::common::{open, raw_pool, server, server_coeff, ud, user};
 
 #[tokio::test]
 async fn record_vpn_stats_empty_deltas_is_noop() {
@@ -342,16 +342,138 @@ async fn record_vpn_stats_atomicity_all_deltas_visible() {
 }
 
 #[tokio::test]
+async fn raw_retention_preserves_the_longest_calendar_month_and_limit_usage() {
+    use chrono::NaiveDate;
+    use vpnctl_inventory::VPN_STATS_RETENTION_DAYS;
+
+    for year in [2024, 2025] {
+        for month in 1..=12 {
+            let start = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+            let end = if month == 12 {
+                NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap()
+            } else {
+                NaiveDate::from_ymd_opt(year, month + 1, 1).unwrap()
+            };
+            assert!(i64::from(VPN_STATS_RETENTION_DAYS) > (end - start).num_days());
+        }
+    }
+
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server_coeff("s1", 2.0)).await.unwrap();
+    inv.add_user(&user("alice")).await.unwrap();
+    let uid = UserId("alice".into());
+    inv.set_user_traffic_limit(&uid, Some(1_000), Some(80))
+        .await
+        .unwrap();
+    let pool = raw_pool(&dir).await;
+    for offset in ["start of month", "-31 days", "-33 days"] {
+        sqlx::query(
+            "INSERT INTO vpn_connection_stats
+             (ts, server_id, user_id, upload_bytes, download_bytes, active_connections)
+             VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1, '+1 second'), 's1', 'alice', 400, 100, 0)",
+        )
+        .bind(offset)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let before = inv.user_traffic_this_month(&uid).await.unwrap();
+    let limits_before = inv.users_traffic_vs_limit().await.unwrap();
+    assert_eq!(before, 1_000);
+    assert_eq!(limits_before[0].1, 1_000);
+
+    assert_eq!(
+        inv.purge_vpn_stats_older_than(VPN_STATS_RETENTION_DAYS)
+            .await
+            .unwrap(),
+        1
+    );
+    let retained: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vpn_connection_stats")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(retained, 2, "even the 31-day-old row must survive");
+    assert_eq!(inv.user_traffic_this_month(&uid).await.unwrap(), before);
+    assert_eq!(inv.users_traffic_vs_limit().await.unwrap(), limits_before);
+}
+
+#[tokio::test]
+async fn server_live_activity_expires_counts_without_losing_window_bytes() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let sid = ServerId("s1".into());
+    inv.add_server(&server("s1")).await.unwrap();
+    inv.record_vpn_stats(&sid, &[ud(None, 100, 200, 7)])
+        .await
+        .unwrap();
+    let pool = raw_pool(&dir).await;
+    sqlx::query(
+        "UPDATE vpn_connection_stats
+         SET ts = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-11 minutes')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let stale = inv.server_live_activity(&sid, 24, 600).await.unwrap();
+    assert_eq!(stale.active_now, None);
+    assert_eq!((stale.bytes_up_window, stale.bytes_dn_window), (100, 200));
+    assert!(stale.last_sample_ts.is_some());
+    assert_eq!(
+        inv.server_live_activity(&sid, 24, 900)
+            .await
+            .unwrap()
+            .active_now,
+        Some(7)
+    );
+
+    inv.record_vpn_stats(&sid, &[ud(None, 0, 0, 0)])
+        .await
+        .unwrap();
+    assert_eq!(
+        inv.server_live_activity(&sid, 24, 600)
+            .await
+            .unwrap()
+            .active_now,
+        Some(0)
+    );
+}
+
+#[tokio::test]
+async fn server_live_activity_uses_last_insert_when_sample_timestamps_match() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let sid = ServerId("s1".into());
+    inv.add_server(&server("s1")).await.unwrap();
+    inv.record_vpn_stats(&sid, &[ud(None, 0, 0, 7), ud(None, 0, 0, 0)])
+        .await
+        .unwrap();
+    let pool = raw_pool(&dir).await;
+    sqlx::query("UPDATE vpn_connection_stats SET ts = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        inv.server_live_activity(&sid, 24, 600)
+            .await
+            .unwrap()
+            .active_now,
+        Some(0)
+    );
+}
+
+#[tokio::test]
 async fn phase4b_server_live_activity_returns_zeros_for_unknown_server() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
     inv.add_server(&server("s1")).await.unwrap();
 
     let activity = inv
-        .server_live_activity(&ServerId("s1".into()), 24)
+        .server_live_activity(&ServerId("s1".into()), 24, 600)
         .await
         .unwrap();
-    assert_eq!(activity.active_now, 0);
+    assert_eq!(activity.active_now, None);
     assert_eq!(activity.bytes_up_window, 0);
     assert_eq!(activity.bytes_dn_window, 0);
     assert_eq!(activity.distinct_users_attributed, 0);
@@ -382,12 +504,13 @@ async fn phase4b_server_live_activity_sums_bytes_and_uses_latest_active_conns() 
     .unwrap();
 
     let activity = inv
-        .server_live_activity(&ServerId("s1".into()), 24)
+        .server_live_activity(&ServerId("s1".into()), 24, 600)
         .await
         .unwrap();
 
     assert_eq!(
-        activity.active_now, 8,
+        activity.active_now,
+        Some(8),
         "active_now must equal newest server-wide tick"
     );
     assert_eq!(activity.bytes_up_window, 100 + 50 + 200 + 50);
@@ -410,7 +533,7 @@ async fn phase4b_all_servers_live_activity_returns_default_entry_for_unobserved_
         .await
         .unwrap();
 
-    let all = inv.all_servers_live_activity(24).await.unwrap();
+    let all = inv.all_servers_live_activity(24, 600).await.unwrap();
     assert_eq!(all.len(), 2, "one entry per servers.id row");
 
     let active = all
@@ -418,14 +541,14 @@ async fn phase4b_all_servers_live_activity_returns_default_entry_for_unobserved_
         .find(|(id, _)| id.0 == "active-srv")
         .expect("active-srv must appear");
     assert_eq!(active.1.bytes_up_window, 1024);
-    assert_eq!(active.1.active_now, 1);
+    assert_eq!(active.1.active_now, Some(1));
 
     let quiet = all
         .iter()
         .find(|(id, _)| id.0 == "quiet-srv")
         .expect("quiet-srv must appear (default-zero)");
     assert_eq!(quiet.1.bytes_up_window, 0);
-    assert_eq!(quiet.1.active_now, 0);
+    assert_eq!(quiet.1.active_now, None);
     assert!(quiet.1.last_sample_ts.is_none());
 }
 
@@ -439,7 +562,7 @@ async fn phase4b_server_live_activity_window_excludes_older_than_since_hours() {
         .unwrap();
 
     let agg = inv
-        .server_live_activity(&ServerId("s1".into()), 1)
+        .server_live_activity(&ServerId("s1".into()), 1, 600)
         .await
         .unwrap();
     assert_eq!(
@@ -480,6 +603,48 @@ async fn user_traffic_this_month_applies_usage_coefficient() {
         .unwrap();
     assert_eq!(alice, 2_000_000, "1M raw bytes on a ×2 node counts as 2M");
     assert_eq!(bob, 1_000_000, "×1 node is the identity — unchanged");
+}
+
+#[tokio::test]
+async fn traffic_limit_reports_only_actual_changes_including_saturation() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let uid = UserId("alice".into());
+    inv.add_user(&user("alice")).await.unwrap();
+    for (limit, threshold, changed) in [
+        (Some(100), Some(80), true),
+        (Some(100), Some(80), false),
+        (Some(100), Some(75), true),
+        (Some(u64::MAX), Some(75), true),
+        (Some(i64::MAX as u64), Some(75), false),
+        (None, None, true),
+        (None, None, false),
+    ] {
+        assert_eq!(
+            inv.set_user_traffic_limit(&uid, limit, threshold)
+                .await
+                .unwrap(),
+            changed
+        );
+    }
+    assert!(
+        inv.set_user_traffic_limit(&UserId("missing".into()), None, None)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn concurrent_identical_traffic_limit_updates_report_one_mutation() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let uid = UserId("alice".into());
+    inv.add_user(&user("alice")).await.unwrap();
+    let (a, b) = tokio::join!(
+        inv.set_user_traffic_limit(&uid, Some(100), Some(80)),
+        inv.set_user_traffic_limit(&uid, Some(100), Some(80)),
+    );
+    assert_ne!(a.unwrap(), b.unwrap());
 }
 
 #[tokio::test]

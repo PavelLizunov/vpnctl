@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use vpnctl_inventory::SqliteInventory;
+use vpnctl_inventory::{SqliteInventory, VPN_STATS_RETENTION_DAYS};
 
 use crate::rate_limit::RateLimiter;
 use crate::wizard::WizardStore;
@@ -104,15 +104,18 @@ pub(crate) fn spawn_retention_purger(inv: SqliteInventory) -> tokio::task::JoinH
                     "sub_access retention purge failed; will retry next tick"
                 ),
             }
-            match inv.purge_vpn_stats_older_than(RETENTION_DAYS).await {
+            match inv
+                .purge_vpn_stats_older_than(VPN_STATS_RETENTION_DAYS)
+                .await
+            {
                 Ok(0) => tracing::debug!(
                     target = "vpnctld::retention",
-                    days = RETENTION_DAYS,
+                    days = VPN_STATS_RETENTION_DAYS,
                     "vpn_connection_stats purge tick: nothing to remove"
                 ),
                 Ok(n) => tracing::info!(
                     target = "vpnctld::retention",
-                    days = RETENTION_DAYS,
+                    days = VPN_STATS_RETENTION_DAYS,
                     removed = n,
                     "purged old vpn_connection_stats rows"
                 ),

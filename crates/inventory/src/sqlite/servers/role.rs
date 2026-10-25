@@ -23,7 +23,7 @@ impl SqliteInventory {
     }
 
     pub async fn set_server_role(&self, sid: &ServerId, role: ServerRole) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let row: Option<(String,)> = sqlx::query_as("SELECT role FROM servers WHERE id = ?1")
             .bind(&sid.0)
@@ -127,7 +127,7 @@ impl SqliteInventory {
         }
         let old = target.jump_via.as_ref().map(|id| id.0.as_str());
         let new = jump_via.map(|id| id.0.as_str());
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("UPDATE servers SET jump_via = ?1 WHERE id = ?2")
             .bind(new)
             .bind(&sid.0)
@@ -194,7 +194,7 @@ impl SqliteInventory {
             crate::jump_resolver::resolve_jump_host(&candidate, Some(&jump))
                 .map_err(|error| SqliteInventoryError::Invalid(error.to_string()))?;
         }
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("UPDATE servers SET role = ?1, jump_via = ?2 WHERE id = ?3")
             .bind(role.as_str())
             .bind(jump_via.map(|id| id.0.as_str()))
@@ -248,7 +248,7 @@ impl SqliteInventory {
         server: &ServerId,
         upstream: Option<&ServerId>,
     ) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let target_row: Option<(String, Option<String>)> =
             sqlx::query_as("SELECT role, client_detour_via FROM servers WHERE id = ?1")

@@ -21,6 +21,8 @@
   `scripts/vpnctl-backup.sh` under `vpnctl-backup.timer`.
 - Off-site: scp copy to a remote node, 30-day retention; primary LAN archive
   stays authoritative if the copy fails.
+- Inventory restore rejects SQLite snapshots without `_sqlx_migrations`,
+  `users`, and `servers` tables before replacing the destination.
 - Restore: `vpnctl restore <bundle>` on a recovered host; web self-test
   (`POST /admin/backup/self-test`) copies a snapshot, migrates it, and checks
   invariants (tables, FKs, counts, schema version, integrity PRAGMA).

@@ -37,6 +37,17 @@ pub trait Protocol: fmt::Debug + Send + Sync {
         DpiRisk::Moderate
     }
 
+    fn validate_server(&self, _ctx: &RenderCtx<'_>) -> Result<()> {
+        Ok(())
+    }
+
+    fn server_secret_specs_for(
+        &self,
+        _secrets: &HashMap<String, String>,
+    ) -> Result<Vec<ServerSecretSpec>> {
+        Ok(self.server_secret_specs())
+    }
+
     fn server_secret_specs(&self) -> Vec<ServerSecretSpec> {
         Vec::new()
     }

@@ -5,7 +5,7 @@ use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
 
 impl SqliteInventory {
     pub async fn add_server(&self, s: &Server) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let res = sqlx::query(
             "INSERT INTO servers (id, address, ssh_port, ssh_user, hoster, jump_via, trusted_host_fingerprint, usage_coefficient)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -195,10 +195,25 @@ impl SqliteInventory {
     }
 
     pub async fn remove_server(&self, id: &ServerId) -> Result<()> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let dependents = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM servers WHERE client_detour_via = ?1 ORDER BY id",
+        )
+        .bind(&id.0)
+        .fetch_all(&mut *tx)
+        .await?;
+        if !dependents.is_empty() {
+            return Err(SqliteInventoryError::Invalid(format!(
+                "cannot delete entry server '{}': client detour targets {}; change their client entry policy first",
+                id.0,
+                dependents.join(", ")
+            )));
+        }
         sqlx::query("DELETE FROM servers WHERE id = ?1")
             .bind(&id.0)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -217,7 +232,7 @@ impl SqliteInventory {
             .filter(|s| !s.is_empty())
             .map(str::to_string);
 
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let prior: Option<(Option<String>,)> =
             sqlx::query_as("SELECT display_name FROM servers WHERE id = ?1")

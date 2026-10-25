@@ -408,7 +408,7 @@ async fn apply_with_overwrite_replaces_existing_user_uuid() {
     let inv = open_test_inv().await;
     inv.add_user(&User {
         id: UserId("alice".into()),
-        uuid: "OLD-uuid-1234".into(),
+        uuid: "00000000-0000-0000-0000-000000000001".into(),
         tuic_password: None,
         wireguard_pubkey: None,
         wireguard_private: None,
@@ -419,7 +419,7 @@ async fn apply_with_overwrite_replaces_existing_user_uuid() {
     .await
     .unwrap();
 
-    let plan = plan_with_one_user("srv-b", "alice", "NEW-uuid-9999");
+    let plan = plan_with_one_user("srv-b", "alice", "00000000-0000-0000-0000-000000000002");
     let outcome = apply_migration_plan(&inv, &plan, false).await.unwrap();
     assert_eq!(outcome.users_skipped_existing, vec!["alice".to_string()]);
     let after_no_overwrite = inv
@@ -427,7 +427,10 @@ async fn apply_with_overwrite_replaces_existing_user_uuid() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(after_no_overwrite.uuid, "OLD-uuid-1234");
+    assert_eq!(
+        after_no_overwrite.uuid,
+        "00000000-0000-0000-0000-000000000001"
+    );
     let outcome = apply_migration_plan(&inv, &plan, true).await.unwrap();
     assert_eq!(outcome.users_overwritten, vec!["alice".to_string()]);
     let after_overwrite = inv
@@ -435,7 +438,7 @@ async fn apply_with_overwrite_replaces_existing_user_uuid() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(after_overwrite.uuid, "NEW-uuid-9999");
+    assert_eq!(after_overwrite.uuid, "00000000-0000-0000-0000-000000000002");
 }
 
 #[tokio::test]
@@ -560,4 +563,157 @@ fn build_plan_real_fixture_end_to_end() {
     assert!(plan.server_secrets.contains_key("vless.short_id"));
     assert!(plan.server_secrets.contains_key("vless.private_key"));
     assert_eq!(plan.grants.len(), 23);
+}
+
+#[tokio::test]
+async fn overwrite_uuid_conflict_preserves_user_and_grants_atomically() {
+    use vpnctl_core::UserId;
+    let inv = open_test_inv().await;
+    let original = plan_with_one_user("srv-a", "alice", "uuid-alice");
+    apply_migration_plan(&inv, &original, false).await.unwrap();
+    let bob = plan_with_one_user("srv-b", "bob", "uuid-bob");
+    apply_migration_plan(&inv, &bob, false).await.unwrap();
+    let before: Vec<(String, Option<String>, String, Option<String>)> = sqlx::query_as(
+        "SELECT server_id, client_uuid, created_at, granted_at FROM grants WHERE user_id = 'alice'",
+    )
+    .fetch_all(&inv.pool)
+    .await
+    .unwrap();
+    let audit_before = inv.recent_audit(100).await.unwrap().len();
+    let mut conflicting = original.clone();
+    conflicting.users_to_import[0].uuid = "uuid-bob".into();
+    assert!(
+        apply_migration_plan(&inv, &conflicting, true)
+            .await
+            .is_err()
+    );
+    let alice = inv
+        .get_user(&UserId("alice".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(alice.uuid, "uuid-alice");
+    assert_eq!(alice.sub_token, original.users_to_import[0].sub_token);
+    let after: Vec<(String, Option<String>, String, Option<String>)> = sqlx::query_as(
+        "SELECT server_id, client_uuid, created_at, granted_at FROM grants WHERE user_id = 'alice'",
+    )
+    .fetch_all(&inv.pool)
+    .await
+    .unwrap();
+    assert_eq!(before, after);
+    assert_eq!(inv.recent_audit(100).await.unwrap().len(), audit_before);
+}
+
+#[tokio::test]
+async fn sequential_plans_preserve_each_servers_effective_uuid() {
+    for overwrite in [false, true] {
+        let inv = open_test_inv().await;
+        let first = plan_with_one_user("srv-a", "alice", "00000000-0000-0000-0000-000000000001");
+        let second = plan_with_one_user("srv-b", "alice", "00000000-0000-0000-0000-000000000002");
+        apply_migration_plan(&inv, &first, overwrite).await.unwrap();
+        apply_migration_plan(&inv, &second, overwrite)
+            .await
+            .unwrap();
+        for plan in [&first, &second] {
+            let users = inv.users_for_server(&plan.server.id).await.unwrap();
+            assert_eq!(users.len(), 1);
+            assert_eq!(users[0].uuid, plan.users_to_import[0].uuid);
+        }
+    }
+}
+
+#[tokio::test]
+async fn conflicting_imported_grant_leaves_no_global_uuid_grant_or_audit() {
+    let inv = open_test_inv().await;
+    let alice = plan_with_one_user("srv-a", "alice", "00000000-0000-0000-0000-000000000001");
+    let bob = plan_with_one_user("srv-b", "bob", "00000000-0000-0000-0000-000000000002");
+    apply_migration_plan(&inv, &alice, false).await.unwrap();
+    apply_migration_plan(&inv, &bob, false).await.unwrap();
+    let conflicting = plan_with_one_user("srv-b", "alice", &bob.users_to_import[0].uuid);
+    let audit_before = inv.recent_audit(100).await.unwrap().len();
+    assert!(
+        apply_migration_plan(&inv, &conflicting, false)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        inv.client_uuid_for(&alice.users_to_import[0].id, &bob.server.id)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(inv.recent_audit(100).await.unwrap().len(), audit_before);
+}
+
+#[tokio::test]
+async fn imported_grant_checks_imported_uuid_instead_of_global_uuid() {
+    let inv = open_test_inv().await;
+    let alice = plan_with_one_user("srv-a", "alice", "00000000-0000-0000-0000-000000000001");
+    let bob = plan_with_one_user("srv-b", "bob", "00000000-0000-0000-0000-000000000002");
+    apply_migration_plan(&inv, &alice, false).await.unwrap();
+    apply_migration_plan(&inv, &bob, false).await.unwrap();
+    inv.set_grant_client_uuid(
+        &bob.users_to_import[0].id,
+        &bob.server.id,
+        &alice.users_to_import[0].uuid,
+    )
+    .await
+    .unwrap();
+    let imported = plan_with_one_user("srv-b", "alice", "00000000-0000-0000-0000-000000000003");
+    apply_migration_plan(&inv, &imported, false).await.unwrap();
+    assert_eq!(
+        inv.client_uuid_for(&alice.users_to_import[0].id, &bob.server.id)
+            .await
+            .unwrap(),
+        Some(imported.users_to_import[0].uuid.clone())
+    );
+    let audit_before = inv.recent_audit(100).await.unwrap().len();
+    apply_migration_plan(&inv, &imported, false).await.unwrap();
+    assert_eq!(inv.recent_audit(100).await.unwrap().len(), audit_before);
+}
+
+#[tokio::test]
+async fn existing_secrets_require_overwrite_and_noop_import_is_not_audited() {
+    let inv = open_test_inv().await;
+    let mut plan = plan_with_one_user("srv-a", "alice", "uuid-alice");
+    apply_migration_plan(&inv, &plan, false).await.unwrap();
+    let original = inv.list_server_secrets(&plan.server.id).await.unwrap();
+    for value in plan.server_secrets.values_mut() {
+        *value = "replacement".into();
+    }
+    let audit_before = inv.recent_audit(100).await.unwrap().len();
+    let outcome = apply_migration_plan(&inv, &plan, false).await.unwrap();
+    assert_eq!(outcome.secrets_set, 0);
+    assert_eq!(
+        inv.list_server_secrets(&plan.server.id).await.unwrap(),
+        original
+    );
+    assert_eq!(inv.recent_audit(100).await.unwrap().len(), audit_before);
+    let outcome = apply_migration_plan(&inv, &plan, true).await.unwrap();
+    assert_eq!(outcome.secrets_set, plan.server_secrets.len());
+    assert_eq!(
+        inv.list_server_secrets(&plan.server.id).await.unwrap(),
+        plan.server_secrets
+    );
+}
+
+#[tokio::test]
+async fn import_without_overwrite_keeps_an_existing_pinned_grant_uuid() {
+    let inv = open_test_inv().await;
+    let first = plan_with_one_user("srv-a", "alice", "00000000-0000-0000-0000-000000000001");
+    apply_migration_plan(&inv, &first, false).await.unwrap();
+    let user = &first.users_to_import[0].id;
+    let pinned = "00000000-0000-0000-0000-00000000000b";
+    inv.set_grant_client_uuid(user, &first.server.id, pinned)
+        .await
+        .unwrap();
+    let audit_before = inv.recent_audit(100).await.unwrap().len();
+    let stale = plan_with_one_user("srv-a", "alice", "00000000-0000-0000-0000-00000000000c");
+    apply_migration_plan(&inv, &stale, false).await.unwrap();
+    assert_eq!(
+        inv.client_uuid_for(user, &first.server.id).await.unwrap(),
+        Some(pinned.to_string()),
+        "the live node accepts the pinned UUID; an import must not replace it"
+    );
+    assert_eq!(inv.recent_audit(100).await.unwrap().len(), audit_before);
 }

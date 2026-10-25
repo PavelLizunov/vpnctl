@@ -257,29 +257,30 @@ async fn role_transition_rejected_while_server_participates_in_detour() {
 }
 
 #[tokio::test]
-async fn on_delete_set_null() {
+async fn deleting_client_entry_is_rejected_without_clearing_target_policies() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
-
-    let s1 = ServerId("s1".into());
-    let s2 = ServerId("s2".into());
-
-    inv.add_server(&srv("s1")).await.unwrap();
-    inv.add_server(&srv("s2")).await.unwrap();
-
-    inv.set_client_detour_via_as("admin", &s1, Some(&s2))
-        .await
-        .unwrap();
-    assert_eq!(inv.client_detour_via(&s1).await.unwrap(), Some(s2.clone()));
-
-    inv.remove_server(&s2).await.unwrap();
-
-    let s1_server = inv.get_server(&s1).await.unwrap();
-    assert!(s1_server.is_some(), "s1 must survive deletion of s2");
-
-    let s1_detour = inv.client_detour_via(&s1).await.unwrap();
-    assert_eq!(
-        s1_detour, None,
-        "client detour must be SET NULL when upstream server s2 is deleted"
-    );
+    let entry = ServerId("entry".into());
+    inv.add_server(&srv("entry")).await.unwrap();
+    for target in ["target-a", "target-b"] {
+        inv.add_server(&srv(target)).await.unwrap();
+        inv.set_client_detour_via_as("admin", &ServerId(target.into()), Some(&entry))
+            .await
+            .unwrap();
+    }
+    let before = inv.recent_audit(100).await.unwrap().len();
+    let err = inv.remove_server(&entry).await.unwrap_err().to_string();
+    assert!(err.contains("entry") && err.contains("target-a, target-b"));
+    assert!(inv.get_server(&entry).await.unwrap().is_some());
+    assert_eq!(inv.recent_audit(100).await.unwrap().len(), before);
+    for target in ["target-a", "target-b"] {
+        let target = ServerId(target.into());
+        assert_eq!(
+            inv.client_detour_via(&target).await.unwrap(),
+            Some(entry.clone())
+        );
+        inv.remove_server(&target).await.unwrap();
+    }
+    inv.remove_server(&entry).await.unwrap();
+    assert!(inv.get_server(&entry).await.unwrap().is_none());
 }

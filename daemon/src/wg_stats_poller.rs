@@ -153,17 +153,28 @@ async fn poll_one_wg_server(
         }
     }
 
-    let deltas = compute_byte_deltas(&server.id.0, &peers, pubkey_to_user, byte_state);
-    if !deltas.is_empty() {
-        if let Err(e) = inv.record_vpn_stats(&server.id, &deltas).await {
-            tracing::warn!(
-                target = "vpnctld::wg_poller",
-                server = %server.id.0,
-                error = %e,
-                "record_vpn_stats failed (will retry next tick)"
-            );
-        }
+    if let Err(e) = record_byte_deltas(inv, &server.id, &peers, pubkey_to_user, byte_state).await {
+        tracing::warn!(
+            target = "vpnctld::wg_poller",
+            server = %server.id.0,
+            error = %e,
+            "record_vpn_stats failed (will retry next tick)"
+        );
     }
+}
+
+async fn record_byte_deltas(
+    inv: &SqliteInventory,
+    server_id: &vpnctl_core::ServerId,
+    peers: &[WgPeer],
+    pubkey_to_user: &HashMap<String, UserId>,
+    state: &mut ByteState,
+) -> Result<(), vpnctl_inventory::SqliteInventoryError> {
+    let mut next_state = state.clone();
+    let deltas = compute_byte_deltas(&server_id.0, peers, pubkey_to_user, &mut next_state);
+    inv.record_vpn_stats(server_id, &deltas).await?;
+    *state = next_state;
+    Ok(())
 }
 
 pub fn compute_byte_deltas(
@@ -366,6 +377,57 @@ mod tests {
             rx,
             tx,
         }
+    }
+
+    #[tokio::test]
+    async fn failed_stats_write_preserves_baseline_for_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        let sid = vpnctl_core::ServerId("de".into());
+        let map = build_pubkey_map(vec![user("alice", Some("PK"))]);
+        let mut state = ByteState::new();
+        compute_byte_deltas(&sid.0, &[peer("PK", 100, 200)], &map, &mut state);
+        let baseline = state.clone();
+
+        assert!(
+            record_byte_deltas(&inv, &sid, &[peer("PK", 150, 280)], &map, &mut state)
+                .await
+                .is_err(),
+            "unknown server must reject the stats write"
+        );
+        assert_eq!(state, baseline);
+
+        inv.add_server(&vpnctl_core::Server {
+            id: sid.clone(),
+            address: "192.0.2.1".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![vpnctl_core::KernelId("amneziawg".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+        record_byte_deltas(&inv, &sid, &[peer("PK", 170, 300)], &map, &mut state)
+            .await
+            .unwrap();
+        record_byte_deltas(&inv, &sid, &[peer("PK", 170, 300)], &map, &mut state)
+            .await
+            .unwrap();
+
+        let rows = inv.recent_vpn_stats_for_server(&sid, 1).await.unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "retry must count the missed bytes exactly once"
+        );
+        assert_eq!((rows[0].upload_bytes, rows[0].download_bytes), (70, 100));
+        assert_eq!(state.get(&(sid.0, "PK".into())), Some(&(170, 300)));
     }
 
     #[test]

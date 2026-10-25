@@ -1,4 +1,4 @@
-use chrono::{Datelike, NaiveDate};
+use chrono::{Months, NaiveDate};
 use sqlx::Row;
 use vpnctl_core::ServerId;
 
@@ -64,7 +64,7 @@ impl SqliteInventory {
             None
         };
 
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM servers WHERE id = ?1")
             .bind(&sid.0)
@@ -191,7 +191,7 @@ impl SqliteInventory {
             .await?;
         res.ok_or_else(|| {
             SqliteInventoryError::Invalid(format!(
-                "billing due date for server '{}' changed concurrently",
+                "billing record for server '{}' changed concurrently",
                 sid.0
             ))
         })
@@ -237,17 +237,27 @@ impl SqliteInventory {
             None => (None, None, None, None),
         };
 
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let res = sqlx::query(
             "UPDATE server_billing
              SET due_date = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-             WHERE server_id = ?2 AND due_date = ?3 AND (?4 = 0 OR auto_renew = 1)",
+             WHERE server_id = ?2 AND due_date = ?3 AND (?4 = 0 OR auto_renew = 1)
+               AND billing_cycle = ?5 AND amount_cents = ?6 AND currency = ?7
+               AND auto_renew = ?8 AND billing_url IS ?9 AND notes IS ?10
+               AND updated_at = ?11",
         )
         .bind(&next_due)
         .bind(&sid.0)
         .bind(expected_due)
         .bind(if require_auto_renew { 1i64 } else { 0i64 })
+        .bind(curr.billing_cycle.as_str())
+        .bind(curr.amount_cents)
+        .bind(&curr.currency)
+        .bind(i64::from(curr.auto_renew))
+        .bind(&curr.billing_url)
+        .bind(&curr.notes)
+        .bind(&curr.updated_at)
         .execute(&mut *tx)
         .await?;
 
@@ -399,22 +409,8 @@ pub fn validate_due_date(s: &str) -> Result<NaiveDate> {
 
 pub fn advance_date_by_cycle(date_str: &str, cycle: BillingCycle) -> Result<String> {
     let date = validate_due_date(date_str)?;
-    let next = add_calendar_months(date, cycle.months());
+    let next = date
+        .checked_add_months(Months::new(cycle.months()))
+        .ok_or_else(|| SqliteInventoryError::Invalid("billing date is out of range".into()))?;
     Ok(next.format("%Y-%m-%d").to_string())
-}
-
-fn add_calendar_months(d: NaiveDate, months: u32) -> NaiveDate {
-    let mut year = d.year();
-    let mut month = d.month() + months;
-    while month > 12 {
-        year += 1;
-        month -= 12;
-    }
-    let mut day = d.day();
-    loop {
-        if let Some(date) = NaiveDate::from_ymd_opt(year, month, day) {
-            return date;
-        }
-        day = day.saturating_sub(1);
-    }
 }

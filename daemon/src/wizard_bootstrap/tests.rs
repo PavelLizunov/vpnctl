@@ -734,3 +734,37 @@ async fn run_bootstrap_fails_with_exact_dotted_pubkey_path_when_missing() {
         other => panic!("expected setup Error event, got {other:?}"),
     }
 }
+
+#[test]
+fn wizard_hostname_skips_awg_but_keeps_other_protocols() {
+    let supported = vec![
+        ProtocolId("vless+reality".into()),
+        ProtocolId("amneziawg2".into()),
+        ProtocolId("hysteria2".into()),
+        ProtocolId("amneziawg3".into()),
+    ];
+    assert_eq!(
+        super::bootstrap::wizard_protocols("vpn.example.org", supported),
+        vec![
+            ProtocolId("vless+reality".into()),
+            ProtocolId("hysteria2".into())
+        ]
+    );
+}
+
+#[test]
+fn wizard_literal_ip_preserves_all_default_protocols() {
+    let supported = crate::app::build_registry()
+        .unwrap()
+        .kernel(&KernelId("sing-box".into()))
+        .unwrap()
+        .supported_protocols();
+    assert!(supported.iter().any(|p| p.0 == "amneziawg2"));
+    assert!(supported.iter().any(|p| p.0 == "amneziawg3"));
+    for address in ["198.51.100.42", "2001:db8::42"] {
+        assert_eq!(
+            super::bootstrap::wizard_protocols(address, supported.clone()),
+            supported
+        );
+    }
+}

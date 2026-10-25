@@ -85,6 +85,8 @@ _RE_DEVICE_ID = re.compile(r'^[0-9a-f]{32}\Z')
 
 def _assert_safe(value: str, pattern: re.Pattern, label: str) -> None:
     if not pattern.match(value):
+        if label in ('client_uuid', 'device_id'):
+            value = redact_identifier(value)
         raise ValueError(
             f'{label}={value!r} failed strict shape check '
             f'(pattern={pattern.pattern!r}); refusing to interpolate into SQL'
@@ -350,6 +352,17 @@ def build_device_id_plan(
     return plan
 
 
+def redact_identifier(value: str | None) -> str:
+    return value[:8] + '…' if value else '(none)'
+
+
+def redact_error(message: str, *identifiers: str | None) -> str:
+    for identifier in identifiers:
+        if identifier:
+            message = message.replace(identifier, redact_identifier(identifier))
+    return message
+
+
 def print_plan(plan: list[PlanRow]) -> dict[str, int]:
     counts: dict[str, int] = {}
     rows_by_action: dict[str, list[PlanRow]] = {}
@@ -368,8 +381,8 @@ def print_plan(plan: list[PlanRow]) -> dict[str, int]:
         rows = rows_by_action.get(action, [])
         print(f'\n[{action}] {len(rows)} row(s)')
         for r in rows[:50]:
-            cur = r.cur_uuid or '(none)'
-            print(f'  {r.user:<24} {r.server:<12} {cur:<40} → {r.src_uuid}')
+            cur = redact_identifier(r.cur_uuid)
+            print(f'  {r.user:<24} {r.server:<12} {cur:<40} → {redact_identifier(r.src_uuid)}')
         if len(rows) > 50:
             print(f'  ... {len(rows) - 50} more')
 
@@ -391,8 +404,8 @@ def print_device_id_plan(plan: list[DeviceIdPlanRow]) -> dict[str, int]:
         rows = rows_by_action.get(action, [])
         print(f'\n[{action}] {len(rows)} row(s)')
         for r in rows[:50]:
-            cur = r.cur_device_id or '(none)'
-            print(f'  {r.user:<24} {cur:<35} → {r.src_device_id}')
+            cur = redact_identifier(r.cur_device_id)
+            print(f'  {r.user:<24} {cur:<35} → {redact_identifier(r.src_device_id)}')
         if len(rows) > 50:
             print(f'  ... {len(rows) - 50} more')
 
@@ -435,13 +448,13 @@ def apply_device_id_changes(host: str, plan: list[DeviceIdPlanRow]) -> int:
         )
         if result.returncode != 0:
             print(
-                f'ERROR on {row.user}: exit={result.returncode}: {result.stderr.strip()}',
+                f'ERROR on {row.user}: exit={result.returncode}: {redact_error(result.stderr.strip(), row.src_device_id, row.cur_device_id)}',
                 file=sys.stderr,
             )
             print('aborting; rows committed before this one stay applied', file=sys.stderr)
             return applied
         applied += 1
-        print(f'  applied  {row.user:<24} → {row.src_device_id}')
+        print(f'  applied  {row.user:<24} → {redact_identifier(row.src_device_id)}')
     return applied
 
 
@@ -486,13 +499,13 @@ def apply_changes(host: str, plan: list[PlanRow]) -> int:
         if result.returncode != 0:
             print(
                 f'ERROR on {row.user}/{row.server}: '
-                f'exit={result.returncode}: {result.stderr.strip()}',
+                f'exit={result.returncode}: {redact_error(result.stderr.strip(), row.src_uuid, row.cur_uuid)}',
                 file=sys.stderr,
             )
             print('aborting; rows committed before this one stay applied', file=sys.stderr)
             return applied
         applied += 1
-        print(f'  applied  {row.user:<24} {row.server:<12} → {row.src_uuid}')
+        print(f'  applied  {row.user:<24} {row.server:<12} → {redact_identifier(row.src_uuid)}')
     return applied
 
 

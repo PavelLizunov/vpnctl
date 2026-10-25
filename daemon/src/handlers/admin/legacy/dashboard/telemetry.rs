@@ -72,14 +72,13 @@ pub(in crate::handlers::admin::legacy) fn dashboard_live_activity_from_rows(
             activity.bytes_dn_window = activity.bytes_dn_window.saturating_add(row.download_bytes);
             if is_latest {
                 activity.last_sample_ts = Some(row.ts);
-                activity.active_now = row.active_connections;
             }
         }
     }
 
     for (server_id, count) in active_conns {
         if let (Some(activity), Some(count)) = (by_server.get_mut(server_id), count) {
-            activity.active_now = u32::try_from(*count).unwrap_or(u32::MAX);
+            activity.active_now = Some(u32::try_from(*count).unwrap_or(u32::MAX));
         }
     }
 
@@ -108,10 +107,9 @@ pub(in crate::handlers::admin::legacy) fn dashboard_vpn_activity(
         .iter()
         .map(|(_, a)| a.bytes_dn_window)
         .fold(0u64, u64::saturating_add);
-    let total_active: u32 = rows
-        .iter()
-        .map(|(_, a)| a.active_now)
-        .fold(0u32, u32::saturating_add);
+    let total_active = rows.iter().try_fold(0u32, |total, (_, a)| {
+        a.active_now.map(|count| total.saturating_add(count))
+    });
     let any_polled = rows.iter().any(|(_, a)| a.last_sample_ts.is_some());
     let window_label = match lang {
         crate::i18n::Locale::En => window.label_en,
@@ -148,7 +146,7 @@ pub(in crate::handlers::admin::legacy) fn dashboard_vpn_activity(
             } @else {
                 div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 8px 0 12px;" {
                     div title=(tr(lang, "Sum of active_connections across all servers' freshest server-wide tick.", "Сумма active_connections по всем серверам (свежий сервер-агрегатный тик).")) {
-                        (status_tile(tr(lang, "active now", "активных сейчас"), &total_active.to_string(), "var(--ink)"))
+                        (status_tile(tr(lang, "active now", "активных сейчас"), &total_active.map(|n| n.to_string()).unwrap_or_else(|| "—".to_string()), "var(--ink)"))
                     }
                     @let up_title = format!("{}{}", tr(lang, "Total upload bytes (client → server) across every node in window: ", "Total upload-байт (клиент → сервер) по всем нодам за окно: "), window_label);
                     @let dn_title = format!("{}{}", tr(lang, "Total download bytes (server → client) across every node in window: ", "Total download-байт (сервер → клиент) по всем нодам за окно: "), window_label);
@@ -177,7 +175,7 @@ pub(in crate::handlers::admin::legacy) fn dashboard_vpn_activity(
                                 td style="padding: 4px 8px;" {
                                     a href=(format!("/admin/servers/{}", crate::http_util::path_segment_encode(&sid.0))) style="color: var(--ink); text-decoration: none;" { (sid.0) }
                                 }
-                                td style="padding: 4px 8px; text-align: right;" { (act.active_now) }
+                                td style="padding: 4px 8px; text-align: right;" { (act.active_now.map(|n| n.to_string()).unwrap_or_else(|| "—".to_string())) }
                                 td style="padding: 4px 8px; text-align: right;" { (humanize_bytes(act.bytes_up_window)) }
                                 td style="padding: 4px 8px; text-align: right;" { (humanize_bytes(act.bytes_dn_window)) }
                                 td style="padding: 4px 8px; text-align: right; color: var(--mute);" {

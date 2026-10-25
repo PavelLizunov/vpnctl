@@ -43,6 +43,28 @@ pub(crate) async fn user_wireguard_conf_download(
             "user '{user_id_str}' is not granted on server '{server_id_str}'"
         ));
     }
+    let available: Result<bool, vpnctl_inventory::SqliteInventoryError> = async {
+        Ok(
+            state.inv.get_server_role(&sid).await? == vpnctl_inventory::ServerRole::VpnExit
+                && !state.inv.is_server_auto_suppressed(&sid).await?
+                && state.inv.client_detour_via(&sid).await?.is_none()
+                && state
+                    .inv
+                    .visible_protocols_for_subscription(&uid, &sid)
+                    .await?
+                    .contains(&vpnctl_core::ProtocolId("wireguard".into())),
+        )
+    }
+    .await;
+    match available {
+        Ok(true) => {}
+        Ok(false) => {
+            return bad_request(
+                "This WireGuard download is unavailable because the subscription does not offer this server as a direct configuration. Review user access and the server's visibility, availability, and routing settings in the admin UI.",
+            );
+        }
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
     let secrets = match state.inv.list_server_secrets(&sid).await {
         Ok(m) => m,
         Err(e) => return internal_error(anyhow::Error::new(e)),

@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use serde_json::Value;
 use vpnctl_core::{
     CoreError, KernelId, Protocol, ProtocolId, RenderCtx, Server, ServerId, User, UserId,
@@ -40,7 +41,7 @@ fn ctx_with<'a>(server: &'a Server, secrets: &'a HashMap<String, String>) -> Ren
     RenderCtx::new(server, secrets)
 }
 
-const PSK: &str = "Test1234567890abcdef0123";
+const PSK: &str = "AAECAwQFBgcICQoLDA0ODw==";
 
 fn secrets_with_psk() -> HashMap<String, String> {
     let mut m = HashMap::new();
@@ -94,6 +95,7 @@ fn ss_server_inbound_method_override_via_secret() {
         "ss2022.method".into(),
         "2022-blake3-aes-256-gcm".to_string(),
     );
+    secrets.insert("ss2022.psk".into(), B64.encode([0_u8; 32]));
     let ctx = ctx_with(&s, &secrets);
     let v = Shadowsocks2022::new()
         .server_inbound(&ctx, &[user("alice")])
@@ -166,6 +168,7 @@ fn ss_client_config_method_and_password_match_inbound() {
         "ss2022.method".into(),
         "2022-blake3-chacha20-poly1305".to_string(),
     );
+    secrets.insert("ss2022.psk".into(), B64.encode([0_u8; 32]));
     let ctx = ctx_with(&s, &secrets);
     let p = Shadowsocks2022::new();
     let inbound = p.server_inbound(&ctx, &[user("alice")]).unwrap();
@@ -264,11 +267,20 @@ fn ss_all_three_valid_methods_accepted() {
         let s = srv();
         let mut secrets = secrets_with_psk();
         secrets.insert("ss2022.method".into(), method.to_string());
+        let bytes = if method == "2022-blake3-aes-128-gcm" {
+            16
+        } else {
+            32
+        };
+        secrets.insert("ss2022.psk".into(), B64.encode(vec![0_u8; bytes]));
         let ctx = ctx_with(&s, &secrets);
         let v = Shadowsocks2022::new()
             .server_inbound(&ctx, &[user("alice")])
             .unwrap();
         assert_eq!(v.get("method").and_then(Value::as_str), Some(method));
+        let protocol = Shadowsocks2022::new();
+        assert!(protocol.client_config(&ctx, &user("alice")).is_ok());
+        assert!(protocol.share_link(&ctx, &user("alice")).is_ok());
     }
 }
 
@@ -337,40 +349,17 @@ fn ss_share_link_userinfo_is_plain_method_colon_password_not_base64() {
 }
 
 #[test]
-fn ss_share_link_special_chars_in_psk_are_percent_encoded() {
+fn ss_share_link_base64_slashes_are_percent_encoded() {
     let s = srv();
-    let mut secrets = HashMap::new();
-    secrets.insert("ss2022.psk".into(), "p@ss/wo#rd:1".to_string());
+    let mut secrets = secrets_with_psk();
+    secrets.insert("ss2022.psk".into(), B64.encode([255_u8; 16]));
     let ctx = ctx_with(&s, &secrets);
     let link = Shadowsocks2022::new()
         .share_link(&ctx, &user("alice"))
         .unwrap();
-
-    let after_scheme = link.strip_prefix("ss://").expect("ss://");
-    let at_idx = after_scheme.rfind('@').expect("'@' separator");
-    let userinfo = &after_scheme[..at_idx];
-
-    let pw_part = userinfo
-        .strip_prefix("2022-blake3-aes-128-gcm:")
-        .expect("expected method then ':' then password; got {userinfo}");
-
-    assert!(pw_part.contains("%40"), "'@' must be %40; pw={pw_part}");
-    assert!(
-        pw_part.contains("%2F") || pw_part.contains("%2f"),
-        "'/' must be %2F; pw={pw_part}"
-    );
-    assert!(pw_part.contains("%23"), "'#' must be %23; pw={pw_part}");
-    assert!(
-        pw_part.contains("%3A") || pw_part.contains("%3a"),
-        "'/' must be %3A; pw={pw_part}"
-    );
-
-    assert!(!pw_part.contains('@'), "raw '@' leaked: {pw_part}");
-    assert!(!pw_part.contains('/'), "raw '/' leaked: {pw_part}");
-    assert!(!pw_part.contains('#'), "raw '#' leaked: {pw_part}");
-    assert!(
-        !pw_part.contains(':'),
-        "raw ':' leaked into password: {pw_part}"
+    assert_eq!(
+        link,
+        "ss://2022-blake3-aes-128-gcm:%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2Fw==@203.0.113.7:8388/#alice"
     );
 }
 
@@ -390,4 +379,77 @@ fn ss_share_link_tag_is_user_id_percent_encoded() {
     assert!(fragment.contains("%23"), "'#' → %23; got {fragment}");
     assert!(!fragment.contains(' '), "raw space leaked: {fragment}");
     assert!(!fragment.contains('#'), "raw '#' leaked: {fragment}");
+}
+
+#[test]
+fn ss_secret_specs_match_method_key_length() {
+    let protocol = Shadowsocks2022::new();
+    for (method, bytes) in [
+        ("2022-blake3-aes-128-gcm", 16),
+        ("2022-blake3-aes-256-gcm", 32),
+        ("2022-blake3-chacha20-poly1305", 32),
+    ] {
+        let secrets = HashMap::from([("ss2022.method".into(), method.into())]);
+        assert_eq!(
+            protocol.server_secret_specs_for(&secrets).unwrap(),
+            vec![vpnctl_core::ServerSecretSpec::Base64Key {
+                key: "ss2022.psk",
+                key_bytes: bytes,
+            }]
+        );
+    }
+    assert_eq!(
+        protocol.server_secret_specs_for(&HashMap::new()).unwrap(),
+        protocol.server_secret_specs()
+    );
+}
+
+#[test]
+fn ss_wrong_length_or_invalid_base64_is_rejected_by_every_renderer() {
+    let server = srv();
+    let protocol = Shadowsocks2022::new();
+    for (method, required, wrong) in [
+        ("2022-blake3-aes-128-gcm", 16, 32),
+        ("2022-blake3-aes-256-gcm", 32, 16),
+        ("2022-blake3-chacha20-poly1305", 32, 16),
+    ] {
+        for psk in [B64.encode(vec![0_u8; wrong]), "invalid!".into()] {
+            let secrets = HashMap::from([
+                ("ss2022.method".into(), method.into()),
+                ("ss2022.psk".into(), psk),
+            ]);
+            let ctx = ctx_with(&server, &secrets);
+            let errors = [
+                protocol.server_inbound(&ctx, &[]).unwrap_err(),
+                protocol.client_config(&ctx, &user("alice")).unwrap_err(),
+                protocol.share_link(&ctx, &user("alice")).unwrap_err(),
+            ];
+            for error in errors {
+                let message = error.to_string();
+                assert!(message.contains("ss2022.psk"));
+                assert!(message.contains(&format!("{required} bytes")));
+                assert!(message.contains(method));
+                assert!(!message.contains("invalid!"));
+            }
+        }
+    }
+}
+
+#[test]
+fn ss_aes128_share_link_and_config_bytes_are_unchanged() {
+    let server = srv();
+    let secrets = secrets_with_psk();
+    let ctx = ctx_with(&server, &secrets);
+    let protocol = Shadowsocks2022::new();
+    assert_eq!(
+        protocol
+            .share_link(&ctx, &user("alice"))
+            .unwrap()
+            .as_bytes(),
+        b"ss://2022-blake3-aes-128-gcm:AAECAwQFBgcICQoLDA0ODw==@203.0.113.7:8388/#alice"
+    );
+    assert_eq!(
+        serde_json::to_vec(&protocol.client_config(&ctx, &user("alice")).unwrap()).unwrap(),
+        br#"{"method":"2022-blake3-aes-128-gcm","password":"AAECAwQFBgcICQoLDA0ODw==","server":"203.0.113.7","server_port":8388,"tag":"ss22-out","type":"shadowsocks"}"#
+    );
 }

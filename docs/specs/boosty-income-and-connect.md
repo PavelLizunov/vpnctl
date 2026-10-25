@@ -9,6 +9,15 @@
   - Строгая валидация домена: букмарклет срабатывает только на `boosty.to` и `*.boosty.to`.
   - LocalStorage-First: букмарклет считывает активные токены (`auth`, `_clientId`) в первую очередь из `localStorage`, используя куки только как резерв.
   - Bearer-First аутентификация: при наличии `access_token` клиент обращается к API напрямую через Bearer-токен, избегая гонок и ошибок `invalid_grant` на эндпоинте `/oauth/token/`. Ротация через `refresh_token` вызывается только при необходимости продления (по 401).
+  - Sync persists each rotated refresh token immediately after OAuth succeeds,
+    before requesting subscribers, including during bearer recovery and dry-run.
+    Persistence errors abort the pass. The roster uses the resulting bearer
+    token so pagination cannot silently rotate credentials. A token rejected
+    during that pass is retried by a subsequent sync.
+  - Web/CLI settings saves preserve the stored refresh token unless the operator
+    supplies a replacement. `set_boosty_settings` treats `refresh_token: None`
+    as unchanged. Settings changes and successful refresh rotations are audited
+    atomically without credential values; no-op writes add no audit entry.
   - Резервный спойлер: ручная форма настройки токенов скрыта под спойлером (`details.ed-spoiler`), основным интерфейсом остаётся 1-Click подключение.
   - Все финансовые расчёты производятся в целочисленных копейках/центах (`i64` minor units) с банковским округлением через валютный движок ЦБ; никаких `f64` в балансе.
 

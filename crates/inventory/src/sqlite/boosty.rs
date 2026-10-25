@@ -115,7 +115,7 @@ impl SqliteInventory {
             Some(token) if !token.is_empty() => token.to_string(),
             _ => vpnctl_crypto::gen_sub_token().map_err(SqliteInventoryError::CryptoIo)?,
         };
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let inserted = sqlx::query(
             "INSERT INTO users (
                 id, uuid, tuic_password, wireguard_pubkey, wireguard_private,
@@ -184,14 +184,20 @@ impl SqliteInventory {
     }
 
     pub async fn set_boosty_settings(&self, s: &BoostySettings) -> Result<()> {
-        sqlx::query(
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let result = sqlx::query(
             "UPDATE boosty_settings
                 SET enabled = ?1, blog_url = ?2, access_token = ?3,
-                    refresh_token = ?4, device_id = ?5, poll_interval_secs = ?6,
+                    refresh_token = COALESCE(?4, refresh_token), device_id = ?5, poll_interval_secs = ?6,
                     auto_disable_lapsed = ?7,
                     grace_days = ?8, auto_create_users = ?9,
                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-              WHERE id = 1",
+              WHERE id = 1 AND (
+                    enabled IS NOT ?1 OR blog_url IS NOT ?2 OR access_token IS NOT ?3
+                    OR refresh_token IS NOT COALESCE(?4, refresh_token)
+                    OR device_id IS NOT ?5 OR poll_interval_secs IS NOT ?6
+                    OR auto_disable_lapsed IS NOT ?7 OR grace_days IS NOT ?8
+                    OR auto_create_users IS NOT ?9)",
         )
         .bind(i64::from(s.enabled))
         .bind(&s.blog_url)
@@ -202,8 +208,29 @@ impl SqliteInventory {
         .bind(i64::from(s.auto_disable_lapsed))
         .bind(i64::from(s.grace_days))
         .bind(i64::from(s.auto_create_users))
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+
+        if result.rows_affected() > 0 {
+            sqlx::query(
+                "INSERT INTO audit_log (actor, action, target, payload)
+                 VALUES ('admin', 'boosty.configure', 'boosty_settings', ?1)",
+            )
+            .bind(
+                serde_json::json!({
+                    "enabled": s.enabled,
+                    "blog_url": s.blog_url,
+                    "poll_interval_secs": s.poll_interval_secs,
+                    "auto_disable_lapsed": s.auto_disable_lapsed,
+                    "grace_days": s.grace_days,
+                    "auto_create_users": s.auto_create_users,
+                })
+                .to_string(),
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -221,21 +248,32 @@ impl SqliteInventory {
     }
 
     pub async fn rotate_boosty_refresh_token(&self, expected: &str, rotated: &str) -> Result<bool> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let result = sqlx::query(
             "UPDATE boosty_settings
                 SET refresh_token = ?1,
                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-              WHERE id = 1 AND refresh_token = ?2",
+              WHERE id = 1 AND refresh_token = ?2 AND refresh_token IS NOT ?1",
         )
         .bind(rotated)
         .bind(expected)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        Ok(result.rows_affected() == 1)
+        let changed = result.rows_affected() == 1;
+        if changed {
+            sqlx::query(
+                "INSERT INTO audit_log (actor, action, target, payload)
+                 VALUES ('boosty-bridge', 'boosty.refresh_token.rotated', 'boosty_settings', NULL)",
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(changed)
     }
 
     pub async fn clear_boosty_access_token(&self, expected: &str) -> Result<bool> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let result = sqlx::query(
             "UPDATE boosty_settings
                 SET access_token = NULL,
@@ -304,7 +342,7 @@ impl SqliteInventory {
         report_json: &str,
         events: &[(String, Option<String>, serde_json::Value)],
     ) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         for (action, target, payload) in events {
             sqlx::query(
                 "INSERT INTO audit_log (actor, action, target, payload)

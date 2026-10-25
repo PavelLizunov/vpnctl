@@ -72,9 +72,18 @@ async fn scan_once_inner(
         if rows.len() < 2 {
             continue;
         }
-        let cur = &rows[0];
-        let prev = &rows[1];
-        for mut ev in diff_rows(prev, cur) {
+        // Use the latest transition for each condition, even when extra steady
+        // samples have arrived since that transition. Source IDs dedupe replays.
+        let mut seen = std::collections::HashSet::new();
+        let events = rows
+            .windows(2)
+            .flat_map(|pair| {
+                diff_rows(&pair[1], &pair[0])
+                    .into_iter()
+                    .map(move |ev| (&pair[1], &pair[0], ev))
+            })
+            .filter(|(_, _, ev)| seen.insert(ev.resolves.unwrap_or(ev.kind)));
+        for (prev, cur, mut ev) in events {
             if let (Some(p_id), Some(c_id)) = (prev.sample_id.as_deref(), cur.sample_id.as_deref())
             {
                 if let serde_json::Value::Object(ref mut map) = ev.payload {
@@ -196,7 +205,16 @@ async fn scan_once_inner(
             if !should_insert {
                 continue;
             }
-            let insert_res = if ev.resolves.is_some() || is_one_shot_event(ev.kind) {
+            let insert_res = if is_one_shot_event(ev.kind) {
+                inv.insert_alert_acked_if_new_source(
+                    ev.kind,
+                    Some(&server.id),
+                    ev.severity,
+                    &ev.summary,
+                    payload_str.as_deref(),
+                )
+                .await
+            } else if ev.resolves.is_some() {
                 inv.insert_alert_acked(
                     ev.kind,
                     Some(&server.id),

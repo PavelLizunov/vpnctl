@@ -13,8 +13,8 @@ use vpnctl_core::{
 
 use self::builder::{
     CADDY_RESTART_IF_ACTIVE, CADDY_VERSION, caddy_build_script, caddy_cache_path,
-    caddy_needs_reinstall, caddy_present, caddy_restart_command, caddy_runtime_provision_script,
-    caddy_vlessws_status_command,
+    caddy_needs_reinstall, caddy_present, caddy_present_command, caddy_restart_command,
+    caddy_runtime_provision_script, caddy_vlessws_status_command,
 };
 use self::render::{
     BUNDLE_DELIMITER, naive_apply_script, render_naive_config, render_vlessws_bundle,
@@ -36,11 +36,27 @@ impl Kernel for Caddy {
         KernelId("caddy".to_string())
     }
 
+    fn service_units(&self) -> &'static [&'static str] {
+        &["caddy.service", "caddy-vlessws.service"]
+    }
+
     fn supported_protocols(&self) -> Vec<ProtocolId> {
         vec![
             ProtocolId("naive".to_string()),
             ProtocolId("vless-ws".to_string()),
         ]
+    }
+
+    fn validate_server_support(&self, server: &vpnctl_core::Server) -> Result<()> {
+        if server.enabled_protocols.iter().any(|p| p.0 == "vless-ws")
+            && !server.kernels.iter().any(|k| k.0 == "sing-box")
+        {
+            return Err(CoreError::Render(
+                "caddy + vless-ws requires the sing-box kernel for /usr/bin/sing-box; enable sing-box on this server"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 
     fn version_requirement(&self) -> Option<KernelVersionRequirement> {
@@ -84,13 +100,7 @@ impl Kernel for Caddy {
                 needs_reinstall
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let present = ssh
-                    .exec(
-                        "command -v /usr/local/bin/caddy >/dev/null 2>&1 \
-                          && /usr/local/bin/caddy list-modules 2>/dev/null | grep -q forward_proxy \
-                          && echo present || echo absent",
-                    )
-                    .await?;
+                let present = ssh.exec(&caddy_present_command()).await?;
                 let needs_reinstall = !caddy_present(&present);
                 if needs_reinstall {
                     ssh.exec(&caddy_build_script()).await?;
@@ -145,12 +155,32 @@ impl Kernel for Caddy {
 
     async fn apply_config(&self, ssh: &dyn SshTransport, config: &[u8]) -> Result<()> {
         if config.starts_with(BUNDLE_DELIMITER.as_bytes()) {
+            ssh.exec("install -o root -g root -m 0600 /dev/null /etc/caddy/.vlessws-bundle.new")
+                .await?;
             ssh.upload("/etc/caddy/.vlessws-bundle.new", config).await?;
             ssh.exec(&vlessws_apply_script()).await?;
             return Ok(());
         }
+        ssh.exec("install -o root -g root -m 0600 /dev/null /etc/caddy/Caddyfile.new")
+            .await?;
         ssh.upload("/etc/caddy/Caddyfile.new", config).await?;
         ssh.exec(&naive_apply_script()).await?;
+        Ok(())
+    }
+
+    async fn open_firewall(
+        &self,
+        ssh: &dyn SshTransport,
+        ctx: &RenderCtx<'_>,
+        protocols: &[&dyn Protocol],
+    ) -> Result<()> {
+        let ports: Vec<(&str, u16)> = protocols
+            .iter()
+            .flat_map(|p| p.effective_listen_ports(ctx.secrets))
+            .collect();
+        if let Some(script) = super::sing_box::firewall_open_script(&ports) {
+            ssh.exec(&script).await?;
+        }
         Ok(())
     }
 

@@ -150,14 +150,11 @@ async fn update_kernels_all_pipeline(
     let _ = tx
         .send(BootstrapEvent::Step {
             phase: "done",
-            message: summary,
+            message: summary.clone(),
         })
         .await;
     let _ = tx
-        .send(BootstrapEvent::Ok {
-            server_id: "all".into(),
-            redirect: "/admin/servers".into(),
-        })
+        .send(super::redeploy::deploy_all_terminal(&failed, summary))
         .await;
 }
 

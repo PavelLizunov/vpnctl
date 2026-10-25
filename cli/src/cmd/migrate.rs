@@ -532,4 +532,60 @@ mod tests {
         assert!(!diff.user_change);
         assert!(diff.any_changed());
     }
+
+    #[tokio::test]
+    async fn multi_plan_import_keeps_each_servers_share_link_bytes() {
+        use vpnctl_core::{Protocol, RenderCtx};
+        use vpnctl_inventory::{BashInventoryEnv, BashVlessUser};
+        for overwrite in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+                .await
+                .unwrap();
+            let mut plans = Vec::new();
+            for (id, uuid) in [
+                ("srv-a", "00000000-0000-0000-0000-000000000001"),
+                ("srv-b", "00000000-0000-0000-0000-000000000002"),
+            ] {
+                plans.push(
+                    build_migration_plan(
+                        Some(id.into()),
+                        &BashInventoryEnv {
+                            server_ip: "203.0.113.7".into(),
+                            ssh_port: 22,
+                            reality_public: "PUB".into(),
+                            short_id: "SID".into(),
+                            users: vec!["alice".into()],
+                        },
+                        &BashSingboxData {
+                            vless_users: vec![BashVlessUser {
+                                name: "alice".into(),
+                                uuid: uuid.into(),
+                                flow: None,
+                            }],
+                            ..Default::default()
+                        },
+                        |_| "test-token".into(),
+                    )
+                    .unwrap(),
+                );
+            }
+            for plan in &plans {
+                apply_migration_plan(&inv, plan, overwrite).await.unwrap();
+            }
+            for plan in &plans {
+                let server = inv.get_server(&plan.server.id).await.unwrap().unwrap();
+                let secrets = inv.list_server_secrets(&server.id).await.unwrap();
+                let users = inv.users_for_server(&server.id).await.unwrap();
+                let link = vpnctl_protocols::VlessReality::new()
+                    .share_link(&RenderCtx::new(&server, &secrets), &users[0])
+                    .unwrap();
+                let expected = format!(
+                    "vless://{}@203.0.113.7:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=yahoo.com&fp=randomized&pbk=PUB&sid=SID&type=tcp&packetEncoding=xudp#alice",
+                    plan.users_to_import[0].uuid,
+                );
+                assert_eq!(link.as_bytes(), expected.as_bytes());
+            }
+        }
+    }
 }

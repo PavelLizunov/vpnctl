@@ -11,6 +11,12 @@ BUILD_TARGET=${VPNCTL_BUILD_TARGET:-x86_64-unknown-linux-musl}
 
 log() { echo "[deploy] $*" >&2; }
 
+# Keep the lock inode in place so waiting runs cannot lock a different file.
+LOCK_FILE=${VPNCTL_DEPLOY_LOCK:-${DAEMON_DST}.deploy.lock}
+mkdir -p "$(dirname "$LOCK_FILE")"
+exec 9>"$LOCK_FILE"
+flock -x 9
+
 # Admin UI assets are served from disk, so they ship with the binaries. A
 # checkout build installs its own daemon/assets; prebuilt artifacts must name
 # theirs in VPNCTL_ASSETS_SRC, or set VPNCTL_SKIP_ASSETS=1 to keep the live ones.
@@ -74,6 +80,7 @@ rollback() {
         set +e
         for ((i=SWAPPED-1; i>=0; i--)); do
             if [ "${EXISTED[$i]}" -eq 1 ]; then
+                [ -e "${BACKUPS[$i]}" ] || [ -L "${BACKUPS[$i]}" ] || continue
                 mv -f "${BACKUPS[$i]}" "${DESTINATIONS[$i]}"
             else
                 rm -f "${DESTINATIONS[$i]}"
@@ -132,8 +139,8 @@ if [ -n "$ASSETS_SRC" ]; then
 fi
 
 for i in "${!STAGED[@]}"; do
-    mv -f "${STAGED[$i]}" "${DESTINATIONS[$i]}"
     SWAPPED=$((i + 1))
+    mv -f "${STAGED[$i]}" "${DESTINATIONS[$i]}"
     log "installed ${DESTINATIONS[$i]}"
     if [ "${VPNCTL_FAIL_AFTER_SWAP:-0}" -eq "$SWAPPED" ]; then
         log "injected failure after swap $SWAPPED"

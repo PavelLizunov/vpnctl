@@ -399,6 +399,77 @@ async fn admin_user_set_traffic_limit_persists_and_audits() {
 }
 
 #[tokio::test]
+async fn admin_user_set_traffic_limit_no_op_does_not_audit() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    let inv = s.inv.clone();
+    let app = router(s);
+    for (body, expected_audits) in [
+        ("limit_gib=5.0&threshold_pct=75", 1),
+        ("limit_gib=5&threshold_pct=75", 1),
+        ("limit_gib=5&threshold_pct=80", 2),
+        ("limit_gib=0&threshold_pct=80", 3),
+        ("limit_gib=0.0&threshold_pct=80", 3),
+        ("limit_gib=1e30&threshold_pct=80", 4),
+        ("limit_gib=1e30&threshold_pct=80", 4),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                add_same_origin(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/admin/users/u0/traffic-limit")
+                        .header("content-type", "application/x-www-form-urlencoded"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let rows = inv.recent_audit(100).await.unwrap();
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r.action == "user.traffic_limit.set")
+                .count(),
+            expected_audits
+        );
+    }
+}
+
+#[tokio::test]
+async fn admin_concurrent_identical_traffic_limits_audit_once() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    let inv = s.inv.clone();
+    let app = router(s);
+    let post = || {
+        add_same_origin(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/users/u0/traffic-limit")
+                .header("content-type", "application/x-www-form-urlencoded"),
+        )
+        .body(Body::from("limit_gib=5&threshold_pct=80"))
+        .unwrap()
+    };
+    let (a, b) = tokio::join!(app.clone().oneshot(post()), app.oneshot(post()));
+    assert_eq!(a.unwrap().status(), StatusCode::SEE_OTHER);
+    assert_eq!(b.unwrap().status(), StatusCode::SEE_OTHER);
+    let audit = inv.recent_audit(100).await.unwrap();
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|r| r.action == "user.traffic_limit.set")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn admin_user_set_traffic_limit_zero_clears_cap() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;

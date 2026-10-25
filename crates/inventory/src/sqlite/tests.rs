@@ -42,6 +42,93 @@ fn sample_user(id: &str) -> User {
     }
 }
 
+#[tokio::test]
+async fn billing_renew_rejects_concurrent_tariff_edits_with_same_due_date() {
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    for edit in [
+        "amount_cents = 2000",
+        "billing_cycle = 'annual'",
+        "currency = 'USD'",
+        "auto_renew = 0",
+        "billing_url = 'https://example.com/billing'",
+        "notes = 'changed tariff'",
+    ] {
+        let mut inv = fresh().await;
+        let server = sample_server("billing-race");
+        inv.add_server(&server).await.unwrap();
+        inv.set_server_billing(
+            &server.id,
+            &ServerBillingInput {
+                due_date: "2026-10-01".into(),
+                billing_cycle: BillingCycle::Monthly,
+                amount_cents: 1000,
+                currency: "EUR".into(),
+                auto_renew: true,
+                billing_url: None,
+                notes: None,
+                initial_payments_count: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let checkouts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&checkouts);
+        let options = (*inv.pool.connect_options()).clone();
+        inv.pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .before_acquire(move |conn, _| {
+                let checkout = counter.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    // Checkout 4 starts the transaction after the billing and two currency reads.
+                    if checkout == 3 {
+                        sqlx::query(&format!(
+                            "UPDATE server_billing SET {edit} WHERE server_id = 'billing-race'"
+                        ))
+                        .execute(&mut *conn)
+                        .await?;
+                    }
+                    Ok(true)
+                })
+            })
+            .connect_with(options)
+            .await
+            .unwrap();
+        checkouts.store(0, Ordering::SeqCst);
+
+        let renewed = inv
+            .advance_server_billing_cycle_guarded(&server.id, "2026-10-01", false)
+            .await
+            .unwrap();
+        assert!(renewed.is_none(), "stale tariff must be rejected: {edit}");
+        assert!(
+            inv.list_server_payments(&server.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            inv.get_server_billing(&server.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .due_date,
+            "2026-10-01"
+        );
+        assert!(
+            inv.recent_audit(100)
+                .await
+                .unwrap()
+                .iter()
+                .all(|a| !a.action.starts_with("server.billing.advance"))
+        );
+    }
+}
+
 #[test]
 fn network_key_ipv4_collapses_to_16() {
     assert_eq!(network_key("91.79.36.72"), "91.79");

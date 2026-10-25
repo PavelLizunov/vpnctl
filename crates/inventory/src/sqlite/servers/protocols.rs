@@ -38,6 +38,24 @@ impl SqliteInventory {
         Ok(res.rows_affected())
     }
 
+    /// Kernels the operator disabled on this server (`server.kernel.disable`
+    /// audit rows), whether or not they were enabled again later.
+    pub async fn retired_server_kernels(&self, server: &ServerId) -> Result<Vec<KernelId>> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT json_extract(payload, '$.kernel') AS kernel_id FROM audit_log
+             WHERE action = 'server.kernel.disable' AND target = ?1
+               AND json_valid(payload) AND json_extract(payload, '$.kernel') IS NOT NULL
+             ORDER BY kernel_id",
+        )
+        .bind(&server.0)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| r.try_get::<String, _>("kernel_id").map(KernelId))
+            .collect::<std::result::Result<_, _>>()?)
+    }
+
     pub async fn add_server_protocol(
         &self,
         server: &ServerId,
@@ -107,7 +125,7 @@ impl SqliteInventory {
         pid: &ProtocolId,
         hidden: bool,
     ) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let prior = sqlx::query(
             "SELECT hidden FROM server_protocols WHERE server_id = ?1 AND protocol_id = ?2",
@@ -170,7 +188,7 @@ impl SqliteInventory {
         pid: &ProtocolId,
         disabled: bool,
     ) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let grant_exists =
             sqlx::query("SELECT 1 FROM grants WHERE user_id = ?1 AND server_id = ?2")

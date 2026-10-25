@@ -235,7 +235,17 @@ pub(crate) async fn set_tweak(
 }
 
 pub(crate) async fn logout() -> Response {
-    let mut resp = Redirect::to("/admin/").into_response();
+    let mut resp = (
+        StatusCode::UNAUTHORIZED,
+        "vpnctl admin: logged out. Cancel the login prompt to stay logged out.\n",
+    )
+        .into_response();
+    resp.headers_mut().insert(
+        header::WWW_AUTHENTICATE,
+        HeaderValue::from_static(r#"Basic realm="vpnctl admin", charset="UTF-8""#),
+    );
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     if let Ok(hv) = HeaderValue::from_str(&crate::handlers::auth::build_logout_cookie()) {
         resp.headers_mut().append(header::SET_COOKIE, hv);
     }
@@ -700,13 +710,11 @@ pub(crate) async fn html_error_pages(
         Ok(bytes) => String::from_utf8_lossy(&bytes).trim().to_string(),
         Err(_) => error_text("request failed").trim().to_string(),
     };
-    let back = headers
-        .get(axum::http::header::REFERER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|r| r.split_once("://").map(|(_, rest)| rest))
-        .and_then(|rest| rest.find('/').map(|i| rest[i..].to_string()))
-        .filter(|path| path.starts_with("/admin") && !path.starts_with("//"))
-        .unwrap_or_else(|| "/admin/".to_string());
+    let back = sanitize_referer(
+        headers
+            .get(axum::http::header::REFERER)
+            .and_then(|v| v.to_str().ok()),
+    );
     let (theme, accent, lang) = theme_accent_lang(&headers);
     let body = maud::html! {
         div.ed-art-eyebrow { (crate::i18n::tr(lang, "Action not completed", "Действие не выполнено")) }

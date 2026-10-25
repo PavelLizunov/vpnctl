@@ -44,20 +44,21 @@ async fn main() -> anyhow::Result<()> {
         "starting"
     );
 
-    let app = vpnctld::build(config.clone()).await?;
+    let (app, writer_handle) = vpnctld::build(config.clone()).await?;
     let listener = tokio::net::TcpListener::bind(config.addr)
         .await
         .with_context(|| format!("bind {}", config.addr))?;
     info!(target = "vpnctld", "listening on http://{}", config.addr);
 
-    axum::serve(
+    let serve_result = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
     .await
-    .context("axum::serve")?;
-    Ok(())
+    .context("axum::serve");
+    vpnctld::access_log::drain_writer(writer_handle).await;
+    serve_result
 }
 
 fn init_tracing() {

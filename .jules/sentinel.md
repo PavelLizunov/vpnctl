@@ -17,3 +17,8 @@
 **Vulnerability:** `/sub/{token}`, `/api/v1/sub/{token}` and `/api/v1/app/config/*` were cacheable; the WireGuard `.conf` download served disabled users.
 **Learning:** Both are fixed on main: the public router sets `Cache-Control: no-store`, and the `.conf` download refuses disabled users. Tests: `public_credential_endpoints_are_not_cacheable`, `admin_user_wireguard_conf_download_refuses_disabled_user`.
 **Prevention:** Before proposing a fix, check main and open PRs for the same finding; do not open another PR for an issue that already has one.
+
+## 2026-10-25 - Error-page back link and grant-route ID validation are settled
+**Vulnerability:** The HTML error page built its back link from `Referer` with its own parser instead of `sanitize_referer`; several PRs proposed format validation of user/server IDs on grant, revoke and access-CSV routes.
+**Learning:** The error page now uses `sanitize_referer` (test: `admin_form_error_back_link_rejects_traversal_referer`). ID format checks on those routes add nothing: every handler looks the ID up in the inventory and answers 404 for an unknown one, and `valid_user_id` / `valid_server_id` are creation-time rules for the web form only, so applying them to existing routes would lock out IDs created by the CLI, migration or Boosty paths.
+**Prevention:** Do not re-propose path-ID format validation on routes that resolve the ID through the inventory; propose it only with a reproducible wrong behaviour.

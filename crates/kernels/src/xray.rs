@@ -66,7 +66,12 @@ static XRAY_SETUP_SCRIPT: std::sync::LazyLock<String> = std::sync::LazyLock::new
                 # a tampered binary.
                 echo "$XSHA256  $TMPDIR/xray.zip" | sha256sum -c - >/dev/null
                 unzip -o -q "$TMPDIR/xray.zip" -d "$TMPDIR"
-                install -o root -g root -m 0755 "$TMPDIR/xray" {bin}
+                STAGED_BIN=$(mktemp {bin}.new.XXXXXX)
+                trap 'rm -f "$STAGED_BIN"; rm -rf "$TMPDIR"' EXIT
+                trap 'exit 1' HUP INT TERM
+                install -o root -g root -m 0755 "$TMPDIR/xray" "$STAGED_BIN"
+                mv -f "$STAGED_BIN" {bin}
+                trap - EXIT HUP INT TERM
                 rm -rf "$TMPDIR"
             fi
 
@@ -201,6 +206,10 @@ impl Kernel for Xray {
         KernelId("xray".to_string())
     }
 
+    fn service_units(&self) -> &'static [&'static str] {
+        &["xray.service"]
+    }
+
     fn supported_protocols(&self) -> Vec<ProtocolId> {
         vec![ProtocolId("vless+xhttp".to_string())]
     }
@@ -294,6 +303,41 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use vpnctl_core::{Server, ServerId};
+
+    #[test]
+    fn setup_stages_binary_before_atomic_rename() {
+        let script = XRAY_SETUP_SCRIPT.as_str();
+        assert!(!script.contains(&format!(
+            "install -o root -g root -m 0755 \"$TMPDIR/xray\" {XRAY_BIN}"
+        )));
+        let stage = script.find("STAGED_BIN=$(mktemp").unwrap();
+        let copy = script.find("install -o root -g root -m 0755").unwrap();
+        let rename = script.find("mv -f \"$STAGED_BIN\"").unwrap();
+        assert!(stage < copy && copy < rename);
+        assert!(script.contains(&format!("mktemp {XRAY_BIN}.new.XXXXXX")));
+        assert!(script.contains("trap 'rm -f \"$STAGED_BIN\"; rm -rf \"$TMPDIR\"' EXIT"));
+    }
+
+    #[test]
+    fn setup_failed_staged_copy_preserves_live_binary() {
+        let script = XRAY_SETUP_SCRIPT.as_str();
+        let stage = script.find("STAGED_BIN=$(mktemp").unwrap();
+        let end = script[stage..].find("trap - EXIT HUP INT TERM").unwrap() + stage;
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("xray");
+        std::fs::write(&live, "old executable").unwrap();
+        let install = script[stage..end].replace(XRAY_BIN, &live.to_string_lossy());
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "set -eu\nTMPDIR=$(mktemp -d)\ninstall() {{ echo partial > \"$8\"; return 1; }}\n{install}"
+            ))
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert_eq!(std::fs::read_to_string(&live).unwrap(), "old executable");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn apply_script_restart_failure_reaches_rollback() {

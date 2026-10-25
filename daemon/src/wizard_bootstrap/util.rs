@@ -1,7 +1,3 @@
-use std::process::{Command, Stdio};
-
-use crate::ssh_subprocess::ssh_safety_opts;
-
 pub fn find_available_server_id(
     existing: &std::collections::HashSet<String>,
     base: &str,
@@ -58,57 +54,31 @@ pub async fn ssh_password_run(
     user: &str,
     password: &str,
     known_hosts: &std::path::Path,
+    trusted_fingerprint: Option<&str>,
     remote_cmd: &str,
 ) -> std::result::Result<String, String> {
-    let pw = password.to_string();
-    let host = host.to_string();
-    let user = user.to_string();
-    let cmd_owned = remote_cmd.to_string();
-    let port_s = port.to_string();
-    let userhost = format!("{user}@{host}");
-
-    let mut args: Vec<String> = vec![
-        "-e".into(),
-        "ssh".into(),
-        "-o".into(),
-        "PreferredAuthentications=password".into(),
-        "-o".into(),
-        "PubkeyAuthentication=no".into(),
-    ];
-    args.extend(ssh_safety_opts(known_hosts, false));
-    args.push("-p".into());
-    args.push(port_s);
-    args.push("--".into());
-    args.push(userhost);
-    args.push(cmd_owned);
-
-    let pw_for_redact = pw.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut cmd = Command::new("sshpass");
-        cmd.env("SSHPASS", &pw)
-            .args(&args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let output = cmd.output().map_err(|e| {
-            format!(
-                "vpnctld cannot run sshpass on its own host ({e}); this is a daemon \
-                 installation problem, not the node's IP or password — the vpnctld host \
-                 needs the sshpass package"
-            )
-        })?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!(
-                "sshpass exit={:?} stderr={}",
-                output.status.code(),
-                redact_password(&stderr, &pw_for_redact)
-            ));
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    })
+    crate::ssh_subprocess::SubprocessSshTransport::new(
+        host,
+        user,
+        std::path::PathBuf::from("/dev/null"),
+    )
+    .port(port)
+    .known_hosts(known_hosts.to_path_buf())
+    .trusted_fingerprint(trusted_fingerprint.map(str::to_string))
+    .exec_password(password, remote_cmd)
     .await
-    .map_err(|e| format!("spawn_blocking JoinError: {e}"))?
+    .map_err(|e| {
+        if let vpnctl_core::CoreError::Transport(message) = &e {
+            if message.starts_with("spawning ssh ") {
+                return format!(
+                    "vpnctld cannot run sshpass on its own host ({}); this is a daemon \
+                     installation problem — the vpnctld host needs the sshpass package",
+                    redact_password(message, password)
+                );
+            }
+        }
+        redact_password(&e.to_string(), password)
+    })
 }
 
 #[cfg(test)]

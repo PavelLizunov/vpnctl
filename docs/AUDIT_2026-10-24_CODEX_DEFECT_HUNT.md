@@ -109,5 +109,57 @@ start-on-GET) as one design change.
 
 Wave 1 (branch `fix/codex-wave1-20261024`): CDX-01, 03, 08, 12, 15, 24, 26,
 35, 39, 45, 47, 49, 53 fixed with regression tests; SSE start tickets are
-specified in `docs/specs/sse-start-tickets.md`. Not deployed. All other IDs
-remain open.
+specified in `docs/specs/sse-start-tickets.md`. Not deployed.
+
+Wave 2 (branch `fix/codex-wave2-20261025`): CDX-02, 05-07, 09, 13, 14, 16-23,
+25, 27, 29-34, 36-38, 40-44, 46, 48, 50-52, 54-71 fixed
+with regression tests by eight Codex implementers, re-reviewed and integrated
+by the lead. Lead changes on top: CDX-51 stops only kernels the operator
+disabled on that server (never unrelated node services); the CDX-25 login
+throttle evicts the oldest bucket instead of refusing new clients; inventory
+transactions use `BEGIN IMMEDIATE`. Not deployed.
+
+Still open (need a design decision or are historical): CDX-04 (one-time
+migration double count), CDX-10 (SS2022 server-wide PSK), CDX-11 (legacy
+WireGuard index-based addresses), CDX-28 (XFF vs X-Real-IP for logging).
+
+## Round 3 (2026-10-25): contradictions, drift and cleanup
+
+Eight read-only Codex hunters (gpt-6.1-sol) at `ce96d46`, one area each (specs,
+repo docs, admin copy, test quality, config surface, client/server protocol
+parity, schema vs Rust, cleanup). Every row below was re-checked against the
+source by the lead; duplicates across hunters are merged.
+
+| ID | Severity | Area | Finding |
+|---|---|---|---|
+| R3-01 | important | client detour | sing-box `/sub` picks the entry server's first outbound as `detour` without checking transport; a Naive-only entry is used for Hysteria2/TUIC targets, which need UDP. |
+| R3-02 | important | caddy validation | The web protocol toggle accepts `naive` + `vless-ws` on one server; the Caddy renderer rejects that pair, so every deploy fails while `/sub` keeps publishing both. |
+| R3-03 | important | stats ingest | A counter for a user missing from `users` (deleted, node not yet redeployed) violates the baseline FK and rolls back the whole tick, so no traffic is recorded for the node. |
+| R3-04 | important | backup self-test | `backup-restore.md` promises FK and `integrity_check` verification; `verify_snapshot` runs neither, yet the web self-test reports PASS. |
+| R3-05 | important | restore docs | `backup-restore.md` and README say `vpnctl restore <bundle>`; the command takes a decrypted SQLite snapshot (`scripts/vpnctl-restore.sh` unpacks the `.tar.zst.age` bundle). |
+| R3-06 | important | admin copy | Kernel and protocol toggles say "inventory only — the node sees it after Deploy"; the handlers queue an automatic redeploy immediately. |
+| R3-07 | important | admin copy | The Delivery tip says rotating the sub-token invalidates the shown URL, but that URL is the app-config link keyed by `device_id`, which rotation does not change. |
+| R3-08 | important | web-only rule | `vless.sni` and `hysteria2.obfs.password` can be set or rotated only with `vpnctl server secret`; there is no web control. |
+| R3-09 | important | README | "Add a new server" row: `/admin/servers/quick-add` is POST-only (wizard is `/admin/servers/new`) and the CLI is `vpnctl bootstrap <id> --address <ip>`, not `<ip> <password>`. |
+| R3-10 | important | currency | `currency-exchange.md` says historical Total Spend is never re-converted; `server_spend_and_count` re-converts payments at current rates when the stored snapshot is for another display currency or missing. |
+| R3-11 | important | CI | `daemon/tests/subprocess_ssh_e2e.rs` (production SSH transport) is `#[ignore]` and the Docker CI job never runs it. |
+| R3-12 | important | test quality | Caddy restart/apply tests use `MockTransport::expect`, which never fails on a missing call; removing the restart/apply exec keeps them green. |
+| R3-13 | minor | registry | Daemon and CLI each hand-build the registry (`daemon/src/app/registry.rs`, `cli/src/registry.rs`); AGENTS.md and `architecture.md` promise one registration line. |
+| R3-14 | minor | admin copy | Boosty form says the access token is used only when the refresh pair is incomplete; `build_client` prefers a non-empty access token (bearer-first, pinned by a test). |
+| R3-15 | minor | admin copy | GeoIP settings say the update "then reloads the DB"; readers load once at start and the runner itself says new DBs load on the next restart. |
+| R3-16 | minor | config | CLI honours `VPNCTLD_BACKUP_DIR`; the daemon scheduler, web download and self-test use the fixed default, so CLI and web see different backup sets. |
+| R3-17 | minor | audit | `audit_for_server` matches only `target` and `$.server_id`; grant/revoke rows carry `$.server`, so server history misses them. |
+| R3-18 | minor | AWG params | The AWG server fills missing obfuscation keys with defaults while clients drop the whole block when any key is missing; a partial legacy set yields mismatched server/client configs. |
+| R3-19 | minor | currency docs | Migration 0058 and `currency-exchange.md` describe per-currency `minor_units`; no such column exists and every currency is stored in hundredths. |
+| R3-20 | minor | BACKLOG | Stale items: Deploy-All lock retry (now waits up to 300 s), subscription base URL "hard-coded" (now a web setting), v2ray-stats helper "deferred" (wired in `clash_poller`). `abuse-detection.md` still says `user_id` stays NULL. |
+| R3-21 | minor | README | Rust 1.85+ (manifest says 1.87); "10 protocols" (12 registered); DPI tiers list (Naive, VLESS-WS, VLESS-XHTTP are Strong); "build SHA changes on every checkout build" (only when `VPNCTL_BUILD_SHA` is set). |
+| R3-22 | minor | docs | `PROTOCOL_TESTING.md` lists AnyTLS, Trojan and Naive as not shipped; `commercial-operations.md` describes the old backup script (optional key, best-effort off-site, `zstd -19`). |
+| R3-23 | minor | test quality | `spec_privilege_semantics.rs` compares inputs to themselves; `cli admin hash-password` test never calls the command; `resolve_one_accepts_valid_ipv4_chars_only` discards every result. |
+| R3-24 | minor | cleanup | Unused: `legacy/shell.rs` topbar/foot/root_class + nav, `set_server_jump_via` (stale `server.jump_via.set` audit), `clash_api::Snapshot::{bytes_per_user, connection_count_for_user}`. |
+
+Found while testing wave 2 (not by a hunter): inventory write transactions
+opened with a deferred `BEGIN` read and then write; in WAL mode a concurrent
+commit between the two makes SQLite return `SQLITE_BUSY` at once, bypassing
+`busy_timeout` (seen as a flaky "database is locked" in an admin smoke test).
+Fixed in wave 2: every inventory transaction uses `BEGIN IMMEDIATE`, guarded by
+`crates/inventory/tests/spec_write_transactions.rs`.

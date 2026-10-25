@@ -10,27 +10,30 @@ impl SqliteInventory {
         id: &UserId,
         limit_bytes: Option<u64>,
         threshold_pct: Option<u8>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let limit_i64 = limit_bytes.map(|b| i64::try_from(b).unwrap_or(i64::MAX));
         let threshold_i64 = threshold_pct.map(i64::from);
         let res = sqlx::query(
             "UPDATE users
                 SET monthly_bandwidth_limit_bytes = ?1,
                     traffic_alert_threshold_pct  = ?2
-              WHERE id = ?3",
+              WHERE id = ?3
+                AND (monthly_bandwidth_limit_bytes IS NOT ?1
+                     OR traffic_alert_threshold_pct IS NOT ?2)",
         )
         .bind(limit_i64)
         .bind(threshold_i64)
         .bind(&id.0)
         .execute(&self.pool)
         .await?;
-        if res.rows_affected() == 0 {
+        let changed = res.rows_affected() != 0;
+        if !changed && self.get_user(id).await?.is_none() {
             return Err(SqliteInventoryError::Invalid(format!(
                 "no such user: {}",
                 id.0
             )));
         }
-        Ok(())
+        Ok(changed)
     }
 
     pub async fn get_user_traffic_limit(&self, id: &UserId) -> Result<(Option<u64>, Option<u8>)> {

@@ -536,6 +536,96 @@ async fn rotated_refresh_token_persisted_even_when_roster_fetch_fails() {
 }
 
 #[tokio::test]
+async fn refresh_rotation_survives_cancellation_while_roster_is_pending() {
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::Duration;
+
+    for recover_bearer in [false, true] {
+        let mut server = mockito::Server::new_async().await;
+        let _bearer_failure = if recover_bearer {
+            Some(
+                server
+                    .mock("GET", "/v1/blog/ninitux/subscribers")
+                    .match_query(mockito::Matcher::Any)
+                    .match_header("authorization", "Bearer expired-access")
+                    .with_status(401)
+                    .create_async()
+                    .await,
+            )
+        } else {
+            None
+        };
+        let refresh = server
+            .mock("POST", "/oauth/token/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}"#,
+            )
+            .create_async()
+            .await;
+        let roster_started = Arc::new(tokio::sync::Notify::new());
+        let started = Arc::clone(&roster_started);
+        let (release, wait) = mpsc::channel();
+        let wait = Mutex::new(wait);
+        let roster = server
+            .mock("GET", "/v1/blog/ninitux/subscribers")
+            .match_query(mockito::Matcher::Any)
+            .match_header("authorization", "Bearer new-access")
+            .with_status(200)
+            .with_chunked_body(move |_| {
+                started.notify_one();
+                let _ = wait.lock().unwrap().recv_timeout(Duration::from_secs(5));
+                Ok(())
+            })
+            .create_async()
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        let settings = BoostySettings {
+            blog_url: Some("ninitux".into()),
+            access_token: recover_bearer.then(|| "expired-access".into()),
+            refresh_token: Some("old-refresh".into()),
+            device_id: Some("device".into()),
+            ..Default::default()
+        };
+        inv.set_boosty_settings(&settings).await.unwrap();
+        let base_url = server.url();
+        let saved_refresh = {
+            let sync = sync_from_settings_at(&inv, &settings, ApplyMode::DryRun, &base_url);
+            tokio::pin!(sync);
+            tokio::select! {
+                result = &mut sync => panic!("sync finished before roster was released: {result:?}"),
+                started = tokio::time::timeout(Duration::from_secs(5), roster_started.notified()) => {
+                    started.expect("roster request must start");
+                }
+            }
+            inv.get_boosty_settings().await.unwrap().refresh_token
+            // Dropping the pending sync models the admin request timeout.
+        };
+        release.send(()).unwrap();
+        assert_eq!(saved_refresh.as_deref(), Some("new-refresh"));
+        let reopened = SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .get_boosty_settings()
+                .await
+                .unwrap()
+                .refresh_token
+                .as_deref(),
+            Some("new-refresh")
+        );
+        refresh.assert_async().await;
+        roster.assert_async().await;
+    }
+}
+
+#[tokio::test]
 async fn build_client_prefers_bearer_flow_when_both_creds_set() {
     let settings = BoostySettings {
         access_token: Some("static-acc".into()),

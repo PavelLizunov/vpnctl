@@ -169,6 +169,7 @@ pub(crate) async fn run(
             trusted_fingerprint,
             usage_coefficient,
         } => {
+            vpnctl_inventory::operation_lock::validate_server_id(&id)?;
             let reg = crate::registry::build()?;
             let server = Server {
                 id: ServerId(id.clone()),
@@ -499,6 +500,36 @@ fn parse_reserved_ports(raw: &str) -> anyhow::Result<Vec<u16>> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn server_add_rejects_ids_unsafe_for_operation_locks() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("inv.db");
+        for id in ["", "../node", "node name", "node/one", "узел"] {
+            let err = run(
+                ServerCmd::Add {
+                    id: id.into(),
+                    address: "203.0.113.10".into(),
+                    ssh_port: 22,
+                    ssh_user: "root".into(),
+                    kernel: "sing-box".into(),
+                    hoster: "generic".into(),
+                    protocols: vec!["vless+reality".into()],
+                    jump_via: None,
+                    trusted_fingerprint: None,
+                    usage_coefficient: 1.0,
+                },
+                Some(db_path.clone()),
+                OutputFormat::Text,
+            )
+            .await
+            .unwrap_err();
+            assert!(err.to_string().contains("operation-lock filename"), "{err}");
+        }
+        let inv = SqliteInventory::open(&db_path).await.unwrap();
+        assert!(inv.list_servers().await.unwrap().is_empty());
+        assert!(inv.recent_audit(10).await.unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn server_add_duplicate_address_is_rejected_before_mutation() {

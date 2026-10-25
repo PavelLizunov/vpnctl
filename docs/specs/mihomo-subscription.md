@@ -34,6 +34,7 @@ rules:
 ```
 - Admin **Delivery** shows the canonical public Mihomo URL (`https://ninitux.com/api/v1/sub/<token>`) without query parameter and its QR code.
 - S5 target and entry identity is based on server ID and proxy tag, never on address uniqueness.
+- Duplicate display names are disambiguated with the same server-ID suffixes as sing-box (see `migration-compatibility.md`); `name`, group membership, and `dialer-proxy` agree. Unique names keep their bytes.
 - Production ingress forwards the strict `/api/v1/sub/<token>` path if its current matcher does not already do so.
 
 ## 3. Verification Checklist (Definition of Done)

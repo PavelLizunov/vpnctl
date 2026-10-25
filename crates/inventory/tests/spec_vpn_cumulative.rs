@@ -223,6 +223,85 @@ async fn lower_totals_are_resets_and_current_values_become_deltas() {
 }
 
 #[tokio::test]
+async fn observation_delay_does_not_reset_monotonic_or_unchanged_counters() {
+    let dir = TempDir::new().unwrap();
+    let (inv, server_id) = fixture(&dir, &["alice"]).await;
+    inv.record_vpn_cumulative_stats(
+        &server_id,
+        &tick(1_000, 2_000, 1_000, 1, vec![counter("alice", 1_000, 2_000)]),
+    )
+    .await
+    .unwrap();
+
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path(&dir).display()))
+        .await
+        .unwrap();
+    for (upload, download, uptime) in [(1_100, 2_200, 1_060), (1_100, 2_200, 1_060)] {
+        sqlx::query(
+            "UPDATE vpn_server_counter_baselines SET observed_at = unixepoch() - 120
+             WHERE server_id = ?1",
+        )
+        .bind(&server_id.0)
+        .execute(&pool)
+        .await
+        .unwrap();
+        inv.record_vpn_cumulative_stats(
+            &server_id,
+            &tick(
+                upload,
+                download,
+                uptime,
+                1,
+                vec![counter("alice", upload, download)],
+            ),
+        )
+        .await
+        .unwrap();
+    }
+    pool.close().await;
+
+    let raw = rows(&dir, &server_id).await;
+    assert_eq!(raw.len(), 1, "a delayed quiet tick must not invent traffic");
+    assert_eq!(sums_for(&raw, Some("alice")), (100, 200));
+    assert_eq!(sums_for(&raw, None), (0, 0));
+}
+
+#[tokio::test]
+async fn observation_gap_with_lower_counter_still_detects_restart() {
+    let dir = TempDir::new().unwrap();
+    let (inv, server_id) = fixture(&dir, &["alice"]).await;
+    inv.record_vpn_cumulative_stats(
+        &server_id,
+        &tick(1_000, 2_000, 60, 1, vec![counter("alice", 1_000, 2_000)]),
+    )
+    .await
+    .unwrap();
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path(&dir).display()))
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE vpn_server_counter_baselines SET observed_at = unixepoch() - 300
+         WHERE server_id = ?1",
+    )
+    .bind(&server_id.0)
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+
+    inv.record_vpn_cumulative_stats(
+        &server_id,
+        &tick(1_200, 500, 120, 1, vec![counter("alice", 1_200, 500)]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        sums_for(&rows(&dir, &server_id).await, Some("alice")),
+        (1_200, 500)
+    );
+}
+
+#[tokio::test]
 async fn lower_uptime_resets_both_directions_even_when_one_counter_increases() {
     let dir = TempDir::new().unwrap();
     let (inv, server_id) = fixture(&dir, &["alice"]).await;

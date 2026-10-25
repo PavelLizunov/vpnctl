@@ -1,8 +1,10 @@
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use argon2::password_hash::{PasswordHash, PasswordVerifier};
-use axum::extract::Request;
+use axum::extract::{ConnectInfo, Request};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -49,7 +51,7 @@ impl std::fmt::Display for AuthConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::MalformedArgon2Hash => f.write_str(
-                "VPNCTLD_ADMIN_PASSWORD starts with $argon2 but is not a valid PHC hash",
+                "VPNCTLD_ADMIN_PASSWORD starts with $argon2 but is not a complete, supported Argon2 PHC hash",
             ),
         }
     }
@@ -66,7 +68,20 @@ pub(crate) enum AdminAuthConfig {
 
 fn parse_password_secret(pw: String) -> Result<PasswordSecret, AuthConfigError> {
     if pw.starts_with("$argon2") {
-        if PasswordHash::new(&pw).is_err() {
+        let valid = PasswordHash::new(&pw).is_ok_and(|parsed| {
+            parsed.hash.is_some()
+                && argon2::Algorithm::try_from(parsed.algorithm).is_ok()
+                && parsed
+                    .version
+                    .is_none_or(|v| argon2::Version::try_from(v).is_ok())
+                && argon2::Params::try_from(&parsed).is_ok()
+                && parsed.salt.is_some_and(|salt| {
+                    let mut decoded = [0u8; 64];
+                    salt.decode_b64(&mut decoded)
+                        .is_ok_and(|bytes| bytes.len() >= argon2::MIN_SALT_LEN)
+                })
+        });
+        if !valid {
             return Err(AuthConfigError::MalformedArgon2Hash);
         }
         Ok(PasswordSecret::Argon2Phc(Arc::new(pw)))
@@ -95,11 +110,54 @@ pub(crate) fn classify_admin_auth_env() -> AdminAuthConfig {
     )
 }
 
+const LOGIN_WINDOW: Duration = Duration::from_secs(60);
+const LOGIN_ATTEMPTS: u8 = 5;
+const MAX_LOGIN_CLIENTS: usize = 1024;
+
+#[derive(Default)]
+struct LoginThrottle {
+    attempts: Mutex<HashMap<Option<IpAddr>, (Instant, u8)>>,
+}
+
+impl LoginThrottle {
+    fn try_acquire(&self, ip: Option<IpAddr>, now: Instant) -> bool {
+        let Ok(mut attempts) = self.attempts.lock() else {
+            return false;
+        };
+        attempts.retain(|_, (start, _)| now.duration_since(*start) < LOGIN_WINDOW);
+        if !attempts.contains_key(&ip) && attempts.len() >= MAX_LOGIN_CLIENTS {
+            // Evict the oldest window instead of refusing: refusing new clients
+            // would let anyone with many addresses lock the operator out.
+            if let Some(oldest) = attempts
+                .iter()
+                .min_by_key(|(_, (start, _))| *start)
+                .map(|(key, _)| *key)
+            {
+                attempts.remove(&oldest);
+            }
+        }
+        let (_, count) = attempts.entry(ip).or_insert((now, 0));
+        if *count >= LOGIN_ATTEMPTS {
+            return false;
+        }
+        // Reserve before verification so concurrent requests share the same budget.
+        *count += 1;
+        true
+    }
+
+    fn clear(&self, ip: Option<IpAddr>) {
+        if let Ok(mut attempts) = self.attempts.lock() {
+            attempts.remove(&ip);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct BasicAuth {
     pub user: Arc<String>,
     secret: PasswordSecret,
     session_key: Arc<[u8; 32]>,
+    login_throttle: Arc<LoginThrottle>,
 }
 
 fn derive_session_key(secret: &PasswordSecret) -> [u8; 32] {
@@ -147,6 +205,7 @@ impl BasicAuth {
             user: Arc::new(user),
             secret,
             session_key,
+            login_throttle: Arc::default(),
         }))
     }
 
@@ -223,13 +282,31 @@ pub(crate) async fn require_basic_auth(
         }
     }
 
-    if check_basic(&req, &auth) {
-        let mut resp = next.run(req).await;
-        let cookie = build_session_cookie(&auth.sign_session(now));
-        if let Ok(hv) = HeaderValue::from_str(&cookie) {
-            resp.headers_mut().append(header::SET_COOKIE, hv);
+    if let Some(header) = req.headers().get(header::AUTHORIZATION).cloned() {
+        let ip = req
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|peer| crate::real_ip::resolve_peer_real_ip(req.headers(), peer.0.ip()));
+        if !auth.login_throttle.try_acquire(ip, Instant::now()) {
+            let mut resp =
+                (StatusCode::TOO_MANY_REQUESTS, "vpnctl admin: retry later\n").into_response();
+            resp.headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
+            return resp;
         }
-        return resp;
+        if verify_basic(header, auth.clone()).await {
+            auth.login_throttle.clear(ip);
+            let logout =
+                req.method() == axum::http::Method::POST && req.uri().path() == "/admin/logout";
+            let mut resp = next.run(req).await;
+            if !logout {
+                let cookie = build_session_cookie(&auth.sign_session(now));
+                if let Ok(hv) = HeaderValue::from_str(&cookie) {
+                    resp.headers_mut().append(header::SET_COOKIE, hv);
+                }
+            }
+            return resp;
+        }
     }
 
     let mut resp = (StatusCode::UNAUTHORIZED, "vpnctl admin: auth required\n").into_response();
@@ -247,8 +324,24 @@ pub(crate) async fn deny_all_misconfigured(_req: Request, _next: Next) -> Respon
         .into_response()
 }
 
-fn check_basic(req: &Request, auth: &BasicAuth) -> bool {
-    let Some(hv) = req.headers().get(header::AUTHORIZATION) else {
+/// At most this many Argon2 verifications run at once, so a flood of password
+/// attempts from many addresses cannot exhaust the blocking pool and CPU.
+const MAX_CONCURRENT_VERIFICATIONS: usize = 4;
+
+static VERIFY_PERMITS: tokio::sync::Semaphore =
+    tokio::sync::Semaphore::const_new(MAX_CONCURRENT_VERIFICATIONS);
+
+async fn verify_basic(header: HeaderValue, auth: BasicAuth) -> bool {
+    let Ok(_permit) = VERIFY_PERMITS.acquire().await else {
+        return false;
+    };
+    tokio::task::spawn_blocking(move || check_basic(Some(&header), &auth))
+        .await
+        .unwrap_or(false)
+}
+
+fn check_basic(header: Option<&HeaderValue>, auth: &BasicAuth) -> bool {
+    let Some(hv) = header else {
         return false;
     };
     let Ok(s) = hv.to_str() else { return false };
@@ -281,6 +374,8 @@ fn check_basic(req: &Request, auth: &BasicAuth) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use axum::routing::{get, post};
+    use tower::ServiceExt;
 
     fn req_with_basic(user: &str, pw: &str) -> Request {
         let creds = format!("{user}:{pw}");
@@ -303,6 +398,7 @@ mod tests {
             user: Arc::new(user.to_string()),
             secret,
             session_key,
+            login_throttle: Arc::default(),
         }
     }
 
@@ -313,6 +409,7 @@ mod tests {
             user: Arc::new(user.to_string()),
             secret,
             session_key,
+            login_throttle: Arc::default(),
         }
     }
 
@@ -329,21 +426,30 @@ mod tests {
     fn plain_path_accepts_correct_password() {
         let auth = auth_plain("slovn", "hunter2");
         let req = req_with_basic("slovn", "hunter2");
-        assert!(check_basic(&req, &auth), "correct plain creds must pass");
+        assert!(
+            check_basic(req.headers().get(header::AUTHORIZATION), &auth),
+            "correct plain creds must pass"
+        );
     }
 
     #[test]
     fn plain_path_rejects_wrong_password() {
         let auth = auth_plain("slovn", "hunter2");
         let req = req_with_basic("slovn", "wrong");
-        assert!(!check_basic(&req, &auth));
+        assert!(!check_basic(
+            req.headers().get(header::AUTHORIZATION),
+            &auth
+        ));
     }
 
     #[test]
     fn plain_path_rejects_wrong_user_does_not_short_circuit() {
         let auth = auth_plain("slovn", "hunter2");
         let req = req_with_basic("wrong", "hunter2");
-        assert!(!check_basic(&req, &auth));
+        assert!(!check_basic(
+            req.headers().get(header::AUTHORIZATION),
+            &auth
+        ));
     }
 
     #[test]
@@ -352,7 +458,7 @@ mod tests {
         let auth = auth_argon2("slovn", &phc);
         let req = req_with_basic("slovn", "hunter2");
         assert!(
-            check_basic(&req, &auth),
+            check_basic(req.headers().get(header::AUTHORIZATION), &auth),
             "argon2 verify must accept correct pw"
         );
     }
@@ -362,14 +468,205 @@ mod tests {
         let phc = make_phc("hunter2");
         let auth = auth_argon2("slovn", &phc);
         let req = req_with_basic("slovn", "WRONG");
-        assert!(!check_basic(&req, &auth));
+        assert!(!check_basic(
+            req.headers().get(header::AUTHORIZATION),
+            &auth
+        ));
     }
 
     #[test]
     fn argon2_path_rejects_malformed_phc_safely() {
         let auth = auth_argon2("slovn", "$argon2id$bogus");
         let req = req_with_basic("slovn", "anything");
-        assert!(!check_basic(&req, &auth));
+        assert!(!check_basic(
+            req.headers().get(header::AUTHORIZATION),
+            &auth
+        ));
+    }
+
+    fn protected_router(auth: BasicAuth) -> axum::Router {
+        axum::Router::new()
+            .route("/", get(|| async { "ok" }))
+            .route(
+                "/admin/logout",
+                post(crate::handlers::admin::helpers::logout),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                auth,
+                require_basic_auth,
+            ))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn argon2_verification_keeps_async_runtime_responsive() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let auth = auth_argon2("admin", &make_phc("password"));
+        let header = req_with_basic("admin", "password").headers()[header::AUTHORIZATION].clone();
+        let progressed = AtomicBool::new(false);
+        let verify = async {
+            let valid = verify_basic(header, auth).await;
+            assert!(progressed.load(Ordering::SeqCst));
+            valid
+        };
+        let heartbeat = async {
+            tokio::task::yield_now().await;
+            progressed.store(true, Ordering::SeqCst);
+        };
+        let (valid, ()) = tokio::join!(verify, heartbeat);
+        assert!(valid);
+    }
+
+    #[tokio::test]
+    async fn failed_logins_throttle_only_the_same_client_ip() {
+        let app = protected_router(auth_plain("admin", "password"));
+        let peer: SocketAddr = "192.0.2.1:12345".parse().unwrap();
+        for _ in 0..LOGIN_ATTEMPTS {
+            let mut req = req_with_basic("admin", "wrong");
+            req.extensions_mut().insert(ConnectInfo(peer));
+            assert_eq!(
+                app.clone().oneshot(req).await.unwrap().status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        let mut req = req_with_basic("admin", "password");
+        req.extensions_mut().insert(ConnectInfo(peer));
+        req.headers_mut()
+            .insert("x-real-ip", HeaderValue::from_static("192.0.2.2"));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.headers()[header::RETRY_AFTER], "60");
+
+        let mut req = req_with_basic("admin", "password");
+        req.extensions_mut().insert(ConnectInfo(
+            "192.0.2.2:12345".parse::<SocketAddr>().unwrap(),
+        ));
+        // Untrusted forwarding headers cannot move a request into another IP's bucket.
+        req.headers_mut()
+            .insert("x-real-ip", HeaderValue::from_static("192.0.2.1"));
+        assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn successful_login_resets_failures_and_sessions_bypass_throttle() {
+        let auth = auth_plain("admin", "password");
+        let app = protected_router(auth.clone());
+        for _ in 0..LOGIN_ATTEMPTS - 1 {
+            let resp = app
+                .clone()
+                .oneshot(req_with_basic("admin", "wrong"))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+        let resp = app
+            .clone()
+            .oneshot(req_with_basic("admin", "password"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        for _ in 0..LOGIN_ATTEMPTS {
+            let resp = app
+                .clone()
+                .oneshot(req_with_basic("admin", "wrong"))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+        let mut req = req_with_basic("admin", "wrong");
+        req.headers_mut().insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!(
+                "{SESSION_COOKIE}={}",
+                auth.sign_session(now_unix())
+            ))
+            .unwrap(),
+        );
+        assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn login_throttle_is_bounded_and_expires_at_window_boundary() {
+        let throttle = LoginThrottle::default();
+        let now = Instant::now();
+        let ip = |n: usize| Some(IpAddr::from(std::net::Ipv4Addr::from(n as u32)));
+        let at = |n: usize| now + Duration::from_nanos(n as u64);
+        for n in 0..MAX_LOGIN_CLIENTS {
+            assert!(throttle.try_acquire(ip(n), at(n)));
+        }
+        // A full table evicts the oldest window; a new client is never refused.
+        assert!(throttle.try_acquire(None, at(MAX_LOGIN_CLIENTS)));
+        {
+            let attempts = throttle.attempts.lock().unwrap();
+            assert_eq!(attempts.len(), MAX_LOGIN_CLIENTS);
+            assert!(!attempts.contains_key(&ip(0)));
+        }
+        let t = at(MAX_LOGIN_CLIENTS);
+        for _ in 1..LOGIN_ATTEMPTS {
+            assert!(throttle.try_acquire(ip(1), t));
+        }
+        assert!(!throttle.try_acquire(ip(1), at(1) + LOGIN_WINDOW - Duration::from_nanos(1)));
+        assert!(throttle.try_acquire(ip(1), at(1) + LOGIN_WINDOW));
+        assert!(throttle.try_acquire(None, at(1) + LOGIN_WINDOW * 2));
+        assert_eq!(throttle.attempts.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn logout_with_basic_credentials_does_not_reissue_session() {
+        let auth = auth_plain("admin", "password");
+        let app = protected_router(auth.clone());
+        for (with_basic, with_session) in [(true, false), (false, true), (true, true)] {
+            let mut req = req_with_basic("admin", "password");
+            if !with_basic {
+                req.headers_mut().remove(header::AUTHORIZATION);
+            }
+            *req.method_mut() = axum::http::Method::POST;
+            *req.uri_mut() = "/admin/logout".parse().unwrap();
+            if with_session {
+                req.headers_mut().insert(
+                    header::COOKIE,
+                    HeaderValue::from_str(&format!(
+                        "{SESSION_COOKIE}={}",
+                        auth.sign_session(now_unix())
+                    ))
+                    .unwrap(),
+                );
+            }
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+            assert!(resp.headers().contains_key(header::WWW_AUTHENTICATE));
+            assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-store");
+            assert!(!resp.headers().contains_key(header::LOCATION));
+            let cookies: Vec<_> = resp.headers().get_all(header::SET_COOKIE).iter().collect();
+            assert_eq!(cookies.len(), 1);
+            assert!(cookies[0].to_str().unwrap().contains("Max-Age=0"));
+        }
+    }
+
+    #[test]
+    fn incomplete_or_unsupported_argon2_phc_is_rejected() {
+        let valid = make_phc("password");
+        let salt_only = valid.rsplit_once('$').unwrap().0.to_string();
+        for phc in [
+            "$argon2id".to_string(),
+            salt_only,
+            valid.replace("argon2id", "argon2bogus"),
+            valid.replace("v=19", "v=42"),
+            valid.replace("m=19456", "m=0"),
+            valid.replace("ZmFrZXNhbHRmYWtlc2FsdA", "YWJj"),
+        ] {
+            assert!(
+                matches!(
+                    BasicAuth::from_parts(Some("admin".into()), Some(phc.clone())),
+                    Err(AuthConfigError::MalformedArgon2Hash)
+                ),
+                "must reject {phc}"
+            );
+            assert_eq!(
+                classify_admin_auth(Some("admin".into()), Some(phc)),
+                AdminAuthConfig::Malformed
+            );
+        }
     }
 
     const MALFORMED_ARGON2: &str = "$argon2id$!!!";
@@ -455,7 +752,10 @@ mod tests {
             .uri("/")
             .body(axum::body::Body::empty())
             .unwrap();
-        assert!(!check_basic(&req, &auth));
+        assert!(!check_basic(
+            req.headers().get(header::AUTHORIZATION),
+            &auth
+        ));
     }
 
     #[test]
@@ -469,7 +769,10 @@ mod tests {
             header::AUTHORIZATION,
             HeaderValue::from_static("Bearer some-jwt"),
         );
-        assert!(!check_basic(&req, &auth));
+        assert!(!check_basic(
+            req.headers().get(header::AUTHORIZATION),
+            &auth
+        ));
     }
 
     #[test]

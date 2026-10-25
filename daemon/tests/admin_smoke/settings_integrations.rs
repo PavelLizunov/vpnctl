@@ -279,6 +279,9 @@ async fn boosty_settings_save_via_web() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
+    inv.set_boosty_refresh_token("rotated-refresh")
+        .await
+        .unwrap();
     let app = router(s);
 
     let resp = app
@@ -291,7 +294,7 @@ async fn boosty_settings_save_via_web() {
                     .header("referer", format!("http://{SAME_ORIGIN_HOST}/admin/boosty")),
             )
             .body(Body::from(
-                "blog_url=ninitux&poll_interval_secs=1800&grace_days=14&enabled=on&auto_create_users=on",
+                "blog_url=ninitux&refresh_token=+++&poll_interval_secs=1800&grace_days=14&enabled=on&auto_create_users=on",
             ))
             .unwrap(),
         )
@@ -305,6 +308,7 @@ async fn boosty_settings_save_via_web() {
     assert_eq!(got.poll_interval_secs, 1800);
     assert_eq!(got.grace_days, 14);
     assert!(got.auto_create_users);
+    assert_eq!(got.refresh_token.as_deref(), Some("rotated-refresh"));
 }
 
 #[tokio::test]
@@ -518,7 +522,10 @@ async fn admin_logout_expires_session_cookie() {
         )
         .await
         .unwrap();
-    assert!(resp.status().is_redirection(), "logout must redirect");
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert!(resp.headers().contains_key("www-authenticate"));
+    assert_eq!(resp.headers()["cache-control"], "no-store");
+    assert_eq!(resp.headers().get_all("set-cookie").iter().count(), 1);
     let cookie = resp
         .headers()
         .get("set-cookie")

@@ -28,6 +28,25 @@ pub fn spawn_writer(inv: SqliteInventory) -> (mpsc::Sender<AccessLogRecord>, Joi
     (tx, handle)
 }
 
+pub async fn drain_writer(mut handle: JoinHandle<()>) {
+    match tokio::time::timeout(std::time::Duration::from_secs(10), &mut handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(
+            target = "vpnctld::access_log_writer",
+            %error,
+            "access-log writer exited before draining cleanly"
+        ),
+        Err(_) => {
+            tracing::warn!(
+                target = "vpnctld::access_log_writer",
+                "access-log writer did not drain within 10 seconds; stopping it"
+            );
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+}
+
 async fn run_writer(inv: SqliteInventory, mut rx: mpsc::Receiver<AccessLogRecord>) {
     let geoip = crate::geoip::GeoLookup::from_env();
     if geoip.is_loaded() {
@@ -276,6 +295,59 @@ pub fn try_enqueue(tx: &mpsc::Sender<AccessLogRecord>, rec: AccessLogRecord) -> 
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_drains_queued_access_logs_after_router_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        let user_id = UserId("drain-user".into());
+        inv.add_user(&vpnctl_core::User {
+            id: user_id.clone(),
+            uuid: "00000000-0000-0000-0000-000000000001".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+            disabled: false,
+        })
+        .await
+        .unwrap();
+        let registry = std::sync::Arc::new(crate::app::build_registry().unwrap());
+        let (state, writer) = crate::app::make_app_state_for_tests(inv.clone(), registry);
+        let app = crate::app::router(state.clone());
+        for bytes in 0..125 {
+            assert!(try_enqueue(
+                &state.access_log_tx,
+                AccessLogRecord {
+                    user_id: user_id.clone(),
+                    ip: "203.0.113.7".into(),
+                    ua: None,
+                    status: 200,
+                    bytes,
+                    accept_language: None,
+                    http_version: None,
+                    device_class: None,
+                    geo_country: None,
+                    geo_asn: None,
+                    tls_ja3: None,
+                    tls_ja4: None,
+                }
+            ));
+        }
+        drop(state);
+        drop(app);
+        drain_writer(writer).await;
+
+        let rows = inv.recent_sub_access(&user_id, 200).await.unwrap();
+        assert_eq!(rows.len(), 125, "all accepted records must be persisted");
+        assert_eq!(
+            rows.iter().map(|row| row.bytes).sum::<u64>(),
+            (0..125).sum::<u64>()
+        );
+    }
 
     #[test]
     fn allowlisted_service_ip_matches_exactly() {

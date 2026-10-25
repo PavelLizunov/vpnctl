@@ -87,6 +87,9 @@ pub(crate) async fn run(
         .trusted_fingerprint(fingerprint)
         .with_jump(jump);
 
+    let retired = inv.retired_server_kernels(&sid).await?;
+    vpnctl_kernels::reconcile_disabled_kernels(&registry, &server, &retired, &ssh).await?;
+
     for k in &kernels {
         println!("→ ensuring kernel '{}' is installed", k.id());
         k.ensure_installed(&ssh).await?;
@@ -308,6 +311,55 @@ mod tests {
             {
                 panic!("protocol {pid:?} still missing `{key}` after CLI bootstrap");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn cli_deploy_bootstrap_mints_method_sized_ss2022_psk_without_rotation() {
+        for method in ["2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305"] {
+            let dir = TempDir::new().unwrap();
+            let inv = open(&dir).await;
+            let registry = crate::registry::build().unwrap();
+            let server = server_with(&["shadowsocks-2022"]);
+            inv.add_server(&server).await.unwrap();
+            inv.set_server_secret(&server.id, "ss2022.method", method)
+                .await
+                .unwrap();
+            let (secrets, minted) = bootstrap_server_secrets(&inv, &server, &registry)
+                .await
+                .unwrap();
+            assert_eq!(minted, vec!["ss2022.psk"]);
+            let psk = &secrets["ss2022.psk"];
+            assert_eq!(psk.len(), 44, "32-byte standard padded base64");
+            let protocol = registry
+                .protocol(&ProtocolId("shadowsocks-2022".into()))
+                .unwrap();
+            assert!(
+                protocol
+                    .server_inbound(&RenderCtx::new(&server, &secrets), &[])
+                    .is_ok()
+            );
+            let audit = inv.recent_audit(100).await.unwrap();
+            let (again, minted) = bootstrap_server_secrets(&inv, &server, &registry)
+                .await
+                .unwrap();
+            assert_eq!(again, secrets);
+            assert!(minted.is_empty());
+            let after = inv.recent_audit(100).await.unwrap();
+            assert_eq!(after.len(), audit.len());
+
+            inv.set_server_secret(&server.id, "ss2022.method", "2022-blake3-aes-128-gcm")
+                .await
+                .unwrap();
+            let (changed, minted) = bootstrap_server_secrets(&inv, &server, &registry)
+                .await
+                .unwrap();
+            assert_eq!(&changed["ss2022.psk"], psk);
+            assert!(minted.is_empty());
+            let error = protocol
+                .server_inbound(&RenderCtx::new(&server, &changed), &[])
+                .unwrap_err();
+            assert!(error.to_string().contains("16 bytes"));
         }
     }
 

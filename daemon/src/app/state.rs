@@ -50,7 +50,7 @@ pub fn deploy_key_path() -> std::path::PathBuf {
 
 pub const DEFAULT_BACKUP_DIR: &str = vpnctl_inventory::DEFAULT_BACKUP_DIR;
 
-pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
+pub async fn build(config: DaemonConfig) -> anyhow::Result<(Router, tokio::task::JoinHandle<()>)> {
     let inv = SqliteInventory::open(&config.db_path).await?;
     let registry = Arc::new(build_registry()?);
 
@@ -113,7 +113,7 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
         inv.clone(),
     ));
 
-    let (access_log_tx, _writer_handle) = access_log::spawn_writer(inv.clone());
+    let (access_log_tx, writer_handle) = access_log::spawn_writer(inv.clone());
 
     let rate_limiter = Arc::new(RateLimiter::default());
 
@@ -158,7 +158,7 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<Router> {
         snapshot_cache,
         geo,
     };
-    Ok(router(state))
+    Ok((router(state), writer_handle))
 }
 
 pub fn make_app_state_for_tests(

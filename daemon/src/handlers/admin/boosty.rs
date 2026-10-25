@@ -709,6 +709,7 @@ pub(crate) async fn boosty_settings_save(State(state): State<AppState>, body: St
     {
         s.access_token = Some(t.trim().to_string());
     }
+    s.refresh_token = None;
     if let Some(t) = form_field(&body, "refresh_token")
         && !t.trim().is_empty()
     {
@@ -734,25 +735,6 @@ pub(crate) async fn boosty_settings_save(State(state): State<AppState>, body: St
     if let Err(e) = state.inv.set_boosty_settings(&s).await {
         return internal_error(anyhow::Error::new(e));
     }
-    if let Err(e) = state
-        .inv
-        .audit(
-            "admin",
-            "boosty.configure",
-            None,
-            Some(&serde_json::json!({
-                "enabled": s.enabled,
-                "blog_url": s.blog_url,
-                "poll_interval_secs": s.poll_interval_secs,
-                "auto_disable_lapsed": s.auto_disable_lapsed,
-                "grace_days": s.grace_days,
-                "auto_create_users": s.auto_create_users,
-            })),
-        )
-        .await
-    {
-        tracing::warn!(target = "vpnctld::boosty", error = %e, "audit boosty.configure failed");
-    }
 
     if form_field(&body, "quick_sync_now").is_some() && s.enabled {
         if let Err(resp) =
@@ -776,7 +758,19 @@ async fn run_boosty_sync_and_deploy(
     } else {
         ApplyMode::EnableOnly
     };
-    match vpnctl_boosty_bridge::sync_from_inventory(&state.inv, mode).await {
+    // Run the sync as its own task so the request timeout cannot cancel it
+    // between an OAuth refresh-token rotation and persisting the new token.
+    let inv = state.inv.clone();
+    let sync =
+        tokio::spawn(async move { vpnctl_boosty_bridge::sync_from_inventory(&inv, mode).await });
+    let result = match sync.await {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::warn!(target = "vpnctld::boosty", error = %e, "{source_tag} sync task failed");
+            return Err(bad_request(&format!("boosty sync failed: {e}")));
+        }
+    };
+    match result {
         Ok(report) => {
             let _ = state
                 .inv

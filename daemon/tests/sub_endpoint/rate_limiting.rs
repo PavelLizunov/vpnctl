@@ -128,7 +128,7 @@ async fn sub_rate_limit_returns_429_after_burst() {
 }
 
 #[tokio::test]
-async fn sub_persistent_ban_lands_after_k_consecutive_429s() {
+async fn sub_persistent_ban_lands_after_k_consecutive_429s_with_redacted_audit() {
     let dir = TempDir::new().unwrap();
     let inv = SqliteInventory::open(&dir.path().join("inv.db"))
         .await
@@ -229,6 +229,26 @@ async fn sub_persistent_ban_lands_after_k_consecutive_429s() {
         tok_ban.reason
     );
 
+    let audit = inv_clone.recent_audit(100).await.unwrap();
+    let row = audit
+        .iter()
+        .find(|row| {
+            row.action == "rate.ban.add"
+                && row.payload.as_ref().is_some_and(|p| p["kind"] == "token")
+        })
+        .expect("token ban must be audited");
+    let n = token.chars().count();
+    let expected = format!(
+        "{}…{} ({n} chars)",
+        token.chars().take(4).collect::<String>(),
+        token.chars().skip(n - 4).collect::<String>()
+    );
+    assert_eq!(row.target.as_deref(), Some(expected.as_str()));
+    assert!(
+        !format!("{audit:?}").contains(&token),
+        "audit must not contain a bearer token"
+    );
+
     let resp = app
         .oneshot(
             Request::builder()
@@ -245,6 +265,56 @@ async fn sub_persistent_ban_lands_after_k_consecutive_429s() {
         s.contains("token-ban"),
         "post-ban response body must say 'token-ban', got {s:?}"
     );
+}
+
+#[tokio::test]
+async fn sub_token_ban_audit_fully_redacts_short_tokens() {
+    let dir = TempDir::new().unwrap();
+    let limiter = Arc::new(RateLimiter::new(1.0, 0.0, Duration::from_secs(60)));
+    let (inv, state, _) = seed_with_limiter(&dir, limiter).await;
+    let user = vpnctl_core::User {
+        id: vpnctl_core::UserId("short-token-user".into()),
+        uuid: "uuid-short-token-user".into(),
+        tuic_password: None,
+        wireguard_pubkey: None,
+        wireguard_private: None,
+        sub_token: Some("short".into()),
+        vpn_router_device_id: None,
+        disabled: false,
+    };
+    inv.add_user(&user).await.unwrap();
+    inv.grant(&user.id, &vpnctl_core::ServerId("srv".into()))
+        .await
+        .unwrap();
+    let app = router(state);
+    for n in 0..=K_DENIALS_TO_BAN {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sub/short")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            if n == 0 {
+                StatusCode::OK
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            }
+        );
+    }
+    assert!(inv.is_banned("token", "short").await.unwrap().is_some());
+    let audit = inv.recent_audit(100).await.unwrap();
+    let row = audit
+        .iter()
+        .find(|row| row.action == "rate.ban.add")
+        .unwrap();
+    assert_eq!(row.target.as_deref(), Some("<redacted>"));
+    assert!(!format!("{row:?}").contains("short"));
 }
 
 #[tokio::test]

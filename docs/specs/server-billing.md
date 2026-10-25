@@ -22,6 +22,10 @@
   - `list_fleet_billing(&self) -> Result<Vec<ServerBillingItem>>`
   - `set_server_billing(&self, sid: &ServerId, billing: &ServerBillingInput) -> Result<()>`
   - `advance_server_billing_cycle(&self, sid: &ServerId) -> Result<()>`
+- Renewal guards the due date and all tariff fields used for the payment
+  snapshot. A concurrent tariff edit rejects renewal without a payment or
+  renewal audit entry. Calendar arithmetic clamps to the last valid day of
+  the target month and returns an error if the target date is out of range.
 - Web:
   - Маршруты `GET /admin/servers/billing`, `POST /admin/servers/{id}/billing`, `POST /admin/servers/{id}/billing/advance`.
   - Мобильная адаптивность: контейнеры с `overflow-x: auto` для таблиц, блочные чипы счетчиков на дашборде.

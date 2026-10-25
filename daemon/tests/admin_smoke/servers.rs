@@ -640,6 +640,41 @@ async fn admin_server_delete_rejects_confirm_mismatch() {
 }
 
 #[tokio::test]
+async fn admin_server_delete_client_entry_returns_conflict_with_targets() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 3, 1, &[(0, 0), (0, 1)]).await;
+    let entry = ServerId("s0".into());
+    for id in ["s1", "s2"] {
+        s.inv
+            .set_client_detour_via_as("admin", &ServerId(id.into()), Some(&entry))
+            .await
+            .unwrap();
+    }
+    let before = s.inv.recent_audit(100).await.unwrap().len();
+    let resp = router(s.clone())
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/s0/delete")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from("confirm=s0"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("s1, s2"));
+    assert!(s.inv.get_server(&entry).await.unwrap().is_some());
+    assert_eq!(s.inv.users_for_server(&entry).await.unwrap().len(), 1);
+    assert_eq!(s.inv.recent_audit(100).await.unwrap().len(), before);
+}
+
+#[tokio::test]
 async fn admin_server_delete_cascades_grants_and_audits() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
@@ -1001,4 +1036,75 @@ async fn admin_server_billing_boosty_income_and_pl_overview() {
         html_pl.contains("all-time:") || html_pl.contains("история блога:"),
         "all-time label missing in html: {html_pl}"
     );
+}
+
+#[tokio::test]
+async fn billing_missing_rates_mark_totals_incomplete_and_hide_profit_and_coverage() {
+    for currencies in [["EUR", "USD", "CHF"], ["USD", "CHF", "CHF"]] {
+        let dir = TempDir::new().unwrap();
+        let s = state(&dir).await;
+        seed(&s.inv, 3, 0, &[]).await;
+        let inv = s.inv.clone();
+        for (index, currency) in currencies.iter().enumerate() {
+            inv.set_server_billing(
+                &ServerId(format!("s{index}")),
+                &vpnctl_inventory::ServerBillingInput {
+                    due_date: "2026-10-01".into(),
+                    billing_cycle: vpnctl_inventory::BillingCycle::Monthly,
+                    amount_cents: 500,
+                    currency: (*currency).into(),
+                    auto_renew: false,
+                    billing_url: None,
+                    notes: None,
+                    initial_payments_count: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        inv.set_boosty_last_report(
+            &serde_json::json!({
+                "subscribers": [{"present": true, "status": "active", "price": "1000"}]
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        inv.upsert_currency_rate(&vpnctl_inventory::CurrencyRate {
+            base_currency: "EUR".into(),
+            target_currency: "RUB".into(),
+            rate_micros: 100_000_000,
+            source: "test".into(),
+            fetched_at: "2026-10-01T00:00:00Z".into(),
+        })
+        .await
+        .unwrap();
+
+        let app = router(s);
+        let html = fetch_html(app.clone(), "/admin/servers/billing").await;
+        assert!(html.contains("ed-alert ed-alert--warn"));
+        assert!(html.contains("Incomplete totals. Missing exchange rates for: CHF, USD"));
+        assert!(html.contains("10.00 €"), "income remains available");
+        assert!(html.contains("Incomplete expenses"));
+        assert!(html.contains("cost coverage unavailable"));
+        assert!(!html.contains("cost coverage:"));
+        assert!(!html.contains("zero server expenses"));
+        assert!(!html.contains("+5.00 €"));
+        assert!(!html.contains("+10.00 €"));
+
+        for currency in ["USD", "CHF"] {
+            inv.upsert_currency_rate(&vpnctl_inventory::CurrencyRate {
+                base_currency: "EUR".into(),
+                target_currency: currency.into(),
+                rate_micros: 1_000_000,
+                source: "test".into(),
+                fetched_at: "2026-10-01T00:00:00Z".into(),
+            })
+            .await
+            .unwrap();
+        }
+        let complete = fetch_html(app, "/admin/servers/billing").await;
+        assert!(!complete.contains("Incomplete"));
+        assert!(complete.contains("cost coverage:"));
+    }
 }

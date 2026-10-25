@@ -28,6 +28,58 @@ fn ssh_fail() -> ProbeOutcome {
     ProbeOutcome::SshFailed("boom".into())
 }
 
+#[tokio::test]
+async fn unreachable_alert_recovers_with_fresh_fail_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let inv = SqliteInventory::open(&tmp.path().join("inv.db"))
+        .await
+        .unwrap();
+    let server = vpnctl_core::Server {
+        id: sid("restart-recovery"),
+        address: "127.0.0.1".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![vpnctl_core::KernelId("sing-box".into())],
+        enabled_protocols: vec![],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    inv.add_server(&server).await.unwrap();
+    dispatch_alerts(
+        &inv,
+        &server,
+        &ssh_fail(),
+        &mut FailState::with_threshold(1),
+    )
+    .await;
+    assert!(
+        inv.has_unacked_alert("server.unreachable", Some(&server.id))
+            .await
+            .unwrap()
+    );
+
+    let mut restarted = FailState::with_threshold(1);
+    dispatch_alerts(&inv, &server, &ok_probe(), &mut restarted).await;
+    dispatch_alerts(&inv, &server, &ok_probe(), &mut restarted).await;
+
+    assert!(
+        !inv.has_unacked_alert("server.unreachable", Some(&server.id))
+            .await
+            .unwrap()
+    );
+    let audit = inv.recent_audit(20).await.unwrap();
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|a| a.action == "alert.auto_ack")
+            .count(),
+        1
+    );
+    assert_eq!(inv.recent_alerts(10, true).await.unwrap().len(), 1);
+}
+
 #[test]
 fn fail_state_below_threshold_emits_no_change() {
     let mut st = FailState::with_threshold(3);

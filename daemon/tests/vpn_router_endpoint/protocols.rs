@@ -808,3 +808,76 @@ async fn vpn_router_awg3_ua_gated_out_for_generic_client() {
         "vless must remain for generic client: {lines:?}"
     );
 }
+
+async fn seed_extra_protocol_uuid_state(dir: &TempDir) -> vpnctld::AppState {
+    let mut state = seed_state_with_naive(dir).await;
+    let mut reg = Registry::new();
+    reg.register_protocol(Box::new(VlessReality::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(Naive::new())).unwrap();
+    reg.register_protocol(Box::new(Hysteria2::new())).unwrap();
+    reg.register_protocol(Box::new(vpnctl_protocols::VlessWs::new()))
+        .unwrap();
+    reg.register_protocol(Box::new(vpnctl_protocols::VlessXhttp::new()))
+        .unwrap();
+    state.registry = Arc::new(reg);
+    let sid = ServerId("cdn".into());
+    for pid in ["hysteria2", "vless-ws", "vless+xhttp"] {
+        state
+            .inv
+            .add_server_protocol(&sid, &ProtocolId(pid.into()))
+            .await
+            .unwrap();
+    }
+    for (key, value) in [
+        ("vlessws.domain", "cdn.example.com"),
+        ("vlessws.path", "wspath"),
+        ("vlessxhttp.path", "xhttppath"),
+        ("vless.public_key", "PUB_cdn"),
+        ("vless.short_id", "abcdef12"),
+    ] {
+        state.inv.set_server_secret(&sid, key, value).await.unwrap();
+    }
+    state
+}
+
+const EXTRA_PROTOCOL_UUID_BYTES: &str = concat!(
+    "vless://11111111-2222-3333-4444-555555555555@de.example.com:443?encryption=none&type=tcp&security=reality&pbk=PUB_de&fp=randomized&sni=yahoo.com&sid=12345678&spx=%2F&flow=xtls-rprx-vision&packetEncoding=xudp#Germany%20VLESS%20~tester-1\n",
+    "naive+https://tester-1:NAIVE_TEST_PW@cdn.example.com#Latvia%20NAIVE%20~tester-1\n",
+    "hysteria2://NAIVE_TEST_PW@cdn.example.com:8444/?sni=cdn.example.com&insecure=1#Latvia%20HY2%20~tester-1\n",
+    "vless://11111111-2222-3333-4444-555555555555@cdn.example.com:8443?encryption=none&type=ws&security=tls&sni=cdn.example.com&host=cdn.example.com&path=%2Fwspath&fp=chrome#Latvia%20WS%20~tester-1\n",
+    "vless://11111111-2222-3333-4444-555555555555@cdn.example.com:9443?encryption=none&security=reality&sni=yahoo.com&fp=randomized&pbk=PUB_cdn&sid=abcdef12&type=xhttp&path=%2Fxhttppath%2F&mode=auto#Latvia%20XHTTP%20~tester-1",
+);
+
+#[tokio::test]
+async fn vpn_router_extra_protocols_without_uuid_override_byte_equal() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_extra_protocol_uuid_state(&dir).await;
+    let lines = subscription_lines_for_ua(router(state), NAIVE_DEVICE_ID, "VPNRouter/2.4.1").await;
+    assert_eq!(
+        lines.join("\n").as_bytes(),
+        EXTRA_PROTOCOL_UUID_BYTES.as_bytes()
+    );
+}
+
+#[tokio::test]
+async fn vpn_router_extra_protocols_per_server_uuid_byte_equal() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_extra_protocol_uuid_state(&dir).await;
+    state
+        .inv
+        .set_grant_client_uuid(
+            &UserId("tester-1".into()),
+            &ServerId("cdn".into()),
+            "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        )
+        .await
+        .unwrap();
+    let lines = subscription_lines_for_ua(router(state), NAIVE_DEVICE_ID, "VPNRouter/2.4.1").await;
+    let expected = EXTRA_PROTOCOL_UUID_BYTES.replace(
+        "vless://11111111-2222-3333-4444-555555555555@cdn.example.com",
+        "vless://aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee@cdn.example.com",
+    );
+    // The Reality server and both password-based protocols retain all bytes.
+    assert_eq!(lines.join("\n").as_bytes(), expected.as_bytes());
+}

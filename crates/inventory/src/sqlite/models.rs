@@ -226,9 +226,12 @@ pub struct Ban {
     pub reason: String,
 }
 
+// Raw readers include calendar-month usage (up to 31 days) and 30-day charts.
+pub const VPN_STATS_RETENTION_DAYS: u32 = 32;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerLiveActivity {
-    pub active_now: u32,
+    pub active_now: Option<u32>,
     pub bytes_up_window: u64,
     pub bytes_dn_window: u64,
     pub last_sample_ts: Option<DateTime<Utc>>,

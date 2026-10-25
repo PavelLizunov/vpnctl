@@ -154,6 +154,42 @@ async fn render_singbox_with(
         }
     }
 
+    let rendered_servers: std::collections::HashSet<ServerId> = rendered
+        .iter()
+        .map(|(server_id, _, _)| server_id.clone())
+        .collect();
+    let mut seen_tags = std::collections::HashSet::new();
+    let mut duplicate_tags = std::collections::HashSet::new();
+    for (server_id, value, tag) in &rendered {
+        if let Some(Some(entry_id)) = detours.get(server_id)
+            && (!rendered_servers.contains(entry_id) || !value.is_object())
+        {
+            continue;
+        }
+        if !seen_tags.insert(tag.clone()) {
+            duplicate_tags.insert(tag.clone());
+        }
+    }
+    // Reserve every original tag so disambiguation cannot rename a unique tag.
+    let mut used_tags: std::collections::HashSet<String> =
+        rendered.iter().map(|(_, _, tag)| tag.clone()).collect();
+    // Subscription servers are ordered by ID; retain that order in the output.
+    for (server_id, value, tag) in &mut rendered {
+        if !duplicate_tags.contains(tag.as_str()) {
+            continue;
+        }
+        let mut candidate = format!("{tag} ({})", server_id.0);
+        let mut suffix = 2;
+        while !used_tags.insert(candidate.clone()) {
+            candidate = format!("{tag} ({}:{suffix})", server_id.0);
+            suffix += 1;
+        }
+        *tag = candidate;
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("tag".into(), json!(tag));
+        }
+    }
+
     let mut first_tag_by_server: std::collections::HashMap<ServerId, String> =
         std::collections::HashMap::new();
     for (server_id, _, tag) in &rendered {

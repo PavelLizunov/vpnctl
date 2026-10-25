@@ -184,7 +184,7 @@ impl SqliteInventory {
         if pairs.is_empty() {
             return Ok(());
         }
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         for (user_id, dest) in pairs {
             let dest_truncated: String = dest.chars().take(200).collect();
             sqlx::query(
@@ -251,7 +251,7 @@ impl SqliteInventory {
         if pairs.is_empty() {
             return Ok(());
         }
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         for (user_id, ip) in pairs {
             if ip.is_empty() {
                 continue;
@@ -280,7 +280,7 @@ impl SqliteInventory {
         if peaks.is_empty() {
             return Ok(());
         }
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         for (user_id, n) in peaks {
             if *n == 0 {
                 continue;

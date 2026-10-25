@@ -212,12 +212,17 @@ pub(crate) async fn get(
                         ttl_secs = crate::rate_limit::DEFAULT_BAN_TTL_SECS,
                         "escalated to 24h persistent ban after consecutive 429s"
                     );
+                    let audit_target = if token.chars().count() <= 8 {
+                        "<redacted>".to_string()
+                    } else {
+                        crate::handlers::admin::users::mask_secret(&token)
+                    };
                     if let Err(e) = state
                         .inv
                         .audit(
                             "daemon",
                             "rate.ban.add",
-                            Some(&token),
+                            Some(&audit_target),
                             Some(&serde_json::json!({
                                 "kind": "token",
                                 "ttl_secs": crate::rate_limit::DEFAULT_BAN_TTL_SECS,

@@ -19,7 +19,10 @@ pub async fn bootstrap_server_secrets(
         let Some(proto) = registry.protocol(pid) else {
             continue;
         };
-        for spec in proto.server_secret_specs() {
+        for spec in proto
+            .server_secret_specs_for(&secrets)
+            .map_err(|e| format!("server_secret_specs {pid}: {e}"))?
+        {
             mint_secret_spec(inv, &server.id, spec, &mut secrets, &mut minted).await?;
         }
     }

@@ -211,6 +211,88 @@ async fn settings_round_trip_and_refresh_rotation() {
 }
 
 #[tokio::test]
+async fn settings_save_preserves_rotated_refresh_unless_explicitly_replaced() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.set_boosty_settings(&BoostySettings {
+        refresh_token: Some("original-refresh".into()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let mut form = inv.get_boosty_settings().await.unwrap();
+    form.refresh_token = None;
+    form.blog_url = Some("updated-blog".into());
+    assert!(
+        inv.rotate_boosty_refresh_token("original-refresh", "rotated-refresh")
+            .await
+            .unwrap()
+    );
+    inv.set_boosty_settings(&form).await.unwrap();
+    let saved = inv.get_boosty_settings().await.unwrap();
+    assert_eq!(saved.refresh_token.as_deref(), Some("rotated-refresh"));
+    assert_eq!(saved.blog_url.as_deref(), Some("updated-blog"));
+
+    let audit_count = inv.recent_audit(100).await.unwrap().len();
+    inv.set_boosty_settings(&form).await.unwrap();
+    assert_eq!(inv.recent_audit(100).await.unwrap().len(), audit_count);
+
+    form.refresh_token = Some("operator-refresh".into());
+    inv.set_boosty_settings(&form).await.unwrap();
+    assert_eq!(
+        inv.get_boosty_settings()
+            .await
+            .unwrap()
+            .refresh_token
+            .as_deref(),
+        Some("operator-refresh")
+    );
+    let audits = inv.recent_audit(100).await.unwrap();
+    assert_eq!(audits.len(), audit_count + 1);
+    assert_eq!(audits[0].action, "boosty.configure");
+    for audit in audits {
+        let payload = audit.payload.unwrap_or_default().to_string();
+        assert!(!payload.contains("original-refresh"));
+        assert!(!payload.contains("rotated-refresh"));
+        assert!(!payload.contains("operator-refresh"));
+    }
+}
+
+#[tokio::test]
+async fn refresh_rotation_audits_only_actual_changes() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.set_boosty_settings(&BoostySettings {
+        refresh_token: Some("original-refresh".into()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let audit_count = inv.recent_audit(100).await.unwrap().len();
+    assert!(
+        !inv.rotate_boosty_refresh_token("stale", "new")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !inv.rotate_boosty_refresh_token("original-refresh", "original-refresh")
+            .await
+            .unwrap()
+    );
+    assert_eq!(inv.recent_audit(100).await.unwrap().len(), audit_count);
+    assert!(
+        inv.rotate_boosty_refresh_token("original-refresh", "rotated-refresh")
+            .await
+            .unwrap()
+    );
+    let audits = inv.recent_audit(100).await.unwrap();
+    assert_eq!(audits.len(), audit_count + 1);
+    assert_eq!(audits[0].action, "boosty.refresh_token.rotated");
+    assert!(audits[0].payload.is_none());
+}
+
+#[tokio::test]
 async fn boosty_user_and_all_server_grants_are_created_atomically() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
