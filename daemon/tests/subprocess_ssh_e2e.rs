@@ -204,9 +204,17 @@ async fn subprocess_ssh_strict_host_key_verification() {
         "known_hosts must be populated after first connect"
     );
 
-    let known_hosts_content = std::fs::read_to_string(&known_hosts_path).expect("read known_hosts");
+    // `ssh-keygen -F` also finds hashed entries (HashKnownHosts is on by
+    // default in Debian/Ubuntu ssh_config).
+    let lookup = std::process::Command::new("ssh-keygen")
+        .arg("-F")
+        .arg(format!("[127.0.0.1]:{host_port}"))
+        .arg("-f")
+        .arg(&known_hosts_path)
+        .output()
+        .expect("ssh-keygen -F invocation");
     assert!(
-        known_hosts_content.contains(&format!("[127.0.0.1]:{host_port}")),
+        lookup.status.success() && !lookup.stdout.is_empty(),
         "known_hosts must pin the host and port"
     );
 

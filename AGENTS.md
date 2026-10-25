@@ -75,7 +75,7 @@ CI additionally runs gitleaks and three Docker-backed SSH suites:
 ```sh
 docker pull lscr.io/linuxserver/openssh-server:latest
 cargo test -p vpnctl-ssh --test e2e_sshd -- --ignored --nocapture
-cargo test -p vpnctld --test subprocess_ssh_e2e -- --ignored --nocapture
+cargo test -p vpnctld --test subprocess_ssh_e2e -- --ignored --nocapture --skip subprocess_ssh_root_roundtrip
 cargo test -p vpnctl-ssh --test spec_password_auth -- --ignored --nocapture
 ```
 

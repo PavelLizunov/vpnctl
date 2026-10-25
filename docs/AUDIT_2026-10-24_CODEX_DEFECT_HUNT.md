@@ -181,3 +181,9 @@ the code already uses let-chains, which need Rust 1.88. Raising the MSRV
 turns on clippy's MSRV-gated lints (`collapsible_if` into let-chains,
 `as_chunks`) across untouched code, so it is left for a separate mechanical
 change.
+
+Wiring `subprocess_ssh_e2e` into CI (R3-11) showed that the never-run suite had
+rotted: the host-key test assumed unhashed `known_hosts` lines (fixed with
+`ssh-keygen -F`), and the root round trip cannot start because the
+linuxserver image never finishes init for `USER_NAME=root`. CI skips that one
+test until it gets an image that allows root login.
