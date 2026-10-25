@@ -758,53 +758,67 @@ async fn run_boosty_sync_and_deploy(
     } else {
         ApplyMode::EnableOnly
     };
-    // Run the sync as its own task so the request timeout cannot cancel it
-    // between an OAuth refresh-token rotation and persisting the new token.
     let inv = state.inv.clone();
-    let sync =
-        tokio::spawn(async move { vpnctl_boosty_bridge::sync_from_inventory(&inv, mode).await });
-    let result = match sync.await {
+    await_boosty_sync_and_deploy(state, source_tag, async move {
+        vpnctl_boosty_bridge::sync_from_inventory(&inv, mode).await
+    })
+    .await
+}
+
+async fn await_boosty_sync_and_deploy(
+    state: &AppState,
+    source_tag: &'static str,
+    sync: impl std::future::Future<
+        Output = Result<vpnctl_boosty_bridge::SyncReport, vpnctl_boosty_bridge::BridgeError>,
+    > + Send
+    + 'static,
+) -> Result<(), Response> {
+    let state = state.clone();
+    // Keep sync, report handling and deploy queuing alive after the request is cancelled.
+    let task = tokio::spawn(async move {
+        match sync.await {
+            Ok(report) => {
+                let _ = state
+                    .inv
+                    .ack_open_alerts(crate::boosty_sync_poller::SYNC_FAILED_ALERT_KIND, None)
+                    .await;
+                tracing::info!(
+                    target = "vpnctld::boosty",
+                    enabled = report.enabled.len(),
+                    disabled = report.disabled.len(),
+                    provisioned = report.provisioned.len(),
+                    "{source_tag} boosty sync"
+                );
+                let flipped: Vec<String> = report
+                    .enabled
+                    .iter()
+                    .chain(report.disabled.iter())
+                    .chain(report.provisioned.iter())
+                    .cloned()
+                    .collect();
+                if !flipped.is_empty() {
+                    let inv = state.inv.clone();
+                    let registry = std::sync::Arc::clone(&state.registry);
+                    let key = crate::app::deploy_key_path();
+                    tokio::spawn(async move {
+                        crate::boosty_sync_poller::deploy_flipped_users(
+                            &inv, &registry, &key, &flipped, source_tag,
+                        )
+                        .await;
+                    });
+                }
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(target = "vpnctld::boosty", error = %e, "{source_tag} sync failed");
+                Err(bad_request(&format!("boosty sync failed: {e}")))
+            }
+        }
+    });
+    match task.await {
         Ok(result) => result,
         Err(e) => {
             tracing::warn!(target = "vpnctld::boosty", error = %e, "{source_tag} sync task failed");
-            return Err(bad_request(&format!("boosty sync failed: {e}")));
-        }
-    };
-    match result {
-        Ok(report) => {
-            let _ = state
-                .inv
-                .ack_open_alerts(crate::boosty_sync_poller::SYNC_FAILED_ALERT_KIND, None)
-                .await;
-            tracing::info!(
-                target = "vpnctld::boosty",
-                enabled = report.enabled.len(),
-                disabled = report.disabled.len(),
-                provisioned = report.provisioned.len(),
-                "{source_tag} boosty sync"
-            );
-            let flipped: Vec<String> = report
-                .enabled
-                .iter()
-                .chain(report.disabled.iter())
-                .chain(report.provisioned.iter())
-                .cloned()
-                .collect();
-            if !flipped.is_empty() {
-                let inv = state.inv.clone();
-                let registry = std::sync::Arc::clone(&state.registry);
-                let key = crate::app::deploy_key_path();
-                tokio::spawn(async move {
-                    crate::boosty_sync_poller::deploy_flipped_users(
-                        &inv, &registry, &key, &flipped, source_tag,
-                    )
-                    .await;
-                });
-            }
-            Ok(())
-        }
-        Err(e) => {
-            tracing::warn!(target = "vpnctld::boosty", error = %e, "{source_tag} sync failed");
             Err(bad_request(&format!("boosty sync failed: {e}")))
         }
     }
@@ -929,4 +943,115 @@ pub(crate) async fn boosty_disable(
         });
     }
     Redirect::to("/admin/boosty").into_response()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use vpnctl_core::{KernelId, Registry, Server, ServerId, User, UserId};
+    use vpnctl_inventory::SqliteInventory;
+
+    #[tokio::test]
+    async fn manual_sync_cancellation_still_queues_redeploy() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        let uid = UserId("boosty-cancel".into());
+        let sid = ServerId("boosty-manual-cancel".into());
+        inv.add_user(&User {
+            id: uid.clone(),
+            uuid: "00000000-0000-0000-0000-000000000001".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+            disabled: true,
+        })
+        .await
+        .unwrap();
+        inv.link_boosty_subscriber(&uid, 100).await.unwrap();
+        inv.add_server(&Server {
+            id: sid.clone(),
+            address: "192.0.2.1".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+        inv.grant(&uid, &sid).await.unwrap();
+        inv.insert_alert_if_no_unacked(
+            crate::boosty_sync_poller::SYNC_FAILED_ALERT_KIND,
+            None,
+            "warning",
+            "test sync failure",
+            None,
+        )
+        .await
+        .unwrap();
+        // An empty registry makes redeploy fail validation before any SSH attempt.
+        let (state, writer) =
+            crate::app::make_app_state_for_tests(inv.clone(), Arc::new(Registry::new()));
+        let (flipped, flip_done) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let sync_inv = inv.clone();
+        let sync_uid = uid.clone();
+        let request = tokio::spawn(async move {
+            await_boosty_sync_and_deploy(&state, "boosty.sync_now", async move {
+                assert!(
+                    sync_inv
+                        .set_boosty_user_disabled(&sync_uid, 100, false)
+                        .await
+                        .unwrap()
+                );
+                flipped.send(()).unwrap();
+                released.await.unwrap();
+                Ok(vpnctl_boosty_bridge::SyncReport {
+                    enabled: vec![sync_uid.0],
+                    ..Default::default()
+                })
+            })
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), flip_done)
+            .await
+            .unwrap()
+            .unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        release.send(()).unwrap();
+
+        let row = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(row) = inv
+                    .recent_audit(20)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|row| row.action == "boosty.autodeploy")
+                {
+                    break row;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled manual sync must still queue redeploy");
+        let payload = row.payload.unwrap();
+        assert_eq!(payload["trigger"], "boosty.sync_now");
+        assert_eq!(payload["users"], serde_json::json!([uid.0]));
+        assert_eq!(payload["servers"], serde_json::json!([sid.0]));
+        assert_eq!(inv.unacked_alert_count().await.unwrap(), 0);
+        writer.abort();
+    }
 }

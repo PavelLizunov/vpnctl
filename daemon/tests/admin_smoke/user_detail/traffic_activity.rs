@@ -372,7 +372,7 @@ async fn admin_user_set_traffic_limit_persists_and_audits() {
                     .uri("/admin/users/alice/traffic-limit")
                     .header("content-type", "application/x-www-form-urlencoded"),
             )
-            .body(Body::from("limit_gib=5.0&threshold_pct=75"))
+            .body(Body::from("limit_loaded=1&limit_gib=5.0&threshold_pct=75"))
             .unwrap(),
         )
         .await
@@ -406,13 +406,13 @@ async fn admin_user_set_traffic_limit_no_op_does_not_audit() {
     let inv = s.inv.clone();
     let app = router(s);
     for (body, expected_audits) in [
-        ("limit_gib=5.0&threshold_pct=75", 1),
-        ("limit_gib=5&threshold_pct=75", 1),
-        ("limit_gib=5&threshold_pct=80", 2),
-        ("limit_gib=0&threshold_pct=80", 3),
-        ("limit_gib=0.0&threshold_pct=80", 3),
-        ("limit_gib=1e30&threshold_pct=80", 4),
-        ("limit_gib=1e30&threshold_pct=80", 4),
+        ("limit_loaded=1&limit_gib=5.0&threshold_pct=75", 1),
+        ("limit_loaded=1&limit_gib=5&threshold_pct=75", 1),
+        ("limit_loaded=1&limit_gib=5&threshold_pct=80", 2),
+        ("limit_loaded=1&limit_gib=0&threshold_pct=80", 3),
+        ("limit_loaded=1&limit_gib=0.0&threshold_pct=80", 3),
+        ("limit_loaded=1&limit_gib=1e30&threshold_pct=80", 4),
+        ("limit_loaded=1&limit_gib=1e30&threshold_pct=80", 4),
     ] {
         let resp = app
             .clone()
@@ -453,7 +453,7 @@ async fn admin_concurrent_identical_traffic_limits_audit_once() {
                 .uri("/admin/users/u0/traffic-limit")
                 .header("content-type", "application/x-www-form-urlencoded"),
         )
-        .body(Body::from("limit_gib=5&threshold_pct=80"))
+        .body(Body::from("limit_loaded=1&limit_gib=5&threshold_pct=80"))
         .unwrap()
     };
     let (a, b) = tokio::join!(app.clone().oneshot(post()), app.oneshot(post()));
@@ -498,7 +498,7 @@ async fn admin_user_set_traffic_limit_zero_clears_cap() {
                 .uri("/admin/users/alice/traffic-limit")
                 .header("content-type", "application/x-www-form-urlencoded"),
         )
-        .body(Body::from("limit_gib=0&threshold_pct=80"))
+        .body(Body::from("limit_loaded=1&limit_gib=0&threshold_pct=80"))
         .unwrap(),
     )
     .await
@@ -917,4 +917,102 @@ async fn v2_user_activity_log_pagination_and_csv() {
         "CSV header drifted"
     );
     assert_eq!(csv.lines().count(), 31, "header + 30 data rows");
+}
+
+fn inject_traffic_read_failure(dir: &TempDir, sql: &str) {
+    let status = std::process::Command::new("python3")
+        .args(["-c", "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.executescript(sys.argv[2]); c.commit(); c.close()"])
+        .arg(dir.path().join("inv.db"))
+        .arg(sql)
+        .status()
+        .unwrap();
+    assert!(status.success(), "temporary traffic fault injection failed");
+}
+
+#[tokio::test]
+async fn failed_limit_read_hides_form_and_unloaded_save_preserves_cap() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    let uid = UserId("u0".into());
+    s.inv
+        .set_user_traffic_limit(&uid, Some(5_368_709_120), Some(80))
+        .await
+        .unwrap();
+    // Keep the real cap intact while making the threshold fail integer decoding.
+    inject_traffic_read_failure(
+        &dir,
+        "UPDATE users SET traffic_alert_threshold_pct = 'unreadable' WHERE id = 'u0';",
+    );
+    assert!(s.inv.get_user_traffic_limit(&uid).await.is_err());
+    let app = router(s.clone());
+    let html = fetch_html(app.clone(), "/admin/users/u0/overview").await;
+    assert!(html.contains("Traffic limit unavailable. Reload this page before editing the limit."));
+    assert!(!html.contains(r#"action="/admin/users/u0/traffic-limit""#));
+    assert!(!html.contains(r#"name="limit_gib""#));
+    assert!(!html.contains(r#"name="limit_loaded""#));
+    assert!(!html.contains("no monthly cap configured"));
+
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users/u0/traffic-limit"),
+            )
+            .body(Body::from("limit_gib=&threshold_pct=80"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    inject_traffic_read_failure(
+        &dir,
+        "UPDATE users SET traffic_alert_threshold_pct = 80 WHERE id = 'u0';",
+    );
+    assert_eq!(
+        s.inv.get_user_traffic_limit(&uid).await.unwrap(),
+        (Some(5_368_709_120), Some(80))
+    );
+    assert!(
+        !s.inv
+            .recent_audit(10)
+            .await
+            .unwrap()
+            .iter()
+            .any(|row| row.action == "user.traffic_limit.set")
+    );
+}
+
+#[tokio::test]
+async fn failed_monthly_usage_read_shows_unknown_with_and_without_cap() {
+    for limit in [None, Some(5_368_709_120)] {
+        let dir = TempDir::new().unwrap();
+        let s = state(&dir).await;
+        seed(&s.inv, 0, 1, &[]).await;
+        let uid = UserId("u0".into());
+        s.inv
+            .set_user_traffic_limit(&uid, limit, Some(80))
+            .await
+            .unwrap();
+        inject_traffic_read_failure(&dir, "DROP TABLE vpn_connection_stats;");
+        assert!(s.inv.user_traffic_this_month(&uid).await.is_err());
+        let html = fetch_html(router(s), "/admin/users/u0/overview").await;
+        let section = html
+            .split("Traffic limit · month-to-date")
+            .nth(1)
+            .unwrap()
+            .split("Access state")
+            .next()
+            .unwrap();
+        assert!(section.contains("Used this month: unknown. Reload to retry."));
+        assert!(!section.contains("0 B"));
+        assert!(!section.contains("projected "));
+        assert!(section.contains(r#"name="limit_loaded" value="1""#));
+        assert!(section.contains(r#"name="limit_gib""#));
+        if limit.is_some() {
+            assert!(section.contains("Monthly cap: "));
+            assert!(section.contains(r#"value="5.0""#));
+        }
+    }
 }

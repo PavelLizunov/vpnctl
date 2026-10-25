@@ -4,19 +4,6 @@ use std::collections::HashMap;
 use vpnctl_core::{KernelId, ProtocolId, ServerId, UserId};
 
 impl SqliteInventory {
-    pub async fn list_server_kernels(&self, id: &ServerId) -> Result<Vec<KernelId>> {
-        let rows = sqlx::query(
-            "SELECT kernel_id FROM server_kernels WHERE server_id = ?1 ORDER BY kernel_id",
-        )
-        .bind(&id.0)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| r.try_get::<String, _>("kernel_id").map(KernelId))
-            .collect::<std::result::Result<_, _>>()?)
-    }
-
     pub async fn add_server_kernel(&self, server: &ServerId, kernel: &KernelId) -> Result<u64> {
         let res = sqlx::query(
             "INSERT INTO server_kernels (server_id, kernel_id) VALUES (?1, ?2)

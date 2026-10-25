@@ -20,8 +20,19 @@ pub(crate) fn redact_audit_payload(payload: &serde_json::Value) -> serde_json::V
                         || kl.contains("private")
                         || kl.contains("token")
                         || kl.contains("secret");
+                    let credential_key = kl.replace(['_', '-'], "");
+                    let credential =
+                        credential_key.ends_with("uuid") || credential_key.ends_with("deviceid");
                     let nv = if secret {
                         serde_json::Value::String("<redacted>".into())
+                    } else if credential {
+                        match v.as_str() {
+                            Some(s) if s.chars().count() > 8 => serde_json::Value::String(format!(
+                                "{}…",
+                                s.chars().take(8).collect::<String>()
+                            )),
+                            _ => serde_json::Value::String("<redacted>".into()),
+                        }
                     } else {
                         redact_audit_payload(v)
                     };

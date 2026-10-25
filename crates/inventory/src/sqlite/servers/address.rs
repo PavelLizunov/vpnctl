@@ -3,6 +3,24 @@ use std::collections::HashSet;
 use std::net::{IpAddr, ToSocketAddrs};
 use vpnctl_core::ServerId;
 
+pub(super) async fn server_id_for_address_on(
+    conn: &mut sqlx::SqliteConnection,
+    addr: &str,
+) -> Result<Option<String>> {
+    let target_ip = addr.parse::<IpAddr>().ok();
+    let rows = sqlx::query_as::<_, (String, String)>("SELECT id, address FROM servers ORDER BY id")
+        .fetch_all(conn)
+        .await?;
+    Ok(rows.into_iter().find_map(|(id, address)| {
+        let matches = match (target_ip, address.parse::<IpAddr>().ok()) {
+            (Some(target), Some(existing)) => target == existing,
+            (None, None) => addr.eq_ignore_ascii_case(&address),
+            _ => false,
+        };
+        matches.then_some(id)
+    }))
+}
+
 impl SqliteInventory {
     pub async fn is_known_server_address(&self, addr: &str) -> Result<bool> {
         let Ok(target) = addr.parse::<IpAddr>() else {
@@ -94,19 +112,8 @@ impl SqliteInventory {
     }
 
     pub async fn server_id_for_address(&self, addr: &str) -> Result<Option<String>> {
-        let target_ip = addr.parse::<IpAddr>().ok();
-        let rows =
-            sqlx::query_as::<_, (String, String)>("SELECT id, address FROM servers ORDER BY id")
-                .fetch_all(&self.pool)
-                .await?;
-        Ok(rows.into_iter().find_map(|(id, address)| {
-            let matches = match (target_ip, address.parse::<IpAddr>().ok()) {
-                (Some(target), Some(existing)) => target == existing,
-                (None, None) => addr.eq_ignore_ascii_case(&address),
-                _ => false,
-            };
-            matches.then_some(id)
-        }))
+        let mut conn = self.pool.acquire().await?;
+        server_id_for_address_on(&mut conn, addr).await
     }
 
     pub async fn server_auto_suppress_state(

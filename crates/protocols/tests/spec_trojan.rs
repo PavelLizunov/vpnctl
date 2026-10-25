@@ -162,6 +162,20 @@ fn tr4_share_link_uses_trojan_scheme_with_allowinsecure_camelcase() {
 }
 
 #[test]
+fn tr4_self_signed_share_link_stays_byte_equal_without_certificate_pin() {
+    let s = srv();
+    let secrets = HashMap::new();
+    let ctx = ctx_with(&s, &secrets);
+    let link = Trojan::new()
+        .share_link(&ctx, &user("alice", Some("hunter2")))
+        .unwrap();
+    assert_eq!(
+        link.as_bytes(),
+        b"trojan://hunter2@203.0.113.7:8643?sni=203.0.113.7&allowInsecure=1#alice"
+    );
+}
+
+#[test]
 fn tr4_share_link_percent_encodes_special_chars_in_password() {
     let s = srv();
     let secrets = HashMap::new();

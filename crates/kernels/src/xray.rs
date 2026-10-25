@@ -145,9 +145,14 @@ fn xray_apply_script() -> String {
     format!(
         r#"
             set -eu
+            trap 'rm -f {staging_path}' EXIT
+            trap 'exit 1' HUP INT TERM
             xray run -test -c {staging_path} 1>&2
+            HAD_PREV=0
             if [ -f {config_path} ]; then
-                cp -a {config_path} {config_path}.bak 2>/dev/null || true
+                cp -a {config_path} {config_path}.bak.new
+                mv {config_path}.bak.new {config_path}.bak
+                HAD_PREV=1
             fi
             mv {staging_path} {config_path}
             chown xray:xray {config_path}
@@ -171,7 +176,7 @@ fn xray_apply_script() -> String {
 
             echo "xray did not become active. Last 20 log lines:" >&2
             journalctl -u xray --no-pager -n 20 >&2 || true
-            if [ -f {config_path}.bak ]; then
+            if [ "$HAD_PREV" = 1 ] && [ -f {config_path}.bak ]; then
                 echo "rolling back to previous xray config" >&2
                 mv {config_path}.bak {config_path} || true
                 chown xray:xray {config_path} || true
@@ -190,13 +195,15 @@ fn firewall_open_script(ports: &[(&str, u16)]) -> Option<String> {
     if uniq.is_empty() {
         return None;
     }
-    let mut s = String::from("if command -v ufw >/dev/null 2>&1; then\n");
+    // The status is captured as its own command so a failing `ufw status`
+    // stops the script (set -e) instead of reading as "inactive".
+    let mut s = String::from(
+        "set -eu\nif command -v ufw >/dev/null 2>&1; then\n  ufw_status=$(LC_ALL=C ufw status)\n  case \"$ufw_status\" in\n    'Status: active'*)\n",
+    );
     for (transport, port) in &uniq {
-        s.push_str(&format!(
-            "  ufw allow {port}/{transport} >/dev/null 2>&1 || true\n"
-        ));
+        s.push_str(&format!("      ufw allow {port}/{transport}\n"));
     }
-    s.push_str("fi\n");
+    s.push_str("      ;;\n  esac\nfi\n");
     Some(s)
 }
 
@@ -251,9 +258,8 @@ impl Kernel for Xray {
     }
 
     async fn apply_config(&self, ssh: &dyn SshTransport, config: &[u8]) -> Result<()> {
-        ssh.upload(XRAY_CONFIG_STAGING_PATH, config).await?;
-        ssh.exec(&xray_apply_script()).await?;
-        Ok(())
+        crate::apply_staged_config(ssh, XRAY_CONFIG_STAGING_PATH, config, &xray_apply_script())
+            .await
     }
 
     async fn open_firewall(
@@ -350,6 +356,19 @@ mod tests {
             line.trim_end().ends_with("|| restart_rc=$?"),
             "under set -eu a failed restart must not skip the .bak rollback: {line}"
         );
+    }
+
+    #[test]
+    fn apply_script_validation_failure_removes_private_staging() {
+        let script = xray_apply_script();
+        crate::staging_tests::assert_validation_failure_removes_staging(
+            &script,
+            XRAY_CONFIG_STAGING_PATH,
+            XRAY_CONFIG_PATH,
+            "xray run -test",
+        );
+        assert!(script.contains(&format!("chown xray:xray {XRAY_CONFIG_PATH}")));
+        assert!(script.contains(&format!("chmod 0640 {XRAY_CONFIG_PATH}")));
     }
 
     fn dummy_server() -> Server {
@@ -542,7 +561,8 @@ mod tests {
         let s = firewall_open_script(&[("tcp", 9443)]).unwrap();
         assert!(s.contains("command -v ufw"));
         assert!(s.contains("ufw allow 9443/tcp"));
-        assert!(s.contains("|| true"));
+        assert!(s.contains("LC_ALL=C ufw status"));
+        assert!(!s.contains("|| true"));
     }
 
     #[test]

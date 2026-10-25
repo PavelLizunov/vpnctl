@@ -67,6 +67,12 @@ pub fn amnezia_share_link(ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
         json!(["0.0.0.0/0".to_string(), "::/0".to_string()]),
     );
     last_config.insert("persistent_keep_alive".into(), json!("25"));
+    if amneziawg_block(ctx).is_some() {
+        for (key, value) in vpnctl_core::amneziawg::effective_params(ctx.secrets) {
+            last_config.insert(key.into(), json!(value));
+        }
+        last_config.insert("isObfuscationEnabled".into(), json!(true));
+    }
 
     let wireguard_obj = json!({
         "port": listen_port.to_string(),

@@ -250,6 +250,42 @@ fn setup_script_installs_and_configures_fail2ban() {
 }
 
 #[test]
+fn setup_script_fail2ban_covers_connected_and_all_configured_ssh_ports() {
+    for (connected, configured, expected) in [
+        (Some(443), "port 22\nport 2222", "443,22,2222"),
+        (Some(2222), "port 22", "2222,22"),
+        (Some(22), "port 22\nport 2222\nport 22", "22,2222"),
+        (Some(2222), "", "2222"),
+        (None, "port 2200\nport 2222", "2200,2222"),
+        (None, "", "22"),
+    ] {
+        let script = sing_box_setup_script(connected);
+        let assignment = script.lines().next().unwrap();
+        let detection = script
+            .split_once("    SSHD_BIN=")
+            .unwrap()
+            .1
+            .split_once("    # backend=systemd")
+            .unwrap()
+            .0;
+        let output = std::process::Command::new("sh")
+            .args([
+                "-c",
+                &format!(
+                    "set -eu\nsshd() {{ printf '%s\\n' '{configured}'; }}\n\
+                     grep() {{ return 1; }}\n{assignment}\nSSHD_BIN={detection}\n\
+                     printf '%s' \"$F2B_SSH_PORT\""
+                ),
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+        assert!(script.contains("port     = ${F2B_SSH_PORT}"));
+    }
+}
+
+#[test]
 fn setup_script_package_detection_uses_exact_dpkg_query_status() {
     let s = SING_BOX_SETUP_SCRIPT.as_str();
     assert!(
@@ -619,8 +655,8 @@ fn firewall_open_script_opens_each_port_idempotently_guarded() {
         "duplicate ports must collapse: {script}"
     );
     assert!(
-        script.contains("|| true"),
-        "must not fail on an existing rule: {script}"
+        script.contains("LC_ALL=C ufw status") && !script.contains("|| true"),
+        "must only open active ufw rules and propagate failures: {script}"
     );
 }
 
@@ -1476,6 +1512,127 @@ async fn ensure_installed_refuses_non_amd64_before_mutating_node() {
         assert!(
             err.to_string().contains("stats helper is linux/amd64"),
             "{err}"
+        );
+    }
+}
+
+#[test]
+fn apply_script_validation_failure_removes_private_staging() {
+    let script = sing_box_apply_script();
+    crate::staging_tests::assert_validation_failure_removes_staging(
+        script,
+        "/etc/sing-box/config.json.new",
+        "/etc/sing-box/config.json",
+        "/usr/bin/sing-box",
+    );
+    assert!(script.contains("chown sing-box:sing-box /etc/sing-box/config.json"));
+    assert!(script.contains("chmod 0640 /etc/sing-box/config.json"));
+}
+
+#[test]
+fn managed_install_starts_and_verifies_inactive_service_with_unchanged_binary() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for (initially_active, start_status, verify_status) in
+        [(true, 0, 0), (false, 0, 0), (false, 1, 0), (false, 0, 1)]
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("usr/bin")).unwrap();
+        std::fs::create_dir_all(root.join("run/lock")).unwrap();
+        let live = root.join("usr/bin/sing-box");
+        let uploaded = root.join("uploaded-sing-box");
+        let helper = root.join("uploaded-helper");
+        let binary = "#!/bin/sh\necho with_v2ray_api\n";
+        std::fs::write(&live, binary).unwrap();
+        std::fs::write(&uploaded, binary).unwrap();
+        std::fs::write(&helper, "fixture helper").unwrap();
+        std::fs::set_permissions(&live, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = install_managed_artifacts_script(
+            &uploaded.to_string_lossy(),
+            &helper.to_string_lossy(),
+        )
+        .replace(
+            "/usr/local/libexec",
+            &format!("{}/usr/local/libexec", root.display()),
+        )
+        .replace("/usr/bin/sing-box", &live.to_string_lossy())
+        .replace("/run/lock", &format!("{}/run/lock", root.display()));
+        let log = root.join("systemctl.log");
+        let mocks = format!(
+            r#"
+            started=0
+            systemctl() {{
+                echo "$*" >> '{log}'
+                case "$*" in
+                    'is-active --quiet caddy-vlessws') return 3 ;;
+                    'is-active --quiet sing-box')
+                        if [ "$started" = 1 ]; then return {verify_status}; fi
+                        return {initial_status} ;;
+                    'start sing-box') started=1; return {start_status} ;;
+                    'restart sing-box') return 0 ;;
+                    *) return 99 ;;
+                esac
+            }}
+            apt-mark() {{ :; }}
+            "#,
+            log = log.display(),
+            initial_status = if initially_active { 0 } else { 3 },
+        );
+        let output = std::process::Command::new("bash")
+            .args(["-c", &format!("{mocks}\n{script}")])
+            .output()
+            .unwrap();
+        let success = start_status == 0 && verify_status == 0;
+        assert_eq!(output.status.success(), success, "{output:?}");
+        assert_eq!(std::fs::read_to_string(&live).unwrap(), binary);
+        let commands = std::fs::read_to_string(log).unwrap();
+        assert_eq!(
+            commands.lines().any(|line| line == "start sing-box"),
+            !initially_active
+        );
+        assert_eq!(
+            commands.lines().any(|line| line == "restart sing-box"),
+            !success
+        );
+        if !initially_active && start_status == 0 {
+            let start = commands.find("start sing-box").unwrap();
+            assert!(commands[start..].contains("is-active --quiet sing-box"));
+        }
+    }
+}
+
+#[test]
+fn firewall_script_fails_when_ufw_status_fails() {
+    let script = firewall_open_script(&[("tcp", 443)]).unwrap();
+    for (status_rc, status_out, expect_ok, expect_allow) in [
+        (0, "Status: active", true, true),
+        (0, "Status: inactive", true, false),
+        (1, "", false, false),
+    ] {
+        let mocks = format!(
+            r#"
+            ufw() {{
+                case "$1" in
+                    status) printf '%s\n' '{status_out}'; return {status_rc} ;;
+                    allow) echo "allow $2" >&2; return 0 ;;
+                esac
+            }}
+            "#
+        );
+        let output = std::process::Command::new("bash")
+            .args(["-c", &format!("{mocks}\n{script}")])
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            expect_ok,
+            "{status_out:?} rc={status_rc}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr).contains("allow 443/tcp"),
+            expect_allow,
+            "{status_out:?} rc={status_rc}"
         );
     }
 }

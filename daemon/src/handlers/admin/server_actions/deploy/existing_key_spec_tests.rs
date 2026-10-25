@@ -45,6 +45,27 @@ input=$(/bin/cat)
 } >> "$VPNCTL_SPEC_DIR/transport.log"
 previous=
 for arg in "$@"; do
+  case "$arg" in
+    UserKnownHostsFile=*)
+      case "$VPNCTL_EXISTING_KEY_SPEC_CASE" in
+        wizard_missing_known_hosts) ;;
+        wizard_*)
+          known_hosts=${arg#UserKnownHostsFile=}
+          read -r kind key rest < "$VPNCTL_SPEC_DIR/host.pub"
+          host='[203.0.113.71]:2222'
+          case "$VPNCTL_EXISTING_KEY_SPEC_CASE" in
+            wizard_root_*|wizard_key_changed) host=203.0.113.71 ;;
+            wizard_ssh_443) host='[203.0.113.71]:443' ;;
+          esac
+          printf '%s %s %s\n' "$host" "$kind" "$key" > "$known_hosts"
+          case "$VPNCTL_EXISTING_KEY_SPEC_CASE" in
+            wizard_ambiguous_known_hosts)
+              read -r kind key rest < "$VPNCTL_SPEC_DIR/deploy.pub"
+              printf '%s %s %s\n' "$host" "$kind" "$key" >> "$known_hosts" ;;
+            wizard_hashed_*) ssh-keygen -H -f "$known_hosts" >/dev/null 2>&1 ;;
+          esac ;;
+      esac ;;
+  esac
   if [ "$previous" = '-F' ]; then
     /bin/cat "$arg" >> "$VPNCTL_SPEC_DIR/transport.log"
     while read -r keyword value rest; do
@@ -87,7 +108,13 @@ printf '0\n'
             &bin.join("ssh-keyscan"),
             r#"#!/bin/sh
 printf 'KEYSCAN\n' >> "$VPNCTL_SPEC_DIR/keyscan.log"
-read -r kind key rest < "$VPNCTL_SPEC_DIR/host.pub"
+keyfile=host.pub
+case "$VPNCTL_EXISTING_KEY_SPEC_CASE" in
+  wizard_*pin_mismatch) keyfile=deploy.pub ;;
+  wizard_key_changed)
+    [ "$(wc -l < "$VPNCTL_SPEC_DIR/keyscan.log")" -lt 2 ] || keyfile=deploy.pub ;;
+esac
+read -r kind key rest < "$VPNCTL_SPEC_DIR/$keyfile"
 printf '203.0.113.71 %s %s\n' "$kind" "$key"
 printf '[203.0.113.71]:2222 %s %s\n' "$kind" "$key"
 printf '203.0.113.72 %s %s\n' "$kind" "$key"
@@ -97,8 +124,8 @@ printf '203.0.113.72 %s %s\n' "$kind" "$key"
             &bin.join("sshpass"),
             r#"#!/bin/sh
 case "$VPNCTL_EXISTING_KEY_SPEC_CASE" in
-  password_*)
-    : > "$VPNCTL_SPEC_DIR/sshpass-called"
+  password_*|wizard_*)
+    printf 'called\n' >> "$VPNCTL_SPEC_DIR/sshpass-called"
     [ "$1" = -e ] || exit 99
     shift
     exec "$@" ;;
@@ -140,6 +167,38 @@ esac
             "case {case} must execute exactly one passing child:\n{stdout}\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn wizard_pins_first_login_key_for_every_later_connection() {
+        run_case("wizard_root_pin_match");
+        run_case("wizard_hashed_pin_match");
+    }
+
+    #[test]
+    fn wizard_keyscan_mismatch_stops_before_second_password_login() {
+        run_case("wizard_root_pin_mismatch");
+        run_case("wizard_nonroot_pin_mismatch");
+    }
+
+    #[test]
+    fn wizard_key_auth_keeps_first_login_pin() {
+        run_case("wizard_key_changed");
+    }
+
+    #[test]
+    fn wizard_missing_accepted_key_stops_before_second_password_login() {
+        run_case("wizard_missing_known_hosts");
+    }
+
+    #[test]
+    fn wizard_with_several_accepted_keys_pins_the_presented_one() {
+        run_case("wizard_ambiguous_known_hosts");
+    }
+
+    #[test]
+    fn wizard_ssh_443_skips_reality_before_registration_with_visible_note() {
+        run_case("wizard_ssh_443");
     }
 
     #[test]
@@ -382,6 +441,9 @@ esac
                     .await
                     .unwrap();
                 let mut registry = Registry::new();
+                if case == "wizard_ssh_443" {
+                    registry = crate::app::build_registry().unwrap();
+                }
                 if case == "deploy_cancel" {
                     registry
                         .register_kernel(Box::new(vpnctl_kernels::Xray::new()))
@@ -412,6 +474,85 @@ esac
                     .nth(1)
                     .unwrap()
                     .to_owned();
+                if case.starts_with("wizard_") {
+                    use crate::wizard_bootstrap::{BootstrapEvent, BootstrapPlan, run_bootstrap};
+                    use tokio_stream::StreamExt;
+
+                    let root_login =
+                        case.starts_with("wizard_root_") || case == "wizard_key_changed";
+                    let events: Vec<_> = run_bootstrap(
+                        BootstrapPlan {
+                            server_id: "wizard-spec".into(),
+                            address: HOST.into(),
+                            ssh_user: if root_login { "root" } else { "debian" }.into(),
+                            ssh_port: if case == "wizard_ssh_443" {
+                                443
+                            } else if root_login {
+                                22
+                            } else {
+                                2222
+                            },
+                            root_password: "SPEC_PASSWORD".into(),
+                            deploy_key_path: root.join("deploy"),
+                            known_hosts_path: root.join("known_hosts"),
+                        },
+                        state.inv.clone(),
+                        std::sync::Arc::clone(&state.registry),
+                    )
+                    .collect()
+                    .await;
+                    let password_calls = read_log(&root, "sshpass-called").lines().count();
+                    let log = read_log(&root, "transport.log");
+                    assert_eq!(log.matches("StrictHostKeyChecking=accept-new").count(), 1);
+                    let stored = state
+                        .inv
+                        .get_server(&ServerId("wizard-spec".into()))
+                        .await
+                        .unwrap();
+                    if case.ends_with("pin_mismatch")
+                        || matches!(case.as_str(), "wizard_missing_known_hosts")
+                    {
+                        assert_eq!(password_calls, 1, "must not send password again");
+                        assert!(!log.contains("authorized_keys"));
+                        assert!(stored.is_none());
+                        assert!(matches!(events.last(), Some(BootstrapEvent::Error { .. })));
+                    } else if case == "wizard_key_changed" {
+                        assert_eq!(password_calls, 2);
+                        assert!(stored.is_none());
+                        assert!(matches!(
+                            events.last(),
+                            Some(BootstrapEvent::Error {
+                                phase: "verify-key",
+                                ..
+                            })
+                        ));
+                    } else {
+                        assert_eq!(password_calls, if root_login { 2 } else { 3 });
+                        assert_eq!(
+                            stored.as_ref().unwrap().trusted_host_fingerprint,
+                            Some(fingerprint)
+                        );
+                        assert!(log.contains("StrictHostKeyChecking yes"));
+                        if case == "wizard_ssh_443" {
+                            assert!(
+                                !stored
+                                    .unwrap()
+                                    .enabled_protocols
+                                    .iter()
+                                    .any(|p| p.0 == "vless+reality")
+                            );
+                            assert!(events.iter().any(|event| matches!(
+                                event,
+                                BootstrapEvent::Step { phase: "register", message }
+                                    if message.contains("vless+reality was skipped")
+                                        && message.contains("443 is used by SSH")
+                            )));
+                        } else {
+                            assert!(matches!(events.last(), Some(BootstrapEvent::Ok { .. })));
+                        }
+                    }
+                    return;
+                }
                 let jump = case == "jump";
                 let mut server = Server {
                     id: ServerId("existing-key-spec".into()),

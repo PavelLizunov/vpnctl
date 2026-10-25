@@ -92,6 +92,14 @@ fn awg_apply_script() -> String {
     format!(
         r#"
             set -eu
+            umask 077
+            _awgval=
+            cleanup() {{
+                rm -f /etc/amnezia/amneziawg/awg0.conf.new
+                if [ -n "$_awgval" ]; then rm -rf "$_awgval"; fi
+            }}
+            trap cleanup EXIT
+            trap 'exit 1' HUP INT TERM
 
             # ── Detect the default egress interface (safe fixed
             #    pipeline — no untrusted shell text). Falls back to
@@ -129,9 +137,9 @@ fn awg_apply_script() -> String {
             #    exists — first deploy has none; -a preserves perms).
             HAD_PREV=0
             if [ -f /etc/amnezia/amneziawg/awg0.conf ]; then
-                if cp -a /etc/amnezia/amneziawg/awg0.conf /etc/amnezia/amneziawg/awg0.conf.bak 2>/dev/null; then
-                    HAD_PREV=1
-                fi
+                cp -a /etc/amnezia/amneziawg/awg0.conf /etc/amnezia/amneziawg/awg0.conf.bak.new
+                mv /etc/amnezia/amneziawg/awg0.conf.bak.new /etc/amnezia/amneziawg/awg0.conf.bak
+                HAD_PREV=1
             fi
 
             mv /etc/amnezia/amneziawg/awg0.conf.new /etc/amnezia/amneziawg/awg0.conf
@@ -162,8 +170,6 @@ fn awg_apply_script() -> String {
             # Failed to come up. Dump diagnostics, then ROLL BACK.
             echo "awg-quick@awg0 did not become active. Last 20 log lines:" >&2
             journalctl -u awg-quick@awg0 --no-pager -n 20 >&2 || true
-            echo "--- attempted config (post-strip) ---" >&2
-            awg-quick strip /etc/amnezia/amneziawg/awg0.conf >&2 || true
             if [ "$HAD_PREV" = 1 ] && [ -f /etc/amnezia/amneziawg/awg0.conf.bak ]; then
                 echo "rolling back to previous awg0 config" >&2
                 mv /etc/amnezia/amneziawg/awg0.conf.bak /etc/amnezia/amneziawg/awg0.conf || true
@@ -258,10 +264,13 @@ impl Kernel for AmneziaWg {
     }
 
     async fn apply_config(&self, ssh: &dyn SshTransport, config: &[u8]) -> Result<()> {
-        ssh.upload("/etc/amnezia/amneziawg/awg0.conf.new", config)
-            .await?;
-        ssh.exec(&awg_apply_script()).await?;
-        Ok(())
+        crate::apply_staged_config(
+            ssh,
+            "/etc/amnezia/amneziawg/awg0.conf.new",
+            config,
+            &awg_apply_script(),
+        )
+        .await
     }
 
     async fn open_firewall(

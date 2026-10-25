@@ -15,6 +15,10 @@
     shell commands; the web UI is the only operator surface).
   - Browser form errors render inside the admin shell with a back link;
     non-browser clients get the plain `vpnctl admin: ` text.
+  - Wizard progress follows bootstrap phases: setup, probe, fingerprint,
+    push-key, verify-key, register, secrets, install, apply. The current phase
+    stays in progress until the next phase starts; only terminal `ok` completes
+    the last phase. Repeated phase events and errors never mark it complete.
 
 ## 2. The six layers
 

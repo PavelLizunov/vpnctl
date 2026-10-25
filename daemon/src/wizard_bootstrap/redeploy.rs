@@ -489,7 +489,8 @@ async fn redeploy_pipeline(
         configs_applied += 1;
         send_step!("apply", "✓ {} — config applied, service active.", kid.0);
         if let Err(e) = kernel.open_firewall(&ssh, &ctx, &protocols).await {
-            send_step!("apply", "⚠ {} — firewall step skipped: {e}", kid.0);
+            ssh_errors.push(format!("{}: open_firewall failed: {e}", kid.0));
+            send_step!("apply", "✗ {} firewall failed: {e}", kid.0);
         }
     }
 

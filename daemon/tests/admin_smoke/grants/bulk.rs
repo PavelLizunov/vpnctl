@@ -177,7 +177,7 @@ async fn server_grant_all_users_grants_every_ungranted() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(resp.status(), StatusCode::OK);
     let granted = st
         .inv
         .users_for_server(&ServerId("srv".into()))
@@ -256,7 +256,7 @@ async fn server_grant_all_skips_disabled_users() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(resp.status(), StatusCode::OK);
     let granted = st
         .inv
         .users_for_server(&ServerId("srv".into()))
@@ -347,7 +347,7 @@ async fn server_revoke_all_users_requires_confirm_match() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(resp.status(), StatusCode::OK);
     let after = st
         .inv
         .users_for_server(&ServerId("srv".into()))
@@ -491,7 +491,7 @@ async fn revoke_all_also_removes_disabled_users_grants() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(resp.status(), StatusCode::OK);
     let left = st
         .inv
         .grant_dates_for_server(&ServerId("srv".into()))
@@ -501,4 +501,184 @@ async fn revoke_all_also_removes_disabled_users_grants() {
         left.is_empty(),
         "a disabled user's grant must not survive revoke-all: {left:?}"
     );
+}
+
+fn inject_grant_failure(dir: &TempDir, sql: &str) {
+    let status = std::process::Command::new("python3")
+        .args(["-c", "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.executescript(sys.argv[2]); c.commit(); c.close()"])
+        .arg(dir.path().join("inv.db"))
+        .arg(sql)
+        .status()
+        .unwrap();
+    assert!(status.success(), "temporary grant fault injection failed");
+}
+
+#[tokio::test]
+async fn revoke_handlers_preserve_grants_when_audit_fails() {
+    for (path, body, expected_status) in [
+        (
+            "/admin/users/u0/grants/s0/revoke",
+            "",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
+        (
+            "/admin/servers/s0/grants/u0/revoke",
+            "",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
+        (
+            "/admin/servers/s0/grants/_revoke-all",
+            "confirm=s0",
+            StatusCode::OK,
+        ),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let st = state(&dir).await;
+        crate::common::seed(&st.inv, 1, 1, &[(0, 0)]).await;
+        inject_grant_failure(
+            &dir,
+            "CREATE TRIGGER fail_revoke_audit BEFORE INSERT ON audit_log
+             WHEN NEW.action = 'user.revoke'
+             BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END;",
+        );
+        let resp = router(st.clone())
+            .oneshot(
+                crate::common::add_same_origin(Request::builder().method("POST").uri(path))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), expected_status, "{path}");
+        assert_eq!(st.inv.count_grants().await.unwrap(), 1, "{path}");
+        assert!(st.inv.recent_audit(10).await.unwrap().is_empty(), "{path}");
+    }
+}
+
+#[tokio::test]
+async fn grant_all_result_reports_uuid_conflict_and_success_counts() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    crate::common::seed(&st.inv, 1, 3, &[(0, 0)]).await;
+    // u0's imported UUID reserves u1's global UUID on this server.
+    st.inv
+        .set_grant_client_uuid(
+            &UserId("u0".into()),
+            &ServerId("s0".into()),
+            "00000000-0000-0000-0000-000000000001",
+        )
+        .await
+        .unwrap();
+    let resp = router(st.clone())
+        .oneshot(
+            crate::common::add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/s0/grants/_grant-all"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&bytes).unwrap();
+    assert!(html.contains("Granted: 1; already granted: 1; disabled users skipped: 0; failed: 1."));
+    assert!(html.contains("<b>u1</b>: "));
+    assert!(html.contains("already used by user u0"));
+    assert!(html.contains("Back to server access"));
+    assert!(html.contains(
+        "These counts describe saved access changes. Check deployment status on the server page."
+    ));
+    let ids: Vec<_> = st
+        .inv
+        .grant_dates_for_server(&ServerId("s0".into()))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(uid, _)| uid.0)
+        .collect();
+    assert_eq!(ids, ["u0", "u2"]);
+}
+
+#[tokio::test]
+async fn revoke_all_result_reports_partial_failure_and_escapes_reason() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    crate::common::seed(&st.inv, 1, 2, &[(0, 0), (1, 0)]).await;
+    inject_grant_failure(
+        &dir,
+        "CREATE TRIGGER fail_one_revoke BEFORE DELETE ON grants
+         WHEN OLD.user_id = 'u1'
+         BEGIN SELECT RAISE(ABORT, 'blocked <user>'); END;",
+    );
+    let resp = router(st.clone())
+        .oneshot(
+            crate::common::add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/s0/grants/_revoke-all"),
+            )
+            .body(Body::from("confirm=s0"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&bytes).unwrap();
+    assert!(html.contains("Revoked: 1; failed: 1."));
+    assert!(html.contains("<b>u1</b>: "));
+    assert!(html.contains("blocked &lt;user&gt;"));
+    assert!(!html.contains("blocked <user>"));
+    let remaining = st
+        .inv
+        .grant_dates_for_server(&ServerId("s0".into()))
+        .await
+        .unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].0.0, "u1");
+    let rows = st.inv.recent_audit(20).await.unwrap();
+    let revokes: Vec<_> = rows.iter().filter(|r| r.action == "user.revoke").collect();
+    assert_eq!(revokes.len(), 1);
+    assert_eq!(revokes[0].target.as_deref(), Some("u0"));
+}
+
+#[tokio::test]
+async fn bulk_no_op_results_do_not_write_mutation_audit() {
+    for (action, body, grants, summary) in [
+        (
+            "_grant-all",
+            "",
+            vec![(0, 0)],
+            "Granted: 0; already granted: 1; disabled users skipped: 0; failed: 0.",
+        ),
+        (
+            "_revoke-all",
+            "confirm=s0",
+            vec![],
+            "Revoked: 0; failed: 0.",
+        ),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let st = state(&dir).await;
+        crate::common::seed(&st.inv, 1, 1, &grants).await;
+        let resp = router(st.clone())
+            .oneshot(
+                crate::common::add_same_origin(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/admin/servers/s0/grants/{action}")),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(std::str::from_utf8(&bytes).unwrap().contains(summary));
+        assert!(st.inv.recent_audit(10).await.unwrap().is_empty());
+    }
 }

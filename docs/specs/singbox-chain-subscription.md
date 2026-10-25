@@ -32,7 +32,10 @@ GET /sub/{token}?format=sing-box
 ```
 
 - Web UI exposes a separate **“Sing-box: S5 via Iceland”** URL/QR.
-- This URL is a standalone subscription to import when the user needs S5.
+- This URL is a separate subscription to import into a GUI client when the
+  user needs S5. It supplies outbounds and routing, without local inbounds/TUN;
+  a bare sing-box core needs these merged into a local configuration with a
+  proxy or TUN inbound before application traffic can use it.
 - All other users continue using the ordinary URL.
 
 ## 3. Verification Checklist (Definition of Done)

@@ -163,17 +163,21 @@ impl Kernel for Caddy {
 
     async fn apply_config(&self, ssh: &dyn SshTransport, config: &[u8]) -> Result<()> {
         if config.starts_with(BUNDLE_DELIMITER.as_bytes()) {
-            ssh.exec("install -o root -g root -m 0600 /dev/null /etc/caddy/.vlessws-bundle.new")
-                .await?;
-            ssh.upload("/etc/caddy/.vlessws-bundle.new", config).await?;
-            ssh.exec(&vlessws_apply_script()).await?;
-            return Ok(());
+            return crate::apply_staged_config(
+                ssh,
+                "/etc/caddy/.vlessws-bundle.new",
+                config,
+                &vlessws_apply_script(),
+            )
+            .await;
         }
-        ssh.exec("install -o root -g root -m 0600 /dev/null /etc/caddy/Caddyfile.new")
-            .await?;
-        ssh.upload("/etc/caddy/Caddyfile.new", config).await?;
-        ssh.exec(&naive_apply_script()).await?;
-        Ok(())
+        crate::apply_staged_config(
+            ssh,
+            "/etc/caddy/Caddyfile.new",
+            config,
+            &naive_apply_script(),
+        )
+        .await
     }
 
     async fn open_firewall(

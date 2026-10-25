@@ -17,8 +17,9 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use guards::user_uuid_diff;
 use scripts::{
-    DEFAULT_STATS_HELPER_ARTIFACT, SING_BOX_SETUP_SCRIPT, cleanup_remote_artifacts_script,
+    DEFAULT_STATS_HELPER_ARTIFACT, cleanup_remote_artifacts_script,
     install_managed_artifacts_script, remote_artifact_paths, sing_box_apply_script,
+    sing_box_setup_script,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -92,7 +93,7 @@ impl Kernel for SingBox {
             .map_err(|e| CoreError::Transport(format!("spawn_blocking failed: {e}")))?
             .map_err(CoreError::Io)?;
 
-        ssh.exec(SING_BOX_SETUP_SCRIPT.as_str()).await?;
+        ssh.exec(&sing_box_setup_script(ssh.target_port())).await?;
 
         let check_cmd = "sha256sum /usr/bin/sing-box /usr/local/libexec/vpnctl/singbox-stats-helper 2>/dev/null; systemctl is-active --quiet sing-box 2>/dev/null && echo 'active' || true";
         if let Ok(output) = ssh.exec(check_cmd).await {
@@ -252,9 +253,13 @@ impl Kernel for SingBox {
             }
         }
 
-        ssh.upload("/etc/sing-box/config.json.new", config).await?;
-        ssh.exec(sing_box_apply_script()).await?;
-        Ok(())
+        crate::apply_staged_config(
+            ssh,
+            "/etc/sing-box/config.json.new",
+            config,
+            sing_box_apply_script(),
+        )
+        .await
     }
 
     async fn open_firewall(

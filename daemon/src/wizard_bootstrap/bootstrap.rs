@@ -6,7 +6,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use super::guard::DeployGuard;
 use super::types::{BootstrapEvent, BootstrapPlan};
-use super::util::ssh_password_run;
+use super::util::{accepted_host_fingerprint, ssh_password_run};
 use crate::http_util::path_segment_encode;
 use crate::ssh_subprocess::SubprocessSshTransport;
 use vpnctl_core::{KernelId, ProtocolId, Registry, RenderCtx, Server, ServerId, SshTransport};
@@ -83,6 +83,24 @@ async fn bootstrap_pipeline(
         Err(e) if e.starts_with("vpnctld cannot run sshpass") => fail!("probe", "{e}."),
         Err(e) => fail!("probe", "{e}. Re-check IP, port, SSH user and password."),
     }
+    send_step!(
+        "fingerprint",
+        "reading the host key accepted by the password login…"
+    );
+    let addr = plan.address.clone();
+    let port = plan.ssh_port;
+    let known_hosts = plan.known_hosts_path.clone();
+    let fingerprint = match tokio::task::spawn_blocking(move || {
+        accepted_host_fingerprint(&addr, port, &known_hosts)
+    })
+    .await
+    {
+        Ok(Ok(fp)) => fp,
+        Ok(Err(e)) => fail!("fingerprint", "{e}"),
+        Err(join_err) => fail!("fingerprint", "host-key lookup task failed: {join_err}"),
+    };
+    send_step!("fingerprint", "pinned {}", fingerprint);
+
     if plan.ssh_user != "root" {
         send_step!("probe", "checking passwordless sudo for {}…", plan.ssh_user);
         match ssh_password_run(
@@ -91,7 +109,7 @@ async fn bootstrap_pipeline(
             &plan.ssh_user,
             &plan.root_password,
             &plan.known_hosts_path,
-            None,
+            Some(&fingerprint),
             "sudo -n sh -c true",
         )
         .await
@@ -104,30 +122,6 @@ async fn bootstrap_pipeline(
             ),
         }
     }
-
-    send_step!(
-        "fingerprint",
-        "fetching host key fingerprint via ssh-keyscan…"
-    );
-    let addr = plan.address.clone();
-    let port = plan.ssh_port;
-    let fingerprint = match tokio::task::spawn_blocking(move || {
-        vpnctl_host_fingerprint::fetch_via_keyscan(&addr, port)
-    })
-    .await
-    {
-        Ok(Ok(fp)) => fp,
-        Ok(Err(e)) => fail!("fingerprint", "{e}"),
-        Err(join_err) => {
-            let cause = if join_err.is_panic() {
-                "panicked"
-            } else {
-                "cancelled"
-            };
-            fail!("fingerprint", "ssh-keyscan task {cause}: {join_err}");
-        }
-    };
-    send_step!("fingerprint", "pinned {}", fingerprint);
 
     send_step!(
         "push-key",
@@ -159,7 +153,8 @@ async fn bootstrap_pipeline(
         plan.deploy_key_path.clone(),
     )
     .port(plan.ssh_port)
-    .known_hosts(plan.known_hosts_path.clone());
+    .known_hosts(plan.known_hosts_path.clone())
+    .trusted_fingerprint(Some(fingerprint.clone()));
     if let Err(e) = ssh.exec("true").await {
         fail!(
             "verify-key",
@@ -187,7 +182,23 @@ async fn bootstrap_pipeline(
         .kernel(&kernel_id)
         .map(|k| k.supported_protocols())
         .unwrap_or_default();
-    let default_protocols = wizard_protocols(&plan.address, supported);
+    let default_protocols =
+        wizard_protocols(&plan.address, plan.ssh_port, supported.clone(), &registry);
+    for pid in &supported {
+        if !default_protocols.contains(pid)
+            && registry.protocol(pid).is_some_and(|p| {
+                p.effective_listen_ports(&std::collections::HashMap::new())
+                    .contains(&("tcp", plan.ssh_port))
+            })
+        {
+            send_step!(
+                "register",
+                "note: {} was skipped because its default TCP port {} is used by SSH.",
+                pid.0,
+                plan.ssh_port
+            );
+        }
+    }
     if plan.address.parse::<std::net::IpAddr>().is_err() {
         send_step!(
             "register",
@@ -206,8 +217,8 @@ async fn bootstrap_pipeline(
         jump_via: None,
         usage_coefficient: 1.0,
     };
-    if let Err(e) = inv.add_server(&server).await {
-        fail!("register", "inv.add_server: {e}");
+    if let Err(e) = inv.register_server(&server, "admin").await {
+        fail!("register", "inv.register_server: {e}");
     }
     if let Err(e) = inv
         .update_trusted_fingerprint(&server.id, &fingerprint)
@@ -370,7 +381,7 @@ async fn bootstrap_pipeline(
         }
         send_step!("apply", "{}: ok — service running with new config.", kid.0);
         if let Err(e) = kernel.open_firewall(&ssh, &ctx, &protocols).await {
-            send_step!("apply", "⚠ {}: firewall step skipped: {e}", kid.0);
+            fail!("apply", "{}: open_firewall failed: {e}", kid.0);
         }
     }
 
@@ -410,13 +421,22 @@ async fn bootstrap_pipeline(
         .await;
 }
 
-pub(super) fn wizard_protocols(address: &str, supported: Vec<ProtocolId>) -> Vec<ProtocolId> {
-    if address.parse::<std::net::IpAddr>().is_ok() {
-        supported
-    } else {
-        supported
-            .into_iter()
-            .filter(|pid| !matches!(pid.0.as_str(), "amneziawg2" | "amneziawg3"))
-            .collect()
-    }
+pub(super) fn wizard_protocols(
+    address: &str,
+    ssh_port: u16,
+    supported: Vec<ProtocolId>,
+    registry: &Registry,
+) -> Vec<ProtocolId> {
+    let literal_ip = address.parse::<std::net::IpAddr>().is_ok();
+    let secrets = std::collections::HashMap::new();
+    supported
+        .into_iter()
+        .filter(|pid| literal_ip || !matches!(pid.0.as_str(), "amneziawg2" | "amneziawg3"))
+        .filter(|pid| {
+            registry.protocol(pid).is_none_or(|p| {
+                !p.effective_listen_ports(&secrets)
+                    .contains(&("tcp", ssh_port))
+            })
+        })
+        .collect()
 }

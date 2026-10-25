@@ -559,3 +559,54 @@ async fn granted_user_uuid_lands_in_rendered_node_config() {
         "granted user's UUID must be present in the rendered inbounds[*].users[]"
     );
 }
+
+#[tokio::test]
+async fn failed_autodeploy_is_visible_even_without_pending_inventory_changes() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let mut server = s
+        .inv
+        .get_server(&ServerId("s0".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    // A distinct ID keeps the process-wide deploy guard independent of other tests.
+    server.id = ServerId("failed-without-pending".into());
+    s.inv.add_server(&server).await.unwrap();
+    s.inv
+        .audit("admin", "server.deploy", Some(&server.id.0), None)
+        .await
+        .unwrap();
+    assert!(!s.inv.server_pending_deploy(&server.id).await.unwrap());
+    let errors = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        vpnctld::wizard_bootstrap::queue_servers_redeploy(
+            vec![server.clone()],
+            &s.inv,
+            &s.registry,
+            &dir.path().join("absent-deploy-key"),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(errors.len(), 1);
+    assert!(!s.inv.server_pending_deploy(&server.id).await.unwrap());
+    assert_eq!(
+        vpnctld::wizard_bootstrap::autodeploy_status(&s.inv, &server.id.0)
+            .unwrap()
+            .phase,
+        vpnctld::wizard_bootstrap::AutodeployPhase::Failed,
+    );
+    let app = router(s);
+    for tab in ["status", "activity", "protocols", "grants", "setup"] {
+        let html = crate::common::fetch_html(
+            app.clone(),
+            &format!("/admin/servers/{}/{tab}", server.id.0),
+        )
+        .await;
+        assert!(html.contains(r#"data-deploy-state="failed""#), "{tab}");
+        assert!(!html.contains(r#"data-deploy-state="applied""#), "{tab}");
+        assert!(html.contains("automatic application failed"), "{tab}");
+    }
+}

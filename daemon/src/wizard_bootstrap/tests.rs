@@ -744,7 +744,12 @@ fn wizard_hostname_skips_awg_but_keeps_other_protocols() {
         ProtocolId("amneziawg3".into()),
     ];
     assert_eq!(
-        super::bootstrap::wizard_protocols("vpn.example.org", supported),
+        super::bootstrap::wizard_protocols(
+            "vpn.example.org",
+            22,
+            supported,
+            &crate::app::build_registry().unwrap(),
+        ),
         vec![
             ProtocolId("vless+reality".into()),
             ProtocolId("hysteria2".into())
@@ -763,8 +768,144 @@ fn wizard_literal_ip_preserves_all_default_protocols() {
     assert!(supported.iter().any(|p| p.0 == "amneziawg3"));
     for address in ["198.51.100.42", "2001:db8::42"] {
         assert_eq!(
-            super::bootstrap::wizard_protocols(address, supported.clone()),
+            super::bootstrap::wizard_protocols(
+                address,
+                22,
+                supported.clone(),
+                &crate::app::build_registry().unwrap(),
+            ),
             supported
         );
     }
+}
+
+#[test]
+fn wizard_skips_every_tcp_protocol_conflicting_with_ssh() {
+    let registry = crate::app::build_registry().unwrap();
+    let supported = registry
+        .kernel(&KernelId("sing-box".into()))
+        .unwrap()
+        .supported_protocols();
+    for (ssh_port, skipped) in [
+        (443, Some("vless+reality")),
+        (8388, Some("shadowsocks-2022")),
+        (8643, Some("trojan")),
+        (8843, Some("anytls")),
+        (8443, None),
+        (8444, None),
+        (51821, None),
+        (51822, None),
+    ] {
+        let selected = super::bootstrap::wizard_protocols(
+            "198.51.100.42",
+            ssh_port,
+            supported.clone(),
+            &registry,
+        );
+        let expected: Vec<_> = supported
+            .iter()
+            .filter(|pid| Some(pid.0.as_str()) != skipped)
+            .cloned()
+            .collect();
+        assert_eq!(selected, expected, "SSH port {ssh_port}");
+        if ssh_port == 443 {
+            assert!(!selected.contains(&ProtocolId("vless+reality".into())));
+        }
+        if ssh_port == 8443 {
+            assert!(selected.contains(&ProtocolId("tuic-v5".into())));
+        }
+    }
+}
+
+#[tokio::test]
+async fn redeploy_firewall_failure_records_failed_audit_and_keeps_server_pending() {
+    #[derive(Debug)]
+    struct FirewallFailure;
+
+    #[async_trait::async_trait]
+    impl vpnctl_core::Kernel for FirewallFailure {
+        fn id(&self) -> KernelId {
+            KernelId("firewall-test".into())
+        }
+        fn supported_protocols(&self) -> Vec<ProtocolId> {
+            vec![]
+        }
+        async fn ensure_installed(
+            &self,
+            _: &dyn vpnctl_core::SshTransport,
+        ) -> vpnctl_core::Result<()> {
+            Ok(())
+        }
+        fn render_config(
+            &self,
+            _: &RenderCtx<'_>,
+            _: &[vpnctl_core::User],
+            _: &[&dyn vpnctl_core::Protocol],
+        ) -> vpnctl_core::Result<Vec<u8>> {
+            Ok(b"{}".to_vec())
+        }
+        async fn apply_config(
+            &self,
+            _: &dyn vpnctl_core::SshTransport,
+            _: &[u8],
+        ) -> vpnctl_core::Result<()> {
+            Ok(())
+        }
+        async fn open_firewall(
+            &self,
+            _: &dyn vpnctl_core::SshTransport,
+            _: &RenderCtx<'_>,
+            _: &[&dyn vpnctl_core::Protocol],
+        ) -> vpnctl_core::Result<()> {
+            Err(vpnctl_core::CoreError::Transport("ufw allow failed".into()))
+        }
+        async fn restart(&self, _: &dyn vpnctl_core::SshTransport) -> vpnctl_core::Result<()> {
+            panic!("redeploy uses apply_config")
+        }
+        async fn status(
+            &self,
+            _: &dyn vpnctl_core::SshTransport,
+        ) -> vpnctl_core::Result<vpnctl_core::KernelStatus> {
+            panic!("redeploy must not need status")
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let inv = vpnctl_inventory::SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let mut registry = vpnctl_core::Registry::new();
+    registry.register_kernel(Box::new(FirewallFailure)).unwrap();
+    let mut server = redeploy_test_server("redeploy-firewall-failure", vec![]);
+    server.kernels = vec![KernelId("firewall-test".into())];
+    inv.add_server(&server).await.unwrap();
+    inv.set_reserved_ports(&server.id, &[12345]).await.unwrap();
+    assert!(inv.server_pending_deploy(&server.id).await.unwrap());
+    let key = dir.path().join("unused-deploy-key");
+    std::fs::write(&key, "fixture: kernel methods do not invoke SSH").unwrap();
+
+    let events =
+        collect_redeploy_bounded(server.clone(), inv.clone(), Arc::new(registry), key).await;
+    assert!(terminal_error(&events).contains("firewall-test: open_firewall failed: "));
+    assert!(terminal_error(&events).contains("ufw allow failed"));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, BootstrapEvent::Ok { .. }))
+    );
+    let audits = inv.audit_for_server(&server.id.0, 10).await.unwrap();
+    let deploy = audits
+        .iter()
+        .find(|entry| entry.action.starts_with("server.deploy"))
+        .unwrap();
+    assert_eq!(deploy.action, "server.deploy.failed");
+    let payload = deploy.payload.as_ref().unwrap();
+    assert!(
+        payload["ssh_errors"][0]
+            .as_str()
+            .unwrap()
+            .contains("open_firewall failed")
+    );
+    assert_eq!(payload["configs_applied"], 1);
+    assert!(inv.server_pending_deploy(&server.id).await.unwrap());
 }

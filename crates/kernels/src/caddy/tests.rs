@@ -1446,7 +1446,7 @@ async fn caddy_apply_naive_executes_script_retiring_vlessws() {
     assert_eq!(
         ssh.executed_commands().expect("command log"),
         vec![
-            "install -o root -g root -m 0600 /dev/null /etc/caddy/Caddyfile.new".to_string(),
+            "install -o root -g root -m 0600 /dev/null '/etc/caddy/Caddyfile.new'".to_string(),
             naive_apply_script(),
         ]
     );
@@ -1471,7 +1471,8 @@ async fn caddy_apply_vlessws_executes_bundle_apply_script() {
     assert_eq!(
         ssh.executed_commands().expect("command log"),
         vec![
-            "install -o root -g root -m 0600 /dev/null /etc/caddy/.vlessws-bundle.new".to_string(),
+            "install -o root -g root -m 0600 /dev/null '/etc/caddy/.vlessws-bundle.new'"
+                .to_string(),
             vlessws_apply_script(),
         ]
     );
@@ -1705,4 +1706,95 @@ async fn caddy_and_amneziawg_open_firewall_for_effective_protocol_ports() {
         assert!(error.to_string().contains("fixture firewall failure"));
         kernel.open_firewall(&ssh, &ctx, &[]).await.unwrap();
     }
+}
+
+#[test]
+fn runtime_firewall_failure_aborts_provisioning() {
+    let runtime = caddy_runtime_provision_script();
+    let start = runtime.find("if command -v ufw").unwrap();
+    let firewall = runtime[start..]
+        .split("command -v /usr/local/bin/caddy")
+        .next()
+        .unwrap();
+    for (state, failed_port, success) in [
+        ("inactive", "80/tcp", true),
+        ("active", "none", true),
+        ("active", "80/tcp", false),
+        ("active", "443/tcp", false),
+    ] {
+        let mocks = r#"
+            ufw() {
+                case "$1" in
+                    status) echo "Status: $VPNCTL_UFW_STATE" ;;
+                    allow) [ "$2" != "$VPNCTL_FAILED_PORT" ] ;;
+                    *) return 99 ;;
+                esac
+            }
+        "#;
+        let output = std::process::Command::new("sh")
+            .args(["-c", &format!("{mocks}\nset -eu\n{firewall}")])
+            .env("VPNCTL_UFW_STATE", state)
+            .env("VPNCTL_FAILED_PORT", failed_port)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), success, "{output:?}");
+    }
+}
+
+#[test]
+fn vlessws_apply_firewall_failure_rolls_back_e2e() {
+    for failed_port in ["80/tcp", "8443/tcp"] {
+        sim_env(
+            &vlessws_apply_script(),
+            &[
+                ("Caddyfile", "OLD_CADDY"),
+                ("vlessws-singbox.json", "OLD_SB"),
+                (".vlessws-deploy.env", "OLD_ENV"),
+                (".vlessws-bundle.new", ""),
+            ],
+            &format!(
+                r#"
+                ufw() {{
+                    case "$1" in
+                        status) echo 'Status: active' ;;
+                        allow) [ "$2" != '{failed_port}' ] ;;
+                        *) return 99 ;;
+                    esac
+                }}
+            "#
+            ),
+            r#"
+                [ "$STATUS" -eq 1 ] || exit 1
+                echo "$OUTPUT" | grep -q "rolling back Caddyfile to previous config" || exit 1
+                [ "$(cat "$TMP_DIR/etc/caddy/Caddyfile")" = "OLD_CADDY" ] || exit 1
+                [ "$(cat "$TMP_DIR/etc/caddy/vlessws-singbox.json")" = "OLD_SB" ] || exit 1
+                [ "$(cat "$TMP_DIR/etc/caddy/.vlessws-deploy.env")" = "OLD_ENV" ] || exit 1
+            "#,
+        );
+    }
+}
+
+#[test]
+fn caddy_validation_failure_removes_all_secret_staging_e2e() {
+    sim_env(
+        &vlessws_apply_script(),
+        &[(".vlessws-bundle.new", "")],
+        "caddy() { return 1; }",
+        r#"
+        [ "$STATUS" -eq 1 ] || exit 1
+        for name in .vlessws-bundle.new Caddyfile.new vlessws-singbox.json.new .vlessws-deploy.env.new; do
+            [ ! -e "$TMP_DIR/etc/caddy/$name" ] || exit 1
+        done
+        "#,
+    );
+    sim_env(
+        &naive_apply_script(),
+        &[("Caddyfile.new", "fixture-secret"), ("Caddyfile", "OLD")],
+        "caddy() { return 1; }",
+        r#"
+        [ "$STATUS" -eq 1 ] || exit 1
+        [ ! -e "$TMP_DIR/etc/caddy/Caddyfile.new" ] || exit 1
+        grep -q OLD "$TMP_DIR/etc/caddy/Caddyfile" || exit 1
+        "#,
+    );
 }

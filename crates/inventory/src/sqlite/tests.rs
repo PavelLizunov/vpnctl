@@ -528,6 +528,113 @@ async fn server_roundtrip() -> Result<()> {
 }
 
 #[tokio::test]
+async fn concurrent_registration_rejects_the_same_canonical_address() -> Result<()> {
+    for (left_address, right_address) in [
+        ("192.0.2.1", "192.0.2.1"),
+        ("2001:0db8:0:0:0:0:0:1", "2001:db8::1"),
+        ("LOCALHOST", "localhost"),
+    ] {
+        let inv = fresh().await;
+        let mut left = sample_server("left");
+        left.address = left_address.into();
+        let mut right = sample_server("right");
+        right.address = right_address.into();
+
+        // Hold the writer so both registrations start before either can insert.
+        let writer = inv.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let registrations = async {
+            tokio::join!(
+                inv.register_server(&left, "admin"),
+                inv.register_server(&right, "cli"),
+            )
+        };
+        tokio::pin!(registrations);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut registrations)
+                .await
+                .is_err()
+        );
+        writer.commit().await?;
+        let (left_result, right_result) = registrations.await;
+        let results = [left_result, right_result];
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let error = results.into_iter().find_map(|result| result.err()).unwrap();
+        assert!(matches!(error, SqliteInventoryError::AlreadyExists(_)));
+        let servers = inv.list_servers().await?;
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].kernels.len(), 1);
+        assert_eq!(servers[0].enabled_protocols.len(), 2);
+        assert_eq!(
+            servers[0].address,
+            if servers[0].id == left.id {
+                left_address
+            } else {
+                right_address
+            }
+        );
+        let audit = inv.recent_audit(10).await?;
+        assert_eq!(
+            audit.len(),
+            1,
+            "rejected registration must not write an audit"
+        );
+        assert_eq!(audit[0].action, "server.register");
+        assert_eq!(audit[0].target.as_deref(), Some(servers[0].id.0.as_str()));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn registration_rejects_duplicate_id_without_another_audit() -> Result<()> {
+    let inv = fresh().await;
+    let server = sample_server("existing");
+    inv.register_server(&server, "admin").await?;
+    let mut duplicate = server.clone();
+    duplicate.address = "192.0.2.2".into();
+    let error = inv.register_server(&duplicate, "cli").await.unwrap_err();
+    assert!(
+        matches!(error, SqliteInventoryError::AlreadyExists(ref what) if what == "server existing")
+    );
+    assert_eq!(inv.count_servers().await?, 1);
+    assert_eq!(inv.recent_audit(10).await?.len(), 1);
+    assert_eq!(
+        inv.get_server(&server.id).await?.unwrap().address,
+        server.address
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn registration_rolls_back_when_audit_fails() -> Result<()> {
+    let inv = fresh().await;
+    sqlx::query(
+        "CREATE TRIGGER reject_registration_audit BEFORE INSERT ON audit_log
+         WHEN NEW.action = 'server.register'
+         BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END",
+    )
+    .execute(inv.pool())
+    .await?;
+    assert!(
+        inv.register_server(&sample_server("rollback"), "admin")
+            .await
+            .is_err()
+    );
+    assert_eq!(inv.count_servers().await?, 0);
+    for table in [
+        "server_kernels",
+        "server_protocols",
+        "server_resolved_addresses",
+    ] {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+            .fetch_one(inv.pool())
+            .await?;
+        assert_eq!(count, 0, "registration must roll back {table}");
+    }
+    assert!(inv.recent_audit(10).await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
 async fn ssh_user_update_and_audit_are_one_mutation() -> Result<()> {
     let inv = fresh().await;
     inv.add_server(&sample_server("ssh-user")).await?;
@@ -1345,5 +1452,64 @@ async fn insert_alert_if_no_unacked_source_event_and_ordinary_semantics() -> Res
         "global alert with identical string _source_event must not reopen after ack"
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn revoke_rolls_back_both_delete_and_audit_on_failure() -> Result<()> {
+    for trigger in [
+        "CREATE TRIGGER fail_revoke_audit BEFORE INSERT ON audit_log
+         WHEN NEW.action = 'user.revoke'
+         BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END",
+        "CREATE TRIGGER fail_revoke_delete BEFORE DELETE ON grants
+         BEGIN SELECT RAISE(ABORT, 'delete unavailable'); END",
+    ] {
+        let inv = fresh().await;
+        let user = sample_user("alice");
+        let server = sample_server("srv");
+        inv.add_user(&user).await?;
+        inv.add_server(&server).await?;
+        inv.grant(&user.id, &server.id).await?;
+        sqlx::query(trigger).execute(&inv.pool).await?;
+
+        assert!(
+            inv.revoke_audited(&user.id, &server.id, "admin", "test")
+                .await
+                .is_err()
+        );
+        assert_eq!(inv.count_grants().await?, 1);
+        assert!(inv.recent_audit(10).await?.is_empty());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_revokes_audit_one_mutation_and_mark_server_pending() -> Result<()> {
+    let inv = fresh().await;
+    let user = sample_user("alice");
+    let server = sample_server("srv");
+    inv.add_user(&user).await?;
+    inv.add_server(&server).await?;
+    inv.grant(&user.id, &server.id).await?;
+    inv.audit("admin", "server.deploy", Some(&server.id.0), None)
+        .await?;
+    assert!(!inv.server_pending_deploy(&server.id).await?);
+
+    let (first, second) = tokio::join!(
+        inv.revoke_audited(&user.id, &server.id, "admin", "test"),
+        inv.revoke_audited(&user.id, &server.id, "admin", "test"),
+    );
+    assert_ne!(first?, second?, "only one request deletes the grant");
+    assert_eq!(inv.count_grants().await?, 0);
+    assert!(inv.server_pending_deploy(&server.id).await?);
+    // The unaudited-call-site compatibility wrapper must also avoid no-op rows.
+    inv.revoke(&user.id, &server.id).await?;
+    let rows = inv.recent_audit(10).await?;
+    let revokes: Vec<_> = rows.iter().filter(|r| r.action == "user.revoke").collect();
+    assert_eq!(revokes.len(), 1);
+    assert_eq!(revokes[0].actor, "admin");
+    assert_eq!(revokes[0].target.as_deref(), Some("alice"));
+    assert_eq!(revokes[0].payload.as_ref().unwrap()["server"], "srv");
+    assert_eq!(revokes[0].payload.as_ref().unwrap()["source"], "test");
     Ok(())
 }

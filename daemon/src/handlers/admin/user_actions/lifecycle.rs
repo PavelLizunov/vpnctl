@@ -23,6 +23,10 @@ pub(crate) async fn user_set_traffic_limit(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     }
 
+    if form_field(&body, "limit_loaded").as_deref() != Some("1") {
+        return bad_request("traffic limit was not loaded — reload the user page before saving");
+    }
+
     let limit_gib: f64 = form_field(&body, "limit_gib")
         .and_then(|s| s.parse().ok())
         .unwrap_or(0.0);
@@ -124,7 +128,7 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
             "user.add",
             Some(&id_decoded),
             Some(&serde_json::json!({
-                "uuid": user.uuid,
+                "uuid_set": true,
                 "wg_pubkey_set": user.wireguard_pubkey.is_some(),
                 "wg_keypair_provenance": "server-generated",
             })),

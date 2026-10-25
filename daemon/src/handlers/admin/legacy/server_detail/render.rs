@@ -469,7 +469,7 @@ pub(super) async fn server_detail_render(
             match operation_status.as_ref().map(|s| s.phase) {
                 Some(crate::wizard_bootstrap::AutodeployPhase::Queued) => "queued",
                 Some(crate::wizard_bootstrap::AutodeployPhase::Running) => "running",
-                Some(crate::wizard_bootstrap::AutodeployPhase::Failed) if pending_deploy != Some(false) => "failed",
+                Some(crate::wizard_bootstrap::AutodeployPhase::Failed) => "failed",
                 _ => match pending_deploy { Some(true) => "pending", Some(false) => "applied", None => "unknown" },
             }
         };
@@ -478,7 +478,7 @@ pub(super) async fn server_detail_render(
             @match deploy_state {
                 "queued" => { (crate::i18n::tr(lang, "changes saved; queued for application", "изменения сохранены; ожидают применения")) }
                 "running" => { (crate::i18n::tr(lang, "applying; further changes will be included in a follow-up pass", "применяется; новые изменения войдут в следующий проход")) }
-                "failed" => { (crate::i18n::tr(lang, "automatic application failed; changes remain pending. Retry deployment using the Deploy button.", "автоприменение не завершено; изменения ожидают применения. Повтори через кнопку деплоя.")) }
+                "failed" => { (crate::i18n::tr(lang, "automatic application failed. Retry deployment using the Deploy button.", "автоприменение не завершено. Повтори через кнопку деплоя.")) }
                 "pending" => { (crate::i18n::tr(lang, "saved; awaiting application", "сохранена; ожидает применения")) }
                 "applied" => { (crate::i18n::tr(lang, "applied according to the deployment audit — not a VPN connectivity test", "применена по журналу деплоя — это не проверка VPN-подключения")) }
                 _ => { (crate::i18n::tr(lang, "status unknown; reload to retry reading deployment state", "статус неизвестен; обнови страницу для повторной проверки")) }

@@ -1491,6 +1491,183 @@ fn remediation_requires_a_verified_healthy_probe() {
 }
 
 #[tokio::test]
+async fn remediation_skips_a_busy_node_without_waiting() {
+    let (_dir, inv) = fresh_inv().await;
+    let server = probeable_server("remediation-busy");
+    inv.add_server(&server).await.unwrap();
+    record_singbox_health(&inv, &server.id, false).await;
+    let held = crate::wizard_bootstrap::DeployGuard::try_acquire(&server.id.0).unwrap();
+
+    assert!(
+        prepare_remediation(&inv, &server.id, Remediation::RestartSingbox)
+            .await
+            .is_none()
+    );
+    let result = tokio::time::timeout(
+        Duration::from_millis(100),
+        auto_remediate_alert(
+            &inv,
+            &server,
+            1,
+            "server.singbox.down",
+            Remediation::RestartSingbox,
+            "test server",
+        ),
+    )
+    .await
+    .expect("busy remediation must not wait for the deploy lock");
+    assert!(!result);
+    drop(held);
+    let _cli_lock = vpnctl_inventory::NodeOperationLock::try_acquire(&server.id.0)
+        .unwrap()
+        .unwrap();
+    assert!(
+        prepare_remediation(&inv, &server.id, Remediation::RestartSingbox)
+            .await
+            .is_none()
+    );
+    assert!(inv.recent_audit(10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn remediation_rechecks_disabled_kernel_after_deploy() {
+    let (_dir, inv) = fresh_inv().await;
+    let stale_server = probeable_server("remediation-disabled");
+    inv.add_server(&stale_server).await.unwrap();
+    record_singbox_health(&inv, &stale_server.id, false).await;
+    let held = crate::wizard_bootstrap::DeployGuard::try_acquire(&stale_server.id.0).unwrap();
+    inv.remove_server_kernel(&stale_server.id, &vpnctl_core::KernelId("sing-box".into()))
+        .await
+        .unwrap();
+    // Another enabled kernel must not make sing-box eligible for a restart.
+    inv.add_server_kernel(&stale_server.id, &vpnctl_core::KernelId("xray".into()))
+        .await
+        .unwrap();
+    drop(held);
+
+    assert!(
+        prepare_remediation(&inv, &stale_server.id, Remediation::RestartSingbox)
+            .await
+            .is_none()
+    );
+    assert!(
+        !auto_remediate_alert(
+            &inv,
+            &stale_server,
+            1,
+            "server.singbox.down",
+            Remediation::RestartSingbox,
+            "test server",
+        )
+        .await
+    );
+    assert!(inv.recent_audit(10).await.unwrap().is_empty());
+    assert!(crate::wizard_bootstrap::DeployGuard::try_acquire(&stale_server.id.0).is_some());
+}
+
+#[tokio::test]
+async fn remediation_rechecks_recovered_condition_after_deploy() {
+    let (_dir, inv) = fresh_inv().await;
+    let server = probeable_server("remediation-recovered");
+    inv.add_server(&server).await.unwrap();
+    record_singbox_health(&inv, &server.id, false).await;
+    let held = crate::wizard_bootstrap::DeployGuard::try_acquire(&server.id.0).unwrap();
+    record_singbox_health(&inv, &server.id, true).await;
+    drop(held);
+
+    assert!(
+        prepare_remediation(&inv, &server.id, Remediation::RestartSingbox)
+            .await
+            .is_none()
+    );
+    assert!(
+        !auto_remediate_alert(
+            &inv,
+            &server,
+            1,
+            "server.singbox.down",
+            Remediation::RestartSingbox,
+            "test server",
+        )
+        .await
+    );
+    assert!(inv.recent_audit(10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn remediation_skips_unknown_health() {
+    let (_dir, inv) = fresh_inv().await;
+    let server = probeable_server("remediation-unknown");
+    inv.add_server(&server).await.unwrap();
+    assert!(
+        prepare_remediation(&inv, &server.id, Remediation::RestartSingbox)
+            .await
+            .is_none()
+    );
+    assert!(inv.recent_audit(10).await.unwrap().is_empty());
+}
+
+#[test]
+fn remediation_checks_current_condition_thresholds() {
+    let mut current = row(
+        0,
+        Some(false),
+        Some(false),
+        Some(90),
+        Some(100),
+        None,
+        None,
+        Some(SINGBOX_LOG_TRIGGER_BYTES),
+    );
+    for plan in [
+        Remediation::RestartSingbox,
+        Remediation::StartFail2ban,
+        Remediation::CleanDisk,
+        Remediation::RotateSingboxLog,
+    ] {
+        assert!(plan.condition_holds(&current));
+    }
+    current.sing_box_active = Some(true);
+    current.fail2ban_active = None;
+    current.disk_used_mib = Some(89);
+    current.sing_box_log_bytes = Some(SINGBOX_LOG_TRIGGER_BYTES - 1);
+    for plan in [
+        Remediation::RestartSingbox,
+        Remediation::StartFail2ban,
+        Remediation::CleanDisk,
+        Remediation::RotateSingboxLog,
+    ] {
+        assert!(!plan.condition_holds(&current));
+    }
+}
+
+#[tokio::test]
+async fn remediation_holds_deploy_guard_and_uses_current_server() {
+    let (_dir, inv) = fresh_inv().await;
+    let server = probeable_server("remediation-current");
+    inv.add_server(&server).await.unwrap();
+    record_singbox_health(&inv, &server.id, false).await;
+    inv.update_server_address(&server.id, "192.0.2.42", 2222, "admin")
+        .await
+        .unwrap();
+
+    let (guard, current) = prepare_remediation(&inv, &server.id, Remediation::RestartSingbox)
+        .await
+        .expect("enabled kernel with a current failure is eligible");
+    assert_eq!(current.address, "192.0.2.42");
+    assert_eq!(current.ssh_port, 2222);
+    assert_eq!(current.ssh_user, "admin");
+    assert!(crate::wizard_bootstrap::DeployGuard::try_acquire(&server.id.0).is_none());
+    assert!(
+        vpnctl_inventory::NodeOperationLock::try_acquire(&server.id.0)
+            .unwrap()
+            .is_none()
+    );
+    drop(guard);
+    assert!(crate::wizard_bootstrap::DeployGuard::try_acquire(&server.id.0).is_some());
+}
+
+#[tokio::test]
 async fn scan_once_ack_then_rescan_identical_pair_does_not_reopen() {
     let (_dir, inv) = fresh_inv().await;
     let server = probeable_server("srv-ack-rescan");

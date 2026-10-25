@@ -1,9 +1,12 @@
 use std::time::Duration;
 
-use vpnctl_core::SshTransport;
-use vpnctl_inventory::SqliteInventory;
+use vpnctl_core::{Server, ServerId, SshTransport};
+use vpnctl_inventory::{NodeHealthRow, SqliteInventory};
 
-use super::diff::{DISK_PRESSURE_RECOVER_PCT, SINGBOX_LOG_TRIGGER_BYTES};
+use super::diff::{
+    DISK_PRESSURE_RECOVER_PCT, DISK_PRESSURE_TRIGGER_PCT, SINGBOX_LOG_TRIGGER_BYTES, disk_pct,
+};
+use crate::wizard_bootstrap::DeployGuard;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Remediation {
@@ -86,6 +89,17 @@ impl Remediation {
         }
     }
 
+    pub(super) fn condition_holds(self, row: &NodeHealthRow) -> bool {
+        match self {
+            Self::RestartSingbox => row.sing_box_active == Some(false),
+            Self::StartFail2ban => row.fail2ban_active == Some(false),
+            Self::CleanDisk => disk_pct(row).is_some_and(|pct| pct >= DISK_PRESSURE_TRIGGER_PCT),
+            Self::RotateSingboxLog => row
+                .sing_box_log_bytes
+                .is_some_and(|bytes| bytes >= SINGBOX_LOG_TRIGGER_BYTES),
+        }
+    }
+
     pub(crate) fn recovery_payload(self, probe: &crate::node_probe::Probe) -> serde_json::Value {
         match self {
             Self::RestartSingbox | Self::StartFail2ban => serde_json::json!({
@@ -106,6 +120,68 @@ impl Remediation {
     }
 }
 
+pub(super) async fn prepare_remediation(
+    inv: &SqliteInventory,
+    server_id: &ServerId,
+    plan: Remediation,
+) -> Option<(DeployGuard, Server)> {
+    let Some(guard) = DeployGuard::try_acquire(&server_id.0) else {
+        tracing::info!(
+            target = "vpnctld::health_remediation",
+            server = %server_id.0,
+            "skipping automatic remediation: node operation lock is busy or unavailable"
+        );
+        return None;
+    };
+    let server = match inv.get_server(server_id).await {
+        Ok(Some(server)) => server,
+        Ok(None) => return None,
+        Err(error) => {
+            tracing::warn!(
+                target = "vpnctld::health_remediation",
+                server = %server_id.0,
+                %error,
+                "could not re-read server before automatic remediation"
+            );
+            return None;
+        }
+    };
+    if !crate::node_probe_poller::probeable(&server)
+        || (matches!(
+            plan,
+            Remediation::RestartSingbox | Remediation::RotateSingboxLog
+        ) && !server.kernels.iter().any(|kid| kid.0 == "sing-box"))
+    {
+        tracing::info!(
+            target = "vpnctld::health_remediation",
+            server = %server_id.0,
+            "skipping automatic remediation: kernel is no longer enabled"
+        );
+        return None;
+    }
+    let latest = match inv.latest_node_health(server_id).await {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::warn!(
+                target = "vpnctld::health_remediation",
+                server = %server_id.0,
+                %error,
+                "could not re-read health before automatic remediation"
+            );
+            return None;
+        }
+    };
+    if !latest.as_ref().is_some_and(|row| plan.condition_holds(row)) {
+        tracing::info!(
+            target = "vpnctld::health_remediation",
+            server = %server_id.0,
+            "skipping automatic remediation: condition is no longer present or unknown"
+        );
+        return None;
+    }
+    Some((guard, server))
+}
+
 pub(crate) async fn auto_remediate_alert(
     inv: &SqliteInventory,
     server: &vpnctl_core::Server,
@@ -114,6 +190,10 @@ pub(crate) async fn auto_remediate_alert(
     plan: Remediation,
     subject: &str,
 ) -> bool {
+    let Some((_operation_guard, server)) = prepare_remediation(inv, &server.id, plan).await else {
+        return false;
+    };
+    let server = &server;
     let jump = match inv.resolve_jump_host(server).await {
         Ok(j) => j,
         Err(e) => {

@@ -682,6 +682,10 @@ fn run_child_with_timeout(
 
 #[async_trait]
 impl SshTransport for SubprocessSshTransport {
+    fn target_port(&self) -> Option<u16> {
+        Some(self.port)
+    }
+
     async fn exec(&self, cmd: &str) -> Result<String> {
         let bytes = self.run(self.privileged_command(cmd), None).await?;
         String::from_utf8(bytes).map_err(|e| {
@@ -828,6 +832,18 @@ mod tests {
             jump_fingerprint: FP_A.into(),
             target_fingerprint: FP_B.into(),
         }
+    }
+
+    #[test]
+    fn target_port_reports_inventory_port_even_with_a_jump_host() {
+        let transport = SubprocessSshTransport::new("203.0.113.7", "root", PathBuf::from("key"));
+        assert_eq!(transport.target_port(), Some(22));
+        assert_eq!(make_transport().target_port(), Some(2222));
+        assert_eq!(
+            make_transport().with_jump(Some(route())).target_port(),
+            Some(2222)
+        );
+        assert_eq!(crate::MockTransport::new().target_port(), None);
     }
 
     #[test]

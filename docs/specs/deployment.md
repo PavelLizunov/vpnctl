@@ -66,6 +66,15 @@ traps remove both uploads and stages. A node-local
 `/run/lock/vpnctl-singbox-install.lock` (`flock -w 300`) serializes every shared
 backup, install, health-check, and rollback path.
 
+Secret-bearing node configs are uploaded only after their staging file is
+created root:root `0600`. Upload/apply errors attempt staging cleanup; apply
+scripts also clean stages on exit and handled signals, including unpacked
+Caddy bundle members and AWG validation copies. Atomic installation keeps the
+existing live ownership/modes: sing-box and xray `0640` with their service
+owner, Caddyfile root:caddy `0640`, Caddy's sing-box backend root:root `0600`,
+and AWG root:root `0600`. AWG failure diagnostics must not print stripped
+configs containing private or preshared keys.
+
 ## 3. Runtime constraints (learned from incidents)
 
 - **glibc hazard.** Prod is Debian bookworm (glibc 2.36). Any dependency that

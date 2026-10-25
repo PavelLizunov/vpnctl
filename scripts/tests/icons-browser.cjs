@@ -14,7 +14,7 @@ const ids = [...fs.readFileSync(path.join(assets, 'icons.svg'), 'utf8').matchAll
 const mime = { '.css': 'text/css', '.js': 'application/javascript', '.svg': 'image/svg+xml', '.woff2': 'font/woff2' };
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vpnctl-icon-browser-'));
 let browser;
-(async () => {
+(async function adminSseAndIconRegressions() {
   assert(process.env.CHROME_BIN, 'CHROME_BIN must name a locally installed Chromium');
   browser = await chromium.launch({ executablePath: process.env.CHROME_BIN, headless: true,
     env: { ...process.env, HOME: home, XDG_CONFIG_HOME: home, XDG_CACHE_HOME: home },
@@ -27,6 +27,9 @@ let browser;
       const unexpected = [];
       await context.route('**/*', async route => {
         const req = route.request(), url = new URL(req.url());
+        if (req.method() === 'POST' && url.origin === 'http://vpnctl.test' && url.pathname === '/admin/sse-ticket') {
+          return route.fulfill({ contentType: 'text/plain', body: 'synthetic-start-ticket' });
+        }
         if (req.method() === 'GET' && url.origin === 'http://vpnctl.test') {
           if (req.isNavigationRequest() && url.pathname === current.route) {
             return route.fulfill({ contentType: 'text/html', body: fs.readFileSync(path.join(fixtures, current.file)) });
@@ -47,11 +50,24 @@ let browser;
         window.EventSource = class {
           constructor() { this.events = {}; window.__sources.push(this); }
           addEventListener(event, callback) { this.events[event] = callback; }
-          close() {}
+          close() { this.closed = true; }
           emit(event, data) { this.events[event]?.(data === undefined ? {} : { data: JSON.stringify(data) }); }
         };
         const timeout = window.setTimeout;
-        window.setTimeout = (fn, ms, ...args) => ms === 1200 || ms === 1400 ? 0 : timeout(fn, ms, ...args);
+        const cancel = window.clearTimeout;
+        window.__reloadTimers = new Set();
+        window.setTimeout = (fn, ms, ...args) => {
+          if (ms === 1200 || ms === 1400) return 0;
+          const id = timeout(ms === 5000 ? () => {} : fn, ms, ...args);
+          if (ms === 5000) window.__reloadTimers.add(id);
+          return id;
+        };
+        window.clearTimeout = id => { window.__reloadTimers.delete(id); cancel(id); };
+        document.addEventListener('DOMContentLoaded', () => {
+          const marker = document.createElement('div');
+          marker.setAttribute('data-reload-after', '5');
+          document.body.appendChild(marker);
+        });
       });
       const page = await context.newPage();
       page.on('pageerror', error => unexpected.push(error.message));
@@ -84,23 +100,58 @@ let browser;
             const label = button.locator('[data-icon-label]');
             assert.equal(await label.count(), 1);
             for (const terminal of ['error', 'transport', 'ok']) {
+              await page.reload({ waitUntil: 'load' });
+              assert.equal(await page.evaluate(() => window.__reloadTimers.size), 1);
+              const sources = await page.evaluate(() => window.__sources.length);
               await button.evaluate(node => node.click());
+              await page.waitForFunction(count => window.__sources.length > count, sources);
               assert(await button.isDisabled());
+              assert.equal(await page.evaluate(() => window.__reloadTimers.size), 0, 'R4-18: SSE start must cancel page refresh');
               assert.equal(await button.locator('.ed-icon').count(), 1);
               await page.evaluate(event => window.__sources.at(-1).emit(event === 'transport' ? 'error' : event,
                 event === 'transport' ? undefined : { message: 'Synthetic browser check' }), terminal);
               assert((await label.textContent()).trim());
               assert.equal(await button.locator('.ed-icon').count(), 1);
-              assert.equal(await button.isDisabled(), terminal === 'ok');
+              assert.equal(await button.isDisabled(), terminal !== 'error', 'R4-14: transport loss must keep start disabled');
+              assert(await page.evaluate(() => window.__sources.at(-1).closed));
+              if (terminal === 'transport') {
+                const log = page.locator('#' + (await button.getAttribute('data-log') || 'deploy-log'));
+                assert((await log.textContent()).includes(current.lang === 'ru' ? 'операция может ещё выполняться' : 'operation may still be running'));
+                await button.evaluate(node => node.click());
+                assert.equal(await page.evaluate(() => window.__sources.length), sources + 1, 'R4-14: disabled retry must not start another operation');
+              }
               if (terminal === 'ok') assert.equal(await button.locator('use').getAttribute('href'), '/admin/assets/icons.svg#check');
               transitions++;
             }
           }
           const phases = await page.locator('[data-step-phase]').evaluateAll(nodes => nodes.map(n => n.dataset.stepPhase));
-          for (const phase of phases) await page.evaluate(phase => window.__sources.at(-1).emit('step', { phase, message: 'Synthetic phase' }), phase);
+          if (phases.length) {
+            assert.equal(await page.evaluate(() => window.__reloadTimers.size), 0, 'R4-18: autostart must cancel page refresh');
+            for (let i = 0; i < phases.length; i++) {
+              const phase = phases[i];
+              for (let repeat = 0; repeat < 2; repeat++) {
+                await page.evaluate(phase => window.__sources.at(-1).emit('step', { phase, message: 'Synthetic phase' }), phase);
+                const marks = await page.locator('.step-mark use').evaluateAll(nodes => nodes.map(n => n.getAttribute('href').split('#')[1]));
+                assert.deepEqual(marks, phases.map((_, k) => k < i ? 'check' : k === i ? 'clock' : 'circle-dashed'), 'R4-19: only prior phases may be complete');
+                assert.equal(await page.locator('.step-mark').nth(i).getAttribute('aria-label'), current.lang === 'ru' ? 'Выполняется' : 'In progress');
+              }
+            }
+            await page.evaluate(() => window.__sources.at(-1).emit('ok', {}));
+          }
           for (const marker of await page.locator('.step-mark').all()) {
             assert.equal(await marker.locator('use').getAttribute('href'), '/admin/assets/icons.svg#check');
             assert.equal(await marker.getAttribute('aria-label'), current.lang === 'ru' ? 'Готово' : 'Complete');
+          }
+          if (phases.length) {
+            await page.reload({ waitUntil: 'load' });
+            await page.evaluate(() => {
+              const source = window.__sources.at(-1);
+              source.emit('step', { phase: 'setup', message: 'Loading key' });
+              source.emit('step', { phase: 'probe', message: 'Connecting' });
+              source.emit('error', { phase: 'probe', message: 'Synthetic failure' });
+            });
+            const marks = await page.locator('.step-mark use').evaluateAll(nodes => nodes.map(n => n.getAttribute('href').split('#')[1]));
+            assert.deepEqual(marks, phases.map((_, i) => i === 0 ? 'check' : i === 1 ? 'clock' : 'circle-dashed'), 'R4-19: a failed probe must not complete deployment rows');
           }
         }
         assert.deepEqual(unexpected, [], `${current.file}: unexpected network/script failure`);

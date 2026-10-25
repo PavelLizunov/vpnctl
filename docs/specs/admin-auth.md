@@ -7,6 +7,10 @@
 - Reject incomplete or unsupported Argon2 PHC configuration at startup, including
   hash-less strings, invalid parameters, unsupported versions and invalid salts.
 
+Generate the admin password's Argon2id PHC hash with `vpnctl admin hash-password`
+(reads one line from stdin). No separate shell script or `argon2` executable is
+needed.
+
 ## 2. Interface / Data Contract
 
 - Password verification runs in `tokio::task::spawn_blocking`.

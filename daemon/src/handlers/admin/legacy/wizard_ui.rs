@@ -240,11 +240,15 @@ pub(crate) async fn wizard_step2_stub(
                                 }
                             }
                         };
-                        (step_row("server", crate::i18n::tr(lang, "ssh + deploy key + harden", "ssh + deploy-ключ + харденинг")))
-                        (step_row("deploy", crate::i18n::tr(lang, "install kernels + mint secrets", "установка ядер + секреты")))
+                        (step_row("setup", crate::i18n::tr(lang, "load deploy key", "загрузка deploy-ключа")))
+                        (step_row("probe", crate::i18n::tr(lang, "check SSH login + sudo", "проверка SSH-входа + sudo")))
+                        (step_row("fingerprint", crate::i18n::tr(lang, "pin host fingerprint", "сохранение отпечатка хоста")))
+                        (step_row("push-key", crate::i18n::tr(lang, "install deploy key", "установка deploy-ключа")))
+                        (step_row("verify-key", crate::i18n::tr(lang, "verify deploy key login", "проверка входа по deploy-ключу")))
+                        (step_row("register", crate::i18n::tr(lang, "register server", "регистрация сервера")))
+                        (step_row("secrets", crate::i18n::tr(lang, "mint protocol secrets", "создание секретов протоколов")))
+                        (step_row("install", crate::i18n::tr(lang, "install kernels", "установка ядер")))
                         (step_row("apply", crate::i18n::tr(lang, "apply config + start services", "применить конфиг + сервисы")))
-                        (step_row("probe", crate::i18n::tr(lang, "probe ports + pin fingerprint", "проба портов + отпечаток")))
-                        (step_row("done", crate::i18n::tr(lang, "complete", "готово")))
                     }
                 }
                 div style="margin-top: 12px;" {

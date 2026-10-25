@@ -194,7 +194,7 @@ pub(crate) async fn run(
                 "user.add",
                 Some(&id),
                 Some(&json!({
-                    "uuid": user.uuid,
+                    "uuid_set": true,
                     "wg_pubkey_set": user.wireguard_pubkey.is_some(),
                     "wg_keypair_provenance": if gen_wireguard { "server-generated" }
                         else if user.wireguard_pubkey.is_some() { "operator-provided" }

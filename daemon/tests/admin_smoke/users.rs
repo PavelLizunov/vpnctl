@@ -217,11 +217,10 @@ async fn admin_user_create_happy_path() {
         .expect("audit row for user.add missing");
     assert_eq!(add.actor, "admin");
     assert_eq!(add.target.as_deref(), Some("alice"));
-    let payload = add.payload.as_ref().expect("payload must contain uuid");
-    assert_eq!(
-        payload["uuid"],
-        serde_json::Value::String(user.uuid.clone())
-    );
+    let payload = add.payload.as_ref().expect("payload must be present");
+    // The UUID is a credential (R4-01): the row records that one was set.
+    assert_eq!(payload["uuid_set"], serde_json::Value::Bool(true));
+    assert!(payload.get("uuid").is_none());
 }
 
 #[tokio::test]
@@ -827,10 +826,15 @@ async fn user_create_audit_payload_includes_wg_keypair_provenance_and_pubkey_set
         .find(|e| e.action == "user.add" && e.target.as_deref() == Some("alice"))
         .expect("user.add audit row must exist for alice");
     let payload = row.payload.as_ref().expect("payload required");
-    assert!(
-        payload.get("uuid").is_some(),
-        "audit payload must include uuid; got: {payload}"
-    );
+    assert_eq!(payload["uuid_set"], true);
+    assert!(payload.get("uuid").is_none());
+    let user = st
+        .inv
+        .get_user(&vpnctl_core::UserId("alice".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!payload.to_string().contains(&user.uuid));
     assert_eq!(
         payload.get("wg_pubkey_set").and_then(|v| v.as_bool()),
         Some(true),

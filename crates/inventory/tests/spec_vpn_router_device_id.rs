@@ -170,7 +170,7 @@ async fn rotation_to_different_value_for_same_user_succeeds() {
 }
 
 #[tokio::test]
-async fn audit_payload_has_alphabetical_key_order_for_byte_equality_with_python() {
+async fn audit_payload_records_presence_without_device_credentials() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
 
@@ -182,32 +182,33 @@ async fn audit_payload_has_alphabetical_key_order_for_byte_equality_with_python(
         .await
         .unwrap();
 
+    inv.set_vpn_router_device_id(&UserId("alice".into()), ALT_DEVICE_ID)
+        .await
+        .unwrap();
     let recent = inv.recent_audit(10).await.unwrap();
-    let row = recent
+    let rows: Vec<_> = recent
         .iter()
-        .find(|r| {
-            r.action == "user.set_vpn_router_device_id"
-                && r.payload
-                    .as_ref()
-                    .and_then(|p| p["new_vpn_router_device_id"].as_str())
-                    == Some(ALT_DEVICE_ID)
-        })
-        .expect("second set_vpn_router_device_id audit row");
-    let payload = row.payload.as_ref().unwrap();
+        .filter(|r| r.action == "user.set_vpn_router_device_id")
+        .collect();
+    assert_eq!(rows.len(), 2, "a no-op must not add an audit row");
+    assert_eq!(rows[0].target.as_deref(), Some("alice"));
+    let payload = rows[0].payload.as_ref().unwrap();
+    assert_eq!(payload["old_vpn_router_device_id_set"], true);
+    assert_eq!(payload["new_vpn_router_device_id_set"], true);
     assert_eq!(
-        payload["old_vpn_router_device_id"],
-        serde_json::json!(VALID_DEVICE_ID)
+        rows[1].payload.as_ref().unwrap()["old_vpn_router_device_id_set"],
+        false
     );
-    assert_eq!(
-        payload["new_vpn_router_device_id"],
-        serde_json::json!(ALT_DEVICE_ID)
-    );
-
-    let s = serde_json::to_string(payload).unwrap();
-    let new_pos = s.find("\"new_vpn_router_device_id\"").unwrap();
-    let old_pos = s.find("\"old_vpn_router_device_id\"").unwrap();
+    let serialized = serde_json::to_string(payload).unwrap();
+    let new_pos = serialized.find("\"new_vpn_router_device_id_set\"").unwrap();
+    let old_pos = serialized.find("\"old_vpn_router_device_id_set\"").unwrap();
     assert!(
         new_pos < old_pos,
-        "alphabetical order: 'new_…' must come before 'old_…': {s}"
+        "audit keys must remain alphabetically ordered"
     );
+    for row in rows {
+        let text = row.payload.as_ref().unwrap().to_string();
+        assert!(!text.contains(VALID_DEVICE_ID));
+        assert!(!text.contains(ALT_DEVICE_ID));
+    }
 }

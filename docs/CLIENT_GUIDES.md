@@ -169,19 +169,22 @@
 * Вставьте URL подписки в разделе профилей, включите **TUN Mode** и подключитесь.
 
 ### Вариант без GUI (Консоль / Сервер):
-1. Используйте ядро **Mihomo** или **sing-box**:
-   * Скачайте готовый конфиг по вашей ссылке:
-     ```bash
-     curl -fsSL "ВАША_ССЫЛКА_ПОДПИСКИ?format=mihomo" -o /etc/mihomo/config.yaml
-     # или если нужен формат sing-box:
-     curl -fsSL "ВАША_ССЫЛКА_ПОДПИСКИ?format=sing-box" -o /etc/sing-box/config.json
-     ```
-2. Запустите демон через systemd:
-   ```bash
-   sudo systemctl enable --now mihomo
-   # или
-   sudo systemctl enable --now sing-box
-   ```
+For one-step import, use a GUI client from the Linux section above and enable
+its TUN mode or system proxy. The subscription supplies remote proxies and
+routing; it is **not a complete standalone configuration** for a bare core.
+
+For an existing **sing-box** installation, request `format=sing-box` and merge
+the returned `outbounds` and `route` into your local configuration. Keep or add
+a local proxy inbound (and configure applications to use it), or a TUN inbound
+with the required system permissions and routing. Preserve outbound tags and
+`detour` references when merging.
+
+For **Mihomo**, use the canonical `/api/v1/sub/{token}` URL or request
+`format=mihomo`. Merge `proxies`, `proxy-groups` and `rules` into a local
+configuration with a listening proxy port (for example, `mixed-port`) or an
+enabled `tun` section. Configure applications to use the proxy port, or enable
+TUN routing. Downloading the subscription and starting systemd alone does not
+redirect application traffic.
 
 ---
 
@@ -200,6 +203,20 @@
 ---
 
 ## ❓ Частые вопросы и решение проблем (FAQ)
+
+### Trojan links and self-signed certificates
+
+The client applications listed above (including v2rayNG and v2rayN) have no
+pinned versions in this guide or the client specs. Trojan links currently use
+`allowInsecure=1` for the node's self-signed TLS certificate. They require a
+client/core that still honors this option; compatibility with versions that
+reject it is not guaranteed. Removing the option alone cannot make a
+self-signed certificate trusted.
+
+vpnctl stores the node's TLS certificate paths, not its certificate fingerprint,
+so it cannot currently export a pinned-certificate Trojan link. The stored SSH
+host fingerprint is unrelated. If the client rejects this link, select another
+issued protocol supported by that client. The Mihomo subscription omits Trojan.
 
 ### 1. Как обновить список серверов (если добавился новый сервер или изменился адрес)?
 * В **Happ / Hiddify**: проведите пальцем сверху вниз по списку серверов для обновления или нажмите значок стрелочек обновления рядом с подпиской.

@@ -224,3 +224,16 @@ the rest are hunter-verified and re-checked by the implementer before fixing.
 | R4-26 | minor | cleanup | Three copies of the `fresh_keypair` SSH test helper. |
 
 26 findings; R4-04 was reported by two hunters and is merged.
+
+### Round 4 fix status
+
+Wave 4 (branch `fix/codex-wave4-20261025`): R4-01..15, 17..25 fixed by eight
+Codex implementers, integrated and reviewed by the lead plus four diff-only
+reviewers. Skipped with reasons: R4-16 (no pinned client versions and no
+server cert fingerprint in the repo; the limitation is documented in
+`docs/CLIENT_GUIDES.md`), R4-26 (no shared test-support location for the three
+test crates). Lead changes on top: firewall scripts capture `ufw status` as
+its own command so a failing status stops the deploy instead of reading as
+"inactive" (review finding); with several accepted host keys the wizard pins
+the key the node presents, only if the password login already trusted it.
+Not deployed.

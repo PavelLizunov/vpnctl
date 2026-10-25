@@ -18,6 +18,12 @@
     supplies a replacement. `set_boosty_settings` treats `refresh_token: None`
     as unchanged. Settings changes and successful refresh rotations are audited
     atomically without credential values; no-op writes add no audit entry.
+  - Manual sync and Quick Connect keep sync, report handling, alert acknowledgement,
+    and redeploy queuing in one task that survives cancellation of the HTTP request.
+  - Reconcile enables/disables a user only if the same Boosty subscriber link and
+    the expected opposite disabled state still match. The conditional update and
+    its audit row commit in one transaction. Stale decisions add neither an audit
+    row nor an enabled/disabled report entry or redeploy request.
   - Резервный спойлер: ручная форма настройки токенов скрыта под спойлером (`details.ed-spoiler`), основным интерфейсом остаётся 1-Click подключение.
   - Все финансовые расчёты производятся в целочисленных копейках/центах (`i64` minor units) с банковским округлением через валютный движок ЦБ; никаких `f64` в балансе.
 
@@ -39,6 +45,9 @@
   pub async fn build_bearer_client(access_token: &str, base_url: &str) -> Result<ApiClient, BridgeError>;
   pub async fn build_refresh_client(refresh_token: &str, device_id: &str, base_url: &str) -> Result<ApiClient, BridgeError>;
   ```
+- Inventory API: `set_boosty_user_disabled(&self, user: &UserId, subscriber_id: i64,
+  disabled: bool) -> Result<bool>` returns whether the conditional update committed;
+  missing, unlinked, relinked, or already-matching users return `false`.
 - Web Surfaces:
   - `/admin/boosty`:
     - Статус-полоса доходов: `доход в месяц (MRR)`, `всего собрано (To Date)`, `плательщиков / всего`.
@@ -52,6 +61,10 @@
       - Карточка 3: Чистая прибыль (Net Margin P&L) и коэффициент покрытия расходов (`покрытие расходов: X% (Y×)`).
 
 ## 3. Verification Checklist (Definition of Done)
+- [ ] Cancelling a manual sync after a user flip still acknowledges sync-failure
+  alerts and queues redeploy for that user.
+- [ ] Unlinking/relinking between reconcile and apply skips the stale status change
+  without an audit or report entry; audit insertion failure rolls back the update.
 - [ ] Метод `SyncReport::income_summary()` корректно вычисляет MRR и total revenue, фильтруя неактивных и бесплатных подписчиков.
 - [ ] Букмарклет считывает токены из `localStorage` (с fallback на cookies) и не требует консоли разработчика (F12).
 - [ ] При наличии `access_token` клиент авторизуется без ошибки `invalid_grant`, а при 401 восстанавливает сессию через `refresh_token`.

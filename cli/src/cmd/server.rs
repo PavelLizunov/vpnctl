@@ -190,7 +190,7 @@ pub(crate) async fn run(
                     server.address
                 );
             }
-            inv.add_server(&server).await?;
+            inv.register_server(&server, "cli").await?;
             let audit_payload = json!({
                 "id": server.id.0,
                 "address": server.address,

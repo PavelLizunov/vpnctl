@@ -92,7 +92,7 @@ pub async fn apply_migration_plan(
                     "user.add",
                     Some(&user.id.0),
                     Some(&serde_json::json!({
-                        "uuid": user.uuid,
+                        "uuid_set": true,
                         "wg_pubkey_set": user.wireguard_pubkey.is_some(),
                         "wg_keypair_provenance": if user.wireguard_pubkey.is_some() {
                             "operator-provided"
@@ -239,8 +239,8 @@ async fn import_grant(
             "grant.set_client_uuid",
             serde_json::json!({
                 "server_id": server.0,
-                "old_client_uuid": old_uuid,
-                "new_client_uuid": client_uuid,
+                "old_client_uuid_set": old_uuid.is_some(),
+                "new_client_uuid_set": client_uuid.is_some(),
             }),
         ),
         None => ("user.grant", serde_json::json!({ "server": server.0 })),
