@@ -16,6 +16,9 @@ regexes = [
     '''qXFvJL5KLmM3Of9hVo5GmJ4n0LB9rWYfV4ZE1XGZJks=''',  # WG pubkey shape test fixture
     '''0000000000000000000000000000000000000000000=''',  # all-zero test privkey placeholder
     '''AAECAwQFBgcICQoLDA0ODw==''',     # SS2022 test PSK: bytes 0..15
+    '''BAUGBwgJCgsMDQ4PEBESEw==''',     # SS2022 test placeholder PSK: bytes 4..19
+    '''Gjw/MOzkwdF8pDO05jE0\+g==''',    # SS2022 user key derived from the test PSK
+    '''D3EvTuq9vyRr5kw11skwxA==''',     # SS2022 user key derived from the test PSK
     '''checksum = "[a-f0-9]{64}"''',
 ]
 
