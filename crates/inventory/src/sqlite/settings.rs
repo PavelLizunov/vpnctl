@@ -41,7 +41,7 @@ impl SqliteInventory {
         actor: &str,
         url: Option<&str>,
     ) -> Result<bool> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let current = sqlx::query_as::<_, (Option<String>,)>(
             "SELECT public_base_url FROM display_settings WHERE id = 1",
         )

@@ -224,6 +224,27 @@ fn test_date_helpers() {
     );
 }
 
+#[test]
+fn advance_date_rejects_out_of_range_year() {
+    let last_date = chrono::NaiveDate::MAX.format("%Y-%m-%d").to_string();
+    assert_eq!(
+        validate_due_date(&last_date).unwrap(),
+        chrono::NaiveDate::MAX
+    );
+    for cycle in [
+        BillingCycle::Monthly,
+        BillingCycle::Quarterly,
+        BillingCycle::SemiAnnual,
+        BillingCycle::Annual,
+    ] {
+        assert!(advance_date_by_cycle(&last_date, cycle).is_err());
+    }
+    assert_eq!(
+        advance_date_by_cycle("2024-01-31", BillingCycle::Monthly).unwrap(),
+        "2024-02-29"
+    );
+}
+
 #[tokio::test]
 async fn server_billing_error_paths() {
     let dir = TempDir::new().unwrap();

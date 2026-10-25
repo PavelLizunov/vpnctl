@@ -33,11 +33,28 @@
 Behavior rules:
 - UUIDs and password material migrate verbatim (`vpnctl migrate from-bash`);
   overwriting an existing server address requires the
-  `--i-really-mean-overwrite-address` gate.
+  `--i-really-mean-overwrite-address` gate. Existing server secrets are retained
+  unless `--overwrite-existing` is set. User replacement is transactional;
+  other-server grants retain their effective UUIDs. Sequential server plans
+  preserve each imported server's UUID through `grants.client_uuid`.
 - Hidden protocols stay running on the node (cached client URIs keep working);
   hiding only removes them from fresh renders.
 - Disabled users get an empty config envelope; re-enabling restores
   byte-for-byte.
+- App-config extra protocols resolve UUIDs with
+  `COALESCE(grants.client_uuid, users.uuid)`, just like `/sub`. Correcting a
+  per-server override changes only UUID-bearing links for that server; users
+  without overrides keep identical bytes.
+- Sing-box tags and Mihomo names keep `{Label} {PROTO} ~{client_name}` when
+  unique among emitted outbounds. Colliding names gain ` ({server_id})` in
+  server-ID order (a numeric suffix resolves any remaining collision).
+  Selectors, groups, and detours use the resolved names. This deliberately
+  repairs previously ambiguous configurations; unrelated tags keep their bytes.
+- The admin WireGuard `.conf` download requires an enabled user with a grant,
+  a VPN-exit server, a visible WireGuard protocol without a disabled grant
+  override, no active auto-suppression, and no client detour. These visibility
+  and routing exclusions return `400` with an admin settings message; allowed files retain
+  their existing bytes. AmneziaWG 2/3 downloads retain their existing checks.
 
 ## 3. Verification Checklist
 

@@ -307,25 +307,7 @@ async fn poll_one_server(
         );
     }
 
-    let mut live_rows = Vec::with_capacity(per_user_conn_count.len().saturating_add(1));
-    if !snapshot.connections.is_empty() {
-        live_rows.push(VpnStatsDelta {
-            user_id: None,
-            upload_bytes: 0,
-            download_bytes: 0,
-            active_connections: u32::try_from(snapshot.connections.len()).unwrap_or(u32::MAX),
-        });
-    }
-    live_rows.extend(
-        per_user_conn_count
-            .into_iter()
-            .map(|(user_id, active_connections)| VpnStatsDelta {
-                user_id: Some(UserId(user_id)),
-                upload_bytes: 0,
-                download_bytes: 0,
-                active_connections,
-            }),
-    );
+    let live_rows = live_connection_rows(snapshot.connections.len(), per_user_conn_count);
     if let Err(error) = inv.record_vpn_stats(&server.id, &live_rows).await {
         tracing::warn!(
             target = "vpnctld::poller",
@@ -336,10 +318,50 @@ async fn poll_one_server(
     }
 }
 
+fn live_connection_rows(
+    total_connections: usize,
+    per_user_conn_count: HashMap<String, u32>,
+) -> Vec<VpnStatsDelta> {
+    let mut live_rows = Vec::with_capacity(per_user_conn_count.len().saturating_add(1));
+    live_rows.push(VpnStatsDelta {
+        user_id: None,
+        upload_bytes: 0,
+        download_bytes: 0,
+        active_connections: u32::try_from(total_connections).unwrap_or(u32::MAX),
+    });
+    live_rows.extend(
+        per_user_conn_count
+            .into_iter()
+            .map(|(user_id, active_connections)| VpnStatsDelta {
+                user_id: Some(UserId(user_id)),
+                upload_bytes: 0,
+                download_bytes: 0,
+                active_connections,
+            }),
+    );
+    live_rows
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_connection_rows_records_zero_after_all_connections_close() {
+        let rows = live_connection_rows(0, HashMap::new());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].user_id, None);
+        assert_eq!(rows[0].active_connections, 0);
+        assert_eq!((rows[0].upload_bytes, rows[0].download_bytes), (0, 0));
+
+        let rows = live_connection_rows(3, HashMap::from([("alice".into(), 2)]));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].user_id, None);
+        assert_eq!(rows[0].active_connections, 3);
+        assert_eq!(rows[1].user_id, Some(UserId("alice".into())));
+        assert_eq!(rows[1].active_connections, 2);
+    }
 
     #[test]
     fn is_real_client_ip_excludes_known_server_hops_control_and_private() {

@@ -88,7 +88,7 @@ impl SqliteInventory {
         if records.is_empty() {
             return Ok(());
         }
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         for r in records {
             let ip = canonical_ip_text(&r.ip);
             sqlx::query(

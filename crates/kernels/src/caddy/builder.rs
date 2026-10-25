@@ -67,6 +67,15 @@ pub(crate) fn default_caddy_cache_path() -> std::path::PathBuf {
     ))
 }
 
+pub(crate) fn caddy_present_command() -> String {
+    format!(
+        r#"command -v /usr/local/bin/caddy >/dev/null 2>&1 \
+         && [ "$(/usr/local/bin/caddy version 2>/dev/null | awk '{{print $1; exit}}')" = '{CADDY_VERSION}' ] \
+         && /usr/local/bin/caddy list-modules 2>/dev/null | grep -q forward_proxy \
+         && echo present || echo absent"#
+    )
+}
+
 pub(crate) fn caddy_present(probe_stdout: &str) -> bool {
     probe_stdout.trim() == "present"
 }

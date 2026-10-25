@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use boosty_api::api_client::ApiClient;
-use vpnctl_inventory::BoostySettings;
+use boosty_api::error::AuthError;
+use vpnctl_inventory::{BoostySettings, SqliteInventory};
 
 use crate::types::BridgeError;
 
@@ -63,4 +64,49 @@ pub async fn build_refresh_client(
         .set_refresh_token_and_device_id(refresh_token, device_id)
         .await?;
     Ok(client)
+}
+
+pub(crate) async fn build_persisted_refresh_client(
+    inv: &SqliteInventory,
+    refresh_token: &str,
+    device_id: &str,
+    base_url: &str,
+) -> Result<ApiClient, BridgeError> {
+    #[derive(serde::Deserialize)]
+    struct RefreshedTokens {
+        access_token: String,
+        refresh_token: String,
+    }
+
+    let response = build_http_client()?
+        .post(format!("{base_url}/oauth/token/"))
+        .form(&[
+            ("device_id", device_id),
+            ("device_os", "web"),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+        ])
+        .send()
+        .await
+        .map_err(AuthError::HttpRequest)?;
+    if response.status() != reqwest::StatusCode::OK {
+        return Err(AuthError::HttpStatus {
+            status: response.status(),
+            body: String::new(),
+        }
+        .into());
+    }
+    let tokens: RefreshedTokens = response.json().await.map_err(AuthError::HttpRequest)?;
+    if tokens.refresh_token != refresh_token
+        && !inv
+            .rotate_boosty_refresh_token(refresh_token, &tokens.refresh_token)
+            .await?
+    {
+        tracing::info!(
+            target = "boosty_bridge",
+            "kept the Boosty refresh credential changed during this sync"
+        );
+    }
+    // A bearer client cannot rotate credentials invisibly during roster pagination.
+    build_bearer_client(&tokens.access_token, base_url).await
 }

@@ -19,6 +19,8 @@
 trait Kernel {
     fn id(&self) -> KernelId;
     fn supported_protocols(&self) -> &[ProtocolId];
+    fn validate_server_support(&self, server: &Server) -> Result<()>;
+    fn service_units(&self) -> &'static [&'static str];
     async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()>;
     async fn apply_config(&self, ssh: &dyn SshTransport, cfg: &str) -> Result<()>;
     // server_secret_specs: a secret-bearing protocol DECLARES its own
@@ -30,6 +32,9 @@ trait Kernel {
 trait Protocol {
     fn id(&self) -> ProtocolId;
     fn server_secret_specs(&self) -> Vec<ServerSecretSpec> { vec![] }
+    fn server_secret_specs_for(&self, secrets: &HashMap<String, String>)
+        -> Result<Vec<ServerSecretSpec>> { Ok(self.server_secret_specs()) }
+    fn validate_server(&self, ctx: &RenderCtx) -> Result<()>;
     fn server_inbound(&self, ctx: &RenderCtx) -> Result<String>;
     fn client_config(&self, ctx: &RenderCtx) -> Result<String>;
     fn share_link(&self, ctx: &RenderCtx) -> Result<String>;
@@ -39,6 +44,21 @@ trait Protocol {
 // line per implementation. `Registry::validate_server` rejects incompatible
 // kernel × protocol combos BEFORE any SSH session opens.
 ```
+
+Kernel implementations declare every managed systemd unit, including auxiliary
+services, through `service_units`. Before installing/applying enabled kernels,
+every deploy entry point stops and disables the installed services of kernels
+that the operator disabled on that server (a `server.kernel.disable` audit row)
+and that are not enabled again. Units of kernels vpnctl never managed on the
+server are left alone; missing units are a no-op; shutdown errors fail the
+deploy. This shared lifecycle hook keeps unit names inside the kernel module
+when new kernels are registered.
+
+Kernel dependency checks and protocol setting checks are dispatched by the
+registry to their owning implementations. Context-aware secret declarations
+keep method-dependent key sizes in the protocol; inventory only mints declared
+missing secrets and preserves existing values. See
+[node kernel installation and rendering validation](node-kernel-rendering-validation.md).
 
 ## 3. Verification Checklist
 

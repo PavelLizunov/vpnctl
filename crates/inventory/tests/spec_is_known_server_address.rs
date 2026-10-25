@@ -138,3 +138,46 @@ async fn server_id_for_address_returns_clashing_id_backing_the_dup_guard() {
         Some("us".to_string())
     );
 }
+
+#[tokio::test]
+async fn duplicate_address_lookup_compares_canonical_ips_and_case_insensitive_hostnames() {
+    let dir = TempDir::new().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    for (id, address) in [
+        ("v6", "2001:0db8:0:0:0:0:0:1"),
+        ("dns", "LOCALHOST"),
+        ("v4", "192.0.2.1"),
+    ] {
+        inv.add_server(&Server {
+            id: ServerId(id.into()),
+            address: address.into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    }
+    for (address, expected) in [
+        ("2001:db8::1", Some("v6")),
+        ("2001:0db8:0000:0:0:0:0:1", Some("v6")),
+        ("localhost", Some("dns")),
+        ("LocalHost", Some("dns")),
+        ("192.0.2.1", Some("v4")),
+        ("192.0.2.2", None),
+        ("2001:db8::2", None),
+        ("other.invalid", None),
+    ] {
+        assert_eq!(
+            inv.server_id_for_address(address).await.unwrap().as_deref(),
+            expected
+        );
+    }
+}

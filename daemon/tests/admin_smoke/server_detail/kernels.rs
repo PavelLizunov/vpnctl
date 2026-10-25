@@ -463,6 +463,29 @@ async fn admin_form_errors_render_inside_the_admin_shell_for_browsers() {
 }
 
 #[tokio::test]
+async fn admin_form_error_back_link_rejects_traversal_referer() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let app = router(s);
+    let req = add_same_origin(
+        Request::builder()
+            .method("POST")
+            .uri("/admin/servers/s0/kernels/sing-box/disable")
+            .header("accept", "text/html")
+            .header("referer", "http://127.0.0.1:18402/admin/../evil"),
+    )
+    .body(Body::empty())
+    .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let html =
+        String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).to_string();
+    assert!(html.contains("href=\"/admin/\""), "{html}");
+    assert!(!html.contains("evil"), "{html}");
+}
+
+#[tokio::test]
 async fn admin_kernel_disable_allowed_when_another_kernel_still_serves_protocols() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
@@ -493,4 +516,9 @@ async fn admin_kernel_disable_allowed_when_another_kernel_still_serves_protocols
     );
     let server = inv.get_server(&sid).await.unwrap().unwrap();
     assert_eq!(server.kernels, vec![KernelId("sing-box".into())]);
+    assert_eq!(
+        inv.retired_server_kernels(&sid).await.unwrap(),
+        vec![KernelId("xray".into())],
+        "deploy must stop exactly the kernels disabled through the admin action"
+    );
 }

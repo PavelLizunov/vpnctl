@@ -343,8 +343,15 @@ pub(crate) fn vlessws_apply_script() -> String {
     format!(
         r#"
             set -eu
+            umask 077
             BUNDLE=/etc/caddy/.vlessws-bundle.new
             test -f "$BUNDLE"
+
+            # Restrict stale staging files before awk truncates them; umask
+            # only protects files created by this apply.
+            for staged in {caddyfile}.new {sb_config}.new; do
+                if [ -e "$staged" ]; then chmod 0600 "$staged"; fi
+            done
 
             # Unpack the bundle. awk splits on
             # the marker line and writes each member to `<path>.new`.
@@ -369,11 +376,11 @@ pub(crate) fn vlessws_apply_script() -> String {
 {prologue}
             # Atomic swaps + perms. Every post-first-swap fallible filesystem command routes via || recover "".
             mv {caddyfile}.new {caddyfile} || recover ""
-            chown caddy:caddy {caddyfile} || recover ""
-            chmod 0644 {caddyfile} || recover ""
+            chown root:caddy {caddyfile} || recover ""
+            chmod 0640 {caddyfile} || recover ""
             mv {sb_config}.new {sb_config} || recover ""
             chown root:root {sb_config} || recover ""
-            chmod 0644 {sb_config} || recover ""
+            chmod 0600 {sb_config} || recover ""
             mv {deploy_env}.new {deploy_env} || recover ""
             chmod 0644 {deploy_env} || recover ""
             rm -f "$BUNDLE" || recover ""
@@ -442,8 +449,8 @@ pub(crate) fn naive_apply_script() -> String {
 {prologue}
             # Atomic swap + perms. Every post-first-swap fallible filesystem command routes via || recover "".
             mv {caddyfile}.new {caddyfile} || recover ""
-            chown caddy:caddy {caddyfile} || recover ""
-            chmod 0644 {caddyfile} || recover ""
+            chown root:caddy {caddyfile} || recover ""
+            chmod 0640 {caddyfile} || recover ""
 
             # Enable and reload-or-restart caddy.
             systemctl enable caddy >/dev/null 2>&1 || recover "caddy"

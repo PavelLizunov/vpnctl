@@ -415,3 +415,139 @@ fn deploy_script_refuses_prebuilt_artifacts_without_assets() {
         assert_eq!(std::fs::read(destination).unwrap(), b"OLD");
     }
 }
+
+fn deploy_test_command(root: &Path) -> Command {
+    for i in 0..4 {
+        std::fs::write(root.join(format!("new-{i}")), b"NEW").unwrap();
+        std::fs::write(root.join(format!("live-{i}")), b"OLD").unwrap();
+    }
+    let mut cmd = Command::new("bash");
+    cmd.env("VPNCTL_DAEMON_DST", root.join("live-0"))
+        .env("VPNCTL_CLI_DST", root.join("live-1"))
+        .env("VPNCTL_SING_BOX_ARTIFACT", root.join("live-2"))
+        .env("VPNCTL_STATS_HELPER_ARTIFACT", root.join("live-3"))
+        .env("VPNCTL_DEPLOY_LOCK", root.join("deploy.lock"))
+        .env("VPNCTL_INSTALL_OWNER", "")
+        .env("VPNCTL_SKIP_ASSETS", "1")
+        .env_remove("VPNCTL_ASSETS_SRC")
+        .env_remove("VPNCTL_FAIL_AFTER_SWAP")
+        .env("VPNCTL_ASSETS_DST", root.join("assets"));
+    cmd
+}
+
+#[test]
+fn deploy_script_waits_for_inter_run_lock_before_staging() {
+    if !bash_available() {
+        return;
+    }
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    let mut cmd = deploy_test_command(root);
+    let output = cmd
+        .arg("-c")
+        .arg(
+            r#"
+set -euo pipefail
+flock() {
+    if [ "${2:-}" = 9 ]; then : > "$TEST_LOCK_ATTEMPT"; fi
+    command flock "$@"
+}
+export -f flock
+exec 8>"$VPNCTL_DEPLOY_LOCK"
+command flock -x 8
+bash "$@" 8>&- &
+pid=$!
+trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+for ((i=0; i<500; i++)); do
+    [ ! -e "$TEST_LOCK_ATTEMPT" ] || break
+    sleep 0.01
+done
+[ -e "$TEST_LOCK_ATTEMPT" ]
+kill -0 "$pid"
+[ "$(cat "$VPNCTL_DAEMON_DST")" = OLD ]
+[ "$(cat "$VPNCTL_SING_BOX_ARTIFACT")" = OLD ]
+[ -z "$(find "$TEST_ROOT" -name '*.stage.*' -o -name '*.rollback.*')" ]
+command flock -u 8
+wait "$pid"
+trap - EXIT
+"#,
+        )
+        .arg("test-deploy-lock")
+        .arg(bash_path(&scripts_dir().join("deploy.sh")))
+        .args((0..4).map(|i| root.join(format!("new-{i}"))))
+        .env("TEST_ROOT", root)
+        .env("TEST_LOCK_ATTEMPT", root.join("attempt"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for i in 0..4 {
+        assert_eq!(
+            std::fs::read(root.join(format!("live-{i}"))).unwrap(),
+            b"NEW"
+        );
+    }
+}
+
+#[test]
+fn deploy_script_rolls_back_signals_on_both_sides_of_rename() {
+    if !bash_available() {
+        return;
+    }
+    for timing in ["before", "after"] {
+        for existed in [false, true] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let root = dir.path();
+            let mut cmd = deploy_test_command(root);
+            if !existed {
+                for i in 0..4 {
+                    std::fs::remove_file(root.join(format!("live-{i}"))).unwrap();
+                }
+            }
+            let output = cmd
+                .arg("-c")
+                .arg(
+                    r#"
+set -euo pipefail
+mv() {
+    case "${2:-}" in
+        *.stage.*)
+            if [ "$TEST_SIGNAL_TIMING" = after ]; then command mv "$@"; fi
+            kill -TERM "$$"
+            return 143
+            ;;
+    esac
+    command mv "$@"
+}
+export -f mv
+exec bash "$@"
+"#,
+                )
+                .arg("test-deploy-signal")
+                .arg(bash_path(&scripts_dir().join("deploy.sh")))
+                .args((0..4).map(|i| root.join(format!("new-{i}"))))
+                .env("TEST_SIGNAL_TIMING", timing)
+                .output()
+                .unwrap();
+            assert!(
+                !output.status.success(),
+                "{timing} must interrupt the install"
+            );
+            for i in 0..4 {
+                let destination = root.join(format!("live-{i}"));
+                if existed {
+                    assert_eq!(std::fs::read(destination).unwrap(), b"OLD", "{timing}");
+                } else {
+                    assert!(!destination.exists(), "{timing}: {destination:?}");
+                }
+            }
+            assert!(std::fs::read_dir(root).unwrap().all(|entry| {
+                let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                !name.contains(".stage.") && !name.contains(".rollback.")
+            }));
+        }
+    }
+}

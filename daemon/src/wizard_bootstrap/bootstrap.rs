@@ -74,6 +74,7 @@ async fn bootstrap_pipeline(
         &plan.ssh_user,
         &plan.root_password,
         &plan.known_hosts_path,
+        None,
         "true",
     )
     .await
@@ -90,6 +91,7 @@ async fn bootstrap_pipeline(
             &plan.ssh_user,
             &plan.root_password,
             &plan.known_hosts_path,
+            None,
             "sudo -n sh -c true",
         )
         .await
@@ -138,6 +140,7 @@ async fn bootstrap_pipeline(
         &plan.ssh_user,
         &plan.root_password,
         &plan.known_hosts_path,
+        Some(&fingerprint),
         &push_cmd,
     )
     .await
@@ -180,10 +183,17 @@ async fn bootstrap_pipeline(
         plan.server_id
     );
     let kernel_id = KernelId("sing-box".into());
-    let default_protocols: Vec<ProtocolId> = registry
+    let supported = registry
         .kernel(&kernel_id)
         .map(|k| k.supported_protocols())
         .unwrap_or_default();
+    let default_protocols = wizard_protocols(&plan.address, supported);
+    if plan.address.parse::<std::net::IpAddr>().is_err() {
+        send_step!(
+            "register",
+            "note: AWG2/AWG3 were skipped because they require a literal server IP."
+        );
+    }
     let server = Server {
         id: ServerId(plan.server_id.clone()),
         address: plan.address.clone(),
@@ -279,6 +289,15 @@ async fn bootstrap_pipeline(
         fail!("install", "{e}");
     }
     let ctx = RenderCtx::new(&server, &secrets);
+    let retired = match inv.retired_server_kernels(&server.id).await {
+        Ok(r) => r,
+        Err(e) => fail!("install", "retired kernel lookup failed: {e}"),
+    };
+    if let Err(e) =
+        vpnctl_kernels::reconcile_disabled_kernels(&registry, &server, &retired, &ssh).await
+    {
+        fail!("install", "kernel shutdown failed: {e}");
+    }
     for kid in &server.kernels {
         let Some(kernel) = registry.kernel(kid) else {
             send_step!(
@@ -389,4 +408,15 @@ async fn bootstrap_pipeline(
             redirect,
         })
         .await;
+}
+
+pub(super) fn wizard_protocols(address: &str, supported: Vec<ProtocolId>) -> Vec<ProtocolId> {
+    if address.parse::<std::net::IpAddr>().is_ok() {
+        supported
+    } else {
+        supported
+            .into_iter()
+            .filter(|pid| !matches!(pid.0.as_str(), "amneziawg2" | "amneziawg3"))
+            .collect()
+    }
 }

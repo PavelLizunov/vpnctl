@@ -6,7 +6,7 @@ use boosty_api::api_client::ApiClient;
 use vpnctl_core::{User, UserId};
 use vpnctl_inventory::{BoostySettings, SqliteInventory, SqliteInventoryError};
 
-use crate::client::{BOOSTY_BASE_URL, build_client};
+use crate::client::{BOOSTY_BASE_URL, build_client, build_persisted_refresh_client};
 use crate::reconcile::{Action, LinkedUser, SubscriberState, reconcile};
 use crate::roster::{is_vpn_eligible, subscriber_events};
 use crate::types::{ApplyMode, BridgeError, NewSubscriberInfo, SubscriberSnapshot, SyncReport};
@@ -72,7 +72,17 @@ pub async fn sync_from_settings_at(
         .ok_or_else(|| BridgeError::Config("blog_url not set".into()))?;
 
     let client = build_client(settings, base_url).await?;
-    let mut active_client = client;
+    let used_bearer = settings
+        .access_token
+        .as_deref()
+        .is_some_and(|token| !token.is_empty());
+    let mut active_client = if let Some(refresh) = client.refresh_token().await
+        && let Some(device) = settings.device_id.as_deref()
+    {
+        build_persisted_refresh_client(inv, &refresh, device, base_url).await?
+    } else {
+        client
+    };
     let mut result = sync_once_with_policy(
         &active_client,
         inv,
@@ -85,7 +95,7 @@ pub async fn sync_from_settings_at(
 
     if let Err(ref err) = result
         && err.is_auth_failure()
-        && settings.access_token.is_some()
+        && used_bearer
         && let (Some(refresh), Some(device)) = (
             settings.refresh_token.as_deref(),
             settings.device_id.as_deref(),
@@ -97,52 +107,25 @@ pub async fn sync_from_settings_at(
             target = "boosty_bridge",
             "bearer token returned auth failure; attempting refresh recovery flow"
         );
-        if let Ok(refresh_client) =
-            crate::client::build_refresh_client(refresh, device, base_url).await
-        {
-            active_client = refresh_client;
-            result = sync_once_with_policy(
-                &active_client,
-                inv,
-                blog,
-                mode,
-                settings.grace_days,
-                settings.auto_create_users,
-            )
-            .await;
-            if result.is_ok() {
-                if let Some(stale_token) = settings.access_token.as_deref() {
-                    if let Err(e) = inv.clear_boosty_access_token(stale_token).await {
-                        tracing::warn!(
-                            target = "boosty_bridge",
-                            error = %e,
-                            "clearing stale access token after refresh recovery failed"
-                        );
-                    }
+        active_client = build_persisted_refresh_client(inv, refresh, device, base_url).await?;
+        result = sync_once_with_policy(
+            &active_client,
+            inv,
+            blog,
+            mode,
+            settings.grace_days,
+            settings.auto_create_users,
+        )
+        .await;
+        if result.is_ok() {
+            if let Some(stale_token) = settings.access_token.as_deref() {
+                if let Err(e) = inv.clear_boosty_access_token(stale_token).await {
+                    tracing::warn!(
+                        target = "boosty_bridge",
+                        error = %e,
+                        "clearing stale access token after refresh recovery failed"
+                    );
                 }
-            }
-        }
-    }
-
-    if let Some(expected) = settings.refresh_token.as_deref()
-        && let Some(rotated) = active_client.refresh_token().await
-        && expected != rotated
-    {
-        match inv.rotate_boosty_refresh_token(expected, &rotated).await {
-            Ok(true) => {}
-            Ok(false) => tracing::info!(
-                target = "boosty_bridge",
-                "kept the Boosty refresh credential changed during this sync"
-            ),
-            Err(e) => {
-                if result.is_ok() {
-                    return Err(e.into());
-                }
-                tracing::warn!(
-                    target = "boosty_bridge",
-                    error = %e,
-                    "persisting rotated refresh token failed after a failed sync"
-                );
             }
         }
     }

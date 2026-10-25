@@ -172,7 +172,7 @@ pub(crate) fn escape_like(s: &str) -> String {
 }
 
 async fn backfill_sub_tokens(pool: &SqlitePool) -> Result<()> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let rows = sqlx::query("SELECT id FROM users WHERE sub_token IS NULL")
         .fetch_all(&mut *tx)
         .await?;

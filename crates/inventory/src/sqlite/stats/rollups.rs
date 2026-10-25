@@ -58,7 +58,7 @@ impl SqliteInventory {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let mut upserted: u64 = 0;
         for r in rows {
             let user_id: String = r.try_get("user_id")?;

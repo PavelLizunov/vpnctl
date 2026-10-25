@@ -17,10 +17,12 @@ pub fn convert_minor(source_minor: i64, rate_micros: i64, markup_bps: i64) -> Op
     if rate_micros <= 0 || markup_bps <= 0 {
         return None;
     }
-    let wide = source_minor as i128 * rate_micros as i128 * markup_bps as i128;
+    let wide = (source_minor as i128)
+        .checked_mul(rate_micros as i128)?
+        .checked_mul(markup_bps as i128)?;
     let divisor = RATE_SCALE as i128 * MARKUP_SCALE as i128;
-    let rounded = (wide + divisor / 2) / divisor;
-    Some(rounded as i64)
+    let rounded = wide.checked_add(divisor / 2)? / divisor;
+    i64::try_from(rounded).ok()
 }
 
 pub fn monthly_equivalent(amount_minor: i64, cycle: BillingCycle) -> i64 {
@@ -57,7 +59,7 @@ impl SqliteInventory {
     }
 
     pub async fn upsert_currency_rates(&self, rates: &[CurrencyRate]) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         for rate in rates {
             if rate.rate_micros <= 0 {
                 return Err(SqliteInventoryError::Invalid(format!(
@@ -251,7 +253,7 @@ impl SqliteInventory {
         &self,
         input: &CurrencySettingsInput,
     ) -> Result<CurrencySettings> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let current = {
             let row = sqlx::query(
@@ -456,7 +458,7 @@ impl SqliteInventory {
             )
             .await?;
 
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM servers WHERE id = ?1")
             .bind(&sid.0)
@@ -760,6 +762,14 @@ mod tests {
     #[test]
     fn convert_minor_rejects_negative_rate() {
         assert_eq!(convert_minor(1000, -1, 10_000), None);
+    }
+
+    #[test]
+    fn convert_minor_rejects_overflow() {
+        assert_eq!(convert_minor(i64::MAX, 2 * RATE_SCALE, 10_000), None);
+        assert_eq!(convert_minor(i64::MIN, 2 * RATE_SCALE, 10_000), None);
+        assert_eq!(convert_minor(i64::MAX, i64::MAX, i64::MAX), None);
+        assert_eq!(convert_minor(i64::MAX, RATE_SCALE, 10_000), Some(i64::MAX));
     }
 
     #[test]

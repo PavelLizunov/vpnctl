@@ -146,12 +146,78 @@ async fn phase4b_dashboard_renders_vpn_activity_tile_with_per_server_breakdown()
             .expect("busy server link must render in the VPN-activity breakdown");
     let busy_row = &html[busy_pos..busy_pos.saturating_add(400)];
     assert!(
-        busy_row.contains(">7<"),
-        "busy server's active-now cell must be 7, got row: …{busy_row}…"
+        busy_row.contains(">—<") && !busy_row.contains(">7<"),
+        "without a fresh snapshot the historical peak must not appear as active now: …{busy_row}…"
     );
     assert!(
         html.contains(busy_anchor) && html.contains("href=\"/admin/servers/quiet\""),
         "both servers must appear in the per-server breakdown"
+    );
+}
+
+#[tokio::test]
+async fn dashboard_active_now_uses_only_fresh_snapshots_in_every_history_window() {
+    use chrono::{Duration, Utc};
+    use vpnctl_inventory::VpnStatsDelta;
+    use vpnctld::clash_api::{Connection, ConnectionMeta, Snapshot};
+
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let sid = ServerId("s0".into());
+    s.inv
+        .record_vpn_stats(
+            &sid,
+            &[VpnStatsDelta {
+                user_id: None,
+                upload_bytes: 100,
+                download_bytes: 200,
+                active_connections: 37,
+            }],
+        )
+        .await
+        .unwrap();
+    let cache = s.snapshot_cache.clone();
+    let app = router(s);
+    let snapshot = Snapshot {
+        connections: vec![Connection {
+            id: "live".into(),
+            upload: 0,
+            download: 0,
+            start: Utc::now().to_rfc3339(),
+            metadata: ConnectionMeta::default(),
+        }],
+        ..Snapshot::default()
+    };
+    for window in ["24h", "7d", "30d", "all"] {
+        let uri = format!("/admin/activity?vpn_window={window}");
+        for (observed_at, expected) in [(Utc::now() - Duration::days(365), "—"), (Utc::now(), "1")]
+        {
+            cache.store_at(sid.clone(), snapshot.clone(), observed_at);
+            let html = fetch_html(app.clone(), &uri).await;
+            let activity = html.split_once("VPN activity · ").unwrap().1;
+            let tile = activity.split_once("active now</div>").unwrap().1;
+            let value = tile.split_once('>').unwrap().1.split_once('<').unwrap().0;
+            assert_eq!(value, expected, "window={window}");
+            let row = activity.split_once("href=\"/admin/servers/s0\"").unwrap().1;
+            let active_cell = row.split_once("</td>").unwrap().1;
+            let value = active_cell
+                .split_once('>')
+                .unwrap()
+                .1
+                .split_once('<')
+                .unwrap()
+                .0;
+            assert_eq!(value, expected, "window={window}");
+        }
+    }
+    cache.store(sid, Snapshot::default());
+    let html = fetch_html(app, "/admin/activity").await;
+    let activity = html.split_once("VPN activity · ").unwrap().1;
+    let tile = activity.split_once("active now</div>").unwrap().1;
+    assert_eq!(
+        tile.split_once('>').unwrap().1.split_once('<').unwrap().0,
+        "0"
     );
 }
 

@@ -674,8 +674,8 @@ pub(crate) async fn live_vpn_stats_section(
             }
             (tr(
                 lang,
-                " over the last 24 hours. Rows are auto-purged after 30 days.",
-                " за последние 24 часа. Строки автоудаляются через 30 дней.",
+                " over the last 24 hours. Rows are auto-purged after 32 days.",
+                " за последние 24 часа. Строки автоудаляются через 32 дня.",
             ))
         }
     }

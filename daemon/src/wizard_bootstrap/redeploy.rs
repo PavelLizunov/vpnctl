@@ -413,6 +413,17 @@ async fn redeploy_pipeline(
     };
     let ctx = RenderCtx::new(&server, &secrets);
 
+    match inv.retired_server_kernels(&server.id).await {
+        Ok(retired) => {
+            if let Err(e) =
+                vpnctl_kernels::reconcile_disabled_kernels(&registry, &server, &retired, &ssh).await
+            {
+                ssh_errors.push(format!("kernel shutdown failed: {e}"));
+            }
+        }
+        Err(e) => ssh_errors.push(format!("retired kernel lookup failed: {e}")),
+    }
+
     for kid in &server.kernels {
         let Some(kernel) = registry.kernel(kid) else {
             ssh_errors.push(format!("{}: kernel not registered", kid.0));

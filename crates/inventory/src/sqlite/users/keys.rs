@@ -98,7 +98,7 @@ impl SqliteInventory {
             )));
         }
 
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let grant_row =
             sqlx::query("SELECT client_uuid FROM grants WHERE user_id = ?1 AND server_id = ?2")
@@ -189,7 +189,7 @@ impl SqliteInventory {
             )));
         }
 
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let old_device_id: Option<String> =
             sqlx::query("SELECT vpn_router_device_id FROM users WHERE id = ?1")

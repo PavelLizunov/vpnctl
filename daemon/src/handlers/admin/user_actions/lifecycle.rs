@@ -32,39 +32,41 @@ pub(crate) async fn user_set_traffic_limit(
         .unwrap_or(DEFAULT_TRAFFIC_THRESHOLD_PCT);
 
     let limit_bytes: Option<u64> = if limit_gib > 0.0 && limit_gib.is_finite() {
-        Some((limit_gib * 1_073_741_824.0) as u64)
+        Some(((limit_gib * 1_073_741_824.0) as u64).min(i64::MAX as u64))
     } else {
         None
     };
 
-    if let Err(e) = state
+    let changed = match state
         .inv
         .set_user_traffic_limit(&uid, limit_bytes, Some(threshold_pct))
         .await
     {
-        return internal_error(anyhow::Error::new(e));
-    }
-
-    if let Err(e) = state
-        .inv
-        .audit(
-            "admin",
-            "user.traffic_limit.set",
-            Some(&user_id_str),
-            Some(&serde_json::json!({
-                "limit_bytes": limit_bytes,
-                "limit_gib": limit_gib,
-                "threshold_pct": threshold_pct,
-            })),
-        )
-        .await
-    {
-        tracing::warn!(
-            target = "vpnctld::admin",
-            user = %user_id_str,
-            error = %e,
-            "audit write failed for user.traffic_limit.set"
-        );
+        Ok(changed) => changed,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    if changed {
+        if let Err(e) = state
+            .inv
+            .audit(
+                "admin",
+                "user.traffic_limit.set",
+                Some(&user_id_str),
+                Some(&serde_json::json!({
+                    "limit_bytes": limit_bytes,
+                    "limit_gib": limit_gib,
+                    "threshold_pct": threshold_pct,
+                })),
+            )
+            .await
+        {
+            tracing::warn!(
+                target = "vpnctld::admin",
+                user = %user_id_str,
+                error = %e,
+                "audit write failed for user.traffic_limit.set"
+            );
+        }
     }
 
     Redirect::to(&format!(

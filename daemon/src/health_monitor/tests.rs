@@ -470,6 +470,81 @@ async fn record_singbox_health(inv: &SqliteInventory, server_id: &ServerId, acti
     tokio::time::sleep(Duration::from_millis(10)).await;
 }
 
+#[tokio::test]
+async fn scan_once_detects_service_down_before_extra_steady_samples() {
+    let (_dir, inv) = fresh_inv().await;
+    let server = probeable_server("extra-samples");
+    inv.add_server(&server).await.unwrap();
+    for active in [true, false, false, false] {
+        record_singbox_health(&inv, &server.id, active).await;
+    }
+
+    scan_once(&inv).await.unwrap();
+    let alerts = inv.recent_alerts(10, false).await.unwrap();
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0].kind, "server.singbox.down");
+    assert_eq!(alerts[0].severity, "critical");
+
+    scan_once(&inv).await.unwrap();
+    assert_eq!(inv.recent_alerts(10, true).await.unwrap().len(), 1);
+    record_singbox_health(&inv, &server.id, true).await;
+    record_singbox_health(&inv, &server.id, true).await;
+    scan_once(&inv).await.unwrap();
+    assert!(inv.recent_alerts(10, false).await.unwrap().is_empty());
+    assert_eq!(inv.recent_alerts(10, true).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn scan_once_dedupes_restart_source_after_inventory_reopen() {
+    let (dir, inv) = fresh_inv().await;
+    let server = probeable_server("restart-source");
+    inv.add_server(&server).await.unwrap();
+    for nrestarts in [2, 4] {
+        inv.record_node_health(
+            &server.id,
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(nrestarts),
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    scan_once(&inv).await.unwrap();
+    scan_once(&inv).await.unwrap();
+    inv.close().await;
+
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    scan_once(&inv).await.unwrap();
+    let alerts = inv.recent_alerts(10, true).await.unwrap();
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0].kind, "server.singbox.restarted");
+    assert!(alerts[0].acked_at.is_some());
+    assert_eq!(
+        inv.recent_audit(20)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|a| a.action == "alert.fire")
+            .count(),
+        1,
+        "a replay must not write an audit row"
+    );
+}
+
 async fn record_singbox_log_health(inv: &SqliteInventory, server_id: &ServerId, bytes: u64) {
     inv.record_node_health(
         server_id,

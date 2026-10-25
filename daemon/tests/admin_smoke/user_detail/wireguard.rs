@@ -327,17 +327,15 @@ async fn admin_user_regen_wireguard_rotates_pair_and_audits() {
     );
 }
 
-#[tokio::test]
-async fn admin_user_wireguard_conf_download_serves_attachment() {
-    let dir = TempDir::new().unwrap();
-    let s = state(&dir).await;
+async fn wireguard_download_state(dir: &TempDir, kernel: &str) -> vpnctld::AppState {
+    let s = state(dir).await;
     let inv = s.inv.clone();
     inv.add_server(&Server {
         id: ServerId("dlsrv".into()),
         address: "203.0.113.11".into(),
         ssh_port: 22,
         ssh_user: "root".into(),
-        kernels: vec![KernelId("sing-box".into())],
+        kernels: vec![KernelId(kernel.into())],
         enabled_protocols: vec![ProtocolId("wireguard".into())],
         trusted_host_fingerprint: None,
         hoster: "generic".into(),
@@ -376,6 +374,13 @@ async fn admin_user_wireguard_conf_download_serves_attachment() {
         .await
         .unwrap();
 
+    s
+}
+
+#[tokio::test]
+async fn admin_user_wireguard_conf_download_serves_attachment() {
+    let dir = TempDir::new().unwrap();
+    let s = wireguard_download_state(&dir, "sing-box").await;
     let app = router(s);
     let resp = app
         .oneshot(
@@ -416,6 +421,7 @@ async fn admin_user_wireguard_conf_download_serves_attachment() {
     );
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = std::str::from_utf8(&body).unwrap();
+    assert_eq!(text.as_bytes(), WIREGUARD_DOWNLOAD_BYTES.as_bytes());
     assert!(
         text.contains("[Interface]"),
         ".conf must contain [Interface]"
@@ -801,5 +807,143 @@ async fn admin_destructive_user_actions_ask_for_confirmation() {
             form_head.contains("data-confirm="),
             "{action} must ask for confirmation"
         );
+    }
+}
+
+const WIREGUARD_DOWNLOAD_BYTES: &str = concat!(
+    "# vpnctl-rendered AmneziaWG client config.\n",
+    "# Private key was server-generated for dltest — import this file as-is.\n\n",
+    "[Interface]\n",
+    "PrivateKey = 0000000000000000000000000000000000000000000=\n",
+    "Address = 10.66.0.2/32\n",
+    "DNS = 1.1.1.1\n\n",
+    "[Peer]\n",
+    "PublicKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n",
+    "Endpoint = 203.0.113.11:51820\n",
+    "AllowedIPs = 0.0.0.0/0, ::/0\n",
+    "PersistentKeepalive = 25\n",
+);
+
+#[tokio::test]
+async fn admin_wireguard_download_visibility_refusal_and_restore_byte_equal() {
+    for kernel in ["sing-box", "amneziawg"] {
+        for gate in [
+            "hidden",
+            "override",
+            "suppressed",
+            "detour",
+            "detour-granted",
+        ] {
+            let dir = TempDir::new().unwrap();
+            let s = wireguard_download_state(&dir, kernel).await;
+            let sid = ServerId("dlsrv".into());
+            let uid = UserId("dltest".into());
+            let pid = ProtocolId("wireguard".into());
+            let app = router(s.clone());
+            match gate {
+                "hidden" => s
+                    .inv
+                    .set_server_protocol_hidden(&sid, &pid, true)
+                    .await
+                    .unwrap(),
+                "override" => s
+                    .inv
+                    .set_grant_protocol_override(&uid, &sid, &pid, true)
+                    .await
+                    .unwrap(),
+                "suppressed" => {
+                    s.inv.set_server_auto_suppress(&sid, true).await.unwrap();
+                    s.inv.set_server_suppressed(&sid, true).await.unwrap();
+                }
+                "detour" | "detour-granted" => {
+                    let mut entry = s.inv.get_server(&sid).await.unwrap().unwrap();
+                    entry.id = ServerId("entry".into());
+                    s.inv.add_server(&entry).await.unwrap();
+                    if gate == "detour-granted" {
+                        s.inv.grant(&uid, &entry.id).await.unwrap();
+                    }
+                    s.inv
+                        .set_client_detour_via_as("test", &sid, Some(&entry.id))
+                        .await
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/admin/users/dltest/wireguard/conf/dlsrv")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{gate}");
+            assert!(response.headers().get("content-disposition").is_none());
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let expected = concat!(
+                "vpnctl admin: This WireGuard download is unavailable because the subscription ",
+                "does not offer this server as a direct configuration. Review user access and ",
+                "the server's visibility, availability, and routing settings in the admin UI.\n",
+            );
+            assert_eq!(body.as_ref(), expected.as_bytes(), "{gate}");
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/sub/st-dltest")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let config: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(
+                config["outbounds"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|outbound| {
+                        outbound["tag"] != "DLSRV WireGuard ~dltest"
+                            || outbound["detour"].is_string()
+                    })
+            );
+            match gate {
+                "hidden" => s
+                    .inv
+                    .set_server_protocol_hidden(&sid, &pid, false)
+                    .await
+                    .unwrap(),
+                "override" => s
+                    .inv
+                    .set_grant_protocol_override(&uid, &sid, &pid, false)
+                    .await
+                    .unwrap(),
+                "suppressed" => {
+                    s.inv.set_server_suppressed(&sid, false).await.unwrap();
+                }
+                "detour" | "detour-granted" => s
+                    .inv
+                    .set_client_detour_via_as("test", &sid, None)
+                    .await
+                    .unwrap(),
+                _ => unreachable!(),
+            }
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/admin/users/dltest/wireguard/conf/dlsrv")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{gate}");
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(body.as_ref(), WIREGUARD_DOWNLOAD_BYTES.as_bytes(), "{gate}");
+        }
     }
 }

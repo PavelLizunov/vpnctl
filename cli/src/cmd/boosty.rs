@@ -122,6 +122,13 @@ async fn run_sync(inv: &SqliteInventory, apply: bool, disable_lapsed: bool) -> a
             print!("{}", deploy_hint(&ids));
         }
     }
+    sync_result(&report, apply)
+}
+
+fn sync_result(report: &SyncReport, apply: bool) -> anyhow::Result<()> {
+    if apply && !report.errors.is_empty() {
+        anyhow::bail!("Boosty sync failed with {} error(s)", report.errors.len());
+    }
     Ok(())
 }
 
@@ -353,9 +360,7 @@ async fn run_configure(
     if let Some(t) = access_token {
         s.access_token = Some(t);
     }
-    if let Some(t) = refresh_token {
-        s.refresh_token = Some(t);
-    }
+    s.refresh_token = refresh_token;
     if let Some(d) = device_id {
         s.device_id = Some(d);
     }
@@ -370,17 +375,6 @@ async fn run_configure(
     }
 
     inv.set_boosty_settings(&s).await?;
-    inv.audit(
-        "cli",
-        "boosty.configure",
-        None,
-        Some(&json!({
-            "enabled": s.enabled,
-            "blog_url": s.blog_url,
-            "poll_interval_secs": s.poll_interval_secs,
-        })),
-    )
-    .await?;
     println!("boosty settings updated");
     Ok(())
 }
@@ -389,6 +383,15 @@ async fn run_configure(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_report_errors_fail_the_command() {
+        let mut report = SyncReport::default();
+        assert!(sync_result(&report, true).is_ok());
+        report.errors.push("test reconciliation failure".into());
+        assert!(sync_result(&report, true).is_err());
+        assert!(sync_result(&report, false).is_ok());
+    }
 
     #[test]
     fn deploy_hint_lists_each_server_and_the_command() {

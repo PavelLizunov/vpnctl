@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -38,6 +38,7 @@ pub(crate) async fn servers_billing(
     let markup_coeff_f64 = markup_bps as f64 / 10_000.0;
 
     let mut monthly_totals_raw: BTreeMap<String, i64> = BTreeMap::new();
+    let mut missing_rate_currencies = BTreeSet::new();
     let mut due_soon_count = 0usize;
     let mut overdue_count = 0usize;
     let mut configured_count = 0usize;
@@ -74,14 +75,17 @@ pub(crate) async fn servers_billing(
                 vpnctl_inventory::monthly_equivalent(b.amount_cents, b.billing_cycle);
             *monthly_totals_raw.entry(b.currency.clone()).or_default() += monthly_cents;
 
-            if let Ok(Some(conv)) = state
+            if let Some(conv) = state
                 .inv
                 .convert_amount(monthly_cents, &b.currency, display_cur)
                 .await
+                .map_err(|e| internal_error(anyhow::Error::new(e)))?
             {
                 fleet_monthly_converted_minor =
                     fleet_monthly_converted_minor.saturating_add(conv.amount_minor);
                 conv_monthly = Some(conv.amount_minor);
+            } else {
+                missing_rate_currencies.insert(b.currency.clone());
             }
 
             if let Ok(due) = vpnctl_inventory::validate_due_date(&b.due_date) {
@@ -109,6 +113,7 @@ pub(crate) async fn servers_billing(
     }
 
     let fleet_annual_converted_minor = fleet_monthly_converted_minor.saturating_mul(12);
+    let fleet_costs_complete = missing_rate_currencies.is_empty();
 
     let boosty_income = boosty_report_opt
         .and_then(|(json, _)| serde_json::from_str::<vpnctl_boosty_bridge::SyncReport>(&json).ok())
@@ -143,9 +148,10 @@ pub(crate) async fn servers_billing(
         }
     }
 
+    let complete_mrr = boosty_mrr_converted_minor.filter(|_| fleet_costs_complete);
     let net_monthly_margin_minor: Option<i64> =
-        boosty_mrr_converted_minor.map(|mrr| mrr.saturating_sub(fleet_monthly_converted_minor));
-    let coverage_ratio_f64: Option<f64> = boosty_mrr_converted_minor.and_then(|mrr| {
+        complete_mrr.map(|mrr| mrr.saturating_sub(fleet_monthly_converted_minor));
+    let coverage_ratio_f64: Option<f64> = complete_mrr.and_then(|mrr| {
         if fleet_monthly_converted_minor > 0 {
             Some((mrr as f64) / (fleet_monthly_converted_minor as f64))
         } else {
@@ -233,6 +239,20 @@ pub(crate) async fn servers_billing(
             }
         }
 
+        @if !fleet_costs_complete {
+            div.ed-alert.ed-alert--warn role="alert" style="margin: 12px 0 16px;" {
+                (crate::i18n::tr(lang,
+                    "Incomplete totals. Missing exchange rates for: ",
+                    "Неполные итоги. Нет курсов для валют: ",
+                ))
+                (missing_rate_currencies.iter().cloned().collect::<Vec<_>>().join(", "))
+                (crate::i18n::tr(lang,
+                    ". Profit and cost coverage are unavailable.",
+                    ". Прибыль и покрытие расходов недоступны.",
+                ))
+            }
+        }
+
         @if let Some(inc) = boosty_income {
             div.ed-rule style="margin: 12px 0 16px;" {}
             div.ed-headrow {
@@ -283,7 +303,11 @@ pub(crate) async fn servers_billing(
                         (crate::i18n::tr(lang, "Server Expenses", "Расходы на серверы"))
                     }
                     div style="margin-top: 6px; font-family: var(--mono); font-size: 14px; font-weight: 600; color: var(--ink);" {
-                        @if fleet_monthly_converted_minor > 0 {
+                        @if !fleet_costs_complete {
+                            span style="color: var(--warm);" {
+                                (crate::i18n::tr(lang, "Incomplete", "Неполный итог"))
+                            }
+                        } @else if fleet_monthly_converted_minor > 0 {
                             (format_amount(fleet_monthly_converted_minor, display_cur))
                             " "
                             span style="font-weight: 400; font-size: 11px; color: var(--mute);" {
@@ -338,7 +362,11 @@ pub(crate) async fn servers_billing(
                             }
                             None => {
                                 span style="color: var(--mute); font-style: italic; font-weight: 400;" {
-                                    (crate::i18n::tr(lang, "No rate for RUB", "Нет курса к RUB"))
+                                    @if !fleet_costs_complete {
+                                        (crate::i18n::tr(lang, "Incomplete expenses", "Неполные расходы"))
+                                    } @else {
+                                        (crate::i18n::tr(lang, "No rate for RUB", "Нет курса к RUB"))
+                                    }
                                 }
                             }
                         }
@@ -366,7 +394,9 @@ pub(crate) async fn servers_billing(
                                 (crate::i18n::tr(lang, "cost coverage: 0%", "покрытие расходов: 0%"))
                             }
                             None => {
-                                @if fleet_monthly_converted_minor == 0 {
+                                @if !fleet_costs_complete {
+                                    (crate::i18n::tr(lang, "cost coverage unavailable", "покрытие расходов недоступно"))
+                                } @else if fleet_monthly_converted_minor == 0 {
                                     (crate::i18n::tr(lang, "zero server expenses", "серверы не тарифицированы"))
                                 } @else {
                                     (crate::i18n::tr(lang, "awaiting exchange rate", "ожидает курса валюты"))
@@ -421,7 +451,11 @@ pub(crate) async fn servers_billing(
                     }
                 }
                 div style="margin-top: 6px; font-family: var(--mono); font-size: 14px; font-weight: 600; color: var(--ink);" {
-                    @if fleet_monthly_converted_minor > 0 {
+                    @if !fleet_costs_complete {
+                        span style="color: var(--warm);" {
+                            (crate::i18n::tr(lang, "Incomplete", "Неполный итог"))
+                        }
+                    } @else if fleet_monthly_converted_minor > 0 {
                         (format_amount(fleet_monthly_converted_minor, display_cur))
                         " "
                         span style="font-weight: 400; font-size: 11px; color: var(--mute);" {

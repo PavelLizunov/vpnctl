@@ -143,6 +143,35 @@ async fn phase4b_server_detail_renders_live_activity_section_when_no_samples() {
         html.contains("last poll: ") && html.contains("never"),
         "empty-state must read «last poll: never»"
     );
+    let tile = html.split_once("active now</div>").unwrap().1;
+    let value = tile.split_once('>').unwrap().1.split_once('<').unwrap().0;
+    assert_eq!(value, "—", "no sample must be shown as unknown, not zero");
+}
+
+#[tokio::test]
+async fn server_detail_active_now_clears_after_a_successful_empty_poll() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let sid = ServerId("s0".into());
+    for active_connections in [7, 0] {
+        s.inv
+            .record_vpn_stats(
+                &sid,
+                &[VpnStatsDelta {
+                    user_id: None,
+                    upload_bytes: 0,
+                    download_bytes: 0,
+                    active_connections,
+                }],
+            )
+            .await
+            .unwrap();
+    }
+    let html = fetch_html(router(s), "/admin/servers/s0/activity").await;
+    let tile = html.split_once("active now</div>").unwrap().1;
+    let value = tile.split_once('>').unwrap().1.split_once('<').unwrap().0;
+    assert_eq!(value, "0", "the previous non-zero count must be cleared");
 }
 
 #[tokio::test]

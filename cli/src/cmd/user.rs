@@ -373,10 +373,10 @@ pub(crate) async fn run(
                 (limit_gib_val > 0.0).then_some((limit_gib_val * 1_073_741_824.0) as u64);
 
             let desired = (limit_bytes, Some(threshold_pct_val));
-            let current = inv.get_user_traffic_limit(&uid).await?;
-            if current != desired {
-                inv.set_user_traffic_limit(&uid, desired.0, desired.1)
-                    .await?;
+            if inv
+                .set_user_traffic_limit(&uid, desired.0, desired.1)
+                .await?
+            {
                 inv.audit(
                     "cli",
                     "user.traffic_limit.set",

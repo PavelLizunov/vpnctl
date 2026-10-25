@@ -257,8 +257,13 @@ pub(crate) async fn collect_extra_protocol_uris(
                 continue;
             }
         }
+        let per_server_user = state
+            .inv
+            .user_with_per_server_uuid(user, &server.id)
+            .await
+            .map_err(|e| format!("user_with_per_server_uuid: {e}"))?;
         let ctx = RenderCtx::new(server, &secrets);
-        match proto.share_link(&ctx, user) {
+        match proto.share_link(&ctx, &per_server_user) {
             Ok(link) => {
                 let custom = state
                     .inv

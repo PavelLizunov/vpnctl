@@ -19,19 +19,22 @@ pub async fn restore_from(
                 snapshot_path.display()
             ))
         })?;
-    let row: Option<(String,)> = sqlx::query_as("SELECT name FROM sqlite_master LIMIT 1")
-        .fetch_optional(&pool)
-        .await
-        .map_err(|e| {
-            SqliteInventoryError::Invalid(format!(
-                "snapshot {} sqlite_master query failed: {e}",
-                snapshot_path.display()
-            ))
-        })?;
-    if row.is_none() {
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'
+         AND name IN ('_sqlx_migrations', 'users', 'servers')",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(|e| {
+        SqliteInventoryError::Invalid(format!(
+            "snapshot {} sqlite_master query failed: {e}",
+            snapshot_path.display()
+        ))
+    })?;
+    if row.0 != 3 {
         pool.close().await;
         return Err(SqliteInventoryError::Invalid(format!(
-            "snapshot {} has empty sqlite_master — not a vpnctl backup",
+            "snapshot {} is missing vpnctl inventory tables — not a vpnctl backup",
             snapshot_path.display()
         )));
     }

@@ -305,7 +305,12 @@ pub(crate) async fn server_delete(
         .map(|v| v.len())
         .unwrap_or(0);
     if let Err(e) = state.inv.remove_server(&sid).await {
-        return internal_error(anyhow::Error::new(e));
+        return match e {
+            vpnctl_inventory::SqliteInventoryError::Invalid(message) => {
+                error_resp(StatusCode::CONFLICT, &message)
+            }
+            e => internal_error(anyhow::Error::new(e)),
+        };
     }
     if let Err(e) = state
         .inv

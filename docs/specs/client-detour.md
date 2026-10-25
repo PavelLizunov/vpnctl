@@ -32,6 +32,10 @@ pub async fn set_client_detour_via_as(
 
 - The entry is deterministic: the first usable sing-box outbound in the upstream server's `enabled_protocols` order.
 - A real mutation writes `server.client_detour.set`; a no-op writes no audit row.
+- Deleting an entry server is rejected while any target references it; the error
+  lists the targets. Their policies and grants remain unchanged, and the rejected
+  delete writes no audit row. The operator must explicitly change the targets'
+  client entry policies before deleting the entry. The web delete returns 409.
 - Web exposes “Client entry / Входной сервер” on server detail.
 - CLI exposes `vpnctl server set-client-detour-via <target> <upstream>` and `--clear`.
 
@@ -42,4 +46,6 @@ pub async fn set_client_detour_via_as(
 - [ ] V2Ray, generic clients, and legacy VPNRouter app-config requests do not publish a chained target; only a VPNRouter request advertising `detour-v1` receives safe chain metadata.
 - [ ] Existing `/sub` and app-config fixtures remain byte-identical without a chain.
 - [ ] Web and CLI set/clear the policy with correct audit behavior.
+- [ ] Deleting a referenced entry fails with all target IDs and preserves policies;
+      deleting a target or an unreferenced entry remains supported.
 - [ ] Independent review, `just ci`, push, and GitHub Actions CI pass.

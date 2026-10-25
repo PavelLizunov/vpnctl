@@ -41,7 +41,7 @@ where
 
 impl SqliteInventory {
     pub async fn grant(&self, user: &UserId, server: &ServerId) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let server_role: Option<(String,)> =
             sqlx::query_as("SELECT role FROM servers WHERE id = ?1")

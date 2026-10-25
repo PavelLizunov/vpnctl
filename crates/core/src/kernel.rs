@@ -5,7 +5,7 @@ use std::fmt;
 
 use crate::error::Result;
 use crate::id::{KernelId, ProtocolId};
-use crate::models::{RenderCtx, User};
+use crate::models::{RenderCtx, Server, User};
 use crate::protocol::Protocol;
 use crate::transport::SshTransport;
 
@@ -15,6 +15,14 @@ pub trait Kernel: fmt::Debug + Send + Sync {
     fn id(&self) -> KernelId;
 
     fn supported_protocols(&self) -> Vec<ProtocolId>;
+
+    fn validate_server_support(&self, _server: &Server) -> Result<()> {
+        Ok(())
+    }
+
+    fn service_units(&self) -> &'static [&'static str] {
+        &[]
+    }
 
     fn version_requirement(&self) -> Option<KernelVersionRequirement> {
         None

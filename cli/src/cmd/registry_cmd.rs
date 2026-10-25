@@ -3,17 +3,12 @@ use serde::Serialize;
 
 #[derive(Serialize)]
 struct RegistrySnapshot {
-    kernels: Vec<&'static str>,
-    protocols: Vec<&'static str>,
+    kernels: Vec<String>,
+    protocols: Vec<String>,
 }
 
 pub(crate) fn run(format: OutputFormat) -> anyhow::Result<()> {
-    let _reg = crate::registry::build()?;
-
-    let snap = RegistrySnapshot {
-        kernels: vec!["sing-box"],
-        protocols: vec!["vless+reality", "tuic-v5"],
-    };
+    let snap = snapshot(&crate::registry::build()?);
 
     crate::ui::print(format, &snap, |s| {
         println!("Kernels:");
@@ -26,4 +21,41 @@ pub(crate) fn run(format: OutputFormat) -> anyhow::Result<()> {
         }
         Ok(())
     })
+}
+
+fn snapshot(registry: &vpnctl_core::Registry) -> RegistrySnapshot {
+    RegistrySnapshot {
+        kernels: registry.kernel_ids().into_iter().map(|id| id.0).collect(),
+        protocols: registry.protocol_ids().into_iter().map(|id| id.0).collect(),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_contains_every_registered_kernel_and_protocol() {
+        let registry = crate::registry::build().unwrap();
+        let snap = snapshot(&registry);
+        assert_eq!(
+            snap.kernels,
+            registry
+                .kernel_ids()
+                .into_iter()
+                .map(|id| id.0)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            snap.protocols,
+            registry
+                .protocol_ids()
+                .into_iter()
+                .map(|id| id.0)
+                .collect::<Vec<_>>()
+        );
+        assert!(snap.kernels.contains(&"xray".to_string()));
+        assert!(snap.protocols.contains(&"vless+xhttp".to_string()));
+    }
 }

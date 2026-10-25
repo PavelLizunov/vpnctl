@@ -143,7 +143,7 @@ impl SqliteInventory {
         if deltas.is_empty() {
             return Ok(());
         }
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         persist_stats_rows(&mut tx, server_id, deltas).await?;
         tx.commit().await?;
         Ok(())
@@ -172,7 +172,7 @@ impl SqliteInventory {
             ));
         }
 
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let observed_at: i64 = sqlx::query_scalar("SELECT unixepoch()")
             .fetch_one(&mut *tx)
             .await?;
@@ -229,7 +229,9 @@ impl SqliteInventory {
         let elapsed = observed_at_u64.saturating_sub(prior_observed_at);
         let expected_uptime = prior_uptime.saturating_add(elapsed);
         let restarted = tick.uptime_seconds < prior_uptime
-            || tick.uptime_seconds.saturating_add(10) < expected_uptime;
+            || (tick.uptime_seconds.saturating_add(10) < expected_uptime
+                && (tick.server_upload_total < prior_server_upload
+                    || tick.server_download_total < prior_server_download));
         let server_upload_delta = if restarted {
             tick.server_upload_total
         } else {

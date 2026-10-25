@@ -41,6 +41,23 @@ pub(crate) async fn server_deploy(
         }
     };
 
+    match tokio::spawn(async move {
+        let _deploy_guard = _deploy_guard;
+        server_deploy_locked(state, server_id_str, sid, server).await
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => internal_error(anyhow::Error::new(e)),
+    }
+}
+
+async fn server_deploy_locked(
+    state: AppState,
+    server_id_str: String,
+    sid: vpnctl_core::ServerId,
+    server: vpnctl_core::Server,
+) -> Response {
     let (_, bootstrapped) = match crate::wizard_bootstrap::bootstrap_server_secrets(
         &state.inv,
         &server,
@@ -115,6 +132,22 @@ pub(crate) async fn server_deploy(
             );
         }
         let ctx = vpnctl_core::RenderCtx::new(&server, &secrets);
+
+        match state.inv.retired_server_kernels(&sid).await {
+            Ok(retired) => {
+                if let Err(e) = vpnctl_kernels::reconcile_disabled_kernels(
+                    &state.registry,
+                    &server,
+                    &retired,
+                    &ssh,
+                )
+                .await
+                {
+                    ssh_errors.push(format!("kernel shutdown failed: {e}"));
+                }
+            }
+            Err(e) => ssh_errors.push(format!("retired kernel lookup failed: {e}")),
+        }
 
         for kid in &server.kernels {
             let Some(kernel) = state.registry.kernel(kid) else {
@@ -336,6 +369,7 @@ pub(crate) async fn server_push_deploy_key(
                     &ssh_user,
                     &password,
                     &known_hosts,
+                    server.trusted_host_fingerprint.as_deref(),
                     &push_cmd,
                 )
                 .await
@@ -349,6 +383,7 @@ pub(crate) async fn server_push_deploy_key(
                 &ssh_user,
                 &password,
                 &known_hosts,
+                server.trusted_host_fingerprint.as_deref(),
                 &push_cmd,
             )
             .await

@@ -72,6 +72,7 @@ impl Registry {
             let k = self
                 .kernel(kid)
                 .ok_or_else(|| CoreError::Render(format!("unknown kernel {kid}")))?;
+            k.validate_server_support(server)?;
             resolved.push((kid.clone(), k.supported_protocols()));
         }
         for proto in &server.enabled_protocols {
@@ -102,6 +103,7 @@ impl Registry {
             let Some(proto) = self.protocol(pid) else {
                 continue;
             };
+            proto.validate_server(&crate::models::RenderCtx::new(server, secrets))?;
             for (transport, port) in proto.effective_listen_ports(secrets) {
                 if let Some(prev) = bound.insert((transport, port), pid) {
                     return Err(CoreError::Render(format!(

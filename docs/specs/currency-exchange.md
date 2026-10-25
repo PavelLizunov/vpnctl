@@ -85,6 +85,7 @@ to nearest (half-up).
 | amount = 0 | Returns 0, no rate lookup needed |
 | missing rate | Returns `None` — caller surfaces as "unconvertible" |
 | rate ≤ 0 or markup ≤ 0 | Returns `None` (defensive rejection) |
+| intermediate or result overflow | Returns `None`; never wraps the converted amount |
 
 ### 2.3 Spend vs Burn Rate
 
@@ -146,6 +147,9 @@ ServerBillingSummaryItem  // Per-server line in summary
   and final amount.
 - **Payment history:** per-server table of immutable payment records with
   original + converted amounts.
+- **Missing rates:** monthly and annual fleet totals are marked incomplete,
+  with a warning listing the missing source currencies. Profit and cost
+  coverage remain unavailable until every configured cost can be converted.
 
 ## 3. Verification Checklist (Definition of Done)
 

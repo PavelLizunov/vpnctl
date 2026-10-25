@@ -1,4 +1,5 @@
 use crate::encoding::{FRAGMENT, USERINFO as PASSWORD};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use percent_encoding::utf8_percent_encode;
 use serde_json::json;
 use vpnctl_core::url_host::host_for_url;
@@ -20,6 +21,35 @@ const VALID_METHODS: &[&str] = &[
     "2022-blake3-aes-256-gcm",
     "2022-blake3-chacha20-poly1305",
 ];
+
+fn key_bytes(method: &str) -> Result<usize> {
+    match method {
+        "2022-blake3-aes-128-gcm" => Ok(16),
+        "2022-blake3-aes-256-gcm" | "2022-blake3-chacha20-poly1305" => Ok(32),
+        _ => Err(CoreError::Render(format!(
+            "shadowsocks-2022 method '{method}' not supported (valid: {:?})",
+            VALID_METHODS
+        ))),
+    }
+}
+
+fn checked_credentials<'a>(ctx: &'a RenderCtx<'_>) -> Result<(&'a str, &'a str)> {
+    let psk = ctx.require("ss2022.psk")?;
+    let method = ctx.or_default("ss2022.method", DEFAULT_METHOD);
+    let required = key_bytes(method)?;
+    let decoded = B64.decode(psk).map_err(|_| {
+        CoreError::Render(format!(
+            "ss2022.psk must be standard padded base64 encoding {required} bytes for {method}"
+        ))
+    })?;
+    if decoded.len() != required {
+        return Err(CoreError::Render(format!(
+            "ss2022.psk must decode to {required} bytes for {method}, got {} bytes; configure a matching PSK before deploying",
+            decoded.len()
+        )));
+    }
+    Ok((method, psk))
+}
 
 pub const SS_2022_PORT: u16 = 8388;
 
@@ -43,16 +73,22 @@ impl Protocol for Shadowsocks2022 {
         }]
     }
 
-    fn server_inbound(&self, ctx: &RenderCtx<'_>, _users: &[User]) -> Result<serde_json::Value> {
-        let psk = ctx.require("ss2022.psk")?;
+    fn server_secret_specs_for(
+        &self,
+        secrets: &std::collections::HashMap<String, String>,
+    ) -> Result<Vec<vpnctl_core::ServerSecretSpec>> {
+        let method = secrets
+            .get("ss2022.method")
+            .map(String::as_str)
+            .unwrap_or(DEFAULT_METHOD);
+        Ok(vec![vpnctl_core::ServerSecretSpec::Base64Key {
+            key: "ss2022.psk",
+            key_bytes: key_bytes(method)?,
+        }])
+    }
 
-        let method = ctx.or_default("ss2022.method", DEFAULT_METHOD);
-        if !VALID_METHODS.contains(&method) {
-            return Err(CoreError::Render(format!(
-                "shadowsocks-2022 method '{method}' not supported (valid: {:?})",
-                VALID_METHODS
-            )));
-        }
+    fn server_inbound(&self, ctx: &RenderCtx<'_>, _users: &[User]) -> Result<serde_json::Value> {
+        let (method, psk) = checked_credentials(ctx)?;
 
         Ok(json!({
             "type": "shadowsocks",
@@ -65,14 +101,7 @@ impl Protocol for Shadowsocks2022 {
     }
 
     fn client_config(&self, ctx: &RenderCtx<'_>, _user: &User) -> Result<serde_json::Value> {
-        let psk = ctx.require("ss2022.psk")?;
-        let method = ctx.or_default("ss2022.method", DEFAULT_METHOD);
-        if !VALID_METHODS.contains(&method) {
-            return Err(CoreError::Render(format!(
-                "shadowsocks-2022 method '{method}' not supported (valid: {:?})",
-                VALID_METHODS
-            )));
-        }
+        let (method, psk) = checked_credentials(ctx)?;
         Ok(json!({
             "type": "shadowsocks",
             "tag": "ss22-out",
@@ -84,14 +113,7 @@ impl Protocol for Shadowsocks2022 {
     }
 
     fn share_link(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
-        let psk = ctx.require("ss2022.psk")?;
-        let method = ctx.or_default("ss2022.method", DEFAULT_METHOD);
-        if !VALID_METHODS.contains(&method) {
-            return Err(CoreError::Render(format!(
-                "shadowsocks-2022 method '{method}' not supported (valid: {:?})",
-                VALID_METHODS
-            )));
-        }
+        let (method, psk) = checked_credentials(ctx)?;
         let pw_enc = utf8_percent_encode(psk, PASSWORD);
         let method_enc = utf8_percent_encode(method, PASSWORD);
         let tag_enc = utf8_percent_encode(&user.id.0, FRAGMENT);

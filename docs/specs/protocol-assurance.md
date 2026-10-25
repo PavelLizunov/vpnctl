@@ -23,9 +23,10 @@ pub struct ProtocolAssuranceSample {
 
 ### Alert hygiene
 - A failed external handshake is retried up to 3 times in one tick (2 s apart), the way a real client reconnects. With `fp=randomized` a single xray REALITY handshake fails about 10% of the time; a real outage fails every attempt. Only a failed tick counts towards the 3-tick alert threshold.
-- `probe_config_missing` from the runner means "no probe template for this server/protocol". It is not a protocol failure. The poller falls back to the built-in TCP path check and records the result as `Unknown` with `probe_template_missing`. That code neither opens nor recovers an alert, so losing templates never fakes a recovery. An alert opened earlier by a real failure stays open until the operator acks it.
+- `probe_config_missing` from the runner means "no probe template for this server/protocol". It is not a protocol failure. The poller falls back to the built-in TCP path check and records the result as `Unknown` with `probe_template_missing`. That code neither opens nor recovers an alert, so losing templates never fakes a recovery. An alert opened earlier by a real failure stays open until a verified recovery or the operator acks it.
+- Only `Verified` recovers an open assurance failure. All `Unknown` results, including `tcp_path_only`, `udp_path_unverified`, and `no_probe_identity`, preserve the open alert because they cannot disprove a definitive handshake failure.
 - An open `protocol.assurance.failed.*` alert whose server×protocol is no longer probed (protocol disabled, server leaves the fleet) is auto-acked at the end of the tick and audited as `alert.auto_ack`.
-- `server.singbox.restarted` is a one-shot event. It is written as already-acked history, so it never stays open and never swallows the next crash. Telegram pushes for it are throttled to one per server per 30 min, counted from the last push.
+- `server.singbox.restarted` is a one-shot event. It is written as already-acked history, deduplicated by the source sample pair even across daemon restarts, so it never stays open and never swallows the next crash. Telegram pushes for it are throttled to one per server per 30 min, counted from the last push.
 
 ## 3. Verification Checklist
 - [ ] Existing health/quality/alert mechanisms mapped and reused.

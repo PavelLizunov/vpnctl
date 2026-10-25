@@ -7,6 +7,9 @@ Replace the stale `1.14.0-vpnctl.5` acquisition pin with the managed fork's
 Keep the APT bootstrap floor unchanged: managed artifacts, not an upstream
 package upgrade, supply the fork's features. Preserve node configuration,
 credentials, subscriptions and the existing binary/helper rollback mechanism.
+An active `caddy-vlessws` unit shares the managed binary: restart and check it
+when that binary changes, and restart it after restoring the previous artifacts
+on failure. Leave an inactive or absent backend inactive.
 Do not change Xray's already-current `26.3.27` pin or reboot node operating systems.
 
 ## Interface and data contract

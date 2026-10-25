@@ -3,7 +3,9 @@
 - What: replace snapshot-only byte attribution with cumulative sing-box V2Ray Stats so short-lived connections are counted.
 - One Stats response supplies inbound server totals and per-user totals; Clash remains live metadata only, and AmneziaWG keeps its existing poller.
 - Counters and their persisted baselines update in one SQLite transaction: a failed write never advances a baseline, and a successful retry cannot double-count.
-- Process uptime detects restarts even when new counters overtake old values; lower individual counters remain reset-safe. The first observation establishes a zero-delta baseline.
+- A decrease in process uptime detects a restart even when new counters overtake old values. An uptime shortfall inferred from controller time also requires a decreased server counter, so controller clock steps and collection/write delays alone cannot re-count cumulative bytes. A restart whose uptime and both server counters overtake their baselines cannot be distinguished locally from delayed collection. Lower individual counters remain reset-safe. The first observation establishes a zero-delta baseline.
+- Raw traffic retention is 32 days (`VPN_STATS_RETENTION_DAYS`), exceeding the longest calendar-month accounting window (31 days); monthly usage and traffic-limit alerts retain the first day throughout the month. Historical raw views remain bounded by retention.
+- Live connection counts use fresh snapshots, never historical bucket peaks. Persist successful empty Clash polls as zero; missing or expired samples are unknown (`—` in the admin UI). Freshness is two configured Clash poll intervals, matching the snapshot cache.
 - The Stats API and helper bind/run on the managed node only; no stats listener is exposed publicly and no user IDs or counters are logged.
 - vpnctl ships a revision-coupled sing-box build with `with_v2ray_api`; APT is held after install so upgrades cannot silently remove accounting support.
 - Existing share links, subscription output, inventory ownership, and Kernel × Protocol boundaries remain byte-compatible.
@@ -37,6 +39,7 @@ impl SqliteInventory {
 ```
 - The node helper queries `127.0.0.1:10085`, uses a bounded timeout, never resets upstream counters, rejects malformed/negative/unknown counter names, and emits deterministic JSON.
 - Server baselines persist one-tick pending/ahead reconciliation; user baselines are keyed by `(server_id, user_id)`, and both cascade with owners.
+- `ServerLiveActivity::active_now` is `Option<u32>` (`None` means no fresh sample). `server_live_activity` and `all_servers_live_activity` take `max_age_secs` separately from the historical byte window.
 
 ## 3. Verification Checklist (Definition of Done)
 - [ ] A connection that opens and closes between Clash polls is counted from cumulative stats.

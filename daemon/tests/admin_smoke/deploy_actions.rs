@@ -726,7 +726,8 @@ async fn servers_update_kernels_all_sse_reports_failures_in_stream_steps() {
     assert!(
         body.contains("done — updated kernels on 0/2 servers; failed: da-uk-all-1, da-uk-all-2")
     );
-    assert!(body.contains("event: ok"));
+    assert!(body.contains("event: error"));
+    assert!(!body.contains("event: ok"));
 }
 
 #[tokio::test]
@@ -754,7 +755,8 @@ async fn servers_update_kernels_all_sse_lock_reports_error_when_server_locked() 
 
     assert!(body.contains("deploy/update already running for server 'da-uk-all-lock'"));
     assert!(body.contains("failed: da-uk-all-lock"));
-    assert!(body.contains("event: ok"));
+    assert!(body.contains("event: error"));
+    assert!(!body.contains("event: ok"));
 }
 
 #[tokio::test]

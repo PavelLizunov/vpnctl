@@ -113,6 +113,49 @@ impl SubprocessSshTransport {
         })
     }
 
+    pub async fn exec_password(&self, password: &str, remote_cmd: &str) -> Result<String> {
+        if self.jump.is_some() {
+            return Err(CoreError::Transport(
+                "password authentication through a jump host is not supported".into(),
+            ));
+        }
+        let transport = self.clone();
+        let password = password.to_string();
+        let remote_cmd = remote_cmd.to_string();
+        tokio::task::spawn_blocking(move || {
+            // Keep the private known_hosts alive until sshpass and ssh have exited.
+            let prepared = if transport.target_fingerprint.is_some() {
+                Some(prepare_pinned_direct(&transport)?)
+            } else {
+                None
+            };
+            let mut cmd = Command::new("sshpass");
+            cmd.env("SSHPASS", &password).args([
+                "-e",
+                "ssh",
+                "-o",
+                "BatchMode=no",
+                "-o",
+                "PreferredAuthentications=password",
+                "-o",
+                "PubkeyAuthentication=no",
+            ]);
+            if let Some(prepared) = &prepared {
+                cmd.args(prepared.final_args(&remote_cmd));
+            } else {
+                cmd.args(ssh_safety_opts(&transport.known_hosts, false))
+                    .args(["-p", &transport.port.to_string(), "--"])
+                    .arg(format!("{}@{}", transport.user, transport.host))
+                    .arg(&remote_cmd);
+            }
+            let label = format!("{}@{}:{}", transport.user, transport.host, transport.port);
+            let bytes = run_child_with_timeout(cmd, None, transport.timeout, &label)?;
+            Ok(String::from_utf8_lossy(&bytes).into_owned())
+        })
+        .await
+        .map_err(|e| CoreError::Transport(format!("spawn_blocking JoinError: {e}")))?
+    }
+
     async fn run(&self, remote_cmd: String, stdin_bytes: Option<Vec<u8>>) -> Result<Vec<u8>> {
         let transport = self.clone();
         let label = format!("{}@{}:{}", self.user, self.host, self.port);

@@ -42,8 +42,15 @@ fn checked_path<'a>(ctx: &'a RenderCtx<'_>) -> Result<&'a str> {
     Ok(path)
 }
 
-fn front_port(ctx: &RenderCtx<'_>) -> u16 {
-    front_port_from_secrets(ctx.secrets)
+fn front_port(ctx: &RenderCtx<'_>) -> Result<u16> {
+    let port = front_port_from_secrets(ctx.secrets);
+    if port == 11443 {
+        return Err(CoreError::Render(
+            "vlessws.listen_port 11443 is reserved for the loopback backend; choose another front port"
+                .into(),
+        ));
+    }
+    Ok(port)
 }
 
 fn front_port_from_secrets(secrets: &std::collections::HashMap<String, String>) -> u16 {
@@ -70,6 +77,10 @@ impl Protocol for VlessWs {
         vec![("tcp", front_port_from_secrets(secrets))]
     }
 
+    fn validate_server(&self, ctx: &RenderCtx<'_>) -> Result<()> {
+        front_port(ctx).map(|_| ())
+    }
+
     fn dpi_risk(&self) -> vpnctl_core::DpiRisk {
         vpnctl_core::DpiRisk::Strong
     }
@@ -85,7 +96,7 @@ impl Protocol for VlessWs {
         let domain = checked_domain(ctx)?;
         let acme_email = ctx.or_default("vlessws.acme_email", "");
         let path = checked_path(ctx)?;
-        let port = front_port(ctx);
+        let port = front_port(ctx)?;
 
         let users_json: Vec<_> = users
             .iter()
@@ -104,7 +115,7 @@ impl Protocol for VlessWs {
     fn client_config(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<serde_json::Value> {
         let domain = checked_domain(ctx)?;
         let path = checked_path(ctx)?;
-        let port = front_port(ctx);
+        let port = front_port(ctx)?;
         Ok(json!({
             "type": "vless",
             "tag": "vless-ws-out",
@@ -127,7 +138,7 @@ impl Protocol for VlessWs {
     fn share_link(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
         let domain = checked_domain(ctx)?;
         let path = checked_path(ctx)?;
-        let port = front_port(ctx);
+        let port = front_port(ctx)?;
         let name = utf8_percent_encode(&user.id.0, FRAGMENT);
         Ok(format!(
             "vless://{uuid}@{addr}:{port}?encryption=none&type=ws&security=tls&sni={sni}&host={host}&path=%2F{path}&fp={fp}#{name}",
@@ -226,6 +237,24 @@ mod tests {
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["uuid"], "11111111-1111-4111-8111-111111111111");
         assert_eq!(arr[0]["name"], "alice");
+    }
+
+    #[test]
+    fn reserved_backend_port_is_rejected_before_rendering() {
+        let server = server();
+        let mut secrets = secrets();
+        secrets.insert("vlessws.listen_port".into(), "11443".into());
+        let ctx = RenderCtx::new(&server, &secrets);
+        let protocol = VlessWs::new();
+        let user = user("alice", "u-1");
+        for error in [
+            protocol.validate_server(&ctx).unwrap_err(),
+            protocol.server_inbound(&ctx, &[]).unwrap_err(),
+            protocol.client_config(&ctx, &user).unwrap_err(),
+            protocol.share_link(&ctx, &user).unwrap_err(),
+        ] {
+            assert!(error.to_string().contains("11443 is reserved"));
+        }
     }
 
     #[test]

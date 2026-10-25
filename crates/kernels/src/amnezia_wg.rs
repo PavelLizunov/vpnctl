@@ -200,6 +200,10 @@ impl Kernel for AmneziaWg {
         KernelId("amneziawg".to_string())
     }
 
+    fn service_units(&self) -> &'static [&'static str] {
+        &["awg-quick@awg0.service"]
+    }
+
     fn supported_protocols(&self) -> Vec<ProtocolId> {
         vec![ProtocolId("wireguard".to_string())]
     }
@@ -271,6 +275,22 @@ impl Kernel for AmneziaWg {
         ssh.upload("/etc/amnezia/amneziawg/awg0.conf.new", config)
             .await?;
         ssh.exec(&awg_apply_script()).await?;
+        Ok(())
+    }
+
+    async fn open_firewall(
+        &self,
+        ssh: &dyn SshTransport,
+        ctx: &RenderCtx<'_>,
+        protocols: &[&dyn Protocol],
+    ) -> Result<()> {
+        let ports: Vec<(&str, u16)> = protocols
+            .iter()
+            .flat_map(|p| p.effective_listen_ports(ctx.secrets))
+            .collect();
+        if let Some(script) = super::sing_box::firewall_open_script(&ports) {
+            ssh.exec(&script).await?;
+        }
         Ok(())
     }
 

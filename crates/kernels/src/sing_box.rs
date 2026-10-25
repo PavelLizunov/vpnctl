@@ -6,6 +6,7 @@ mod tests;
 
 pub(crate) use arch::resolve_sing_box_artifact_path;
 pub use guards::{live_config_user_uuids, validate_config_excludes_ports};
+pub(crate) use scripts::firewall_open_script;
 pub use scripts::{
     SING_BOX_AMD64_SHA256, SING_BOX_ARM64_SHA256, SING_BOX_ARMV7_SHA256, SING_BOX_MIN_VERSION,
     SING_BOX_VPNCTL_VERSION,
@@ -17,8 +18,7 @@ use async_trait::async_trait;
 use guards::user_uuid_diff;
 use scripts::{
     DEFAULT_STATS_HELPER_ARTIFACT, SING_BOX_SETUP_SCRIPT, cleanup_remote_artifacts_script,
-    firewall_open_script, install_managed_artifacts_script, remote_artifact_paths,
-    sing_box_apply_script,
+    install_managed_artifacts_script, remote_artifact_paths, sing_box_apply_script,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -42,6 +42,10 @@ impl Kernel for SingBox {
         KernelId("sing-box".to_string())
     }
 
+    fn service_units(&self) -> &'static [&'static str] {
+        &["sing-box.service"]
+    }
+
     fn supported_protocols(&self) -> Vec<ProtocolId> {
         vec![
             ProtocolId("vless+reality".to_string()),
@@ -63,13 +67,17 @@ impl Kernel for SingBox {
     }
 
     async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()> {
-        let arch = ssh
-            .exec("uname -m 2>/dev/null || echo x86_64")
-            .await?
-            .trim()
-            .to_string();
+        let arch = ssh.exec("uname -m").await?.trim().to_string();
+        let helper_override = std::env::var_os("VPNCTL_STATS_HELPER_ARTIFACT");
+        // The bundled stats helper is linux/amd64; other nodes need an
+        // operator-supplied helper built for their architecture.
+        if helper_override.is_none() && !matches!(arch.as_str(), "x86_64" | "amd64") {
+            return Err(CoreError::Transport(format!(
+                "managed sing-box deploy requires an amd64 node: the stats helper is linux/amd64, node architecture is {arch:?} (set VPNCTL_STATS_HELPER_ARTIFACT to a helper built for it)"
+            )));
+        }
         let sing_box_path = resolve_sing_box_artifact_path(&arch);
-        let helper_path = std::env::var_os("VPNCTL_STATS_HELPER_ARTIFACT")
+        let helper_path = helper_override
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_STATS_HELPER_ARTIFACT));
         let (sing_box, stats_helper, sb_digest, sh_digest) =

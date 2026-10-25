@@ -14,7 +14,7 @@ prev_month=$(date -u -d "${this_month}-01 -1 month" +%Y-%m)
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
 nodes() {
-  sqlite3 "file:${DB}?immutable=1" \
+  sqlite3 "file:${DB}?mode=ro" \
     "SELECT ssh_user || ' ' || address || ' ' || ssh_port
        FROM servers
       WHERE (jump_via IS NULL OR jump_via = '')
@@ -31,7 +31,7 @@ ssh_node() { # user host port cmd...
 
 fetch() {
   local name=$1 seg=$2
-  local gz="$DIR/${name}.partial.gz" mmdb="$DIR/${name}.partial" mon url
+  local gz="$DIR/${name}.$$.partial.gz" mmdb="$DIR/${name}.$$.partial" mon url
   for mon in "$this_month" "$prev_month"; do
     url="https://download.db-ip.com/free/dbip-${seg}-lite-${mon}.mmdb.gz"
     while read -r u h p; do

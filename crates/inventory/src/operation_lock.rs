@@ -56,7 +56,7 @@ fn default_lock_dir() -> PathBuf {
     }
 }
 
-fn validate_server_id(server_id: &str) -> io::Result<()> {
+pub fn validate_server_id(server_id: &str) -> io::Result<()> {
     if !server_id.is_empty()
         && server_id
             .bytes()

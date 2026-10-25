@@ -61,7 +61,7 @@ impl SqliteInventory {
         .await
         .map_err(|e| SqliteInventoryError::Invalid(format!("resolve server addresses: {e}")))?;
 
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let mut all = HashSet::new();
         for (server_id, ips) in resolved {
             let Some(ips) = ips else { continue };
@@ -94,12 +94,19 @@ impl SqliteInventory {
     }
 
     pub async fn server_id_for_address(&self, addr: &str) -> Result<Option<String>> {
-        let row: Option<(String,)> =
-            sqlx::query_as("SELECT id FROM servers WHERE address = ?1 ORDER BY id LIMIT 1")
-                .bind(addr)
-                .fetch_optional(&self.pool)
+        let target_ip = addr.parse::<IpAddr>().ok();
+        let rows =
+            sqlx::query_as::<_, (String, String)>("SELECT id, address FROM servers ORDER BY id")
+                .fetch_all(&self.pool)
                 .await?;
-        Ok(row.map(|(id,)| id))
+        Ok(rows.into_iter().find_map(|(id, address)| {
+            let matches = match (target_ip, address.parse::<IpAddr>().ok()) {
+                (Some(target), Some(existing)) => target == existing,
+                (None, None) => addr.eq_ignore_ascii_case(&address),
+                _ => false,
+            };
+            matches.then_some(id)
+        }))
     }
 
     pub async fn server_auto_suppress_state(
@@ -121,7 +128,7 @@ impl SqliteInventory {
     }
 
     pub async fn set_server_auto_suppress(&self, sid: &ServerId, enabled: bool) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let prior: Option<(i64, Option<String>)> = sqlx::query_as(
             "SELECT auto_suppress_when_unreachable, suppressed_at FROM servers WHERE id = ?1",
         )
@@ -182,7 +189,7 @@ impl SqliteInventory {
     }
 
     pub async fn set_server_udp_pair_enabled(&self, sid: &ServerId, enabled: bool) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let prior: Option<(i64,)> =
             sqlx::query_as("SELECT udp_pair_enabled FROM servers WHERE id = ?1")
                 .bind(&sid.0)
@@ -221,7 +228,7 @@ impl SqliteInventory {
     }
 
     pub async fn set_server_suppressed(&self, sid: &ServerId, suppressed: bool) -> Result<bool> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let prior: Option<(Option<String>,)> =
             sqlx::query_as("SELECT suppressed_at FROM servers WHERE id = ?1")
                 .bind(&sid.0)
@@ -303,7 +310,7 @@ impl SqliteInventory {
         if new_user == old_user {
             return Ok(false);
         }
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let changed = sqlx::query(
             "UPDATE servers SET ssh_user = ?1,
                                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')

@@ -41,7 +41,7 @@ impl SqliteInventory {
         expected: &str,
         payload: &serde_json::Value,
     ) -> Result<bool> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("UPDATE servers SET id = id WHERE id = ?1")
             .bind(&id.0)
             .execute(&mut *tx)
@@ -91,7 +91,7 @@ impl SqliteInventory {
         sorted.dedup();
         let new_json = serde_json::to_string(&sorted)?;
 
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let prior: Option<(String,)> =
             sqlx::query_as("SELECT reserved_ports FROM servers WHERE id = ?1")

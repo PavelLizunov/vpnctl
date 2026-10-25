@@ -39,15 +39,21 @@ daemon + CLI + managed sing-box + node-side stats helper, exports
 (`vpnctl_core::build_version`, `option_env!`, no git at runtime), validates all
 four sources before installing any, stages all four, installs node artifacts
 first and daemon last, and rolls every prior path back on an interrupted swap.
+An inter-run `flock` on `${VPNCTL_DAEMON_DST}.deploy.lock` (override with
+`VPNCTL_DEPLOY_LOCK`) covers builds, staging, swaps and rollback; the lock file
+is kept in place. Swap bookkeeping precedes each rename so a signal on either side
+restores the previous set.
 Admin UI assets are served from `/opt/vpnctl/assets/`, so they are replaced as
 one set in the same transaction: a checkout build ships its `daemon/assets`,
 prebuilt artifacts must pass theirs in `VPNCTL_ASSETS_SRC`, or set
 `VPNCTL_SKIP_ASSETS=1` to keep the live set deliberately; otherwise the script
 refuses before touching anything (new markup with an old `admin.js` breaks the
 deploy buttons).
-The Go artifacts are static linux/amd64 builds; managed sing-box must report the
-`with_v2ray_api` tag. For the accounting migration, install artifacts first,
-deploy every sing-box node while the old daemon still polls Clash, verify the
+The Go artifacts are static linux/amd64 builds. Managed sing-box deployment
+rejects non-amd64 nodes before changing them because its stats helper is amd64;
+managed sing-box must report the `with_v2ray_api` tag. For the accounting
+migration, install artifacts first, deploy every sing-box node while the old
+daemon still polls Clash, verify the
 loopback Stats API, and only then restart vpnctld; this avoids a collection gap
 during rollout. Then `sudo systemctl restart vpnctld` and verify the changed code path
 with a curl. Before replacing: `sudo cp -a /opt/vpnctl/vpnctld

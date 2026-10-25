@@ -159,7 +159,7 @@ pub(super) async fn server_detail_render(
 
     let live_activity = state
         .inv
-        .server_live_activity(&sid, 24)
+        .server_live_activity(&sid, 24, crate::clash_poller::poll_interval_secs().saturating_mul(2))
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(target = "vpnctld::admin", server = %sid, error = %e, "server_live_activity failed");

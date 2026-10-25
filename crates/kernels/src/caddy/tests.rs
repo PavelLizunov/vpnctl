@@ -1511,3 +1511,158 @@ async fn caddy_status_backend_probe_unknown_reports_inactive() {
         "Unknown backend probe output must report inactive"
     );
 }
+
+#[test]
+fn cacheless_presence_requires_pinned_version_and_forward_proxy() {
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("caddy");
+    let probe = caddy_present_command().replace("/usr/local/bin/caddy", &binary.to_string_lossy());
+    for (version, modules, expected) in [
+        (CADDY_VERSION, "http.handlers.forward_proxy", "present"),
+        ("v2.10.0", "http.handlers.forward_proxy", "absent"),
+        ("v99.0.0", "http.handlers.forward_proxy", "absent"),
+        (CADDY_VERSION, "http.handlers.file_server", "absent"),
+    ] {
+        std::fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in version) echo '{version} h1:fixture' ;; list-modules) echo '{modules}' ;; esac\n"
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&probe)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), expected);
+    }
+}
+
+#[test]
+fn registry_requires_sing_box_for_caddy_vlessws() {
+    let mut registry = vpnctl_core::Registry::new();
+    registry.register_kernel(Box::new(Caddy::new())).unwrap();
+    registry
+        .register_kernel(Box::new(crate::SingBox::new()))
+        .unwrap();
+    registry
+        .register_protocol(Box::new(VlessWs::new()))
+        .unwrap();
+    registry.register_protocol(Box::new(Naive::new())).unwrap();
+    let mut server = dummy_server();
+    assert!(registry.validate_server_support(&server).is_ok());
+    server.enabled_protocols = vec![ProtocolId("vless-ws".into())];
+    let err = registry.validate_server_support(&server).unwrap_err();
+    assert!(err.to_string().contains("requires the sing-box kernel"));
+    server.kernels.push(KernelId("sing-box".into()));
+    assert!(registry.validate_server_support(&server).is_ok());
+
+    let mut secrets = vlessws_secrets();
+    secrets.insert("vlessws.listen_port".into(), "11443".into());
+    let err = registry.validate_server(&server, &secrets).unwrap_err();
+    assert!(err.to_string().contains("11443 is reserved"));
+    secrets.insert("vlessws.listen_port".into(), "2087".into());
+    assert!(registry.validate_server(&server, &secrets).is_ok());
+}
+
+#[test]
+fn caddy_apply_restricts_secret_file_access() {
+    let vlessws = vlessws_apply_script();
+    let naive = naive_apply_script();
+    for script in [&vlessws, &naive] {
+        assert!(script.contains("chown root:caddy /etc/caddy/Caddyfile"));
+        assert!(script.contains("chmod 0640 /etc/caddy/Caddyfile"));
+        assert!(!script.contains("chmod 0644 /etc/caddy/Caddyfile"));
+    }
+    assert!(vlessws.contains("umask 077"));
+    assert!(vlessws.contains("chown root:root /etc/caddy/vlessws-singbox.json"));
+    assert!(vlessws.contains("chmod 0600 /etc/caddy/vlessws-singbox.json"));
+    let runtime = caddy_runtime_provision_script();
+    assert!(runtime.contains("User=caddy\nGroup=caddy"));
+    let backend = runtime.split("Type=simple").nth(1).unwrap();
+    assert!(!backend.contains("User="), "backend runs as root");
+}
+
+#[test]
+fn caddy_apply_keeps_staging_and_live_secrets_private_e2e() {
+    sim_env(
+        &vlessws_apply_script(),
+        &[
+            (".vlessws-bundle.new", ""),
+            ("Caddyfile.new", "STALE_CADDY"),
+            ("vlessws-singbox.json.new", "STALE_BACKEND"),
+        ],
+        r#"
+        chmod() { command chmod "$@"; }
+        caddy() {
+            [ "$(stat -c %a "$TMP_DIR/etc/caddy/Caddyfile.new")" = 600 ] || return 1
+            [ "$(stat -c %a "$TMP_DIR/etc/caddy/vlessws-singbox.json.new")" = 600 ] || return 1
+        }
+        "#,
+        r#"
+        [ "$STATUS" -eq 0 ] || exit 1
+        [ "$(stat -c %a "$TMP_DIR/etc/caddy/Caddyfile")" = 640 ] || exit 1
+        [ "$(stat -c %a "$TMP_DIR/etc/caddy/vlessws-singbox.json")" = 600 ] || exit 1
+        "#,
+    );
+    sim_env(
+        &naive_apply_script(),
+        &[("Caddyfile.new", "NAIVE_CADDY")],
+        "chmod() { command chmod \"$@\"; }",
+        r#"
+        [ "$STATUS" -eq 0 ] || exit 1
+        [ "$(stat -c %a "$TMP_DIR/etc/caddy/Caddyfile")" = 640 ] || exit 1
+        "#,
+    );
+}
+
+#[tokio::test]
+async fn caddy_and_amneziawg_open_firewall_for_effective_protocol_ports() {
+    let server = dummy_server();
+    let mut secrets = vlessws_secrets();
+    secrets.insert("vlessws.listen_port".into(), "2087".into());
+    secrets.insert("wireguard.listen_port".into(), "51821".into());
+    let ctx = RenderCtx::new(&server, &secrets);
+    // A transport error proves each kernel executes the expected firewall command.
+    #[derive(Debug)]
+    struct RequireCommand(String);
+    #[async_trait::async_trait]
+    impl SshTransport for RequireCommand {
+        async fn exec(&self, cmd: &str) -> Result<String> {
+            assert_eq!(cmd, self.0);
+            Err(CoreError::Transport("fixture firewall failure".into()))
+        }
+        async fn exec_unprivileged(&self, _: &str) -> Result<String> {
+            unreachable!()
+        }
+        async fn upload(&self, _: &str, _: &[u8]) -> Result<()> {
+            unreachable!()
+        }
+        async fn read_file(&self, _: &str) -> Result<Vec<u8>> {
+            unreachable!()
+        }
+    }
+    let caddy = Caddy::new();
+    let amneziawg = crate::AmneziaWg::new();
+    let ws = VlessWs::new();
+    let naive = Naive::new();
+    let wireguard = vpnctl_protocols::WireGuard::new();
+    for (kernel, protocol, transport, port) in [
+        (&caddy as &dyn Kernel, &ws as &dyn Protocol, "tcp", 2087),
+        (&caddy, &naive, "tcp", 443),
+        (&amneziawg, &wireguard, "udp", 51821),
+    ] {
+        let expected = crate::sing_box::firewall_open_script(&[(transport, port)]).unwrap();
+        let ssh = RequireCommand(expected);
+        let error = kernel
+            .open_firewall(&ssh, &ctx, &[protocol])
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("fixture firewall failure"));
+        kernel.open_firewall(&ssh, &ctx, &[]).await.unwrap();
+    }
+}

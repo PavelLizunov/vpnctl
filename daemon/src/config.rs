@@ -91,7 +91,7 @@ pub(crate) fn assert_auth_safe_for_addr_inner(
     if matches!(auth, AdminAuthConfig::Malformed) {
         return Err(anyhow::anyhow!(
             "vpnctld refuses to start: VPNCTLD_ADMIN_PASSWORD begins with $argon2 \
-             but is not a valid PHC hash. Admin auth would be DISABLED (fail-open). \
+             but is not a complete, supported Argon2 PHC hash. Admin auth would be DISABLED (fail-open). \
              Re-generate the hash via `vpnctl admin hash-password` and paste the \
              full $argon2id$… line into /etc/vpnctl/vpnctld.env, or set a plaintext \
              password."
@@ -177,6 +177,20 @@ mod tests {
             err.contains("$argon2") && err.contains("fail-open"),
             "malformed-argon2 startup error must name the cause; got: {err}"
         );
+    }
+
+    #[test]
+    fn hashless_argon2_is_rejected_at_startup_on_every_bind() {
+        let auth = crate::handlers::auth::classify_admin_auth(
+            Some("admin".into()),
+            Some("$argon2id".into()),
+        );
+        for addr in ["127.0.0.1:18402", "0.0.0.0:18402"] {
+            let err = assert_auth_safe_for_addr_inner(addr.parse().unwrap(), auth, true)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("complete, supported Argon2 PHC hash"));
+        }
     }
 
     #[test]
