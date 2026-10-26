@@ -67,6 +67,15 @@ pub fn router(state: AppState) -> Router {
                 axum::http::header::REFERRER_POLICY,
                 axum::http::HeaderValue::from_static("no-referrer"),
             ),
+        )
+        .route_layer(
+            tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+                axum::http::HeaderName::from_static("permissions-policy"),
+                axum::http::HeaderValue::from_static(
+                    "accelerometer=(), camera=(), geolocation=(), gyroscope=(), \
+                 magnetometer=(), microphone=(), payment=(), usb=()",
+                ),
+            ),
         );
 
     public_router
@@ -532,5 +541,35 @@ mod tests {
         std::fs::create_dir(&js).unwrap();
         let err = validate_admin_assets(dir.path()).unwrap_err().to_string();
         assert!(err.contains("admin.js"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn public_endpoints_include_permissions_policy_header() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let inv = vpnctl_inventory::SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        let (state, _handle) = crate::app::state::make_app_state_for_tests(
+            inv,
+            std::sync::Arc::new(crate::app::build_registry().unwrap()),
+        );
+
+        let app = router(state);
+        let req = Request::builder()
+            .uri("/api/v1/health")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().contains_key("permissions-policy"));
+        assert_eq!(
+            resp.headers()["permissions-policy"],
+            "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+        );
     }
 }
