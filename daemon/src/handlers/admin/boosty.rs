@@ -1,5 +1,7 @@
 use crate::handlers::admin::icons::icon;
-use axum::extract::{Path, State};
+use std::net::SocketAddr;
+
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use maud::{Markup, html};
@@ -36,6 +38,7 @@ fn boosty_time(ts: Option<i64>) -> String {
 pub(crate) async fn boosty_page(
     headers: HeaderMap,
     State(state): State<AppState>,
+    req: axum::extract::Request,
 ) -> Result<Markup, Response> {
     let (theme, accent, lang) = theme_accent_lang(&headers);
 
@@ -90,14 +93,32 @@ pub(crate) async fn boosty_page(
                 .is_some_and(|v| !v.is_empty())
                 && settings.device_id.as_deref().is_some_and(|v| !v.is_empty())));
 
-    let host = headers
+    let host_raw = headers
         .get(axum::http::header::HOST)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("vpnctld");
-    let proto = headers
-        .get("x-forwarded-proto")
-        .and_then(|p| p.to_str().ok())
-        .unwrap_or("http");
+    let host = if !host_raw.is_empty()
+        && host_raw.len() <= 253
+        && host_raw
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
+    {
+        host_raw
+    } else {
+        "vpnctld"
+    };
+
+    let peer_ip = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip());
+    let forwarded_proto = peer_ip.and_then(|ip| {
+        crate::real_ip::resolve_trusted_header(&headers, ip, "x-forwarded-proto")
+    });
+    let proto = match forwarded_proto.as_deref() {
+        Some("https") => "https",
+        _ => "http",
+    };
     let admin_origin = format!("{proto}://{host}");
     let default_blog = settings.blog_url.as_deref().unwrap_or("");
 
