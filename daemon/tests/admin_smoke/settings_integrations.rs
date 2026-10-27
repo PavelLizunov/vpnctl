@@ -312,6 +312,29 @@ async fn boosty_settings_save_via_web() {
 }
 
 #[tokio::test]
+async fn boosty_page_sanitizes_untrusted_proto_and_malformed_host() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    let req = Request::builder()
+        .uri("/admin/boosty")
+        .header("host", "evil.com/bad#")
+        .header("x-forwarded-proto", "javascript:alert(1)")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&bytes).unwrap();
+
+    assert!(
+        html.contains("http://vpnctld") && html.contains("var origin="),
+        "untrusted X-Forwarded-Proto and malformed Host must fall back to http://vpnctld origin: {html}"
+    );
+}
+
+#[tokio::test]
 async fn boosty_page_explains_bearer_first_and_refresh_recovery_in_both_languages() {
     let dir = TempDir::new().unwrap();
     let app = router(state(&dir).await);

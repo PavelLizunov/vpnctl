@@ -6,7 +6,7 @@
 
 - **Workspace Crates:** 10
 - **Tracked Rust Files:** 426 (282 prod / 144 test)
-- **Total Rust LOC:** 148,739 (84,488 prod / 64,251 test)
+- **Total Rust LOC:** 148,782 (84,508 prod / 64,274 test)
 - **Database Migrations:** 69
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 131
 
@@ -23,14 +23,14 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 6,753 (14) | 1,554 (6) | **8,307** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,236 (20) | 4,817 (12) | **9,053** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,778 (4) | 1,191 (5) | **2,969** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 10 tests | 45,898 (149) | 34,149 (61) | **80,047** |
-| **Total** | | | | **84,488 (282)** | **64,251 (144)** | **148,739** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 10 tests | 45,918 (149) | 34,172 (61) | **80,090** |
+| **Total** | | | | **84,508 (282)** | **64,274 (144)** | **148,782** |
 
 ## Largest Rust Modules (Top 25)
 
 | File | LOC | Crate | Role |
 |---|---|---|---|
-| `daemon/tests/admin_smoke/settings_integrations.rs` | 2,463 | `daemon` | Test |
+| `daemon/tests/admin_smoke/settings_integrations.rs` | 2,486 | `daemon` | Test |
 | `crates/inventory/src/sqlite/tests.rs` | 1,948 | `crates/inventory` | Prod |
 | `daemon/src/health_monitor/tests.rs` | 1,845 | `daemon` | Prod |
 | `crates/kernels/src/caddy/tests.rs` | 1,800 | `crates/kernels` | Prod |
@@ -47,8 +47,8 @@
 | `daemon/src/protocol_assurance_poller.rs` | 1,100 | `daemon` | Prod |
 | `crates/inventory/tests/spec_node_health.rs` | 1,097 | `crates/inventory` | Test |
 | `daemon/src/wizard_bootstrap/tests.rs` | 1,085 | `daemon` | Prod |
+| `daemon/src/handlers/admin/boosty.rs` | 1,077 | `daemon` | Prod |
 | `crates/boosty-bridge/tests/sync_integration.rs` | 1,074 | `crates/boosty-bridge` | Test |
-| `daemon/src/handlers/admin/boosty.rs` | 1,057 | `daemon` | Prod |
 | `cli/src/cmd/server.rs` | 1,048 | `cli` | Prod |
 | `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,043 | `daemon` | Prod |
 | `crates/inventory/src/sqlite/health.rs` | 1,019 | `crates/inventory` | Prod |
