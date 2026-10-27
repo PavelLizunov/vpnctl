@@ -112,9 +112,8 @@ pub(crate) async fn boosty_page(
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ci| ci.0.ip());
-    let forwarded_proto = peer_ip.and_then(|ip| {
-        crate::real_ip::resolve_trusted_header(&headers, ip, "x-forwarded-proto")
-    });
+    let forwarded_proto = peer_ip
+        .and_then(|ip| crate::real_ip::resolve_trusted_header(&headers, ip, "x-forwarded-proto"));
     let proto = match forwarded_proto.as_deref() {
         Some("https") => "https",
         _ => "http",
