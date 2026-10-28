@@ -124,6 +124,10 @@ async fn admin_responses_carry_security_headers() {
         headers.get("referrer-policy").map(|v| v.to_str().unwrap()),
         Some("same-origin")
     );
+    assert_eq!(
+        headers.get("cache-control").map(|v| v.to_str().unwrap()),
+        Some("no-store")
+    );
     let perm = headers
         .get("permissions-policy")
         .expect("Permissions-Policy must be set")
