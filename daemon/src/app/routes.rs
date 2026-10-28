@@ -116,10 +116,7 @@ pub(crate) fn admin_router(state: AppState) -> Router {
     let auth = BasicAuth::from_env(&state.admin_session_secret);
 
     let dynamic_admin = Router::new()
-        .route(
-            "/api/v1/stats/sub-access",
-            get(handlers::stats::sub_access),
-        )
+        .route("/api/v1/stats/sub-access", get(handlers::stats::sub_access))
         .route("/admin", get(admin::dashboard))
         .route("/admin/", get(admin::dashboard))
         .route("/admin/overview", get(admin::dashboard))
