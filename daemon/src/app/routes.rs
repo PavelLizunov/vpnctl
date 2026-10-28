@@ -115,16 +115,8 @@ pub(crate) fn admin_router(state: AppState) -> Router {
     let assets_dir = admin_assets_dir();
     let auth = BasicAuth::from_env(&state.admin_session_secret);
 
-    let with_admin = Router::new()
-        .route(
-            "/api/v1/stats/sub-access",
-            get(handlers::stats::sub_access).layer(
-                tower_http::set_header::SetResponseHeaderLayer::if_not_present(
-                    axum::http::header::CACHE_CONTROL,
-                    axum::http::HeaderValue::from_static("no-store"),
-                ),
-            ),
-        )
+    let dynamic_admin = Router::new()
+        .route("/api/v1/stats/sub-access", get(handlers::stats::sub_access))
         .route("/admin", get(admin::dashboard))
         .route("/admin/", get(admin::dashboard))
         .route("/admin/overview", get(admin::dashboard))
@@ -431,10 +423,18 @@ pub(crate) fn admin_router(state: AppState) -> Router {
         .route("/admin/backup/self-test", post(admin::backup_self_test))
         .route("/admin/tweak/{kind}", post(admin::set_tweak))
         .route("/admin/logout", post(admin::logout))
+        .layer(
+            tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("no-store"),
+            ),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin::html_error_pages,
-        ))
+        ));
+
+    let with_admin = dynamic_admin
         .nest_service(
             "/admin/assets",
             tower::ServiceBuilder::new()
