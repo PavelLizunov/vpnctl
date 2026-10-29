@@ -1,9 +1,9 @@
 use crate::handlers::admin::icons::icon;
 use axum::extract::{ConnectInfo, Extension, Path, State};
 use axum::http::HeaderMap;
-use std::net::SocketAddr;
 use axum::response::{IntoResponse, Redirect, Response};
 use maud::{Markup, html};
+use std::net::SocketAddr;
 
 use super::audit::{action_kind, redact_audit_payload, summarize_audit_payload};
 use super::helpers::{
@@ -92,27 +92,33 @@ pub(crate) async fn boosty_page(
                 .is_some_and(|v| !v.is_empty())
                 && settings.device_id.as_deref().is_some_and(|v| !v.is_empty())));
 
-    let raw_host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("vpnctld");
-    let clean_host: String = raw_host
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | ':'))
-        .collect();
-    let host = if clean_host.is_empty() {
-        "vpnctld"
+    let admin_origin = if let Ok(Some(pub_url)) = state.inv.get_public_base_url().await
+        && !pub_url.is_empty()
+    {
+        pub_url.trim_end_matches('/').to_string()
     } else {
-        &clean_host
+        let raw_host = headers
+            .get(axum::http::header::HOST)
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("vpnctld");
+        let clean_host: String = raw_host
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | ':'))
+            .collect();
+        let host = if clean_host.is_empty() {
+            "vpnctld"
+        } else {
+            &clean_host
+        };
+        let forwarded_proto = connect_info.and_then(|ci| {
+            crate::real_ip::resolve_trusted_header(&headers, ci.0.0.ip(), "x-forwarded-proto")
+        });
+        let proto = match forwarded_proto.as_deref() {
+            Some("https") => "https",
+            _ => "http",
+        };
+        format!("{proto}://{host}")
     };
-    let forwarded_proto = connect_info.and_then(|ci| {
-        crate::real_ip::resolve_trusted_header(&headers, ci.0.0.ip(), "x-forwarded-proto")
-    });
-    let proto = match forwarded_proto.as_deref() {
-        Some("https") => "https",
-        _ => "http",
-    };
-    let admin_origin = format!("{proto}://{host}");
     let default_blog = settings.blog_url.as_deref().unwrap_or("");
 
     let admin_origin_js = serde_json::to_string(&admin_origin).unwrap_or_default();
