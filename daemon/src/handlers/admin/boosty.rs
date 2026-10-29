@@ -1,8 +1,9 @@
 use crate::handlers::admin::icons::icon;
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Extension, Path, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use maud::{Markup, html};
+use std::net::SocketAddr;
 
 use super::audit::{action_kind, redact_audit_payload, summarize_audit_payload};
 use super::helpers::{
@@ -35,6 +36,7 @@ fn boosty_time(ts: Option<i64>) -> String {
 
 pub(crate) async fn boosty_page(
     headers: HeaderMap,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     State(state): State<AppState>,
 ) -> Result<Markup, Response> {
     let (theme, accent, lang) = theme_accent_lang(&headers);
@@ -90,15 +92,33 @@ pub(crate) async fn boosty_page(
                 .is_some_and(|v| !v.is_empty())
                 && settings.device_id.as_deref().is_some_and(|v| !v.is_empty())));
 
-    let host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("vpnctld");
-    let proto = headers
-        .get("x-forwarded-proto")
-        .and_then(|p| p.to_str().ok())
-        .unwrap_or("http");
-    let admin_origin = format!("{proto}://{host}");
+    let admin_origin = if let Ok(Some(pub_url)) = state.inv.get_public_base_url().await
+        && !pub_url.is_empty()
+    {
+        pub_url.trim_end_matches('/').to_string()
+    } else {
+        let raw_host = headers
+            .get(axum::http::header::HOST)
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("vpnctld");
+        let clean_host: String = raw_host
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | ':'))
+            .collect();
+        let host = if clean_host.is_empty() {
+            "vpnctld"
+        } else {
+            &clean_host
+        };
+        let forwarded_proto = connect_info.and_then(|ci| {
+            crate::real_ip::resolve_trusted_header(&headers, ci.0.0.ip(), "x-forwarded-proto")
+        });
+        let proto = match forwarded_proto.as_deref() {
+            Some("https") => "https",
+            _ => "http",
+        };
+        format!("{proto}://{host}")
+    };
     let default_blog = settings.blog_url.as_deref().unwrap_or("");
 
     let admin_origin_js = serde_json::to_string(&admin_origin).unwrap_or_default();
@@ -953,6 +973,35 @@ mod tests {
     use std::time::Duration;
     use vpnctl_core::{KernelId, Registry, Server, ServerId, User, UserId};
     use vpnctl_inventory::SqliteInventory;
+
+    #[tokio::test]
+    async fn boosty_page_sanitizes_host_and_validates_forwarded_proto() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        let (state, writer) =
+            crate::app::make_app_state_for_tests(inv.clone(), Arc::new(Registry::new()));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::HOST,
+            axum::http::HeaderValue::from_static("evil.com\" <script>alert(1)</script>:8080"),
+        );
+        headers.insert(
+            "x-forwarded-proto",
+            axum::http::HeaderValue::from_static("javascript:alert(1)"),
+        );
+
+        let markup = boosty_page(headers, None, State(state)).await.unwrap();
+        let html = markup.into_string();
+
+        assert!(!html.contains("<script>alert(1)</script>"));
+        assert!(!html.contains("javascript:alert(1)"));
+        assert!(html.contains("http://evil.comscriptalert1script:8080"));
+
+        writer.abort();
+    }
 
     #[tokio::test]
     async fn manual_sync_cancellation_still_queues_redeploy() {
