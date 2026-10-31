@@ -493,6 +493,12 @@ pub(crate) fn admin_router(state: AppState) -> Router {
                  magnetometer=(), microphone=(), payment=(), usb=()",
                 ),
             ),
+        )
+        .route_layer(
+            tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+                axum::http::HeaderName::from_static("x-robots-tag"),
+                axum::http::HeaderValue::from_static("noindex, nofollow"),
+            ),
         );
 
     match auth {
