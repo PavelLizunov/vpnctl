@@ -15,6 +15,8 @@ mod grants;
 mod icon_fixtures;
 #[path = "admin_smoke/monitoring.rs"]
 mod monitoring;
+#[path = "admin_smoke/private_checks.rs"]
+mod private_checks;
 #[path = "admin_smoke/readiness_quality_spec.rs"]
 mod readiness_quality_spec;
 #[path = "admin_smoke/server_detail.rs"]

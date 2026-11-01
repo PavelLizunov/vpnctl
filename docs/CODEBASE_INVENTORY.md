@@ -5,10 +5,10 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 426 (282 prod / 144 test)
-- **Total Rust LOC:** 148,739 (84,488 prod / 64,251 test)
+- **Tracked Rust Files:** 433 (285 prod / 148 test)
+- **Total Rust LOC:** 150,521 (85,417 prod / 65,104 test)
 - **Database Migrations:** 69
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 131
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 133
 
 ## Workspace Crates & Targets
 
@@ -22,9 +22,9 @@
 | `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 47 tests | 16,083 (54) | 19,241 (52) | **35,324** |
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 6,753 (14) | 1,554 (6) | **8,307** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,236 (20) | 4,817 (12) | **9,053** |
-| `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,778 (4) | 1,191 (5) | **2,969** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 10 tests | 45,898 (149) | 34,149 (61) | **80,047** |
-| **Total** | | | | **84,488 (282)** | **64,251 (144)** | **148,739** |
+| `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,757 (4) | 1,191 (5) | **2,948** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 13 tests | 46,848 (152) | 35,002 (65) | **81,850** |
+| **Total** | | | | **85,417 (285)** | **65,104 (148)** | **150,521** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -42,8 +42,8 @@
 | `daemon/tests/admin_smoke/dashboard.rs` | 1,227 | `daemon` | Test |
 | `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,200 | `daemon` | Test |
 | `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,164 | `daemon` | Test |
-| `crates/ssh/src/subprocess.rs` | 1,148 | `crates/ssh` | Prod |
 | `daemon/src/handlers/auth.rs` | 1,144 | `daemon` | Prod |
+| `crates/ssh/src/subprocess.rs` | 1,127 | `crates/ssh` | Prod |
 | `daemon/src/protocol_assurance_poller.rs` | 1,100 | `daemon` | Prod |
 | `crates/inventory/tests/spec_node_health.rs` | 1,097 | `crates/inventory` | Test |
 | `daemon/src/wizard_bootstrap/tests.rs` | 1,085 | `daemon` | Prod |
@@ -130,7 +130,7 @@
 | `0068` | vpn cumulative generation | `crates/inventory/migrations/0068_vpn_cumulative_generation.sql` | 18 |
 | `0069` | alert delivery state | `crates/inventory/migrations/0069_alert_delivery_state.sql` | 15 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (131)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (133)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -157,6 +157,8 @@
 | `POST` | `/admin/logout` | `admin::logout` |
 | `GET` | `/admin/monitoring` | `admin::monitoring` |
 | `GET` | `/admin/monitoring/` | `admin::monitoring` |
+| `GET` | `/admin/monitoring/private-checks` | `admin::private_checks_page` |
+| `POST` | `/admin/monitoring/private-checks` | `admin::private_checks_run` |
 | `POST` | `/admin/monitoring/probe-all` | `admin::monitoring_probe_all` |
 | `GET` | `/admin/overview` | `admin::dashboard` |
 | `GET` | `/admin/search` | `admin::search` |
