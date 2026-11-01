@@ -87,7 +87,10 @@ failures. Legacy samples remain stored as history but cannot be pooled into a
 known current population. The failure percentage measures **TCP connection
 attempts**, not packet loss or authenticated VPN connectivity. Configuration
 application is separate from external protocol-assurance evidence; absent
-external evidence remains **not checked**.
+external evidence remains **not checked**. Monitoring also offers a manual private
+controller check of configured effective ports. It reports TCP connection results,
+not VPN handshakes or censorship; UDP remains unchecked. Results are kept in memory
+until daemon restart, and hostname targets use the first inventory-resolved IP.
 
 See the [deployment/readiness contract](docs/specs/deploy-readiness-quality.md).
 Migration 0056 is additive; binary rollback must use the documented

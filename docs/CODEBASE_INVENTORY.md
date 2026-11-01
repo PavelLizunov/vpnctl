@@ -5,10 +5,10 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 426 (282 prod / 144 test)
-- **Total Rust LOC:** 148,739 (84,488 prod / 64,251 test)
+- **Tracked Rust Files:** 429 (283 prod / 146 test)
+- **Total Rust LOC:** 149,230 (84,748 prod / 64,482 test)
 - **Database Migrations:** 69
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 131
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 133
 
 ## Workspace Crates & Targets
 
@@ -23,8 +23,8 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 6,753 (14) | 1,554 (6) | **8,307** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,236 (20) | 4,817 (12) | **9,053** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,778 (4) | 1,191 (5) | **2,969** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 10 tests | 45,898 (149) | 34,149 (61) | **80,047** |
-| **Total** | | | | **84,488 (282)** | **64,251 (144)** | **148,739** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 11 tests | 46,158 (150) | 34,380 (63) | **80,538** |
+| **Total** | | | | **84,748 (283)** | **64,482 (146)** | **149,230** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -130,7 +130,7 @@
 | `0068` | vpn cumulative generation | `crates/inventory/migrations/0068_vpn_cumulative_generation.sql` | 18 |
 | `0069` | alert delivery state | `crates/inventory/migrations/0069_alert_delivery_state.sql` | 15 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (131)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (133)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -157,6 +157,8 @@
 | `POST` | `/admin/logout` | `admin::logout` |
 | `GET` | `/admin/monitoring` | `admin::monitoring` |
 | `GET` | `/admin/monitoring/` | `admin::monitoring` |
+| `GET` | `/admin/monitoring/private-checks` | `admin::private_checks_page` |
+| `POST` | `/admin/monitoring/private-checks` | `admin::private_checks_run` |
 | `POST` | `/admin/monitoring/probe-all` | `admin::monitoring_probe_all` |
 | `GET` | `/admin/overview` | `admin::dashboard` |
 | `GET` | `/admin/search` | `admin::search` |

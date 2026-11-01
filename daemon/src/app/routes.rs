@@ -137,6 +137,10 @@ pub(crate) fn admin_router(state: AppState) -> Router {
             "/admin/monitoring/probe-all",
             post(admin::monitoring_probe_all),
         )
+        .route(
+            "/admin/monitoring/private-checks",
+            get(admin::private_checks_page).post(admin::private_checks_run),
+        )
         .route("/admin/servers", get(admin::servers))
         .route("/admin/servers/", get(admin::servers))
         .route("/admin/servers/billing", get(admin::servers_billing))

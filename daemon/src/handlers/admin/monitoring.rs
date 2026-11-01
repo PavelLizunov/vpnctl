@@ -150,6 +150,7 @@ pub(crate) async fn monitoring(
                 }
             }
             div.ed-headrow__actions {
+                a.ed-abtn.ed-abtn--secondary.ed-abtn--sm style="min-height:44px;" href="/admin/monitoring/private-checks" { (tr(lang, "Private controller checks", "Приватная проверка с контроллера")) }
                 form method="post" action="/admin/monitoring/probe-all" {
                     button type="submit"
                            class="ed-abtn ed-abtn--secondary ed-abtn--sm"
