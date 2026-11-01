@@ -1414,6 +1414,15 @@ form[data-submitting] .ed-abtn,
 .ed-hist__n { font-family: var(--serif); font-size: 13px; color: var(--ink); text-align: right; font-variant-numeric: tabular-nums; }
 
 /* ─── MODULE: private-checks.css ─────────────────────────────────────────────── */
+/* Monitoring entry: the navigation link and submit button share one geometry. */
+.ed-monitoring-actions { flex-wrap: wrap; }
+.ed-monitoring-actions form { display: flex; margin: 0; }
+.ed-monitoring-actions .ed-abtn { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; min-height: 32px; padding: 6px 10px; }
+.ed-monitoring-actions .ed-abtn:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+@media (max-width: 768px) {
+  .ed-monitoring-actions .ed-abtn { min-height: 44px; }
+}
+
 /* Private checks: compact comparison, quiet editorial hierarchy. */
 .pc { max-width: 1240px; margin: 0 auto; --pc-ok: #22633f; --pc-bad: #a22d29; }
 .ed-ink .pc { --pc-ok: #91d4ab; --pc-bad: #ffaaa3; }

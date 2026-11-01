@@ -149,8 +149,8 @@ pub(crate) async fn monitoring(
                     (humanize_age(now - ts, lang))
                 }
             }
-            div.ed-headrow__actions {
-                a.ed-abtn.ed-abtn--secondary.ed-abtn--sm style="min-height:44px;" href="/admin/monitoring/private-checks" { (tr(lang, "Node reachability", "Доступность узлов")) }
+            div.ed-headrow__actions.ed-monitoring-actions {
+                a.ed-abtn.ed-abtn--secondary.ed-abtn--sm href="/admin/monitoring/private-checks" { (tr(lang, "Node reachability", "Доступность узлов")) }
                 form method="post" action="/admin/monitoring/probe-all" {
                     button type="submit"
                            class="ed-abtn ed-abtn--secondary ed-abtn--sm"
