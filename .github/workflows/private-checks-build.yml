@@ -6,7 +6,7 @@ permissions:
   contents: read
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
@@ -22,10 +22,14 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y musl-tools cmake
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-musl
+          key: release-musl-ubuntu24-baseline
       - name: Build checked revision
         env:
           VPNCTL_BUILD_SHA: c6b99ec
+          RUSTFLAGS: '-C target-cpu=x86-64'
+          CFLAGS_x86_64_unknown_linux_musl: '-march=x86-64 -mtune=generic'
+          CXXFLAGS_x86_64_unknown_linux_musl: '-march=x86-64 -mtune=generic'
+          GOAMD64: v1
         run: |
           test "$(git rev-parse HEAD)" = c6b99ecd65d6c40530f213337b924bc643a37bd9
           cargo build --release --target x86_64-unknown-linux-musl -p vpnctld -p vpnctl
