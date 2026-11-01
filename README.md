@@ -93,7 +93,10 @@ servers over their existing trusted SSH connections. Each observation identifies
 source; a server is not tested from itself, and an unavailable source is not a
 failed target. It reports TCP connection results, not VPN handshakes or censorship;
 UDP remains unchecked. Results are kept in memory until daemon restart, and hostname
-targets use the first inventory-resolved IP.
+targets use the first inventory-resolved IP. The **Node reachability** page compares
+TCP ports across sources, updates automatically during a run, and separates UDP
+ports and missing measurements from connection failures. On larger inventories,
+repeat runs rotate batches of up to 32 ports and four server sources.
 
 See the [deployment/readiness contract](docs/specs/deploy-readiness-quality.md).
 Migration 0056 is additive; binary rollback must use the documented
