@@ -5,8 +5,8 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 429 (283 prod / 146 test)
-- **Total Rust LOC:** 149,230 (84,748 prod / 64,482 test)
+- **Tracked Rust Files:** 430 (283 prod / 147 test)
+- **Total Rust LOC:** 149,593 (84,988 prod / 64,605 test)
 - **Database Migrations:** 69
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 133
 
@@ -22,9 +22,9 @@
 | `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 47 tests | 16,083 (54) | 19,241 (52) | **35,324** |
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 6,753 (14) | 1,554 (6) | **8,307** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,236 (20) | 4,817 (12) | **9,053** |
-| `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,778 (4) | 1,191 (5) | **2,969** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 11 tests | 46,158 (150) | 34,380 (63) | **80,538** |
-| **Total** | | | | **84,748 (283)** | **64,482 (146)** | **149,230** |
+| `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,757 (4) | 1,191 (5) | **2,948** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 12 tests | 46,419 (150) | 34,503 (64) | **80,922** |
+| **Total** | | | | **84,988 (283)** | **64,605 (147)** | **149,593** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -42,8 +42,8 @@
 | `daemon/tests/admin_smoke/dashboard.rs` | 1,227 | `daemon` | Test |
 | `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,200 | `daemon` | Test |
 | `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,164 | `daemon` | Test |
-| `crates/ssh/src/subprocess.rs` | 1,148 | `crates/ssh` | Prod |
 | `daemon/src/handlers/auth.rs` | 1,144 | `daemon` | Prod |
+| `crates/ssh/src/subprocess.rs` | 1,127 | `crates/ssh` | Prod |
 | `daemon/src/protocol_assurance_poller.rs` | 1,100 | `daemon` | Prod |
 | `crates/inventory/tests/spec_node_health.rs` | 1,097 | `crates/inventory` | Test |
 | `daemon/src/wizard_bootstrap/tests.rs` | 1,085 | `daemon` | Prod |
