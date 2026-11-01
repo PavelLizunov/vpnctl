@@ -126,7 +126,7 @@ async fn probe(target: &Target) -> Outcome {
 }
 
 pub(crate) async fn private_checks_run(State(state): State<AppState>) -> Response {
-    if let Ok(guard) = state.private_checks.running.clone().try_lock_owned() {
+    if let Ok(guard) = Arc::clone(&state.private_checks.running).try_lock_owned() {
         state.private_checks.failed.store(false, Ordering::Release);
         tokio::spawn(async move {
             let _guard = guard;
