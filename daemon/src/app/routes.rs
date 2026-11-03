@@ -493,6 +493,13 @@ pub(crate) fn admin_router(state: AppState) -> Router {
                  magnetometer=(), microphone=(), payment=(), usb=()",
                 ),
             ),
+        )
+        // Disallow web crawlers and search engine indexing on the admin panel.
+        .route_layer(
+            tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+                axum::http::HeaderName::from_static("x-robots-tag"),
+                axum::http::HeaderValue::from_static("noindex, nofollow"),
+            ),
         );
 
     match auth {
