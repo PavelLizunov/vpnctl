@@ -332,13 +332,56 @@ async fn admin_server_quick_add_registers_with_default_protocols() {
     assert_eq!(srv.kernels.len(), 1);
     assert_eq!(srv.kernels[0].0, "sing-box");
     let pids: Vec<&str> = srv.enabled_protocols.iter().map(|p| p.0.as_str()).collect();
-    assert!(
-        pids.contains(&"vless+reality"),
-        "default protocols: {pids:?}"
-    );
-    assert!(pids.contains(&"tuic-v5"));
-    assert!(pids.contains(&"hysteria2"));
-    assert!(!pids.contains(&"wireguard"));
+    assert_eq!(pids, ["vless+reality"]);
+}
+
+#[tokio::test]
+async fn admin_server_quick_add_defaults_cover_hostnames_ipv6_and_ssh_collision() {
+    for (address, ssh_port, expected) in [
+        ("vpn.example.org", 22, vec!["vless+reality"]),
+        ("2001%3Adb8%3A%3A42", 22, vec!["vless+reality"]),
+        ("198.51.100.42", 443, vec![]),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let s = state(&dir).await;
+        let inv = s.inv.clone();
+        let response = router(s)
+            .oneshot(
+                add_same_origin(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/admin/servers/quick-add")
+                        .header("content-type", "application/x-www-form-urlencoded"),
+                )
+                .body(Body::from(format!(
+                    "id=fixture&address={address}&ssh_port={ssh_port}"
+                )))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let server = inv
+            .get_server(&vpnctl_core::ServerId("fixture".into()))
+            .await
+            .unwrap()
+            .unwrap();
+        let protocols: Vec<_> = server
+            .enabled_protocols
+            .iter()
+            .map(|p| p.0.as_str())
+            .collect();
+        assert_eq!(protocols, expected);
+        let audit = inv.recent_audit(10).await.unwrap();
+        let entry = audit
+            .iter()
+            .find(|e| e.action == "server.quick_add")
+            .unwrap();
+        assert_eq!(
+            entry.payload.as_ref().unwrap()["protocols"],
+            serde_json::json!(expected)
+        );
+    }
 }
 
 #[tokio::test]

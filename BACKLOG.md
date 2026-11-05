@@ -2,6 +2,20 @@
 
 Deferred work items with enough context to pick up cold. Newest first.
 
+## Forced password change on first SSH login
+
+**Status:** confirmed unsupported by the password-based setup transport.
+
+A hoster can require a root password change before allowing any remote command.
+The wizard/deploy-key push currently uses non-interactive sshpass and fails with
+`Password change required but no TTY available`. After the password is changed
+through the hoster's console, the existing web deploy-key form can install and
+verify the key, and deployment can proceed. This is an onboarding gap, separate
+from protocol defaults; it must not be described as an incorrect password.
+A follow-up needs a web flow that completes the host-required password change,
+keeps host-key verification, never logs or persists either password, and verifies
+a fresh key-only session before declaring setup complete.
+
 ## Client recovery when a node's public IP is filtered
 
 **Status:** design recorded; automatic client failover is not implemented.
