@@ -414,6 +414,10 @@ pub(super) async fn server_detail_render(
                 }
             }
             div.ed-headrow__actions {
+                a.ed-abtn.ed-abtn--secondary.ed-abtn--sm
+                    href=(format!("/admin/servers/{}/cheburcheck", path_segment_encode(&server.id.0))) {
+                    "Cheburcheck"
+                }
                 button type="button"
                        data-sse-url=(format!("/admin/servers/{}/update-kernels/sse", path_segment_encode(&server.id.0)))
                        data-log="update-kernels-log"

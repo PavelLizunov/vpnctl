@@ -5,10 +5,10 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 426 (282 prod / 144 test)
-- **Total Rust LOC:** 148,739 (84,488 prod / 64,251 test)
+- **Tracked Rust Files:** 451 (297 prod / 154 test)
+- **Total Rust LOC:** 156,502 (88,141 prod / 68,361 test)
 - **Database Migrations:** 69
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 131
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 142
 
 ## Workspace Crates & Targets
 
@@ -19,12 +19,12 @@
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,419 (13) | 0 (0) | **1,419** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 318 (1) | 125 (1) | **443** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 193 (1) | 454 (2) | **647** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 47 tests | 16,083 (54) | 19,241 (52) | **35,324** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 47 tests | 16,181 (55) | 19,241 (52) | **35,422** |
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 6,753 (14) | 1,554 (6) | **8,307** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,236 (20) | 4,817 (12) | **9,053** |
-| `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,778 (4) | 1,191 (5) | **2,969** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 10 tests | 45,898 (149) | 34,149 (61) | **80,047** |
-| **Total** | | | | **84,488 (282)** | **64,251 (144)** | **148,739** |
+| `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,757 (4) | 1,191 (5) | **2,948** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 15 tests | 49,474 (163) | 38,259 (71) | **87,733** |
+| **Total** | | | | **88,141 (297)** | **68,361 (154)** | **156,502** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -42,15 +42,15 @@
 | `daemon/tests/admin_smoke/dashboard.rs` | 1,227 | `daemon` | Test |
 | `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,200 | `daemon` | Test |
 | `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,164 | `daemon` | Test |
-| `crates/ssh/src/subprocess.rs` | 1,148 | `crates/ssh` | Prod |
 | `daemon/src/handlers/auth.rs` | 1,144 | `daemon` | Prod |
+| `crates/ssh/src/subprocess.rs` | 1,127 | `crates/ssh` | Prod |
 | `daemon/src/protocol_assurance_poller.rs` | 1,100 | `daemon` | Prod |
 | `crates/inventory/tests/spec_node_health.rs` | 1,097 | `crates/inventory` | Test |
 | `daemon/src/wizard_bootstrap/tests.rs` | 1,085 | `daemon` | Prod |
 | `crates/boosty-bridge/tests/sync_integration.rs` | 1,074 | `crates/boosty-bridge` | Test |
 | `daemon/src/handlers/admin/boosty.rs` | 1,057 | `daemon` | Prod |
 | `cli/src/cmd/server.rs` | 1,048 | `cli` | Prod |
-| `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,043 | `daemon` | Prod |
+| `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,047 | `daemon` | Prod |
 | `crates/inventory/src/sqlite/health.rs` | 1,019 | `crates/inventory` | Prod |
 | `daemon/tests/admin_smoke/user_detail/traffic_activity.rs` | 1,018 | `daemon` | Test |
 | `daemon/tests/admin_smoke/shell_nav/shell_assets_nav.rs` | 1,014 | `daemon` | Test |
@@ -130,7 +130,7 @@
 | `0068` | vpn cumulative generation | `crates/inventory/migrations/0068_vpn_cumulative_generation.sql` | 18 |
 | `0069` | alert delivery state | `crates/inventory/migrations/0069_alert_delivery_state.sql` | 15 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (131)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (142)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -157,6 +157,9 @@
 | `POST` | `/admin/logout` | `admin::logout` |
 | `GET` | `/admin/monitoring` | `admin::monitoring` |
 | `GET` | `/admin/monitoring/` | `admin::monitoring` |
+| `GET` | `/admin/monitoring/cheburcheck` | `admin::cheburcheck_overview` |
+| `GET` | `/admin/monitoring/private-checks` | `admin::private_checks_page` |
+| `POST` | `/admin/monitoring/private-checks` | `admin::private_checks_run` |
 | `POST` | `/admin/monitoring/probe-all` | `admin::monitoring_probe_all` |
 | `GET` | `/admin/overview` | `admin::dashboard` |
 | `GET` | `/admin/search` | `admin::search` |
@@ -182,6 +185,8 @@
 | `POST` | `/admin/servers/{id}/auto-suppress` | `admin::server_set_auto_suppress` |
 | `POST` | `/admin/servers/{id}/billing` | `admin::server_set_billing` |
 | `POST` | `/admin/servers/{id}/billing/advance` | `admin::server_advance_billing` |
+| `GET` | `/admin/servers/{id}/cheburcheck` | `admin::cheburcheck_page` |
+| `POST` | `/admin/servers/{id}/cheburcheck` | `admin::cheburcheck_run` |
 | `POST` | `/admin/servers/{id}/client-detour` | `admin::server_set_client_detour_via` |
 | `POST` | `/admin/servers/{id}/delete` | `admin::server_delete` |
 | `GET` | `/admin/servers/{id}/delete-confirm` | `admin::server_delete_confirm` |
@@ -261,6 +266,12 @@
 | `GET` | `/api/v1/app/config` | `handlers::vpn_router::get_config_root_catchall` |
 | `GET` | `/api/v1/app/config/` | `handlers::vpn_router::get_config_root_catchall` |
 | `GET` | `/api/v1/app/config/{*tail}` | `handlers::vpn_router::get_config` |
+| `GET` | `/api/v1/app/node-status/device` | `handlers::client_nodes::unauthorized_nodes` |
+| `GET` | `/api/v1/app/node-status/device/` | `handlers::client_nodes::unauthorized_nodes` |
+| `GET` | `/api/v1/app/node-status/device/{*tail}` | `handlers::client_nodes::get_device_nodes` |
+| `GET` | `/api/v1/app/node-status/subscription` | `handlers::client_nodes::unauthorized_nodes` |
+| `GET` | `/api/v1/app/node-status/subscription/` | `handlers::client_nodes::unauthorized_nodes` |
+| `GET` | `/api/v1/app/node-status/subscription/{*tail}` | `handlers::client_nodes::get_subscription_nodes` |
 | `GET` | `/api/v1/health` | `handlers::health::get` |
 | `GET` | `/api/v1/stats/sub-access` | `handlers::stats::sub_access` |
 | `GET` | `/api/v1/sub/{token}` | `handlers::sub::get_mihomo` |
