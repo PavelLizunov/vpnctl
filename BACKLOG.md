@@ -2,6 +2,17 @@
 
 Deferred work items with enough context to pick up cold. Newest first.
 
+## Route-aware management and subscriber failover (2026-11-05 incident)
+
+**Status:** open. Operational recovery uses the Netherlands for management and
+AI proxy egress. Automated management relay selection and universal subscriber
+recovery are not implemented by that repair.
+
+Start with [the incident handoff](docs/incidents/2026-11-05-route-failover.md):
+direct connections failed while the VPS services remained active; a controlled
+packet capture localized one failure before the guest interface. SSH health
+through a relay must remain distinct from direct client VPN reachability.
+
 ## Deploy All lock retry on concurrent user auto-deploy
 
 **Status:** closed in code. `daemon/src/wizard_bootstrap/redeploy.rs` routes
