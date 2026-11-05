@@ -20,7 +20,8 @@ No admin credential in a client. No fleet, peer, private-key, SSH or employee da
 - All responses have no-store/nosniff/no-referrer headers. Success JSON:
   `{"schema":1,"generated_at":UNIX_SECONDS,"max_age_seconds":TTL,"nodes":[...]}`.
 - Each node has ONLY `endpoint_host`, `country_iso`, `memory_total_mib`,
-  `memory_available_mib`, `load_1min_x100`, `observed_at`, `age_seconds`, `freshness`.
+  `memory_available_mib`, `load_1min_x100`, `observed_at`, `age_seconds`, `freshness`,
+  and the additive `activity_level` described below.
   Optional data is JSON null, never zero as a stand-in for absent data. Country
   is uppercase ISO alpha-2 from existing local AppState.geo lookup of the node
   IP, or existing cached resolved IPs for a hostname. Conflicting/missing cached
@@ -39,6 +40,35 @@ No admin credential in a client. No fleet, peer, private-key, SSH or employee da
   older => stale. Keep sample values/timestamps when stale, labeled stale.
 - Device and subscription identities for the same user yield the same projection.
   Empty grants return nodes:[]; unavailable metrics do not suppress country.
+
+## Optional activity level (schema 1)
+
+Add `activity_level` with values `low`, `medium`, `high`, or `unknown`; preserve
+all existing fields. This describes observed traffic activity, never CPU or link
+utilization or saturation. Clients render this backend-owned label, not RAM or
+raw load values; absent or unrecognized levels display Unknown.
+
+Use only the existing reset-safe `vpn_server_hourly` source, without adding raw
+traffic, user rollups or accounting multipliers. The bounded window contains the
+current UTC hour and previous 23 UTC hours: an approximate trailing day, not an
+exact-to-second 24-hour total. Require at least 20 distinct valid hour buckets.
+Each actual sample timestamp must belong to its own UTC hour bucket.
+Negative/non-integer bytes, invalid timestamps, future actual sample timestamps,
+overflow, or insufficient coverage produce `unknown`. The newest actual traffic
+sample must have nonnegative age within the metadata TTL; an hour boundary is
+not a sample timestamp. The existing node-health sample must also be fresh.
+
+Sum upload plus download bytes: below 25 GiB is `low`, 25 GiB inclusive to
+100 GiB exclusive is `medium`, and 100 GiB inclusive or above is `high`.
+One GiB is 1024^3 bytes. No country-specific override. Read only the indexed
+server/hour range (at most 25 rows to detect malformed excess buckets); no new
+probe, network request, service or migration. Existing auth, grant filtering,
+endpoints, privacy headers, read-only counters and legacy byte oracles remain.
+
+Independent spec tests cover thresholds, 19/20-bucket coverage, invalid/missing/
+stale/future traffic and metadata, zero activity, identity equivalence, grant
+isolation and unchanged legacy fields. The shared old empty-telemetry fixture
+adds only `activity_level: "unknown"`.
 
 ## Independent spec tests and fixture contract
 

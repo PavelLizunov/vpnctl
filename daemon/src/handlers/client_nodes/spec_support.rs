@@ -205,6 +205,36 @@ impl Fixture {
         .unwrap();
     }
 
+    pub(super) async fn traffic_hour(
+        &self,
+        node: &NodeFixture,
+        hour_at: i64,
+        upload: i64,
+        download: i64,
+        last_sample_at: i64,
+    ) {
+        let hour = chrono::DateTime::from_timestamp(hour_at - hour_at.rem_euclid(3600), 0)
+            .unwrap()
+            .format("%Y-%m-%dT%H:00:00.000Z")
+            .to_string();
+        let sample = chrono::DateTime::from_timestamp(last_sample_at, 0)
+            .unwrap()
+            .to_rfc3339();
+        sqlx::query(
+            "INSERT INTO vpn_server_hourly
+             (hour, server_id, upload_bytes, download_bytes, active_connections_peak, last_sample_ts)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5)",
+        )
+        .bind(hour)
+        .bind(&node.id.0)
+        .bind(upload)
+        .bind(download)
+        .bind(sample)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+    }
+
     pub(super) fn now(&self) -> i64 {
         chrono::Utc::now().timestamp()
     }

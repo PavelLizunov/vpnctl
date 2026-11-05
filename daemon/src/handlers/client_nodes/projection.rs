@@ -18,6 +18,7 @@ pub(super) struct NodeMetadata {
     memory_total_mib: Option<u64>,
     memory_available_mib: Option<u64>,
     load_1min_x100: Option<u32>,
+    activity_level: &'static str,
     observed_at: Option<i64>,
     age_seconds: Option<u64>,
     freshness: &'static str,
@@ -44,6 +45,7 @@ impl NodeMetadata {
             memory_total_mib: memory.map(|(total, _)| total),
             memory_available_mib: memory.map(|(_, available)| available),
             load_1min_x100: sample.and_then(|s| s.load_1min_x100),
+            activity_level: "unknown",
             observed_at,
             age_seconds,
             freshness: match age_seconds {
@@ -52,6 +54,16 @@ impl NodeMetadata {
                 None => "unknown",
             },
         }
+    }
+
+    pub(super) fn with_activity(mut self, bytes: Option<u64>) -> Self {
+        self.activity_level = match (self.freshness, bytes) {
+            ("fresh", Some(bytes)) if bytes < 25 * 1024u64.pow(3) => "low",
+            ("fresh", Some(bytes)) if bytes < 100 * 1024u64.pow(3) => "medium",
+            ("fresh", Some(_)) => "high",
+            _ => "unknown",
+        };
+        self
     }
 }
 

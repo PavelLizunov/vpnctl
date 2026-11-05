@@ -41,6 +41,7 @@ fn assert_node_contract(node: &Value) {
             "memory_total_mib",
             "memory_available_mib",
             "load_1min_x100",
+            "activity_level",
             "observed_at",
             "age_seconds",
             "freshness",

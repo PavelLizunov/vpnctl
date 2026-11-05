@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod activity_spec_tests;
 mod limits;
 mod projection;
 
@@ -161,6 +163,7 @@ async fn project_nodes(
         }
         let endpoints = endpoint_hosts(state, server, protocols, detour.is_some()).await?;
         let sample = state.inv.latest_node_health(&server.id).await?;
+        let activity = state.inv.node_activity_bytes(&server.id, now, ttl).await?;
         let cached_ips = if server.address.parse::<std::net::IpAddr>().is_ok() {
             Vec::new()
         } else {
@@ -170,13 +173,10 @@ async fn project_nodes(
             state.geo.lookup(ip).and_then(|info| info.country_iso)
         });
         for endpoint_host in endpoints {
-            nodes.push(NodeMetadata::new(
-                endpoint_host,
-                country.clone(),
-                sample.as_ref(),
-                now,
-                ttl,
-            ));
+            nodes.push(
+                NodeMetadata::new(endpoint_host, country.clone(), sample.as_ref(), now, ttl)
+                    .with_activity(activity),
+            );
         }
     }
     Ok(NodesResponse {

@@ -35,6 +35,7 @@ fn assert_unknown_projection(snapshot: &Value, expected_hosts: &[&str]) {
         assert_eq!(
             object_keys(node),
             [
+                "activity_level",
                 "age_seconds",
                 "country_iso",
                 "endpoint_host",
