@@ -116,3 +116,12 @@ Base provenance: deployed662b411 is the head of existing PR #307, five commits
 ahead of main239d2a55. This task does not rewrite or merge that work. The new
 metadata diff is relative to662b411; the main-targeted PR retains that production
 baseline so its CI validates the complete prospective runtime tree.
+
+## CI correction: test fixture visibility
+
+Exact-head de4976b passes cargo check, fmt, deny, gitleaks and managed artifacts.
+Clippy rejects ten unrestricted pub methods inside the private test fixture
+(unreachable_pub under -D warnings). Restrict those fixture methods to pub(super),
+which still admits the sibling spec tests. No lint suppression or production
+change is needed. Record this before correction; full tests/SSH suites and the
+replacement exact-head CI remain pending.

@@ -40,7 +40,7 @@ pub(super) struct Fixture {
 }
 
 impl Fixture {
-    pub async fn new() -> Self {
+    pub(super) async fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("metadata-test.db");
         let inv = SqliteInventory::open(&path).await.unwrap();
@@ -67,7 +67,7 @@ impl Fixture {
         }
     }
 
-    pub async fn user(&self, disabled: bool) -> UserFixture {
+    pub(super) async fn user(&self, disabled: bool) -> UserFixture {
         let n = self.next.fetch_add(1, Ordering::Relaxed);
         let device_id = format!("{n:032x}");
         let sub_token = format!("synthetic-subscription-{n}");
@@ -92,7 +92,7 @@ impl Fixture {
         }
     }
 
-    pub async fn node(&self, endpoint_host: &str, visible: bool, role: &str) -> NodeFixture {
+    pub(super) async fn node(&self, endpoint_host: &str, visible: bool, role: &str) -> NodeFixture {
         let n = self.next.fetch_add(1, Ordering::Relaxed);
         let id = ServerId(format!("synthetic-node-{n}"));
         // The production add_server helper refreshes DNS for hostnames. Seed
@@ -135,7 +135,7 @@ impl Fixture {
         NodeFixture { id }
     }
 
-    pub async fn grant(&self, user: &UserFixture, node: &NodeFixture) {
+    pub(super) async fn grant(&self, user: &UserFixture, node: &NodeFixture) {
         // Null WG allocation makes any accidental allocating render read visible.
         sqlx::query("INSERT INTO grants (user_id, server_id, wg_octet) VALUES (?1, ?2, NULL)")
             .bind(&user.id.0)
@@ -145,11 +145,11 @@ impl Fixture {
             .unwrap();
     }
 
-    pub async fn revoke(&self, user: &UserFixture, node: &NodeFixture) {
+    pub(super) async fn revoke(&self, user: &UserFixture, node: &NodeFixture) {
         self.inv.revoke(&user.id, &node.id).await.unwrap();
     }
 
-    pub async fn sample(&self, node: &NodeFixture, sample: Sample) {
+    pub(super) async fn sample(&self, node: &NodeFixture, sample: Sample) {
         let timestamp = chrono::DateTime::from_timestamp(sample.observed_at, 0)
             .unwrap()
             .to_rfc3339();
@@ -168,15 +168,15 @@ impl Fixture {
         .unwrap();
     }
 
-    pub fn now(&self) -> i64 {
+    pub(super) fn now(&self) -> i64 {
         chrono::Utc::now().timestamp()
     }
 
-    pub fn ttl(&self) -> u64 {
+    pub(super) fn ttl(&self) -> u64 {
         super::metadata_ttl()
     }
 
-    pub async fn request(&self, path: &str) -> (StatusCode, HeaderMap, Value) {
+    pub(super) async fn request(&self, path: &str) -> (StatusCode, HeaderMap, Value) {
         let response = self
             .router
             .clone()
@@ -190,7 +190,7 @@ impl Fixture {
         (status, headers, value)
     }
 
-    pub async fn read_only_counts(&self) -> Value {
+    pub(super) async fn read_only_counts(&self) -> Value {
         let mut counts = serde_json::Map::new();
         for (name, query) in [
             ("peers", "SELECT COUNT(*) FROM users"),
