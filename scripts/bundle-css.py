@@ -16,6 +16,7 @@ MODULES = [
     "theme.css",
     "components.css",
     "charts.css",
+    "private-checks.css",
 ]
 
 

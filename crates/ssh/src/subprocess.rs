@@ -419,53 +419,28 @@ fn validate_pinned_jump(transport: &SubprocessSshTransport, route: &PinnedJumpRo
 
 fn run_keyscan(host: &str, port: u16) -> Result<Vec<u8>> {
     let port = port.to_string();
-    let output = Command::new("ssh-keyscan")
-        .args(vpnctl_host_fingerprint::build_keyscan_args(&port, host))
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| CoreError::Transport(format!("spawning ssh-keyscan for pinned host: {e}")))?;
-    if !output.status.success() {
-        return Err(CoreError::Transport(format!(
-            "ssh-keyscan for pinned host failed: exit={:?}",
-            output.status.code()
-        )));
-    }
-    if output.stdout.is_empty() {
+    let mut cmd = Command::new("ssh-keyscan");
+    cmd.args(vpnctl_host_fingerprint::build_keyscan_args(&port, host));
+    let output = run_child_with_timeout(cmd, None, Duration::from_secs(12), "pinned host keyscan")?;
+    if output.is_empty() {
         return Err(CoreError::Transport(
             "ssh-keyscan for pinned host returned no keys".into(),
         ));
     }
-    Ok(output.stdout)
+    Ok(output)
 }
 
 fn matching_raw_key(scan: &[u8], expected: &str) -> Result<Option<String>> {
-    use std::io::Write;
-
-    let mut child = Command::new("ssh-keygen")
-        .args(["-lf", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| CoreError::Transport(format!("spawning ssh-keygen for pinned host: {e}")))?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| CoreError::Transport("ssh-keygen stdin pipe unavailable".into()))?
-        .write_all(scan)
-        .map_err(|e| CoreError::Transport(format!("writing ssh-keygen input: {e}")))?;
-    let output = child
-        .wait_with_output()
-        .map_err(|e| CoreError::Transport(format!("waiting for ssh-keygen: {e}")))?;
-    if !output.status.success() {
-        return Err(CoreError::Transport(format!(
-            "ssh-keygen fingerprinting failed: exit={:?}",
-            output.status.code()
-        )));
-    }
-    let fingerprints = vpnctl_host_fingerprint::extract_all_sha256_tokens(
-        &String::from_utf8_lossy(&output.stdout),
-    );
+    let mut cmd = Command::new("ssh-keygen");
+    cmd.args(["-lf", "-"]);
+    let output = run_child_with_timeout(
+        cmd,
+        Some(scan.to_vec()),
+        Duration::from_secs(12),
+        "pinned host fingerprint",
+    )?;
+    let fingerprints =
+        vpnctl_host_fingerprint::extract_all_sha256_tokens(&String::from_utf8_lossy(&output));
     select_matching_raw_key(&String::from_utf8_lossy(scan), &fingerprints, expected)
 }
 
@@ -605,7 +580,11 @@ fn run_child_with_timeout(
         }
 
         match child.try_wait() {
-            Ok(Some(status)) if out_reader.is_finished() && err_reader.is_finished() => {
+            Ok(Some(status))
+                if out_reader.is_finished()
+                    && err_reader.is_finished()
+                    && in_writer.as_ref().is_none_or(|writer| writer.is_finished()) =>
+            {
                 break status;
             }
             Ok(Some(_)) | Ok(None) => {
