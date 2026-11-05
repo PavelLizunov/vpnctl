@@ -149,6 +149,26 @@ impl Fixture {
         self.inv.revoke(&user.id, &node.id).await.unwrap();
     }
 
+    pub(super) async fn protocol_alias(&self, node: &NodeFixture, protocol: &str, host: &str) {
+        let key = match protocol {
+            "naive" => "naive.domain",
+            "vless-ws" => "vlessws.domain",
+            _ => panic!("unsupported synthetic protocol alias"),
+        };
+        sqlx::query(
+            "INSERT INTO server_protocols (server_id, protocol_id, hidden) VALUES (?1, ?2, 0)",
+        )
+        .bind(&node.id.0)
+        .bind(protocol)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        self.inv
+            .set_server_secret(&node.id, key, host)
+            .await
+            .unwrap();
+    }
+
     pub(super) async fn seed_legacy_workload_grant(&self, user: &UserFixture, node: &NodeFixture) {
         let role: String = sqlx::query_scalar("SELECT role FROM servers WHERE id = ?1")
             .bind(&node.id.0)

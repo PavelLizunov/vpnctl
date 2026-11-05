@@ -3,6 +3,34 @@
 use super::projection::{NodeMetadata, country_for_ips, country_for_node, ttl_for_interval};
 
 #[test]
+fn canonical_endpoint_hosts_reject_malformed_aliases_without_affecting_valid_ip_literals() {
+    for host in [
+        "",
+        ".",
+        "node..example.invalid",
+        "-node.example.invalid",
+        "node-.example.invalid",
+        "[node.example.invalid]",
+        "[192.0.2.1]",
+        "[[2001:db8::1]]",
+        "node.example.invalid:443",
+        "https://node.example.invalid",
+        "999.999.999.999",
+        "node.example.invalid..",
+    ] {
+        assert_eq!(super::canonical_endpoint_host(host), None, "{host}");
+    }
+    assert_eq!(
+        super::canonical_endpoint_host("[2001:0db8::1]"),
+        Some("2001:db8::1".into())
+    );
+    assert_eq!(
+        super::canonical_endpoint_host("192.0.2.1"),
+        Some("192.0.2.1".into())
+    );
+}
+
+#[test]
 fn hostname_country_uses_only_cached_node_addresses_and_requires_consensus() {
     let a = "192.0.2.1".parse().unwrap();
     let b = "2001:db8::1".parse().unwrap();

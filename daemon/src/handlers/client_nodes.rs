@@ -2,6 +2,8 @@ mod limits;
 mod projection;
 
 #[cfg(test)]
+mod endpoint_alias_spec_tests;
+#[cfg(test)]
 mod spec_support;
 #[cfg(test)]
 mod spec_tests;
@@ -211,20 +213,38 @@ async fn endpoint_hosts(
             }
             _ => Some(server.address.clone()),
         };
-        if let Some(host) = host.filter(|host| valid_endpoint_host(host)) {
+        if let Some(host) = host.and_then(|host| canonical_endpoint_host(&host)) {
             hosts.insert(host);
         }
     }
     Ok(hosts.into_iter().collect())
 }
 
-fn valid_endpoint_host(host: &str) -> bool {
-    host.parse::<std::net::IpAddr>().is_ok()
-        || (!host.is_empty()
-            && host.len() <= 253
-            && host
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-'))
+fn canonical_endpoint_host(host: &str) -> Option<String> {
+    let literal = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = literal.parse::<std::net::IpAddr>() {
+        return (literal == host || ip.is_ipv6()).then(|| ip.to_string());
+    }
+    let host = host.strip_suffix('.').unwrap_or(host);
+    valid_dns_host(host).then(|| host.to_ascii_lowercase())
+}
+
+fn valid_dns_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && !host.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label.starts_with(|c: char| c.is_ascii_alphanumeric())
+                && label.ends_with(|c: char| c.is_ascii_alphanumeric())
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
 }
 
 fn metadata_ttl() -> u64 {

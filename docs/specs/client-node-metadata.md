@@ -136,3 +136,55 @@ grant seeder in the unique temporary fixture DB, remove only that local insert
 trigger before the synthetic grant, and keep the real role-filtering endpoint
 assertion. Never change production schema, migrations, grant logic or live state.
 This corrects the fixture rather than deleting the denied-role consumer case.
+
+## Confirmed cross-repository P2 before correction
+
+Final GPT ASTRA XHIGH reviewed client25f3ca38/backend2ace802 and found raw endpoint
+deduplication incompatible with the client's canonical keys. Admin config keeps
+case; one Reality+Naive node can emit both node.example.test and NODE.example.test,
+so the client rejects the entire snapshot. Coordinator traced and confirmed it.
+After current176e1ad CI is green, canonicalize SAME-NODE DNS case/trailing-dot and
+IP spellings before deduplication. Never merge genuinely ambiguous different-node
+rows or weaken client duplicate rejection. Add producer-to-consumer regression,
+independent diff review and final Astra recheck. No implementation/live claim yet.
+
+## Alias correction and reviewable deployment artifacts
+
+Exact176e1ad now passes all ten CI jobs, including full workspace tests and
+Docker SSH suites. The next block fixes the confirmed alias producer contract.
+Within ONE server, canonicalize DNS ASCII case and one optional trailing root
+dot, plus equivalent IP spellings, BEFORE endpoint deduplication. Reject malformed
+hosts; distinct hosts remain distinct, and different physical-server rows must
+not be silently merged. The strict client duplicate oracle remains unchanged.
+
+An independent spec writer receives only this contract and fixture signatures:
+Fixture::new/user/node/grant/request as above; NEW
+fixture.protocol_alias(&node, protocol_id:&str, endpoint_host:&str).await seeds
+a visible enabled naive or vless-ws alias without DNS/network. It is TEST-ONLY.
+Write endpoint_alias_spec_tests.rs using actual router responses: same-node case,
+trailing-dot and IPv6 equivalence yield one canonical host; different aliases
+remain separate; different nodes sharing an alias remain distinct/ambiguous.
+Also provide a synthetic JSON snapshot with generated_at2000, ttl1320, one
+canonical DNS host, all sample/country fieldsnull and freshnessunknown. Backend
+response comparison may normalize ONLY its generated_at to2000; client consumer
+parses the identical fixture. No identity/live data enters either fixture.
+
+Prepare a generic GitHub pull-request/manual candidate-artifact workflow so the
+reviewed exact head can produce musl daemon+CLI, pinned managed sing-box/helper
+and same-revision assets together. Existing CI remains the activation gate.
+Build only on GitHub after capacity/tool preflight, embed VPNCTL_BUILD_SHA, include
+source/digests, upload binaries/assets only (no config/inventory/secrets), and
+perform no deployment/tag/release. Controlled production activation remains a
+separate owner-approved step under commercial-operations; no new live claim.
+
+Alias/artifact block source receipt: same-node endpoints now canonicalize before
+BTreeSet insertion; different-node ambiguity is preserved and malformed aliases
+are omitted. An independent spec-only writer adds11 actual-router tests and a
+shared synthetic snapshot; the C# HTTP consumer parses an identical copy. A
+separate boundary test keeps bracket/IP/error cases. No new library dependency.
+Source search found no interchangeable canonicalization helper; existing inline
+SNI validation has different IP/root-dot policy and remains untouched.
+Independent diff-only review of the complete block returned[]. cargo fmt/app-map
+checks and workflow shell/Python/YAML syntax checks pass. No local compilation,
+full tests or SDK installation. New exact-head CI and final Astra recheck remain
+pending. Candidate artifacts contain no live state and perform no deployment.
