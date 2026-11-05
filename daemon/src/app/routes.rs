@@ -29,6 +29,30 @@ pub fn router(state: AppState) -> Router {
     let admin_router = admin_router(state.clone());
 
     let public_router = Router::new()
+        .route(
+            "/api/v1/app/node-status/device/{*tail}",
+            get(handlers::client_nodes::get_device_nodes),
+        )
+        .route(
+            "/api/v1/app/node-status/subscription/{*tail}",
+            get(handlers::client_nodes::get_subscription_nodes),
+        )
+        .route(
+            "/api/v1/app/node-status/device",
+            get(handlers::client_nodes::unauthorized_nodes),
+        )
+        .route(
+            "/api/v1/app/node-status/device/",
+            get(handlers::client_nodes::unauthorized_nodes),
+        )
+        .route(
+            "/api/v1/app/node-status/subscription",
+            get(handlers::client_nodes::unauthorized_nodes),
+        )
+        .route(
+            "/api/v1/app/node-status/subscription/",
+            get(handlers::client_nodes::unauthorized_nodes),
+        )
         .route("/api/v1/health", get(handlers::health::get))
         .route("/sub/{token}", get(handlers::sub::get))
         .route("/api/v1/sub/{token}", get(handlers::sub::get_mihomo))

@@ -5,10 +5,10 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 433 (285 prod / 148 test)
-- **Total Rust LOC:** 150,521 (85,417 prod / 65,104 test)
+- **Tracked Rust Files:** 439 (290 prod / 149 test)
+- **Total Rust LOC:** 152,290 (86,326 prod / 65,964 test)
 - **Database Migrations:** 69
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 133
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 139
 
 ## Workspace Crates & Targets
 
@@ -23,8 +23,8 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 6,753 (14) | 1,554 (6) | **8,307** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,236 (20) | 4,817 (12) | **9,053** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,757 (4) | 1,191 (5) | **2,948** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 13 tests | 46,848 (152) | 35,002 (65) | **81,850** |
-| **Total** | | | | **85,417 (285)** | **65,104 (148)** | **150,521** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 13 tests | 47,757 (157) | 35,862 (66) | **83,619** |
+| **Total** | | | | **86,326 (290)** | **65,964 (149)** | **152,290** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -130,7 +130,7 @@
 | `0068` | vpn cumulative generation | `crates/inventory/migrations/0068_vpn_cumulative_generation.sql` | 18 |
 | `0069` | alert delivery state | `crates/inventory/migrations/0069_alert_delivery_state.sql` | 15 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (133)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (139)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -263,6 +263,12 @@
 | `GET` | `/api/v1/app/config` | `handlers::vpn_router::get_config_root_catchall` |
 | `GET` | `/api/v1/app/config/` | `handlers::vpn_router::get_config_root_catchall` |
 | `GET` | `/api/v1/app/config/{*tail}` | `handlers::vpn_router::get_config` |
+| `GET` | `/api/v1/app/node-status/device` | `handlers::client_nodes::unauthorized_nodes` |
+| `GET` | `/api/v1/app/node-status/device/` | `handlers::client_nodes::unauthorized_nodes` |
+| `GET` | `/api/v1/app/node-status/device/{*tail}` | `handlers::client_nodes::get_device_nodes` |
+| `GET` | `/api/v1/app/node-status/subscription` | `handlers::client_nodes::unauthorized_nodes` |
+| `GET` | `/api/v1/app/node-status/subscription/` | `handlers::client_nodes::unauthorized_nodes` |
+| `GET` | `/api/v1/app/node-status/subscription/{*tail}` | `handlers::client_nodes::get_subscription_nodes` |
 | `GET` | `/api/v1/health` | `handlers::health::get` |
 | `GET` | `/api/v1/stats/sub-access` | `handlers::stats::sub_access` |
 | `GET` | `/api/v1/sub/{token}` | `handlers::sub::get_mihomo` |
