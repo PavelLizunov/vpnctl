@@ -117,9 +117,9 @@ silently declare a VPS globally dead or transfer every customer's traffic.
 **Operator surface:** expose the preferred relay/fallback policy and current
 direct/relayed/degraded states in the Web UI. Record actual transitions in the
 audit log without no-op spam. Display stale/unknown observations distinctly.
-Optional external blocklist enrichment should retain source and timestamp and
-remain distinct from measured protocol health; this incident's list lookup
-did not identify the actual connectivity failure.
+Targeted external Cheburcheck enrichment is delivered in the activation below.
+Its source/timestamp and regional observations remain distinct from measured
+protocol health; the list lookup did not identify the connectivity failure.
 
 **Subscriber scope:** implement and name compatible automatic selection paths
 per artifact/client. A new import, a refreshed subscription, an already-running
@@ -156,7 +156,62 @@ Relevant sources to inspect at the deployed/next integration revision:
 ## Validation boundary
 
 Operational SSH/socket/HTTP probes, the controlled packet capture and the
-external dynamic IP checks supplied the observations above. Application builds,
-automated suites and forced failover
-of production clients were not run. The document does not claim a universal
-automatic redirect has shipped; that development remains open in `BACKLOG.md`.
+external dynamic IP checks supplied the initial incident observations above.
+That investigation did not run application builds, automated suites or forced
+failover of production clients. The later Cheburcheck implementation and its
+validation are recorded below. Universal automatic client redirect remains open
+in `BACKLOG.md`.
+
+## Cheburcheck activation: 2026-11-05 21:51–21:52 UTC
+
+This is 2026-11-06 in Moscow. Source
+`22ab7f0ed10d4d67d19a0f7f3de60ea273586dd5` is published in
+[PR #312](https://github.com/PavelLizunov/vpnctl/pull/312), based on the previously
+deployed `59477de` / PR #311. The feature PR is open; production runs its head.
+Deployment source is `origin/feature/cheburcheck-integration`. This handoff branch
+contains operational notes and remains separate from the deployment source.
+
+[CI](https://github.com/PavelLizunov/vpnctl/actions/runs/42112113909) and the
+[candidate package build](https://github.com/PavelLizunov/vpnctl/actions/runs/42112113847)
+passed for that SHA. Local check, fmt, clippy, workspace tests and deny all exited
+0; the final snapshot-lock change additionally passed check/fmt/clippy and the
+12 admin contract tests, including concurrent GETs during completion. The
+adapter has 36 spec-derived cases. Independent diff review findings were fixed.
+CI also passed the Docker-backed SSH suites.
+
+The static musl package's source and checksums were verified. Its daemon, CLI,
+managed node artifacts and admin assets were installed with the source revision's
+`scripts/deploy.sh`; vpnctld was restarted once. Health returned 200 with
+`0.9.0+22ab7f0`, and systemd reported active. Existing VPS services and routing
+policies were not redeployed by this feature installation.
+
+The operator entry is **Monitoring → Cheburcheck**, also linked from each server.
+`/admin/monitoring/cheburcheck` returned 401 without credentials and 200 with
+credentials; both affected-node pages returned 200. Each selected node's POST
+returned 303. Live validation used authenticated HTTP; browser layout review was
+not run. GET pages read stored state, and there is no bulk external sweep.
+
+Only the two affected aliases were submitted through the new panel action:
+
+- `is-new`: start 21:51:29 UTC, finish 21:51:44 UTC. Static list miss;
+  dynamic Done, 43 online observers, 41 reports: 31 `tspu_block`, 9 `uncertain`,
+  1 `ok`, 2 missing, 0 cached. No service failure.
+- `infomaniak`: start 21:52:11 UTC, finish 21:52:26 UTC. Static list miss;
+  dynamic Done, 43 online observers, 41 reports: 32 `tspu_block`, 9 `uncertain`,
+  0 `ok`, 2 missing, 0 cached. No service failure.
+
+The journal contained exactly four Cheburcheck rows: start/result for each alias.
+The pages displayed Finished/Done from those stored results. No observer IDs,
+signed lookup contexts, credentials or inventory dumps are copied into this
+handoff. Uncertain/missing reports do not count as filtering; `ok` is a response
+after calibrated DPI, not an authenticated VPN transfer. These checks continue
+to show regional filtering signals despite empty static blocklists.
+
+Recovery options and automatic failover boundaries are now documented in the
+[deployed source guide](https://github.com/PavelLizunov/vpnctl/blob/22ab7f0ed10d4d67d19a0f7f3de60ea273586dd5/docs/operations/blocked-node-recovery.md)
+and [Cheburcheck contract](https://github.com/PavelLizunov/vpnctl/blob/22ab7f0ed10d4d67d19a0f7f3de60ea273586dd5/docs/specs/cheburcheck.md).
+Prefer a Netherlands entry with the original VPS as exit for compatible updated
+clients. Direct recovery requires a usable address/path; another prefix or
+provider move is an option to discuss with the hoster. Old static profiles need
+an updated artifact or a previously provisioned reserve. Automatic route changes,
+new IP provisioning and end-to-end client-chain acceptance remain future work.

@@ -16,6 +16,12 @@ The follow-up dynamic checks report regional `tspu_block` despite empty static
 blocklists. A proposed hostname also resolves to the wrong endpoint; open ports
 alone were a false signal of node reachability. Both cases are in the handoff.
 
+Targeted Cheburcheck diagnostics are now deployed from `22ab7f0` in
+[PR #312](https://github.com/PavelLizunov/vpnctl/pull/312). The handoff records
+the activation and two live results. Remaining recovery work starts from that
+production source, with the Netherlands as preferred entry; see the
+[recovery guide](https://github.com/PavelLizunov/vpnctl/blob/22ab7f0ed10d4d67d19a0f7f3de60ea273586dd5/docs/operations/blocked-node-recovery.md).
+
 ## Deploy All lock retry on concurrent user auto-deploy
 
 **Status:** closed in code. `daemon/src/wizard_bootstrap/redeploy.rs` routes
