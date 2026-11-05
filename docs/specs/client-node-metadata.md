@@ -125,3 +125,6 @@ Clippy rejects ten unrestricted pub methods inside the private test fixture
 which still admits the sibling spec tests. No lint suppression or production
 change is needed. Record this before correction; full tests/SSH suites and the
 replacement exact-head CI remain pending.
+
+CI43e07bb: the non-exit spec fixture used vpn-entry, which the existing role CHECK rejects before the endpoint runs.
+Use the permitted workload-only role with the same exclusion assertions; no production or schema change.

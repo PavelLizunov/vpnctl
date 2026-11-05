@@ -333,7 +333,7 @@ async fn non_exit_nodes_are_excluded_even_when_visible_and_granted() {
     let fixture = Fixture::new().await;
     let user = fixture.user(false).await;
     let exit = fixture.node("192.0.2.17", true, "vpn-exit").await;
-    let non_exit = fixture.node("192.0.2.18", true, "vpn-entry").await;
+    let non_exit = fixture.node("192.0.2.18", true, "workload-only").await;
     fixture.grant(&user, &exit).await;
     fixture.grant(&user, &non_exit).await;
     let body = metadata(
