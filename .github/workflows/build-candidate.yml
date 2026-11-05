@@ -31,6 +31,10 @@ env:
   GOTOOLCHAIN: local
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   BUILD_TARGET: x86_64-unknown-linux-musl
+  RUSTFLAGS: '-C target-cpu=x86-64 -C target-feature=-avx,-avx2,-bmi1,-bmi2'
+  CFLAGS: '-march=x86-64 -mtune=generic'
+  CFLAGS_x86_64_unknown_linux_musl: '-march=x86-64 -mtune=generic'
+  AWS_LC_SYS_CFLAGS_x86_64_unknown_linux_musl: '-march=x86-64 -mtune=generic'
   VPNCTL_BUILD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
 jobs:
@@ -114,7 +118,7 @@ jobs:
       - name: Install musl tools on hosted runner
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends musl-tools
+          sudo apt-get install -y --no-install-recommends musl-tools qemu-user
 
       - name: Verify build toolchain
         run: |
@@ -123,6 +127,7 @@ jobs:
           rustup target list --installed | grep -Fx "$BUILD_TARGET"
           go version | grep -E '^go version go1\.26\.'
           musl-gcc --version
+          qemu-x86_64 --version
           curl --version
 
       - name: Build daemon and CLI from the same revision
@@ -159,6 +164,16 @@ jobs:
           cli_version = subprocess.check_output([release / "vpnctl", "--version"], text=True).strip()
           if cli_version != f"vpnctl {expected}":
               raise SystemExit(f"CLI provenance mismatch: {cli_version}")
+          # Hosted CPUs can hide nonportable C startup instructions. Require
+          # both entry points to run on an AVX-less CPU before publication.
+          for binary, wanted in (("vpnctl", f"vpnctl {expected}"), ("vpnctld", f"vpnctld {version}")):
+              portable = subprocess.check_output(
+                  ["qemu-x86_64", "-cpu", "Nehalem", release / binary, "--version"],
+                  text=True, timeout=20,
+              ).strip()
+              if portable != wanted:
+                  raise SystemExit(f"Portable CPU provenance mismatch: {binary}")
+          print("AVX-less Nehalem daemon and CLI version checks passed")
           # vpnctld --version is semver-only; health exposes its compiled SHA.
           # All generated state stays outside the package and is removed here.
           with tempfile.TemporaryDirectory(prefix="candidate-smoke-", dir=os.environ["RUNNER_TEMP"]) as temporary:

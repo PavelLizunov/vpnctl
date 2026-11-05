@@ -188,3 +188,19 @@ Independent diff-only review of the complete block returned[]. cargo fmt/app-map
 checks and workflow shell/Python/YAML syntax checks pass. No local compilation,
 full tests or SDK installation. New exact-head CI and final Astra recheck remain
 pending. Candidate artifacts contain no live state and perform no deployment.
+
+## Confirmed preactivation CPU compatibility failure
+
+Candidate1fafc61 passes hosted CI but both Rust binaries SIGILL on actualVM119,
+whose verified flags lackAVX/AVX2. Existing662b411 remains healthy and untouched.
+Child-only trace resolves c5f96ec2 atELF0xaeea54 to
+aws_lc_0_45_0_OPENSSL_cpuid_setup+0x64 (vmovd). This is C crypto initialization,
+not a DB/permissions failure. No explicit native flags were found; do not claim
+the original flag cause. Protected four-binary/asset backup, consistent SQLite
+backup/integrity/FK and separate restore selfcheck already pass.
+
+Record before correction: force baseline x86-64 for Rust and C cross-compilation
+using supported target CFLAGS/AWS_LC_SYS_CFLAGS; add an AVX-less Nehalem QEMU
+version gate on GitHub before upload. No tool/SDK install or new build on Harness
+or production, no CPU/security configuration change and no live activation of
+the rejected artifact. Existing candidate smoke and exact-source gates remain.
