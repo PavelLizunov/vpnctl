@@ -28,6 +28,8 @@ pub struct AppState {
     pub wizard: Arc<WizardStore>,
     pub snapshot_cache: crate::snapshot_cache::SnapshotCache,
     pub geo: crate::geoip::GeoLookup,
+    pub(crate) private_checks: Arc<crate::handlers::admin::private_checks::PrivateChecks>,
+    pub(crate) cheburcheck: Arc<crate::handlers::admin::cheburcheck_checks::ExternalChecks>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -162,6 +164,8 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<(Router, tokio::task:
         wizard,
         snapshot_cache,
         geo,
+        private_checks: Arc::default(),
+        cheburcheck: Arc::default(),
     };
     Ok((router(state), writer_handle))
 }
@@ -189,6 +193,8 @@ pub fn make_app_state_with_rate_limiter(
             wizard: Arc::new(WizardStore::new()),
             snapshot_cache: crate::snapshot_cache::SnapshotCache::new(),
             geo: crate::geoip::GeoLookup::disabled(),
+            private_checks: Arc::default(),
+            cheburcheck: Arc::default(),
         },
         handle,
     )

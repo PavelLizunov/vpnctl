@@ -21,9 +21,9 @@
   installed services, including auxiliary units. Units of kernels vpnctl never
   managed on that server are never touched. No inventory schema or client wire
   format changes are introduced.
-- Hostname wizard targets omit AWG2/AWG3 with a visible progress note. IPv4 and
-  IPv6 literals retain the complete default protocol list unless an SSH port
-  conflicts as described below.
+- New server defaults enable only VLESS+REALITY, for hostnames and literal
+  IPv4/IPv6 addresses alike; see `server-protocol-defaults.md`. Other protocols
+  require explicit operator selection.
 - The wizard pins the host key recorded by its first successful password login
   before any further connection, including the non-root sudo probe. A later
   keyscan only supplies a key matching that pin; it never establishes trust.
@@ -34,7 +34,7 @@
   supported. This is the owning wizard host-key selection contract.
 - Before registration, the wizard skips protocols whose default TCP listener
   collides with the connected SSH port and emits a progress note for each.
-  UDP listeners using the same numeric port remain enabled.
+  No other protocol is enabled as a fallback.
 - The fail2ban sshd jail covers the connected inventory SSH port and every port
   reported by `sshd -T`, deduplicated. Config-file detection and port 22 remain
   fallbacks when the transport/configuration supplies no port.
@@ -73,8 +73,8 @@ cannot discard it.
       accepted keys fail closed; matching plain/hashed entries retain TOFU.
 - [ ] Several accepted key types select the presented, already accepted key;
       an unaccepted presented key fails closed.
-- [ ] Wizard skips REALITY on SSH 443 and other TCP port collisions before
-      registration, reports the skipped protocol, and preserves UDP defaults.
+- [ ] Wizard skips REALITY on SSH 443 before registration and reports the
+      skipped protocol, without enabling a fallback.
 - [ ] Rendered fail2ban script includes the connected and all configured ports,
       removes duplicates, and retains port 22 as the last fallback.
 - [ ] Hung password command is killed within the deadline, with no surviving child.
@@ -85,7 +85,7 @@ cannot discard it.
 - [ ] Cancelled HTTP deploy retains its lock until SSH work completes.
 - [ ] Retired kernel services are stopped/disabled; enabled, never-retired and
       absent units are untouched; shutdown errors propagate.
-- [ ] Hostname filtering excludes only AWG2/AWG3 and preserves literal-IP defaults.
+- [ ] Hostnames and literal IPs share the VLESS+REALITY-only default.
 - [ ] Failed/locked fleet updates end with `error`; empty successful fleet with `ok`.
 - [ ] Partial snapshot copy leaves live/staged configuration and the previous
       backup unchanged, without attempting service changes.

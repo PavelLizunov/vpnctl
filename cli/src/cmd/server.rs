@@ -27,7 +27,7 @@ pub(crate) enum ServerCmd {
         #[arg(long, default_value = "generic")]
         hoster: String,
         /// Comma-separated list of enabled protocols.
-        #[arg(long, value_delimiter = ',', default_values_t = ["vless+reality".to_string(), "tuic-v5".to_string()])]
+        #[arg(long, value_delimiter = ',', default_value = "vless+reality")]
         protocols: Vec<String>,
         /// Optional jump host (server id; ProxyJump support lands in v0.3).
         #[arg(long)]

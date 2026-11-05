@@ -56,7 +56,7 @@ pub(crate) struct BootstrapArgs {
     pub kernel: String,
     #[arg(long, default_value = "generic")]
     pub hoster: String,
-    #[arg(long, value_delimiter = ',', default_values_t = ["vless+reality".to_string(), "tuic-v5".to_string()])]
+    #[arg(long, value_delimiter = ',', default_value = "vless+reality")]
     pub protocols: Vec<String>,
     #[arg(long, default_value_t = 1.0)]
     pub usage_coefficient: f64,

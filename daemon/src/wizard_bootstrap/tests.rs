@@ -784,84 +784,38 @@ async fn run_bootstrap_fails_with_exact_dotted_pubkey_path_when_missing() {
 }
 
 #[test]
-fn wizard_hostname_skips_awg_but_keeps_other_protocols() {
-    let supported = vec![
-        ProtocolId("vless+reality".into()),
-        ProtocolId("amneziawg2".into()),
-        ProtocolId("hysteria2".into()),
-        ProtocolId("amneziawg3".into()),
-    ];
-    assert_eq!(
-        super::bootstrap::wizard_protocols(
-            "vpn.example.org",
-            22,
-            supported,
-            &crate::app::build_registry().unwrap(),
-        ),
-        vec![
-            ProtocolId("vless+reality".into()),
-            ProtocolId("hysteria2".into())
-        ]
-    );
-}
-
-#[test]
-fn wizard_literal_ip_preserves_all_default_protocols() {
-    let supported = crate::app::build_registry()
-        .unwrap()
-        .kernel(&KernelId("sing-box".into()))
-        .unwrap()
-        .supported_protocols();
-    assert!(supported.iter().any(|p| p.0 == "amneziawg2"));
-    assert!(supported.iter().any(|p| p.0 == "amneziawg3"));
-    for address in ["198.51.100.42", "2001:db8::42"] {
-        assert_eq!(
-            super::bootstrap::wizard_protocols(
-                address,
-                22,
-                supported.clone(),
-                &crate::app::build_registry().unwrap(),
-            ),
-            supported
-        );
-    }
-}
-
-#[test]
-fn wizard_skips_every_tcp_protocol_conflicting_with_ssh() {
+fn new_servers_enable_only_vless_reality_by_default() {
     let registry = crate::app::build_registry().unwrap();
     let supported = registry
         .kernel(&KernelId("sing-box".into()))
         .unwrap()
         .supported_protocols();
-    for (ssh_port, skipped) in [
-        (443, Some("vless+reality")),
-        (8388, Some("shadowsocks-2022")),
-        (8643, Some("trojan")),
-        (8843, Some("anytls")),
-        (8443, None),
-        (8444, None),
-        (51821, None),
-        (51822, None),
-    ] {
-        let selected = super::bootstrap::wizard_protocols(
-            "198.51.100.42",
-            ssh_port,
-            supported.clone(),
-            &registry,
+    assert!(supported.iter().any(|p| p.0 == "hysteria2"));
+    assert!(supported.iter().any(|p| p.0 == "amneziawg3"));
+    for ssh_port in [22, 2222, 8388, 8643, 8843, 8443, 8444, 51821, 51822] {
+        assert_eq!(
+            super::default_server_protocols(ssh_port, supported.clone(), &registry),
+            vec![ProtocolId("vless+reality".into())],
+            "SSH port {ssh_port}",
         );
-        let expected: Vec<_> = supported
-            .iter()
-            .filter(|pid| Some(pid.0.as_str()) != skipped)
-            .cloned()
-            .collect();
-        assert_eq!(selected, expected, "SSH port {ssh_port}");
-        if ssh_port == 443 {
-            assert!(!selected.contains(&ProtocolId("vless+reality".into())));
-        }
-        if ssh_port == 8443 {
-            assert!(selected.contains(&ProtocolId("tuic-v5".into())));
-        }
+    }
+}
+
+#[test]
+fn new_server_defaults_do_not_replace_reality_when_ssh_uses_443() {
+    let registry = crate::app::build_registry().unwrap();
+    let supported = registry
+        .kernel(&KernelId("sing-box".into()))
+        .unwrap()
+        .supported_protocols();
+    assert!(super::default_server_protocols(443, supported, &registry).is_empty());
+}
+
+#[test]
+fn new_server_defaults_do_not_enable_an_unsupported_protocol() {
+    let registry = crate::app::build_registry().unwrap();
+    for supported in [vec![], vec![ProtocolId("hysteria2".into())]] {
+        assert!(super::default_server_protocols(22, supported, &registry).is_empty());
     }
 }
 

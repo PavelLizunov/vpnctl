@@ -30,6 +30,7 @@ async fn admin_wizard_new_renders_form_with_required_fields() {
         html.contains(r#"id="root_password" name="root_password" type="password""#),
         "root_password must be type=password"
     );
+    assert!(html.contains("Only VLESS+REALITY is enabled by default."));
     assert!(
         html.contains("Add server · step 1 of 2"),
         "step indicator missing"

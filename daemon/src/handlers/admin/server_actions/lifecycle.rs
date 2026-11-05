@@ -122,11 +122,13 @@ pub(crate) async fn server_quick_add(State(state): State<AppState>, body: String
 
     use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
     let kernel_id = KernelId("sing-box".into());
-    let default_protocols: Vec<ProtocolId> = state
+    let supported: Vec<ProtocolId> = state
         .registry
         .kernel(&kernel_id)
         .map(|k| k.supported_protocols())
         .unwrap_or_default();
+    let default_protocols =
+        crate::wizard_bootstrap::default_server_protocols(ssh_port, supported, &state.registry);
 
     let server = Server {
         id: ServerId(id.clone()),

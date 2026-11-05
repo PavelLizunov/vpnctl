@@ -149,7 +149,9 @@ pub(crate) async fn monitoring(
                     (humanize_age(now - ts, lang))
                 }
             }
-            div.ed-headrow__actions {
+            div.ed-headrow__actions.ed-monitoring-actions {
+                a.ed-abtn.ed-abtn--secondary.ed-abtn--sm href="/admin/monitoring/private-checks" { (tr(lang, "Node reachability", "Доступность узлов")) }
+                a.ed-abtn.ed-abtn--secondary.ed-abtn--sm href="/admin/monitoring/cheburcheck" { "Cheburcheck" }
                 form method="post" action="/admin/monitoring/probe-all" {
                     button type="submit"
                            class="ed-abtn ed-abtn--secondary ed-abtn--sm"
