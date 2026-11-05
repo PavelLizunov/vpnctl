@@ -149,6 +149,23 @@ impl Fixture {
         self.inv.revoke(&user.id, &node.id).await.unwrap();
     }
 
+    pub(super) async fn seed_legacy_workload_grant(&self, user: &UserFixture, node: &NodeFixture) {
+        let role: String = sqlx::query_scalar("SELECT role FROM servers WHERE id = ?1")
+            .bind(&node.id.0)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap();
+        assert_eq!(role, "workload-only");
+        // This fixture owns a unique temporary database. Model an inconsistent
+        // legacy grant so the endpoint's role filter is exercised independently
+        // of the normal insert guard, without weakening production constraints.
+        sqlx::query("DROP TRIGGER trg_grant_rejects_workload_role")
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        self.grant(user, node).await;
+    }
+
     pub(super) async fn sample(&self, node: &NodeFixture, sample: Sample) {
         let timestamp = chrono::DateTime::from_timestamp(sample.observed_at, 0)
             .unwrap()

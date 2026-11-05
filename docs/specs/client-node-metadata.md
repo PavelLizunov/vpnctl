@@ -128,3 +128,11 @@ replacement exact-head CI remain pending.
 
 CI43e07bb: the non-exit spec fixture used vpn-entry, which the existing role CHECK rejects before the endpoint runs.
 Use the permitted workload-only role with the same exclusion assertions; no production or schema change.
+
+CI2ace802 reaches the grant step and exposes an additional fixture constraint:
+migration0053 rejects grants to workload-only servers even when inserted directly.
+The negative endpoint oracle remains unchanged. Add an explicit TEST-ONLY legacy
+grant seeder in the unique temporary fixture DB, remove only that local insert
+trigger before the synthetic grant, and keep the real role-filtering endpoint
+assertion. Never change production schema, migrations, grant logic or live state.
+This corrects the fixture rather than deleting the denied-role consumer case.
