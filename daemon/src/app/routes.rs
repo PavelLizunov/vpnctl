@@ -158,6 +158,14 @@ pub(crate) fn admin_router(state: AppState) -> Router {
         .route("/admin/monitoring", get(admin::monitoring))
         .route("/admin/monitoring/", get(admin::monitoring))
         .route(
+            "/admin/monitoring/cheburcheck",
+            get(admin::cheburcheck_overview),
+        )
+        .route(
+            "/admin/servers/{id}/cheburcheck",
+            get(admin::cheburcheck_page).post(admin::cheburcheck_run),
+        )
+        .route(
             "/admin/monitoring/probe-all",
             post(admin::monitoring_probe_all),
         )

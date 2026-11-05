@@ -237,7 +237,11 @@ mod tests {
         ));
         assert_eq!(local(&target(port, "udp")).await, Outcome::UdpNotChecked);
         drop(listener);
-        assert_eq!(local(&target(port, "tcp")).await, Outcome::Refused);
+        // Keep the refused port reserved while concurrent tests bind sockets.
+        let refused = tokio::net::TcpSocket::new_v4().unwrap();
+        refused.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let refused_port = refused.local_addr().unwrap().port();
+        assert_eq!(local(&target(refused_port, "tcp")).await, Outcome::Refused);
         let mut missing = target(port, "tcp");
         missing.ip = None;
         assert_eq!(local(&missing).await, Outcome::NoAddress);

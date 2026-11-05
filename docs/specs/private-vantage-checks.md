@@ -2,7 +2,7 @@
 
 ## Intent and invariants
 
-Provide an operator-visible, private check of each configured VPN server from controlled network vantage points. Never send server addresses or credentials to Cheburcheck or other third-party checking services. A TCP connection confirms only transport reachability, never a VPN handshake or unblocked status; UDP and end-to-end transfer require protocol-aware checks and must remain explicitly unverified if unavailable. Do not change VPN configurations, subscribers, routes or existing assurance/alert semantics. Reuse trusted SSH/host-key configuration and existing inventory; no arbitrary targets or command injection.
+Provide an operator-visible, private check of each configured VPN server from controlled network vantage points. This private sweep does not send addresses or credentials to third-party checking services. The owner's 2026-11-05 request adds a separate targeted public-IP [Cheburcheck action](cheburcheck.md); it supersedes the earlier global exclusion without changing this sweep. A TCP connection confirms only transport reachability, never a VPN handshake or unblocked status; UDP and end-to-end transfer require protocol-aware checks and must remain explicitly unverified if unavailable. Do not change VPN configurations, subscribers, routes or existing assurance/alert semantics. Reuse trusted SSH/host-key configuration and existing inventory; no arbitrary targets or command injection.
 
 ## Interface and data contract
 
@@ -12,7 +12,7 @@ Show source, server, transport/port, last check time, latency and precise result
 
 - Unit/integration tests cover success, timeout/refusal, unavailable vantage and stale/no result, protocol transport semantics, target validation and UI escaping/authentication.
 - Check actual user-facing result on production after deployment; independently validate at least one direct network comparison.
-- Existing VPN operation, credentials and configuration remain unchanged; no public Cheburcheck requests.
+- Existing VPN operation, credentials and configuration remain unchanged; this private sweep makes no public Cheburcheck requests.
 - Document retained limitations, exact source of each observation, and upstream code/license if incorporated.
 
 ## Decision and progress
