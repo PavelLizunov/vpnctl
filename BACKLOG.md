@@ -12,6 +12,9 @@ Start with [the incident handoff](docs/incidents/2026-11-05-route-failover.md):
 direct connections failed while the VPS services remained active; a controlled
 packet capture localized one failure before the guest interface. SSH health
 through a relay must remain distinct from direct client VPN reachability.
+The follow-up dynamic checks report regional `tspu_block` despite empty static
+blocklists. A proposed hostname also resolves to the wrong endpoint; open ports
+alone were a false signal of node reachability. Both cases are in the handoff.
 
 ## Deploy All lock retry on concurrent user auto-deploy
 

@@ -6,7 +6,7 @@ client IPs, account identities, UUIDs, keys and raw configurations stay outside
 Git. No vpnctl application code or schema was changed by this handoff.
 
 Full operational evidence and the now-tracked AI egress updater are in
-[homelab-infra-docs, incident snapshot](https://github.com/PavelLizunov/homelab-infra-docs/blob/511d877c32cdaf844185f51fe09c6183d43c33e1/docs/incidents/vpn-route-2026-11-05.md).
+[homelab-infra-docs, incident snapshot](https://github.com/PavelLizunov/homelab-infra-docs/blob/0c0cce7315a9c8bbc9630437a62a64760e6c6f49/docs/incidents/vpn-route-2026-11-05.md).
 
 ## What actually failed
 
@@ -32,8 +32,27 @@ independent fingerprint comparison later matched the stored keys.
 empty `blocked_subnets` and empty provider matches for both addresses at
 19:44:42/19:45:03. This is a list lookup, not a direct-connectivity measurement.
 Its [FAQ](https://cheburcheck.ru/kb/faq) notes incomplete lists and separates
-dynamic scanner results. No scanner job was launched. A public blocklist entry
-is therefore unconfirmed, while the packet loss is independently observed.
+dynamic scanner results. At that stage no scanner job had been launched;
+the subsequent dynamic checks below materially extend the finding.
+
+[observed] At 20:00:56–20:01:12, `is-new` received 36 of 43 observer reports:
+26 `tspu_block`, 9 `uncertain`, 1 `ok`. At 20:01:34–20:01:49, `infomaniak`
+received 37 of 43: 26 `tspu_block`, 10 `uncertain`, 1 `ok`. All were uncached.
+For each address the 26 blocking verdicts cover 16 ASNs. The sole `ok` came
+from AS8369, Chelyabinsk; it means a response after the calibrated DPI hop,
+not an authenticated VPN transfer. Missing/uncertain reports are not counted
+as blocking. The scope was only these two affected IPs.
+
+[inferred] This is strong independent evidence consistent with regional
+TSPU/IP filtering, while an official list entry remains absent. The specific
+filtering hop on the owner's path is still unknown. Retain the distinction
+between list lookup, scanner classification and an actual client handshake.
+
+[observed] The owner's proposed is-new hostname resolves to homelab's public
+address instead of the inventory target. Its SSH key differs; an isolated
+VLESS Reality attempt retaining is-new credentials/SNI failed with connection
+reset. DNS was not changed. The hostname is not a working is-new VPN entry in
+this snapshot; the full report records the owner's supplied name and evidence.
 
 ## Operational changes already made
 
@@ -108,6 +127,11 @@ client and an old static single-IP profile need separate acceptance cases.
 Provide a migration path for artifacts that cannot switch automatically.
 An outage can interrupt existing TCP sessions even when new connections recover.
 
+**Endpoint identity:** the hostname case above had open TCP ports but reached
+the wrong SSH identity and failed the intended VPN handshake. Address resolution,
+service identity and protocol transfer need separate observations; port-open
+alone must not be presented as a working node or a successful automatic repair.
+
 **Acceptance scenarios for that future work:** direct SSH failure with healthy
 NL relay; direct VPN-port failure with healthy relay SSH; partial regional
 failure; NL failure with reserve recovery; policy retained after daemon restart;
@@ -131,7 +155,8 @@ Relevant sources to inspect at the deployed/next integration revision:
 
 ## Validation boundary
 
-Operational SSH/socket/HTTP probes and the controlled packet capture supplied
-the observations above. Application builds, automated suites and forced failover
+Operational SSH/socket/HTTP probes, the controlled packet capture and the
+external dynamic IP checks supplied the observations above. Application builds,
+automated suites and forced failover
 of production clients were not run. The document does not claim a universal
 automatic redirect has shipped; that development remains open in `BACKLOG.md`.
