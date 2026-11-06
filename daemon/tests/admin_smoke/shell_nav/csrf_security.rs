@@ -37,6 +37,10 @@ async fn admin_unmatched_paths_do_not_leak_admin_fingerprint() {
             headers.get("permissions-policy").is_none(),
             "GET {path} leaks Permissions-Policy (admin fingerprint)"
         );
+        assert!(
+            headers.get("x-robots-tag").is_none(),
+            "GET {path} leaks X-Robots-Tag (admin fingerprint)"
+        );
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let s = String::from_utf8_lossy(&body);
         assert!(
@@ -134,6 +138,11 @@ async fn admin_responses_carry_security_headers() {
             && perm.contains("microphone=()")
             && perm.contains("geolocation=()"),
         "Permissions-Policy must block sensor / device APIs: {perm}"
+    );
+    assert_eq!(
+        headers.get("x-robots-tag").map(|v| v.to_str().unwrap()),
+        Some("noindex, nofollow"),
+        "X-Robots-Tag must be set to noindex, nofollow on admin responses"
     );
 }
 
