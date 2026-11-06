@@ -26,7 +26,7 @@ pub use quality::{QUALITY_MIN_SAMPLES, ServiceQualitySample, ServiceQualityScore
 pub use sqlite::{
     AccessBucket, AdminAlert, AuditEntry, Ban, BillingCycle, BoostySettings, ConversionResult,
     CurrencyRate, CurrencySettings, CurrencySettingsInput, FleetBillingSummary, HeavyUser,
-    NodeHealthRow, NodeNicUsage, ProxyMaskedStats, ServerBilling, ServerBillingInput,
+    NodeHealthRow, NodeNicDelta, NodeNicUsage, ProxyMaskedStats, ServerBilling, ServerBillingInput,
     ServerBillingItem, ServerBillingSummaryItem, ServerLiveActivity, ServerPayment,
     ServerPaymentInput, ServerRole, ServerTrafficLimit, SharingSignals, SqliteInventory,
     SqliteInventoryError, SubAccessAggregates, SubAccessEntry, SubAccessEntryInput, SubDeviceFp,

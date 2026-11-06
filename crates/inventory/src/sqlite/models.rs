@@ -350,7 +350,15 @@ pub struct NodeHealthRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeNicDelta {
+    pub ts: DateTime<Utc>,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeNicUsage {
+    pub deltas: Vec<NodeNicDelta>,
     pub rx_bytes: u64,
     pub tx_bytes: u64,
     pub total_bytes: u64,

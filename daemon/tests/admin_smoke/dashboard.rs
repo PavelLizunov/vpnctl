@@ -127,19 +127,19 @@ async fn phase4b_dashboard_renders_vpn_activity_tile_with_per_server_breakdown()
 
     let html = fetch_html(router(s), "/admin/activity").await;
     assert!(
-        html.contains("VPN activity · 24h"),
+        html.contains("Full server traffic · 24h"),
         "dashboard must surface the new VPN-activity tile; got: {}",
         &html[..200.min(html.len())]
     );
     assert!(
-        html.contains("does not report"),
-        "tile must explain why per-user numbers come from elsewhere"
+        html.contains("including GAP"),
+        "tile must explain full NIC coverage"
     );
     let activity_pos = html
-        .find("VPN activity · 24h")
+        .find("Full server traffic · 24h")
         .expect("VPN activity tile must render");
     let activity_html = &html[activity_pos..];
-    let busy_anchor = "href=\"/admin/servers/busy\"";
+    let busy_anchor = "href=\"/admin/servers/busy/activity\"";
     let busy_pos = activity_pos
         + activity_html
             .find(busy_anchor)
@@ -150,7 +150,7 @@ async fn phase4b_dashboard_renders_vpn_activity_tile_with_per_server_breakdown()
         "without a fresh snapshot the historical peak must not appear as active now: …{busy_row}…"
     );
     assert!(
-        html.contains(busy_anchor) && html.contains("href=\"/admin/servers/quiet\""),
+        html.contains(busy_anchor) && html.contains("href=\"/admin/servers/quiet/activity\""),
         "both servers must appear in the per-server breakdown"
     );
 }
@@ -195,11 +195,14 @@ async fn dashboard_active_now_uses_only_fresh_snapshots_in_every_history_window(
         {
             cache.store_at(sid.clone(), snapshot.clone(), observed_at);
             let html = fetch_html(app.clone(), &uri).await;
-            let activity = html.split_once("VPN activity · ").unwrap().1;
+            let activity = html.split_once("Full server traffic · ").unwrap().1;
             let tile = activity.split_once("active now</div>").unwrap().1;
             let value = tile.split_once('>').unwrap().1.split_once('<').unwrap().0;
             assert_eq!(value, expected, "window={window}");
-            let row = activity.split_once("href=\"/admin/servers/s0\"").unwrap().1;
+            let row = activity
+                .split_once("href=\"/admin/servers/s0/activity\"")
+                .unwrap()
+                .1;
             let active_cell = row.split_once("</td>").unwrap().1;
             let value = active_cell
                 .split_once('>')
@@ -213,7 +216,7 @@ async fn dashboard_active_now_uses_only_fresh_snapshots_in_every_history_window(
     }
     cache.store(sid, Snapshot::default());
     let html = fetch_html(app, "/admin/activity").await;
-    let activity = html.split_once("VPN activity · ").unwrap().1;
+    let activity = html.split_once("Full server traffic · ").unwrap().1;
     let tile = activity.split_once("active now</div>").unwrap().1;
     assert_eq!(
         tile.split_once('>').unwrap().1.split_once('<').unwrap().0,
@@ -227,12 +230,12 @@ async fn phase4b_dashboard_vpn_activity_tile_shows_empty_state_when_no_polls() {
     let s = state(&dir).await;
     let html = fetch_html(router(s), "/admin/activity").await;
     assert!(
-        html.contains("VPN activity · 24h"),
+        html.contains("Full server traffic · 24h"),
         "tile must always render"
     );
     assert!(
-        html.contains("No clash-api samples yet"),
-        "empty-state copy must mention «No clash-api samples yet»"
+        html.contains("No NIC observations."),
+        "empty-state copy must mention «No NIC observations.»"
     );
 }
 
@@ -675,31 +678,16 @@ async fn dashboard_fleet_traffic_totals_render_beside_chart() {
     let s = state(&dir).await;
     seed(&s.inv, 1, 1, &[(0, 0)]).await;
     let html = fetch_html(router(s), "/admin/activity").await;
-    assert!(
-        html.contains("vs prior"),
-        "dash#2 'vs prior' delta tile missing"
-    );
-    let traffic = html
-        .split_once(r#"id="vpn-traffic""#)
-        .unwrap()
-        .1
-        .split_once(r#"id="kernel-rollup""#)
-        .unwrap()
-        .0;
-    for (direction, label) in [("arrow-up", "upload 24h"), ("arrow-down", "download 24h")] {
-        assert!(
-            traffic
-                .split(r#"class="ed-status-tile__k">"#)
-                .skip(1)
-                .any(|tile| {
-                    let heading = tile.split_once("</div>").unwrap().0;
-                    heading.contains(&format!(
-                        r#"<use href="/admin/assets/icons.svg#{direction}""#
-                    )) && heading.split_once("</svg>").map(|(_, text)| text.trim()) == Some(label)
-                }),
-            "{label}: direction icon and exact window label missing from the same tile"
-        );
+    let traffic = html.split_once(r#"id="vpn-traffic""#).unwrap().1;
+    assert!(traffic.contains("data-source=\"nic\""));
+    for label in ["RX</div>", "TX</div>", "Total RX + TX</div>"] {
+        assert!(traffic.contains(label));
     }
+    assert!(traffic.contains("No NIC observations."));
+    assert!(
+        !traffic.contains("vs prior"),
+        "missing prior history must not invent a comparison"
+    );
 }
 
 #[tokio::test]
@@ -728,10 +716,11 @@ async fn activity_fleet_totals_sum_attributed_and_remainder() {
         )
         .await
         .unwrap();
+    seed_nic_traffic(&s.inv, &ServerId("s0".into()), 1200, 800).await;
     let html = fetch_html(router(s), "/admin/activity").await;
     assert!(
-        html.contains("1000 B"),
-        "activity fleet totals must sum attributed (900) + remainder (100) = 1000 B"
+        html.contains("2.0 KiB"),
+        "activity totals must use full 2000 NIC bytes instead of 1000 VPN bytes"
     );
 }
 
@@ -761,10 +750,11 @@ async fn dashboard_traffic_24h_sums_attributed_and_remainder() {
         )
         .await
         .unwrap();
+    seed_nic_traffic(&s.inv, &ServerId("s0".into()), 1200, 800).await;
     let html = fetch_html(router(s), "/admin/").await;
     assert!(
-        html.contains("1000 B"),
-        "traffic 24h must sum attributed (900) + remainder (100) = 1000 B"
+        html.contains("2.0 KiB"),
+        "traffic 24h must use full 2000 NIC bytes instead of 1000 VPN bytes"
     );
 }
 
@@ -1039,12 +1029,12 @@ async fn dashboard_tabs_render_gate_and_mark_active() {
             "/admin/overview",
             "overview",
             "Health feed",
-            "Fleet traffic",
+            "Full server traffic",
         ),
         (
             "/admin/activity",
             "activity",
-            "Fleet traffic",
+            "Full server traffic",
             "Health feed",
         ),
         (
@@ -1096,7 +1086,7 @@ async fn dashboard_bare_url_renders_overview_tab() {
         "bare URL must render the overview tab's sections"
     );
     assert!(
-        !html.contains("Fleet traffic"),
+        !html.contains("Full server traffic"),
         "bare URL (overview) must not render the activity tab"
     );
 }
@@ -1153,7 +1143,7 @@ async fn dashboard_info_cards_headlines_match_voice() {
     let activity = fetch_html(app, "/admin/activity").await;
     for (html, needle) in [
         (&overview, ">Fleet <span"),
-        (&activity, "vs prior"),
+        (&activity, "Total RX + TX"),
         (&activity, "Kernel rollup · sing-box"),
         (&overview, "Health feed"),
         (&overview, "Likely-shared subscriptions"),
@@ -1176,7 +1166,7 @@ async fn dashboard_info_cards_headlines_ru() {
     let activity = fetch_html_with_cookie(app, "/admin/activity", "vpnctl_lang=ru").await;
     for (html, needle) in [
         (&overview, ">Флот <span"),
-        (&activity, "против пред."),
+        (&activity, "Всего RX + TX"),
         (&activity, "Версии ядер · sing-box"),
         (&overview, "Поток здоровья"),
         (&overview, "Похоже на расшаренные подписки"),

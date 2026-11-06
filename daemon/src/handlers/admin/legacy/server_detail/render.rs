@@ -19,9 +19,7 @@ use crate::handlers::admin::legacy::dashboard::{
     humanize_age, kernel_floor_rollup, server_detail_assurance_section,
     server_detail_kernel_inventory_section, server_detail_quality_section,
 };
-use crate::handlers::admin::legacy::user_sections::{
-    fit_vpn_sparkline_window, pick_vpn_sparkline_window,
-};
+use crate::handlers::admin::legacy::user_sections::pick_vpn_sparkline_window;
 use crate::handlers::admin::servers::fp_short;
 use crate::http_util::path_segment_encode;
 
@@ -339,26 +337,14 @@ pub(super) async fn server_detail_render(
         });
 
     let traffic_window = pick_vpn_sparkline_window(query.vpn_window.as_deref());
-    let traffic_since_hours = if traffic_window.slug == "all" {
-        u32::MAX
-    } else {
-        traffic_window.cells * traffic_window.bucket_hours
-    };
-    let traffic_rows: Vec<vpnctl_inventory::VpnStatsRow> = state
-        .inv
-        .recent_vpn_stats_fleet(traffic_since_hours, traffic_window.bucket_hours)
-        .await
-        .map(|rows| {
-            rows.into_iter()
-                .filter(|row| row.server_id == sid)
-                .collect()
-        })
-        .unwrap_or_else(|e| {
-            tracing::warn!(target = "vpnctld::admin", server = %sid, error = %e, "server traffic rollup query failed");
-            Vec::new()
-        });
-
-    let traffic_window = fit_vpn_sparkline_window(traffic_window, &traffic_rows);
+    let traffic_chart = crate::handlers::admin::nic_traffic::NicWindow::load(
+        &state.inv,
+        std::slice::from_ref(&server),
+        now,
+        crate::handlers::admin::nic_traffic::hours(traffic_window.slug),
+    )
+    .await
+    .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
     let server_audit = state
         .inv
@@ -662,7 +648,7 @@ pub(super) async fn server_detail_render(
             (server_detail_gap_section(&traffic, lang))
             (crate::handlers::admin::traffic::server_section(&sid, &traffic_month, lang))
             (server_detail_live_connections_section(last_server_snap.as_deref(), &source_user_map, &dns_ptr_map, lang))
-            (server_detail_traffic_section(&traffic_rows, traffic_window, &server.id, lang))
+            (server_detail_traffic_section(&traffic_chart, traffic_window, &server.id, live_activity.active_now, lang))
             (server_detail_top_users_section(&top_users, lang))
             (server_detail_network_split_section(last_server_snap.as_deref(), lang))
         }

@@ -36,3 +36,6 @@ mod wizard;
 
 #[path = "admin_smoke/server_traffic.rs"]
 mod server_traffic;
+
+#[path = "admin_smoke/full_nic_surfaces.rs"]
+mod full_nic_surfaces;

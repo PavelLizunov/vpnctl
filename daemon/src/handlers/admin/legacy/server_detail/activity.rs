@@ -5,7 +5,6 @@ use maud::{Markup, html};
 use super::telemetry::status_tile;
 use crate::handlers::admin::audit::{action_kind, summarize_audit_payload};
 use crate::handlers::admin::helpers::{format_msk_iso, humanize_bytes};
-use crate::handlers::admin::legacy::dashboard::sparkline_svg_scaled;
 use crate::handlers::admin::legacy::user_sections::{VpnSparklineWindow, window_picker_section};
 use crate::http_util::path_segment_encode;
 use crate::snapshot_cache::{
@@ -393,76 +392,20 @@ pub(super) fn server_detail_top_users_section(
 }
 
 pub(super) fn server_detail_traffic_section(
-    rows: &[vpnctl_inventory::VpnStatsRow],
+    data: &crate::handlers::admin::nic_traffic::NicWindow,
     window: VpnSparklineWindow,
     server_id: &vpnctl_core::ServerId,
+    active_now: Option<u32>,
     lang: crate::i18n::Locale,
 ) -> Markup {
-    use crate::i18n::tr;
     let base_url = format!(
         "/admin/servers/{}/activity",
         path_segment_encode(&server_id.0)
     );
-    let window_label = match lang {
-        crate::i18n::Locale::En => window.label_en,
-        crate::i18n::Locale::Ru => window.label_ru,
-    };
-
-    let mut total_up: u64 = 0;
-    let mut total_dn: u64 = 0;
-    for r in rows {
-        total_up = total_up.saturating_add(r.upload_bytes);
-        total_dn = total_dn.saturating_add(r.download_bytes);
-    }
-
-    let now = chrono::Utc::now();
-    let bucket_secs = i64::from(window.bucket_hours) * 3600;
-    let cells = window.cells as usize;
-    let mut series: Vec<f64> = vec![0.0; cells];
-    if bucket_secs > 0 && cells > 0 {
-        for r in rows {
-            let age_secs = (now - r.ts).num_seconds().max(0);
-            let back = (age_secs / bucket_secs) as usize;
-            let idx = (cells - 1).saturating_sub(back.min(cells - 1));
-            let bytes = r.upload_bytes.saturating_add(r.download_bytes);
-            series[idx] += bytes as f64;
-        }
-    }
-    let has_data = series.iter().any(|v| *v > 0.0);
-
     html! {
-        section id="server-traffic" style="margin-top: 28px;" {
-            div.ed-art-eyebrow {
-                (tr(lang, "Server traffic · ", "Трафик сервера · ")) (window_label)
-            }
-            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 4px;" {
-                (tr(
-                    lang,
-                    "Server-wide upload+download from clash-api 5-min ticks, bucketed across the window. Pick a window below — the sparkline + totals update together.",
-                    "Серверный upload+download с 5-минутных тиков clash-api, разложенный по окну. Выбери окно ниже — спарклайн и итоги обновятся вместе.",
-                ))
-            }
+        section id="server-traffic" style="margin-top:28px;" {
             (window_picker_section(&base_url, window.slug, lang))
-            div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin: 12px 0 6px;" {
-                (status_tile(tr(lang, "↑ upload", "↑ отдано"), &humanize_bytes(total_up), "var(--ink)"))
-                (status_tile(tr(lang, "↓ download", "↓ принято"), &humanize_bytes(total_dn), "var(--ink)"))
-            }
-            @if has_data {
-                @let series_max = series.iter().copied().fold(0.0_f64, f64::max);
-                (sparkline_svg_scaled(&series, 1160, 90, None, false))
-                div style="font-family: var(--mono); font-size: 10px; color: var(--mute);" {
-                    (tr(lang, "max ", "макс ")) (humanize_bytes(series_max as u64))
-                    (tr(lang, " per bucket", " на интервал"))
-                }
-            } @else {
-                p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 8px 0 0;" {
-                    (tr(
-                        lang,
-                        "No traffic recorded in this window yet. The clash-api poller fills this once the node reports samples.",
-                        "В этом окне трафик ещё не записан. Поллер clash-api наполнит график как только нода начнёт отдавать сэмплы.",
-                    ))
-                }
-            }
+            (crate::handlers::admin::nic_traffic::panel(data, &[(server_id.clone(), active_now.and_then(|n| usize::try_from(n).ok()))], lang))
         }
     }
 }

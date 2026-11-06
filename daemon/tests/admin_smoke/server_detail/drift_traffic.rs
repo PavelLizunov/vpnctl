@@ -725,9 +725,10 @@ async fn server_detail_traffic_section_renders_sparkline_and_window_picker() {
         )
         .await
         .unwrap();
+    seed_nic_traffic(&s.inv, &ServerId("s0".into()), 20_000_000, 80_000_000).await;
     let html = fetch_html(router(s), "/admin/servers/s0/activity").await;
     assert!(
-        html.contains("Server traffic · "),
+        html.contains("Full server traffic · "),
         "server-traffic eyebrow missing"
     );
     let traffic = html
@@ -737,25 +738,15 @@ async fn server_detail_traffic_section_renders_sparkline_and_window_picker() {
         .split_once("</section>")
         .unwrap()
         .0;
-    for (direction, label) in [("arrow-up", "upload"), ("arrow-down", "download")] {
-        assert!(
-            traffic
-                .split(r#"class="ed-status-tile__k">"#)
-                .skip(1)
-                .any(|tile| {
-                    let heading = tile.split_once("</div>").unwrap().0;
-                    heading.contains(&format!(
-                        r#"<use href="/admin/assets/icons.svg#{direction}""#
-                    )) && heading.split_once("</svg>").map(|(_, text)| text.trim()) == Some(label)
-                }),
-            "{label}: server traffic tile must carry its own direction icon and exact label"
-        );
+    assert!(traffic.contains("data-source=\"nic\""));
+    for label in ["RX</div>", "TX</div>", "Total RX + TX</div>"] {
+        assert!(traffic.contains(label));
     }
     assert!(
         html.contains("/admin/servers/s0/activity?vpn_window=7d"),
         "window picker must be scoped to /admin/servers/s0"
     );
-    let traffic = html.split("Server traffic · ").nth(1).unwrap_or("");
+    let traffic = html.split("Full server traffic · ").nth(1).unwrap_or("");
     assert!(
         traffic.contains("<svg"),
         "populated window must render the sparkline svg"
@@ -769,7 +760,7 @@ async fn server_detail_traffic_section_empty_state_when_no_stats() {
     seed(&s.inv, 1, 0, &[]).await;
     let html = fetch_html(router(s), "/admin/servers/s0/activity").await;
     assert!(
-        html.contains("No traffic recorded in this window yet"),
+        html.contains("No NIC observations."),
         "empty traffic window must render the empty-state copy"
     );
 }

@@ -17,12 +17,13 @@ pub(crate) fn summary(t: &ServerTraffic, lang: Locale) -> Markup {
     html! {
         p style="font-family:var(--mono); font-size:12px; margin:6px 0;" { (date(t.period_start)) " → " (date(t.period_end)) }
         @if let Some(u) = &t.usage {
-            p style="font-family:var(--mono); font-size:12px; margin:6px 0;" { b { (tr(lang, "Observed: ", "Учтено: ")) (humanize_bytes(t.used_bytes().unwrap_or(0))) }
+            p style="font-family:var(--mono); font-size:12px; margin:6px 0;" { b { (tr(lang, "Observed: ", "Учтено: ")) (humanize_bytes(u.total_bytes)) }
                 " · RX " (humanize_bytes(u.rx_bytes)) " · TX " (humanize_bytes(u.tx_bytes))
             }
             p style="font-family:var(--mono); font-size:12px; margin:6px 0;" { (quality(t, lang)) " · " (tr(lang, "measured ", "измерено ")) (format_msk_iso(u.first_sample_ts)) " → " (format_msk_iso(u.last_sample_ts)) }
         } @else { p style="font-family:var(--mono); font-size:12px; margin:6px 0;" { (tr(lang, "No usable NIC observations", "Нет пригодных сетевых измерений")) } }
         @if let Some(l) = &t.limit {
+            p { (tr(lang,"Chargeable usage: ","Расход для лимита: ")) (t.used_bytes().map(humanize_bytes).unwrap_or_else(|| "—".into())) " · " (direction(&l.direction, lang)) }
             p style="font-family:var(--mono); font-size:12px; margin:6px 0;" { (tr(lang, "Limit: ", "Лимит: ")) (humanize_bytes(l.limit_bytes))
                 " (" (l.limit_bytes) " B) · " (direction(&l.direction, lang))
                 " · " (tr(lang, "warn at ", "предупреждать от ")) (l.warning_pct) "%"

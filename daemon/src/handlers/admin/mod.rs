@@ -38,3 +38,5 @@ pub(crate) use user_access::*;
 pub(crate) use user_actions::*;
 pub(crate) use user_detail::*;
 pub(crate) use users::*;
+
+pub(crate) mod nic_traffic;

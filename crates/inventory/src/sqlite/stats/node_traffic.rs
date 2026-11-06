@@ -5,7 +5,7 @@ use sqlx::Row;
 use vpnctl_core::ServerId;
 
 use crate::sqlite::{
-    NodeNicUsage, Result, ServerTrafficLimit, SqliteInventory, SqliteInventoryError,
+    NodeNicDelta, NodeNicUsage, Result, ServerTrafficLimit, SqliteInventory, SqliteInventoryError,
 };
 
 const MAX_WINDOW_SECONDS: i64 = 40 * 86_400;
@@ -150,6 +150,7 @@ impl SqliteInventory {
         let mut rx_bytes = 0u64;
         let mut tx_bytes = 0u64;
         let mut interrupted = false;
+        let mut deltas = Vec::with_capacity(readings.len() - 1);
         for pair in readings.windows(2) {
             let (previous, current) = (&pair[0], &pair[1]);
             if current.0.timestamp().saturating_sub(previous.0.timestamp()) as u64 > max_gap_seconds
@@ -158,6 +159,11 @@ impl SqliteInventory {
             }
             if previous.1 != current.1 {
                 interrupted = true;
+                deltas.push(NodeNicDelta {
+                    ts: current.0,
+                    rx_bytes: 0,
+                    tx_bytes: 0,
+                });
                 continue;
             }
             interrupted |= current.2 < previous.2 || current.3 < previous.3;
@@ -165,6 +171,11 @@ impl SqliteInventory {
                 (previous.1.clone(), previous.2, previous.3),
                 (current.1.clone(), current.2, current.3),
             ]);
+            deltas.push(NodeNicDelta {
+                ts: current.0,
+                rx_bytes: rx,
+                tx_bytes: tx,
+            });
             let (Some(rx), Some(tx)) = (rx_bytes.checked_add(rx), tx_bytes.checked_add(tx)) else {
                 return Ok(None);
             };
@@ -177,6 +188,7 @@ impl SqliteInventory {
         let first_sample_ts = readings[0].0;
         let last_sample_ts = readings[readings.len() - 1].0;
         Ok(Some(NodeNicUsage {
+            deltas,
             rx_bytes,
             tx_bytes,
             total_bytes,
