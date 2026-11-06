@@ -13,3 +13,6 @@ pub(crate) use self::grants::*;
 pub(crate) use self::kernels::*;
 pub(crate) use self::lifecycle::*;
 pub(crate) use self::protocols::*;
+
+mod traffic;
+pub(crate) use self::traffic::*;

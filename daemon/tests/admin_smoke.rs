@@ -15,6 +15,8 @@ mod grants;
 mod icon_fixtures;
 #[path = "admin_smoke/monitoring.rs"]
 mod monitoring;
+#[path = "admin_smoke/private_checks.rs"]
+mod private_checks;
 #[path = "admin_smoke/readiness_quality_spec.rs"]
 mod readiness_quality_spec;
 #[path = "admin_smoke/server_detail.rs"]
@@ -31,3 +33,9 @@ mod user_detail;
 mod users;
 #[path = "admin_smoke/wizard.rs"]
 mod wizard;
+
+#[path = "admin_smoke/server_traffic.rs"]
+mod server_traffic;
+
+#[path = "admin_smoke/full_nic_surfaces.rs"]
+mod full_nic_surfaces;

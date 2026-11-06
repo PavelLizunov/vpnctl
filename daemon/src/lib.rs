@@ -3,6 +3,7 @@ pub mod alert_sink;
 pub mod alert_text;
 pub mod app;
 pub mod boosty_sync_poller;
+pub mod cheburcheck;
 pub mod clash_api;
 pub mod clash_poller;
 pub mod config;
@@ -21,6 +22,7 @@ pub mod protocol_assurance_poller;
 pub mod quality_poller;
 pub mod rate_limit;
 pub mod real_ip;
+mod server_traffic;
 pub mod sharing_score;
 mod singbox_stats;
 pub mod snapshot_cache;
@@ -34,6 +36,16 @@ pub use app::{
     AppState, build, make_app_state_for_tests, make_app_state_with_rate_limiter, router,
 };
 pub use config::{DaemonConfig, assert_auth_safe_for_addr, assert_auth_safe_for_addr_with};
+
+pub fn make_app_state_with_cheburcheck_for_tests(
+    inv: vpnctl_inventory::SqliteInventory,
+    registry: std::sync::Arc<vpnctl_core::Registry>,
+    client: cheburcheck::Client,
+) -> (AppState, tokio::task::JoinHandle<()>) {
+    let (mut state, handle) = make_app_state_for_tests(inv, registry);
+    state.cheburcheck = handlers::admin::cheburcheck_checks::with_client(client);
+    (state, handle)
+}
 
 pub fn spawn_retention_purger_for_test(
     inv: vpnctl_inventory::SqliteInventory,

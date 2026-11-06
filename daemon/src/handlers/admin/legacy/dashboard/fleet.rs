@@ -6,8 +6,6 @@ use crate::handlers::admin::helpers::{
     fleet_majority_version, humanize_bytes, kernel_observations_of, kernel_versions_inline,
     ordered_kernel_ids, sing_box_version_of,
 };
-use crate::handlers::admin::legacy::server_detail::status_tile;
-use crate::handlers::admin::legacy::user_sections::VpnSparklineWindow;
 use crate::http_util::path_segment_encode;
 
 fn parse_version_tuple(raw: &str) -> Option<(u64, u64, u64)> {
@@ -205,7 +203,7 @@ pub(in crate::handlers::admin::legacy) fn dashboard_fleet_table(
         Option<vpnctl_inventory::NodeHealthRow>,
     )],
     active_conns: &[(vpnctl_core::ServerId, Option<usize>)],
-    traffic_24h: &std::collections::HashMap<vpnctl_core::ServerId, u64>,
+    traffic_24h: &crate::handlers::admin::nic_traffic::NicWindow,
     kernel_versions: &[(vpnctl_core::ServerId, Option<String>)],
     lang: crate::i18n::Locale,
 ) -> Markup {
@@ -215,7 +213,12 @@ pub(in crate::handlers::admin::legacy) fn dashboard_fleet_table(
     }
     let now = chrono::Utc::now();
     let dash = "—";
-    let max_traffic = traffic_24h.values().copied().max().unwrap_or(0);
+    let max_traffic = traffic_24h
+        .nodes
+        .values()
+        .map(|u| u.total_bytes)
+        .max()
+        .unwrap_or(0);
     let majority_version = fleet_majority_version(kernel_versions);
     html! {
             section id="fleet-at-a-glance" style="margin-top: 18px;" {
@@ -223,8 +226,8 @@ pub(in crate::handlers::admin::legacy) fn dashboard_fleet_table(
                     (tr(lang, "Fleet", "Флот")) " "
                     span.ed-tip title=(tr(
                         lang,
-                        "One row per server — sing-box state, disk/memory pressure (warm cell above 70%), live connections, 24h traffic with each node's share of the busiest, the on-node sing-box version (≠ marks drift from the fleet majority) and probe freshness. Open a server for the full drill-in.",
-                        "Одна строка на сервер — состояние sing-box, нагрузка диска/памяти (тёплая ячейка выше 70%), живые подключения, трафик за 24ч с долей от самой нагруженной ноды, версия sing-box на ноде (≠ помечает дрейф от большинства флота) и свежесть пробы. Открой сервер для деталей.",
+                        "One row per server — sing-box state, disk/memory pressure (warm cell above 70%), live connections, full observed NIC RX+TX traffic over 24h including GAP, without billing coefficients, with each node's share of the busiest, the on-node sing-box version (≠ marks drift from the fleet majority) and probe freshness. Open a server for the full drill-in.",
+                        "Одна строка на сервер — состояние sing-box, нагрузка диска/памяти (тёплая ячейка выше 70%), живые подключения, полный расход NIC RX+TX за 24ч, включая ГЭП и без тарифных коэффициентов, с долей от самой нагруженной ноды, версия sing-box на ноде (≠ помечает дрейф от большинства флота) и свежесть пробы. Открой сервер для деталей.",
                     )) { (status("info", lang, "Information", "Информация")) }
                 }
                 div.ed-grid-wrap {
@@ -256,7 +259,8 @@ pub(in crate::handlers::admin::legacy) fn dashboard_fleet_table(
                                 .iter()
                                 .find(|(id, _)| *id == s.id)
                                 .and_then(|(_, j)| j.as_deref());
-                            @let traffic = traffic_24h.get(&s.id).copied();
+                            @let observation = traffic_24h.nodes.get(&s.id);
+                            @let traffic = observation.map(|u| u.total_bytes);
                             @let busiest = max_traffic > 0 && traffic == Some(max_traffic);
                             @let disk_pct = health.and_then(pct_disk);
                             @let mem_pct = health.and_then(pct_mem);
@@ -292,10 +296,13 @@ pub(in crate::handlers::admin::legacy) fn dashboard_fleet_table(
                                         Some(b) => @if busiest { b { (humanize_bytes(b)) } } @else { (humanize_bytes(b)) },
                                         None => span.ed-grid__mut { (dash) },
                                     }
+                                    @if let Some(u) = observation {
+                                        div.ed-grid__mut.ed-grid__sm { (crate::handlers::admin::nic_traffic::quality(u, traffic_24h.now, lang)) }
+                                    }
                                 }
                                 td {
                                     @if let Some(b) = traffic {
-                                        @let share = b.saturating_mul(100).checked_div(max_traffic).unwrap_or(0);
+                                        @let share = (u128::from(b) * 100).checked_div(u128::from(max_traffic)).unwrap_or(0);
                                         div.ed-hist__bar title=(format!("{share}%")) { div style=(format!("width: {share}%;")) {} };
                                     } @else {
                                         span.ed-grid__mut { (dash) }
@@ -334,74 +341,6 @@ fn pct_mem(h: &vpnctl_inventory::NodeHealthRow) -> Option<u8> {
     }
     let free_pct = ((avail.saturating_mul(100)) / total).min(100) as u8;
     Some(100u8.saturating_sub(free_pct))
-}
-
-pub(in crate::handlers::admin::legacy) fn dashboard_fleet_traffic_totals(
-    rows: &[vpnctl_inventory::VpnStatsRow],
-    coeffs: &std::collections::HashMap<vpnctl_core::ServerId, f64>,
-    window: VpnSparklineWindow,
-    lang: crate::i18n::Locale,
-) -> Markup {
-    use crate::i18n::tr;
-    use chrono::{DurationRound, TimeDelta, Utc};
-    let bucket_seconds = i64::from(window.bucket_hours) * 3600;
-    let Ok(now) = Utc::now().duration_trunc(TimeDelta::seconds(bucket_seconds)) else {
-        return html! {};
-    };
-    let cur_start =
-        now - TimeDelta::seconds(i64::from(window.cells.saturating_sub(1)) * bucket_seconds);
-    let prior_start = cur_start - TimeDelta::seconds(i64::from(window.cells) * bucket_seconds);
-
-    let weight = |sid: &vpnctl_core::ServerId| -> f64 { coeffs.get(sid).copied().unwrap_or(1.0) };
-    let mut cur_up = 0f64;
-    let mut cur_dn = 0f64;
-    let mut prior_total = 0f64;
-    for r in rows {
-        let Ok(row_bucket) = r.ts.duration_trunc(TimeDelta::seconds(bucket_seconds)) else {
-            continue;
-        };
-        if row_bucket > now {
-            continue;
-        }
-        let w = weight(&r.server_id);
-        let up = r.upload_bytes as f64 * w;
-        let dn = r.download_bytes as f64 * w;
-        if row_bucket >= cur_start {
-            cur_up += up;
-            cur_dn += dn;
-        } else if row_bucket >= prior_start {
-            prior_total += up + dn;
-        }
-    }
-    let cur_total = cur_up + cur_dn;
-    let delta_pct: Option<i64> = if prior_total > 0.0 {
-        Some((((cur_total - prior_total) / prior_total) * 100.0).round() as i64)
-    } else {
-        None
-    };
-    let window_label = match lang {
-        crate::i18n::Locale::En => window.label_en,
-        crate::i18n::Locale::Ru => window.label_ru,
-    };
-
-    html! {
-        div style="margin-top: 12px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;" {
-            div title=(tr(lang, "Upload bytes (client → server) summed across the fleet over the window, weighted by each server's usage coefficient.", "Upload-байты (клиент → сервер), суммированные по флоту за окно, с учётом коэффициента трафика каждого сервера.")) {
-                (status_tile(&format!("↑ {} {}", tr(lang, "upload", "отправка"), window_label), &humanize_bytes(cur_up as u64), "var(--ink)"))
-            }
-            div title=(tr(lang, "Download bytes (server → client) summed across the fleet over the window, weighted by each server's usage coefficient.", "Download-байты (сервер → клиент), суммированные по флоту за окно, с учётом коэффициента трафика каждого сервера.")) {
-                (status_tile(&format!("↓ {} {}", tr(lang, "download", "загрузка"), window_label), &humanize_bytes(cur_dn as u64), "var(--ink)"))
-            }
-            div title=(tr(lang, "Total traffic this window vs the previous equal-length window.", "Суммарный трафик за это окно против предыдущего окна такой же длины.")) {
-                @match delta_pct {
-                    Some(p) if p > 0 => (status_tile(tr(lang, "vs prior", "против пред."), &format!("+{p}%"), "#c62828")),
-                    Some(p) if p < 0 => (status_tile(tr(lang, "vs prior", "против пред."), &format!("{p}%"), "#2e7d32")),
-                    Some(_) => (status_tile(tr(lang, "vs prior", "против пред."), "0%", "var(--mute)")),
-                    None => (status_tile(tr(lang, "vs prior", "против пред."), "—", "var(--mute)")),
-                }
-            }
-        }
-    }
 }
 
 pub(in crate::handlers::admin::legacy) fn dashboard_health_feed(

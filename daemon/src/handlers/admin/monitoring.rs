@@ -41,6 +41,19 @@ pub(crate) async fn monitoring(
         uptimes.push([u24, u7, u30]);
         trends.push(t);
     }
+    let mut traffic_months = Vec::with_capacity(servers.len());
+    for server in &servers {
+        traffic_months.push((
+            server.id.clone(),
+            crate::server_traffic::ServerTraffic::load(
+                &state.inv,
+                &server.id,
+                chrono::Utc::now().timestamp(),
+            )
+            .await
+            .map_err(|e| internal_error(anyhow::Error::new(e)))?,
+        ));
+    }
     let kernel_versions = state.inv.kernel_versions_fleet().await.unwrap_or_default();
     let alerts_by_kind = state
         .inv
@@ -149,7 +162,9 @@ pub(crate) async fn monitoring(
                     (humanize_age(now - ts, lang))
                 }
             }
-            div.ed-headrow__actions {
+            div.ed-headrow__actions.ed-monitoring-actions {
+                a.ed-abtn.ed-abtn--secondary.ed-abtn--sm href="/admin/monitoring/private-checks" { (tr(lang, "Node reachability", "Доступность узлов")) }
+                a.ed-abtn.ed-abtn--secondary.ed-abtn--sm href="/admin/monitoring/cheburcheck" { "Cheburcheck" }
                 form method="post" action="/admin/monitoring/probe-all" {
                     button type="submit"
                            class="ed-abtn ed-abtn--secondary ed-abtn--sm"
@@ -227,6 +242,8 @@ pub(crate) async fn monitoring(
                 " — " (tr(lang, "drift: ", "дрейф: ")) (sid) " · " (v) " " (icon("equal-not"))
             }
         }
+
+        (crate::handlers::admin::traffic::fleet(&traffic_months, lang))
 
         section style="margin-top: 14px;" {
             div.ed-art-eyebrow {

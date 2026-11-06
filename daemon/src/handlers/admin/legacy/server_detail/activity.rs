@@ -5,7 +5,6 @@ use maud::{Markup, html};
 use super::telemetry::status_tile;
 use crate::handlers::admin::audit::{action_kind, summarize_audit_payload};
 use crate::handlers::admin::helpers::{format_msk_iso, humanize_bytes};
-use crate::handlers::admin::legacy::dashboard::sparkline_svg_scaled;
 use crate::handlers::admin::legacy::user_sections::{VpnSparklineWindow, window_picker_section};
 use crate::http_util::path_segment_encode;
 use crate::snapshot_cache::{
@@ -14,6 +13,7 @@ use crate::snapshot_cache::{
 
 pub(super) fn server_detail_live_activity_section(
     activity: &vpnctl_inventory::ServerLiveActivity,
+    nic: Option<&vpnctl_inventory::NodeNicUsage>,
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
@@ -21,41 +21,29 @@ pub(super) fn server_detail_live_activity_section(
         .last_sample_ts
         .map(format_msk_iso)
         .unwrap_or_else(|| tr(lang, "never", "никогда").to_string());
-    let total_bytes = activity
-        .bytes_up_window
-        .saturating_add(activity.bytes_dn_window);
+    let bytes = |f: fn(&vpnctl_inventory::NodeNicUsage) -> u64| {
+        nic.map(|u| humanize_bytes(f(u)))
+            .unwrap_or_else(|| "—".into())
+    };
     html! {
         div.ed-rule {}
-        div.ed-art-eyebrow {
-            (tr(lang, "Live activity · last 24h", "Живая активность · 24 часа"))
-        }
-        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-            (tr(
-                lang,
-                "Server-wide totals from this node's clash-api (5-minute tick). Numbers reflect actual VPN traffic — VLESS, TUIC, Trojan auth all summed. AmneziaWG is kernel-level and not visible to clash-api, so it's NOT counted here. ",
-                "Сервер-агрегатные показатели из clash-api ноды (тик 5 минут). Числа отражают реальный VPN-трафик — VLESS, TUIC, Trojan сложены вместе. AmneziaWG — kernel-уровень, не виден clash-api, поэтому НЕ учитывается.",
-            ))
-        }
+        div.ed-art-eyebrow { (tr(lang, "Live activity · last 24h", "Живая активность · 24 часа")) }
+        p { (tr(lang,
+            "Full interface traffic: every VPN protocol, OS traffic and GAP. Connection counts and per-user attribution are shown separately.",
+            "Весь трафик интерфейса: все протоколы VPN, трафик ОС и ГЭП. Соединения и атрибуция по пользователям показаны отдельно.")) }
         div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 12px 0 8px;" {
-            div title=(tr(lang, "Active connections from the freshest clash-api snapshot (5-min tick). Includes all auth-bearing connections sing-box currently holds open.", "Активные соединения из самого свежего snapshot clash-api (тик 5 минут). Включает все авторизованные соединения, которые sing-box сейчас держит открытыми.")) {
-                (status_tile(tr(lang, "active now", "активных сейчас"), &activity.active_now.map(|n| n.to_string()).unwrap_or_else(|| "—".to_string()), "var(--ink)"))
-            }
-            div title=(tr(lang, "Total bytes (upload + download) summed across every clash-api tick in the last 24 hours.", "Всего байт (upload + download), сумма по всем тикам clash-api за последние 24 часа.")) {
-                (status_tile(tr(lang, "total 24h", "всего 24ч"), &humanize_bytes(total_bytes), "var(--ink)"))
-            }
-            div title=(tr(lang, "Upload bytes (client → server) over the last 24 hours.", "Upload-байт (клиент → сервер) за последние 24 часа.")) {
-                (status_tile(tr(lang, "upload 24h", "upload 24ч"), &humanize_bytes(activity.bytes_up_window), "var(--ink)"))
-            }
-            div title=(tr(lang, "Download bytes (server → client) over the last 24 hours.", "Download-байт (сервер → клиент) за последние 24 часа.")) {
-                (status_tile(tr(lang, "download 24h", "download 24ч"), &humanize_bytes(activity.bytes_dn_window), "var(--ink)"))
-            }
+            (status_tile(tr(lang, "active now", "активных сейчас"), &activity.active_now.map(|n| n.to_string()).unwrap_or_else(|| "—".into()), "var(--ink)"))
+            (status_tile(tr(lang, "NIC total 24h", "NIC всего 24ч"), &bytes(|u| u.total_bytes), "var(--ink)"))
+            (status_tile(tr(lang, "RX incoming 24h", "RX входящий 24ч"), &bytes(|u| u.rx_bytes), "var(--ink)"))
+            (status_tile(tr(lang, "TX outgoing 24h", "TX исходящий 24ч"), &bytes(|u| u.tx_bytes), "var(--ink)"))
         }
-        p style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin: 4px 0 14px;" {
-            (tr(lang, "last poll: ", "последний поллинг: "))
-            b style="color: var(--ink);" { (last_seen_str) }
-            " · "
-            (activity.distinct_users_attributed)
-            (tr(lang, " users attributed (sing-box does not report users per connection; server-wide totals are exact)", " юзеров атрибутировано (sing-box не сообщает юзера для соединения; итоги по серверу точные)"))
+        @if let Some(u) = nic {
+            p { (tr(lang, "NIC measured: ", "NIC измерено: ")) (format_msk_iso(u.first_sample_ts)) " → " (format_msk_iso(u.last_sample_ts))
+                " · " (if chrono::Utc::now().timestamp().saturating_sub(u.last_sample_ts.timestamp()) as u64 > crate::server_traffic::max_gap_seconds() { tr(lang, "stale / partial; observed minimum", "устарело / неполно; измеренный минимум") } else if u.complete { tr(lang, "complete coverage", "полное покрытие") } else { tr(lang, "partial coverage; observed minimum", "неполное покрытие; измеренный минимум") })
+            }
+        } @else { p { (tr(lang, "NIC data unavailable", "Нет данных NIC")) } }
+        p { (tr(lang, "last poll: ", "последний поллинг: ")) b { (last_seen_str) }
+            " · " (activity.distinct_users_attributed) (tr(lang, " users attributed", " пользователей атрибутировано"))
         }
     }
 }
@@ -96,8 +84,8 @@ pub(super) fn server_detail_gap_section(
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
             (tr(
                 lang,
-                "Real interface traffic (NIC ground-truth — catches ALL protocols, reconciles with the hoster) vs the sing-box part clash-api could attribute. The GAP is everything clash-api can't see: non-sing-box protocols (naive/Caddy) plus TLS/QUIC overhead.",
-                "Реальный трафик интерфейса (NIC — ловит ВСЕ протоколы, сходится с хостером) против sing-box-части, которую смог атрибутировать clash-api. ГЭП — всё, что clash-api не видит: не-sing-box протоколы (naive/Caddy) плюс оверхед TLS/QUIC.",
+                "Observed interface traffic includes GAP already. Compare it with attributed VPN traffic: the remainder can include other protocols, OS traffic and overhead. Hoster billing may differ; GAP is not assigned to users.",
+                "Измеренный трафик интерфейса уже включает ГЭП. Сравнение с атрибутированным VPN-трафиком: остаток может включать другие протоколы, трафик ОС и оверхед. Учёт хостера может отличаться; ГЭП не начисляется пользователям.",
             ))
         }
         div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 8px;" {
@@ -404,76 +392,20 @@ pub(super) fn server_detail_top_users_section(
 }
 
 pub(super) fn server_detail_traffic_section(
-    rows: &[vpnctl_inventory::VpnStatsRow],
+    data: &crate::handlers::admin::nic_traffic::NicWindow,
     window: VpnSparklineWindow,
     server_id: &vpnctl_core::ServerId,
+    active_now: Option<u32>,
     lang: crate::i18n::Locale,
 ) -> Markup {
-    use crate::i18n::tr;
     let base_url = format!(
         "/admin/servers/{}/activity",
         path_segment_encode(&server_id.0)
     );
-    let window_label = match lang {
-        crate::i18n::Locale::En => window.label_en,
-        crate::i18n::Locale::Ru => window.label_ru,
-    };
-
-    let mut total_up: u64 = 0;
-    let mut total_dn: u64 = 0;
-    for r in rows {
-        total_up = total_up.saturating_add(r.upload_bytes);
-        total_dn = total_dn.saturating_add(r.download_bytes);
-    }
-
-    let now = chrono::Utc::now();
-    let bucket_secs = i64::from(window.bucket_hours) * 3600;
-    let cells = window.cells as usize;
-    let mut series: Vec<f64> = vec![0.0; cells];
-    if bucket_secs > 0 && cells > 0 {
-        for r in rows {
-            let age_secs = (now - r.ts).num_seconds().max(0);
-            let back = (age_secs / bucket_secs) as usize;
-            let idx = (cells - 1).saturating_sub(back.min(cells - 1));
-            let bytes = r.upload_bytes.saturating_add(r.download_bytes);
-            series[idx] += bytes as f64;
-        }
-    }
-    let has_data = series.iter().any(|v| *v > 0.0);
-
     html! {
-        section id="server-traffic" style="margin-top: 28px;" {
-            div.ed-art-eyebrow {
-                (tr(lang, "Server traffic · ", "Трафик сервера · ")) (window_label)
-            }
-            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 4px;" {
-                (tr(
-                    lang,
-                    "Server-wide upload+download from clash-api 5-min ticks, bucketed across the window. Pick a window below — the sparkline + totals update together.",
-                    "Серверный upload+download с 5-минутных тиков clash-api, разложенный по окну. Выбери окно ниже — спарклайн и итоги обновятся вместе.",
-                ))
-            }
+        section id="server-traffic" style="margin-top:28px;" {
             (window_picker_section(&base_url, window.slug, lang))
-            div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin: 12px 0 6px;" {
-                (status_tile(tr(lang, "↑ upload", "↑ отдано"), &humanize_bytes(total_up), "var(--ink)"))
-                (status_tile(tr(lang, "↓ download", "↓ принято"), &humanize_bytes(total_dn), "var(--ink)"))
-            }
-            @if has_data {
-                @let series_max = series.iter().copied().fold(0.0_f64, f64::max);
-                (sparkline_svg_scaled(&series, 1160, 90, None, false))
-                div style="font-family: var(--mono); font-size: 10px; color: var(--mute);" {
-                    (tr(lang, "max ", "макс ")) (humanize_bytes(series_max as u64))
-                    (tr(lang, " per bucket", " на интервал"))
-                }
-            } @else {
-                p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 8px 0 0;" {
-                    (tr(
-                        lang,
-                        "No traffic recorded in this window yet. The clash-api poller fills this once the node reports samples.",
-                        "В этом окне трафик ещё не записан. Поллер clash-api наполнит график как только нода начнёт отдавать сэмплы.",
-                    ))
-                }
-            }
+            (crate::handlers::admin::nic_traffic::panel(data, &[(server_id.clone(), active_now.and_then(|n| usize::try_from(n).ok()))], lang))
         }
     }
 }

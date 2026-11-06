@@ -332,13 +332,56 @@ async fn admin_server_quick_add_registers_with_default_protocols() {
     assert_eq!(srv.kernels.len(), 1);
     assert_eq!(srv.kernels[0].0, "sing-box");
     let pids: Vec<&str> = srv.enabled_protocols.iter().map(|p| p.0.as_str()).collect();
-    assert!(
-        pids.contains(&"vless+reality"),
-        "default protocols: {pids:?}"
-    );
-    assert!(pids.contains(&"tuic-v5"));
-    assert!(pids.contains(&"hysteria2"));
-    assert!(!pids.contains(&"wireguard"));
+    assert_eq!(pids, ["vless+reality"]);
+}
+
+#[tokio::test]
+async fn admin_server_quick_add_defaults_cover_hostnames_ipv6_and_ssh_collision() {
+    for (address, ssh_port, expected) in [
+        ("vpn.example.org", 22, vec!["vless+reality"]),
+        ("2001%3Adb8%3A%3A42", 22, vec!["vless+reality"]),
+        ("198.51.100.42", 443, vec![]),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let s = state(&dir).await;
+        let inv = s.inv.clone();
+        let response = router(s)
+            .oneshot(
+                add_same_origin(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/admin/servers/quick-add")
+                        .header("content-type", "application/x-www-form-urlencoded"),
+                )
+                .body(Body::from(format!(
+                    "id=fixture&address={address}&ssh_port={ssh_port}"
+                )))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let server = inv
+            .get_server(&vpnctl_core::ServerId("fixture".into()))
+            .await
+            .unwrap()
+            .unwrap();
+        let protocols: Vec<_> = server
+            .enabled_protocols
+            .iter()
+            .map(|p| p.0.as_str())
+            .collect();
+        assert_eq!(protocols, expected);
+        let audit = inv.recent_audit(10).await.unwrap();
+        let entry = audit
+            .iter()
+            .find(|e| e.action == "server.quick_add")
+            .unwrap();
+        assert_eq!(
+            entry.payload.as_ref().unwrap()["protocols"],
+            serde_json::json!(expected)
+        );
+    }
 }
 
 #[tokio::test]
@@ -775,16 +818,42 @@ async fn admin_server_delete_client_entry_returns_conflict_with_targets() {
 async fn admin_server_delete_cascades_grants_and_audits() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    seed(&s.inv, 2, 2, &[(0, 0), (1, 0)]).await;
+    seed(&s.inv, 2, 2, &[]).await;
+    // Deploy guards are process-wide; isolate this fixture from concurrent s0 deploy tests.
+    let mut target = s
+        .inv
+        .get_server(&ServerId("s0".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    target.id = ServerId("delete-cascade-target".into());
+    target.address = "192.0.2.210".into();
+    s.inv.add_server(&target).await.unwrap();
+    for user in ["u0", "u1"] {
+        s.inv.grant(&UserId(user.into()), &target.id).await.unwrap();
+    }
+    s.inv
+        .set_server_traffic_limit(
+            &target.id,
+            Some(&vpnctl_inventory::ServerTrafficLimit {
+                limit_bytes: 1_000_000,
+                direction: "both".into(),
+                reset_day: 1,
+                warning_pct: 80,
+            }),
+            "spec",
+        )
+        .await
+        .unwrap();
     let resp = router(s.clone())
         .oneshot(
             add_same_origin(
                 Request::builder()
                     .method("POST")
-                    .uri("/admin/servers/s0/delete")
+                    .uri("/admin/servers/delete-cascade-target/delete")
                     .header("content-type", "application/x-www-form-urlencoded"),
             )
-            .body(Body::from("confirm=s0"))
+            .body(Body::from("confirm=delete-cascade-target"))
             .unwrap(),
         )
         .await
@@ -793,7 +862,7 @@ async fn admin_server_delete_cascades_grants_and_audits() {
 
     assert!(
         s.inv
-            .get_server(&ServerId("s0".into()))
+            .get_server(&ServerId("delete-cascade-target".into()))
             .await
             .unwrap()
             .is_none(),
@@ -801,7 +870,7 @@ async fn admin_server_delete_cascades_grants_and_audits() {
     );
     assert_eq!(
         s.inv
-            .users_for_server(&ServerId("s0".into()))
+            .users_for_server(&ServerId("delete-cascade-target".into()))
             .await
             .unwrap()
             .len(),
@@ -822,12 +891,22 @@ async fn admin_server_delete_cascades_grants_and_audits() {
             .await
             .unwrap()
             .is_some(),
-        "user must survive — only its grant to s0 is removed"
+        "user must survive — only its grant to the target is removed"
+    );
+    assert!(
+        s.inv
+            .get_server_traffic_limit(&target.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "hoster quota must cascade with its server"
     );
     let audit = s.inv.recent_audit(20).await.unwrap();
     let row = audit
         .iter()
-        .find(|e| e.action == "server.remove" && e.target.as_deref() == Some("s0"))
+        .find(|e| {
+            e.action == "server.remove" && e.target.as_deref() == Some("delete-cascade-target")
+        })
         .expect("server.remove audit row must land");
     let payload = row
         .payload
