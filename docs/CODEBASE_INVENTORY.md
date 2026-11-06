@@ -5,10 +5,10 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 451 (297 prod / 154 test)
-- **Total Rust LOC:** 156,540 (88,135 prod / 68,405 test)
-- **Database Migrations:** 69
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 142
+- **Tracked Rust Files:** 458 (302 prod / 156 test)
+- **Total Rust LOC:** 158,782 (88,923 prod / 69,859 test)
+- **Database Migrations:** 70
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 143
 
 ## Workspace Crates & Targets
 
@@ -19,12 +19,12 @@
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,419 (13) | 0 (0) | **1,419** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 318 (1) | 125 (1) | **443** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 193 (1) | 454 (2) | **647** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 47 tests | 16,181 (55) | 19,241 (52) | **35,422** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 48 tests | 16,409 (56) | 20,554 (53) | **36,963** |
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 6,753 (14) | 1,554 (6) | **8,307** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,236 (20) | 4,817 (12) | **9,053** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,757 (4) | 1,191 (5) | **2,948** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 15 tests | 49,424 (163) | 38,303 (71) | **87,727** |
-| **Total** | | | | **88,135 (297)** | **68,405 (154)** | **156,540** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 15 tests | 49,984 (167) | 38,444 (72) | **88,428** |
+| **Total** | | | | **88,923 (302)** | **69,859 (156)** | **158,782** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -36,9 +36,10 @@
 | `crates/kernels/src/caddy/tests.rs` | 1,800 | `crates/kernels` | Prod |
 | `crates/kernels/src/sing_box/tests.rs` | 1,711 | `crates/kernels` | Prod |
 | `daemon/tests/admin_smoke/alerts_health.rs` | 1,514 | `daemon` | Test |
-| `daemon/tests/admin_smoke/servers.rs` | 1,346 | `daemon` | Test |
+| `daemon/tests/admin_smoke/servers.rs` | 1,382 | `daemon` | Test |
 | `daemon/tests/sub_endpoint/mihomo.rs` | 1,324 | `daemon` | Test |
 | `daemon/tests/admin_smoke/server_detail/setup_config.rs` | 1,318 | `daemon` | Test |
+| `crates/inventory/tests/spec_full_node_traffic.rs` | 1,313 | `crates/inventory` | Test |
 | `daemon/tests/admin_smoke/dashboard.rs` | 1,227 | `daemon` | Test |
 | `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,200 | `daemon` | Test |
 | `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,164 | `daemon` | Test |
@@ -46,17 +47,16 @@
 | `crates/ssh/src/subprocess.rs` | 1,127 | `crates/ssh` | Prod |
 | `daemon/src/protocol_assurance_poller.rs` | 1,100 | `daemon` | Prod |
 | `crates/inventory/tests/spec_node_health.rs` | 1,097 | `crates/inventory` | Test |
+| `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,081 | `daemon` | Prod |
 | `crates/boosty-bridge/tests/sync_integration.rs` | 1,074 | `crates/boosty-bridge` | Test |
 | `daemon/src/handlers/admin/boosty.rs` | 1,057 | `daemon` | Prod |
 | `cli/src/cmd/server.rs` | 1,048 | `cli` | Prod |
-| `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,047 | `daemon` | Prod |
 | `daemon/src/wizard_bootstrap/tests.rs` | 1,039 | `daemon` | Prod |
 | `crates/inventory/src/sqlite/health.rs` | 1,019 | `crates/inventory` | Prod |
 | `daemon/tests/admin_smoke/user_detail/traffic_activity.rs` | 1,018 | `daemon` | Test |
 | `daemon/tests/admin_smoke/shell_nav/shell_assets_nav.rs` | 1,014 | `daemon` | Test |
-| `daemon/tests/admin_smoke/user_detail/wireguard.rs` | 1,004 | `daemon` | Test |
 
-## Database Migrations (69)
+## Database Migrations (70)
 
 | Version | Migration Name | File | Lines |
 |---|---|---|---|
@@ -129,8 +129,9 @@
 | `0067` | vpn server hourly seed fix | `crates/inventory/migrations/0067_vpn_server_hourly_seed_fix.sql` | 50 |
 | `0068` | vpn cumulative generation | `crates/inventory/migrations/0068_vpn_cumulative_generation.sql` | 18 |
 | `0069` | alert delivery state | `crates/inventory/migrations/0069_alert_delivery_state.sql` | 15 |
+| `0070` | server traffic limits | `crates/inventory/migrations/0070_server_traffic_limits.sql` | 8 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (142)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (143)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -212,6 +213,7 @@
 | `GET` | `/admin/servers/{id}/setup` | `admin::server_detail_setup` |
 | `POST` | `/admin/servers/{id}/ss2022-mode` | `admin::server_set_ss2022_mode` |
 | `GET` | `/admin/servers/{id}/status` | `admin::server_detail` |
+| `POST` | `/admin/servers/{id}/traffic-limit` | `admin::server_set_traffic_limit` |
 | `POST` | `/admin/servers/{id}/udp-pair` | `admin::server_set_udp_pair` |
 | `GET` | `/admin/servers/{id}/update-kernels/sse` | `admin::server_update_kernels_sse` |
 | `POST` | `/admin/servers/{id}/vlessws-config` | `admin::server_set_vlessws_config` |

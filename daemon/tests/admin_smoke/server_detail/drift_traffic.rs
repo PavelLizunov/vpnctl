@@ -132,11 +132,13 @@ async fn phase4b_server_detail_renders_live_activity_section_when_no_samples() {
         "server-detail must surface the Phase 4b live-activity section eyebrow"
     );
     assert!(
-        html.contains("server-wide totals are exact"),
-        "section must explain the sing-box caveat so the operator knows why per-user is zero"
+        html.contains("Full interface traffic: every VPN protocol, OS traffic and GAP"),
+        "section must explain full NIC coverage including unattributed traffic"
     );
     assert!(
-        html.contains("active now") && html.contains("upload 24h") && html.contains("download 24h"),
+        html.contains("active now")
+            && html.contains("RX incoming 24h")
+            && html.contains("TX outgoing 24h"),
         "all 4 tile labels must render"
     );
     assert!(
@@ -565,6 +567,14 @@ async fn server_detail_renders_traffic_gap_section() {
     assert!(html.contains("NIC total"), "NIC total tile");
     assert!(html.contains("GAP (unattributed)"), "gap tile");
     assert!(html.contains("ens18"), "interface name shown");
+    assert!(
+        html.contains("Observed: 4.7 GiB"),
+        "monthly usage must be the 5 GB NIC delta, not 1 GB attributed traffic or NIC plus GAP"
+    );
+    assert!(
+        html.contains("partial coverage"),
+        "a month with only two new observations must be labelled partial"
+    );
     assert!(
         !html.contains("No NIC ground-truth yet"),
         "should render real numbers, not the empty-state"

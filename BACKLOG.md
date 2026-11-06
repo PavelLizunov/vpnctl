@@ -2,6 +2,18 @@
 
 Deferred work items with enough context to pick up cold. Newest first.
 
+## VexVPN single-server import compatibility
+
+**Status:** next task requested by the owner, after full node/monthly traffic accounting.
+
+The owner-provided VexVPN screenshot rejects the provider's HTTPS subscription
+and explicitly requests vless/vmess/trojan/ss server links. Verify the client's
+actual import capabilities, then expose direct per-server VLESS links and QR
+codes in the existing web delivery flow, with a one-artifact default. Encoding
+the same unsupported subscription URL in another QR is not a compatibility fix.
+App reference: https://apps.apple.com/ru/app/vexvpn/id6815689581 . Do not copy the
+owner's screenshot subscription/device URL or token into Git or reports.
+
 ## Forced password change on first SSH login
 
 **Status:** confirmed unsupported by the password-based setup transport.

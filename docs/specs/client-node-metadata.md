@@ -48,27 +48,20 @@ all existing fields. This describes observed traffic activity, never CPU or link
 utilization or saturation. Clients render this backend-owned label, not RAM or
 raw load values; absent or unrecognized levels display Unknown.
 
-Use only the existing reset-safe `vpn_server_hourly` source, without adding raw
-traffic, user rollups or accounting multipliers. The bounded window contains the
-current UTC hour and previous 23 UTC hours: an approximate trailing day, not an
-exact-to-second 24-hour total. Require at least 20 distinct valid hour buckets.
-Each actual sample timestamp must belong to its own UTC hour bucket.
-Negative/non-integer bytes, invalid timestamps, future actual sample timestamps,
-overflow, or insufficient coverage produce `unknown`. The newest actual traffic
-sample must have nonnegative age within the metadata TTL; an hour boundary is
-not a sample timestamp. The existing node-health sample must also be fresh.
+Use full reset-safe NIC RX+TX deltas, including unattributed GAP, in the trailing
+24-hour window. Require at least 20 distinct observed UTC hours, no interruption
+and fresh last NIC and node-health samples within the metadata TTL. Invalid,
+future, negative/non-integer counters, overflow, resets, interface changes,
+excessive gaps or insufficient observations produce `unknown`, never `low`.
+The complete accounting and coverage contract is [full-node-traffic.md](full-node-traffic.md).
 
-Sum upload plus download bytes: below 25 GiB is `low`, 25 GiB inclusive to
-100 GiB exclusive is `medium`, and 100 GiB inclusive or above is `high`.
-One GiB is 1024^3 bytes. No country-specific override. Read only the indexed
-server/hour range (at most 25 rows to detect malformed excess buckets); no new
-probe, network request, service or migration. Existing auth, grant filtering,
-endpoints, privacy headers, read-only counters and legacy byte oracles remain.
+Below 25 GiB is `low`, 25 GiB inclusive to 100 GiB exclusive is `medium`, and
+100 GiB inclusive or above is `high`. One GiB is 1024^3 bytes. No country-specific
+override or accounting multiplier. Reads remain bounded and local; existing auth,
+grant filtering, endpoints, privacy headers and legacy client artifacts remain.
 
-Independent spec tests cover thresholds, 19/20-bucket coverage, invalid/missing/
-stale/future traffic and metadata, zero activity, identity equivalence, grant
-isolation and unchanged legacy fields. The shared old empty-telemetry fixture
-adds only `activity_level: "unknown"`.
+Independent spec tests cover thresholds, 19/20-hour coverage, invalid/missing/
+stale/future NIC and metadata, zero activity, isolation and unchanged fields.
 
 ## Independent spec tests and fixture contract
 

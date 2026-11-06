@@ -350,6 +350,27 @@ pub struct NodeHealthRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeNicUsage {
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    pub total_bytes: u64,
+    pub samples: usize,
+    pub observed_hours: usize,
+    pub first_sample_ts: DateTime<Utc>,
+    pub last_sample_ts: DateTime<Utc>,
+    pub interrupted: bool,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerTrafficLimit {
+    pub limit_bytes: u64,
+    pub direction: String,
+    pub reset_day: u8,
+    pub warning_pct: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrafficBreakdown {
     pub nic_total_bytes: u64,
     pub nic_rx_bytes: u64,

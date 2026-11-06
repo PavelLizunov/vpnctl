@@ -16,3 +16,5 @@ pub use poller::{scan_once, spawn_health_monitor};
 pub use specialized_checks::{
     check_attribution_stall, check_sub_fetch_without_traffic, check_user_traffic_limits,
 };
+
+mod server_traffic;

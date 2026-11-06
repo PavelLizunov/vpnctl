@@ -14,6 +14,7 @@ use crate::snapshot_cache::{
 
 pub(super) fn server_detail_live_activity_section(
     activity: &vpnctl_inventory::ServerLiveActivity,
+    nic: Option<&vpnctl_inventory::NodeNicUsage>,
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
@@ -21,41 +22,29 @@ pub(super) fn server_detail_live_activity_section(
         .last_sample_ts
         .map(format_msk_iso)
         .unwrap_or_else(|| tr(lang, "never", "никогда").to_string());
-    let total_bytes = activity
-        .bytes_up_window
-        .saturating_add(activity.bytes_dn_window);
+    let bytes = |f: fn(&vpnctl_inventory::NodeNicUsage) -> u64| {
+        nic.map(|u| humanize_bytes(f(u)))
+            .unwrap_or_else(|| "—".into())
+    };
     html! {
         div.ed-rule {}
-        div.ed-art-eyebrow {
-            (tr(lang, "Live activity · last 24h", "Живая активность · 24 часа"))
-        }
-        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-            (tr(
-                lang,
-                "Server-wide totals from this node's clash-api (5-minute tick). Numbers reflect actual VPN traffic — VLESS, TUIC, Trojan auth all summed. AmneziaWG is kernel-level and not visible to clash-api, so it's NOT counted here. ",
-                "Сервер-агрегатные показатели из clash-api ноды (тик 5 минут). Числа отражают реальный VPN-трафик — VLESS, TUIC, Trojan сложены вместе. AmneziaWG — kernel-уровень, не виден clash-api, поэтому НЕ учитывается.",
-            ))
-        }
+        div.ed-art-eyebrow { (tr(lang, "Live activity · last 24h", "Живая активность · 24 часа")) }
+        p { (tr(lang,
+            "Full interface traffic: every VPN protocol, OS traffic and GAP. Connection counts and per-user attribution are shown separately.",
+            "Весь трафик интерфейса: все протоколы VPN, трафик ОС и ГЭП. Соединения и атрибуция по пользователям показаны отдельно.")) }
         div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 12px 0 8px;" {
-            div title=(tr(lang, "Active connections from the freshest clash-api snapshot (5-min tick). Includes all auth-bearing connections sing-box currently holds open.", "Активные соединения из самого свежего snapshot clash-api (тик 5 минут). Включает все авторизованные соединения, которые sing-box сейчас держит открытыми.")) {
-                (status_tile(tr(lang, "active now", "активных сейчас"), &activity.active_now.map(|n| n.to_string()).unwrap_or_else(|| "—".to_string()), "var(--ink)"))
-            }
-            div title=(tr(lang, "Total bytes (upload + download) summed across every clash-api tick in the last 24 hours.", "Всего байт (upload + download), сумма по всем тикам clash-api за последние 24 часа.")) {
-                (status_tile(tr(lang, "total 24h", "всего 24ч"), &humanize_bytes(total_bytes), "var(--ink)"))
-            }
-            div title=(tr(lang, "Upload bytes (client → server) over the last 24 hours.", "Upload-байт (клиент → сервер) за последние 24 часа.")) {
-                (status_tile(tr(lang, "upload 24h", "upload 24ч"), &humanize_bytes(activity.bytes_up_window), "var(--ink)"))
-            }
-            div title=(tr(lang, "Download bytes (server → client) over the last 24 hours.", "Download-байт (сервер → клиент) за последние 24 часа.")) {
-                (status_tile(tr(lang, "download 24h", "download 24ч"), &humanize_bytes(activity.bytes_dn_window), "var(--ink)"))
-            }
+            (status_tile(tr(lang, "active now", "активных сейчас"), &activity.active_now.map(|n| n.to_string()).unwrap_or_else(|| "—".into()), "var(--ink)"))
+            (status_tile(tr(lang, "NIC total 24h", "NIC всего 24ч"), &bytes(|u| u.total_bytes), "var(--ink)"))
+            (status_tile(tr(lang, "RX incoming 24h", "RX входящий 24ч"), &bytes(|u| u.rx_bytes), "var(--ink)"))
+            (status_tile(tr(lang, "TX outgoing 24h", "TX исходящий 24ч"), &bytes(|u| u.tx_bytes), "var(--ink)"))
         }
-        p style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin: 4px 0 14px;" {
-            (tr(lang, "last poll: ", "последний поллинг: "))
-            b style="color: var(--ink);" { (last_seen_str) }
-            " · "
-            (activity.distinct_users_attributed)
-            (tr(lang, " users attributed (sing-box does not report users per connection; server-wide totals are exact)", " юзеров атрибутировано (sing-box не сообщает юзера для соединения; итоги по серверу точные)"))
+        @if let Some(u) = nic {
+            p { (tr(lang, "NIC measured: ", "NIC измерено: ")) (format_msk_iso(u.first_sample_ts)) " → " (format_msk_iso(u.last_sample_ts))
+                " · " (if chrono::Utc::now().timestamp().saturating_sub(u.last_sample_ts.timestamp()) as u64 > crate::server_traffic::max_gap_seconds() { tr(lang, "stale / partial; observed minimum", "устарело / неполно; измеренный минимум") } else if u.complete { tr(lang, "complete coverage", "полное покрытие") } else { tr(lang, "partial coverage; observed minimum", "неполное покрытие; измеренный минимум") })
+            }
+        } @else { p { (tr(lang, "NIC data unavailable", "Нет данных NIC")) } }
+        p { (tr(lang, "last poll: ", "последний поллинг: ")) b { (last_seen_str) }
+            " · " (activity.distinct_users_attributed) (tr(lang, " users attributed", " пользователей атрибутировано"))
         }
     }
 }
@@ -96,8 +85,8 @@ pub(super) fn server_detail_gap_section(
         p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
             (tr(
                 lang,
-                "Real interface traffic (NIC ground-truth — catches ALL protocols, reconciles with the hoster) vs the sing-box part clash-api could attribute. The GAP is everything clash-api can't see: non-sing-box protocols (naive/Caddy) plus TLS/QUIC overhead.",
-                "Реальный трафик интерфейса (NIC — ловит ВСЕ протоколы, сходится с хостером) против sing-box-части, которую смог атрибутировать clash-api. ГЭП — всё, что clash-api не видит: не-sing-box протоколы (naive/Caddy) плюс оверхед TLS/QUIC.",
+                "Observed interface traffic includes GAP already. Compare it with attributed VPN traffic: the remainder can include other protocols, OS traffic and overhead. Hoster billing may differ; GAP is not assigned to users.",
+                "Измеренный трафик интерфейса уже включает ГЭП. Сравнение с атрибутированным VPN-трафиком: остаток может включать другие протоколы, трафик ОС и оверхед. Учёт хостера может отличаться; ГЭП не начисляется пользователям.",
             ))
         }
         div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 8px;" {

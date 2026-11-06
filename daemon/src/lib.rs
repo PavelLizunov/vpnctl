@@ -22,6 +22,7 @@ pub mod protocol_assurance_poller;
 pub mod quality_poller;
 pub mod rate_limit;
 pub mod real_ip;
+mod server_traffic;
 pub mod sharing_score;
 mod singbox_stats;
 pub mod snapshot_cache;

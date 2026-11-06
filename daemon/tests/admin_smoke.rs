@@ -33,3 +33,6 @@ mod user_detail;
 mod users;
 #[path = "admin_smoke/wizard.rs"]
 mod wizard;
+
+#[path = "admin_smoke/server_traffic.rs"]
+mod server_traffic;

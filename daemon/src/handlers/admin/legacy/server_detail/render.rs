@@ -168,6 +168,25 @@ pub(super) async fn server_detail_render(
             vpnctl_inventory::ServerLiveActivity::default()
         });
 
+    let traffic_month = crate::server_traffic::ServerTraffic::load(
+        &state.inv,
+        &sid,
+        chrono::Utc::now().timestamp(),
+    )
+    .await
+    .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let now = chrono::Utc::now().timestamp();
+    let nic_day = state
+        .inv
+        .node_nic_usage(
+            &sid,
+            now - 86_400,
+            now,
+            crate::server_traffic::max_gap_seconds(),
+        )
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
     let traffic = state
         .inv
         .server_traffic_breakdown(&sid, 24)
@@ -184,6 +203,20 @@ pub(super) async fn server_detail_render(
                 nic_iface: None,
             }
         });
+
+    // Keep the legacy attribution reader's contract, but display NIC/GAP from
+    // the same validated window used by the daily and monthly activity cards.
+    let traffic = vpnctl_inventory::TrafficBreakdown {
+        nic_total_bytes: nic_day.as_ref().map_or(0, |u| u.total_bytes),
+        nic_rx_bytes: nic_day.as_ref().map_or(0, |u| u.rx_bytes),
+        nic_tx_bytes: nic_day.as_ref().map_or(0, |u| u.tx_bytes),
+        attributed_bytes: traffic.attributed_bytes,
+        gap_bytes: nic_day.as_ref().map_or(0, |u| {
+            u.total_bytes.saturating_sub(traffic.attributed_bytes)
+        }),
+        nic_samples: nic_day.as_ref().map_or(0, |u| u.samples),
+        nic_iface: traffic.nic_iface,
+    };
 
     let last_server_snap = state.snapshot_cache.get_live(&sid);
     let dns_ptr_map = if let Some(s) = last_server_snap.as_ref() {
@@ -625,8 +658,9 @@ pub(super) async fn server_detail_render(
                 }
             }
             (server_detail_audit_section(&server_audit, lang))
-            (server_detail_live_activity_section(&live_activity, lang))
+            (server_detail_live_activity_section(&live_activity, nic_day.as_ref(), lang))
             (server_detail_gap_section(&traffic, lang))
+            (crate::handlers::admin::traffic::server_section(&sid, &traffic_month, lang))
             (server_detail_live_connections_section(last_server_snap.as_deref(), &source_user_map, &dns_ptr_map, lang))
             (server_detail_traffic_section(&traffic_rows, traffic_window, &server.id, lang))
             (server_detail_top_users_section(&top_users, lang))

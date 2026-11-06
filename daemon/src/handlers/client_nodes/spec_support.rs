@@ -205,34 +205,10 @@ impl Fixture {
         .unwrap();
     }
 
-    pub(super) async fn traffic_hour(
-        &self,
-        node: &NodeFixture,
-        hour_at: i64,
-        upload: i64,
-        download: i64,
-        last_sample_at: i64,
-    ) {
-        let hour = chrono::DateTime::from_timestamp(hour_at - hour_at.rem_euclid(3600), 0)
-            .unwrap()
-            .format("%Y-%m-%dT%H:00:00.000Z")
-            .to_string();
-        let sample = chrono::DateTime::from_timestamp(last_sample_at, 0)
-            .unwrap()
-            .to_rfc3339();
-        sqlx::query(
-            "INSERT INTO vpn_server_hourly
-             (hour, server_id, upload_bytes, download_bytes, active_connections_peak, last_sample_ts)
-             VALUES (?1, ?2, ?3, ?4, 0, ?5)",
-        )
-        .bind(hour)
-        .bind(&node.id.0)
-        .bind(upload)
-        .bind(download)
-        .bind(sample)
-        .execute(&self.pool)
-        .await
-        .unwrap();
+    pub(super) async fn nic_sample(&self, node: &NodeFixture, observed_at: i64, rx: i64, tx: i64) {
+        sqlx::query("INSERT INTO node_health(server_id,ts,sample_id,nic_iface,nic_rx_bytes,nic_tx_bytes) VALUES(?1,?2,?3,'eth0',?4,?5)")
+            .bind(&node.id.0).bind(chrono::DateTime::from_timestamp(observed_at, 0).unwrap().to_rfc3339())
+            .bind(vpnctl_crypto::gen_uuid()).bind(rx).bind(tx).execute(&self.pool).await.unwrap();
     }
 
     pub(super) fn now(&self) -> i64 {

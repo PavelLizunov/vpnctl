@@ -14,6 +14,7 @@ pub(crate) mod private_checks;
 pub(crate) mod search;
 pub(crate) mod server_actions;
 pub(crate) mod servers;
+pub(crate) mod traffic;
 pub(crate) mod ui;
 pub(crate) mod user_access;
 pub(crate) mod user_actions;
