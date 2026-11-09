@@ -162,7 +162,10 @@ fn safe_return_to(raw: Option<String>) -> String {
                 || r.starts_with("/admin/servers#"))
                 && !r.contains("//")
                 && !r.contains("..")
-                && !r.contains(['\r', '\n', '\\']) =>
+                && !r.contains('\\')
+                && !r
+                    .chars()
+                    .any(|c| c.is_ascii_control() || c.is_ascii_whitespace()) =>
         {
             r
         }
@@ -269,6 +272,18 @@ mod tests {
         );
         assert_eq!(
             safe_return_to(Some("/admin/servers\r\nLocation: http://evil.com".into())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers\tjavascript:alert(1)".into())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers/123\0evil".into())),
+            "/admin/servers/billing"
+        );
+        assert_eq!(
+            safe_return_to(Some("/admin/servers evil".into())),
             "/admin/servers/billing"
         );
         assert_eq!(safe_return_to(None), "/admin/servers/billing");

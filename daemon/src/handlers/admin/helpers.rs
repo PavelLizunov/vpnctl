@@ -446,7 +446,10 @@ pub(crate) fn sanitize_referer(referer: Option<&str>) -> String {
         Some(r) => r,
         None => return "/admin/".to_string(),
     };
-    if raw.contains('\n') || raw.contains('\r') {
+    if raw
+        .chars()
+        .any(|c| c.is_ascii_control() || c.is_ascii_whitespace())
+    {
         return "/admin/".to_string();
     }
     let path = if let Some(stripped) = raw
@@ -744,6 +747,12 @@ mod tests {
         assert_eq!(sanitize_referer(Some("/admin//evil.com")), "/admin/");
         assert_eq!(sanitize_referer(Some("/admin/\\evil.com")), "/admin/");
         assert_eq!(sanitize_referer(Some("/admin\\evil.com")), "/admin/");
+        assert_eq!(
+            sanitize_referer(Some("/admin/servers\tjavascript:alert(1)")),
+            "/admin/"
+        );
+        assert_eq!(sanitize_referer(Some("/admin/users\0evil")), "/admin/");
+        assert_eq!(sanitize_referer(Some("/admin/servers evil")), "/admin/");
         assert_eq!(
             sanitize_referer(Some("http://example.com/admin/../evil")),
             "/admin/"
