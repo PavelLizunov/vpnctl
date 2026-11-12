@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/PavelLizunov/vpnctl/actions/workflows/ci.yml/badge.svg)](https://github.com/PavelLizunov/vpnctl/actions/workflows/ci.yml)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.88%2B%20(2024%20ed)-orange.svg)](rust-toolchain.toml)
+[![Rust](https://img.shields.io/badge/rust-1.89%2B%20(2024%20ed)-orange.svg)](rust-toolchain.toml)
 [![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)](#project-size)
 [![Version](https://img.shields.io/badge/version-0.9.0-blue.svg)](#production-health-check)
 
@@ -39,7 +39,7 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 |---|---|
 | Protocols × Kernels | **12 protocols** × **4 kernels**, fully orthogonal (see [Architecture](#architecture)) |
 | Inventory | SQLite via `sqlx`, audit-on-mutation |
-| Toolchain | Rust **1.88+**, edition **2024** · static musl Linux x86_64 binaries (`x86_64-unknown-linux-musl`) |
+| Toolchain | Rust **1.89+**, edition **2024** · static musl Linux x86_64 binaries (`x86_64-unknown-linux-musl`) |
 
 ### What ships today
 
