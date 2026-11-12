@@ -2,8 +2,8 @@
 
 ## 1. Intent & Invariants
 
-- What: every code change passes independent review and spec-derived tests
-  BEFORE commit, and the CI watch is blocking after push. Agents are isolated:
+- What: every code change passes independent review before commit and
+  spec-derived tests before acceptance; CI is blocking after push. Agents are isolated:
   they see only what is pasted into their prompt — brief them like a new
   colleague, never refer to "the discussion above".
 - Invariants:
@@ -37,6 +37,32 @@ Pre-commit, in order:
    `cargo fmt --all` before testing. Docs-only changes may skip steps 1–2 but
    NOT the fmt-check.
 
+### Publication from a control-plane host
+
+When the host prohibits compilation, the following exception permits publishing
+work for validation without bypassing the host's resource safeguards:
+
+1. Work in a dedicated task branch and worktree. Complete independent review
+   and write any required spec-tests before committing.
+2. Run `cargo fmt --all`, `cargo fmt --all -- --check`, `git diff --check`,
+   generated-file checks, and gitleaks on the diff. These must pass locally.
+   Record prohibited compilation and unavailable target checks as not-run,
+   including the actual reason; do not report them as passed.
+3. Commit and push the candidate branch, create a **draft PR**, and link it to
+   the task. The draft's validation notes must identify the local checks that
+   were deferred. An unavailable external worker is not a publication blocker.
+4. GitHub Actions must pass all five canonical Cargo commands, `just ci`, and
+   applicable target checks on the exact candidate. Keep the PR in draft until
+   this succeeds. Any code change invalidates the earlier results.
+5. Fix red checks before adding unrelated commits. A pre-existing dependency
+   failure is still a blocker to acceptance: investigate and remediate it,
+   without suppressing advisories merely to make CI pass.
+
+This exception permits task-branch publication only. It does not permit pushing
+directly to `main`, bypassing review, weakening gates, merging a red candidate,
+or deploying. Persist progress in the linked PR rather than a worker's temporary
+directory. Resume that PR on later scheduled runs instead of creating duplicates.
+
 Hotfix exception (ALL three must hold): ≤ 5 lines, exactly one surface touched,
 no output pinned by `*_byte_equal*` tests changes.
 
@@ -49,5 +75,6 @@ wait.
 - [ ] review-agent ran on the diff; `critical` + `important` findings fixed
       (`minor` is opt-in).
 - [ ] Spec-tests written for new public APIs and run in-session.
-- [ ] `just ci` green with recorded exit codes.
+- [ ] `just ci` and the five canonical Cargo commands green with recorded exit
+      codes, locally or in GitHub Actions under the publication exception.
 - [ ] After push, CI watched to completion; green before the next commit.

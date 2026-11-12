@@ -21,9 +21,31 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-deny
       - name: project map is current
         run: python3 scripts/project-map.py --check
-      - run: cargo check --workspace --all-targets
+      - name: cargo check
+        run: |
+          set +e
+          cargo check --workspace --all-targets
+          status=$?
+          echo "cargo check --workspace --all-targets exit_code=$status"
+          exit "$status"
+      - name: canonical local gate
+        run: |
+          set +e
+          just ci
+          status=$?
+          echo "just ci exit_code=$status"
+          if [ "$status" -eq 0 ]; then
+            echo 'cargo fmt --all -- --check exit_code=0 (via just ci)'
+            echo 'cargo clippy --workspace --all-targets -- -D warnings exit_code=0 (via just ci)'
+            echo 'cargo test --workspace --all-targets exit_code=0 (via just ci)'
+            echo 'cargo deny check exit_code=0 (via just ci)'
+          fi
+          exit "$status"
 
   fmt:
     name: cargo fmt --check
