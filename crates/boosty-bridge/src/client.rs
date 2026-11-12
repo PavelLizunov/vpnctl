@@ -68,6 +68,7 @@ pub async fn build_refresh_client(
 
 pub(crate) async fn build_persisted_refresh_client(
     inv: &SqliteInventory,
+    settings: &BoostySettings,
     refresh_token: &str,
     device_id: &str,
     base_url: &str,
@@ -97,15 +98,13 @@ pub(crate) async fn build_persisted_refresh_client(
         .into());
     }
     let tokens: RefreshedTokens = response.json().await.map_err(AuthError::HttpRequest)?;
-    if tokens.refresh_token != refresh_token
-        && !inv
-            .rotate_boosty_refresh_token(refresh_token, &tokens.refresh_token)
-            .await?
+    if !inv
+        .save_boosty_session(settings, &tokens.access_token, &tokens.refresh_token)
+        .await?
     {
-        tracing::info!(
-            target = "boosty_bridge",
-            "kept the Boosty refresh credential changed during this sync"
-        );
+        return Err(BridgeError::Config(
+            "Boosty credentials changed during refresh; retry synchronization".into(),
+        ));
     }
     // A bearer client cannot rotate credentials invisibly during roster pagination.
     build_bearer_client(&tokens.access_token, base_url).await

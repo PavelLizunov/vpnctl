@@ -12,6 +12,11 @@ members = [
     "cli",
     "daemon",
 ]
+exclude = ["vendor/sqlx-sqlite"]
+
+[patch.crates-io]
+# SQLx 0.8.6 with the patched SQLite FFI dependency; see its README.vpnctl.md.
+sqlx-sqlite = { path = "vendor/sqlx-sqlite" }
 
 [workspace.package]
 version = "0.9.0"

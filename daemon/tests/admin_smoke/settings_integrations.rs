@@ -312,6 +312,65 @@ async fn boosty_settings_save_via_web() {
 }
 
 #[tokio::test]
+async fn boosty_quick_connect_rejects_incomplete_session_before_saving() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let app = router(s);
+    let before = inv.recent_audit(100).await.unwrap().len();
+    for missing in ["blog_url", "access_token", "refresh_token", "device_id"] {
+        let mut fields = vec!["quick_sync_now=1", "enabled=on"];
+        for (field, value) in [
+            ("blog_url", "blog_url=test-blog"),
+            ("access_token", "access_token=test-access"),
+            ("refresh_token", "refresh_token=test-refresh"),
+            ("device_id", "device_id=test-device"),
+        ] {
+            if field != missing {
+                fields.push(value);
+            }
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                add_same_origin(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/admin/boosty/settings")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header("referer", format!("http://{SAME_ORIGIN_HOST}/admin/boosty")),
+                )
+                .body(Body::from(fields.join("&")))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = String::from_utf8(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.starts_with("vpnctl admin: "));
+        assert!(body.contains("Quick Connect requires"));
+        assert!(!inv.get_boosty_settings().await.unwrap().enabled);
+        assert!(
+            inv.get_boosty_settings()
+                .await
+                .unwrap()
+                .access_token
+                .is_none()
+        );
+        assert_eq!(inv.recent_audit(100).await.unwrap().len(), before);
+    }
+}
+
+#[tokio::test]
 async fn boosty_page_explains_bearer_first_and_refresh_recovery_in_both_languages() {
     let dir = TempDir::new().unwrap();
     let app = router(state(&dir).await);

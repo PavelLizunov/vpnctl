@@ -2,6 +2,32 @@
 
 Deferred work items with enough context to pick up cold. Newest first.
 
+## Remove the temporary SQLite driver dependency backport
+
+The security gate uses patched `libsqlite3-sys 0.39.1` through the vendored
+SQLx 0.8.6 SQLite driver and `russh 0.65.1`, without advisory suppressions.
+Remove `vendor/sqlx-sqlite` and its workspace patch when a compatible published
+SQLx release supports the patched bindings; retain inventory/backup and static
+musl compatibility checks. See `docs/specs/dependency-security-backports.md`.
+The declared workspace Rust version also needs reconciliation with dependency
+requirements: even the previously selected russh required Rust 1.89.
+
+## Boosty: independent authorization and stale lapse decisions
+
+Quick Connect copies a browser session. The bridge can preserve and reuse its
+tokens, but a browser logout, revocation or competing refresh can invalidate
+that session. Investigate a supported independent authorization before
+promising unattended operation across browser-session revocation. Recovery
+must remain a web action; never ask operators to extract credentials manually.
+
+Remaining reconcile debt: `observe_boosty_lapse` needs an expected-subscriber
+guard and transactional mutation auditing, like `set_boosty_user_disabled`.
+Protected absences in an anomalous roster must not start the lapse clock.
+Manual lapse-confirmation forms also need to reject decisions after unlink,
+relink or subscription recovery instead of using unrestricted user disable.
+Cover these interleavings with deterministic tests and preserve existing
+subscription identities and grants.
+
 ## VexVPN single-server import compatibility
 
 **Status:** next task requested by the owner, after full node/monthly traffic accounting.
