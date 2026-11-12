@@ -916,6 +916,10 @@ async fn inconsistent_roster_pages_cannot_mutate_users_lapses_or_reports() {
     let first_sub = subscriber(100, "First payer", "active");
     for (first, second) in [
         (
+            json!({"data":[first_sub.clone()],"total":1,"limit":100,"offset":7}),
+            json!({}),
+        ),
+        (
             json!({"data":[first_sub.clone()],"total":2,"limit":100,"offset":0}),
             json!({"data":[],"total":2,"limit":100,"offset":1}),
         ),
@@ -1020,6 +1024,55 @@ async fn complete_paginated_roster_provisions_once_and_preserves_existing_links(
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn boosty_next_offsets_accept_complete_and_paginated_rosters() {
+    for total in [1, 2] {
+        let mut server = mockito::Server::new_async().await;
+        let first = server
+            .mock("GET", "/v1/blog/ninitux/subscribers")
+            .match_query(mockito::Matcher::UrlEncoded("offset".into(), "0".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({"data":[subscriber(100,"First payer","active")],"total":total,"limit":100,"offset":1}).to_string())
+            .expect(1)
+            .create_async().await;
+        let second = server
+            .mock("GET", "/v1/blog/ninitux/subscribers")
+            .match_query(mockito::Matcher::UrlEncoded("offset".into(), "1".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({"data":[subscriber(200,"Second payer","active")],"total":total,"limit":100,"offset":2}).to_string())
+            .expect(usize::from(total == 2))
+            .create_async().await;
+        let dir = tempfile::tempdir().unwrap();
+        let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        let client = ApiClient::new(reqwest::Client::new(), server.url());
+        let report = sync_once(&client, &inv, "ninitux", ApplyMode::DryRun)
+            .await
+            .unwrap();
+        assert_eq!(report.total_subscribers, total);
+        assert_eq!(report.active_subscribers, total);
+        let ids: Vec<_> = report
+            .new_subscribers
+            .iter()
+            .map(|s| s.subscriber_id)
+            .collect();
+        assert_eq!(
+            ids,
+            if total == 1 {
+                vec![100]
+            } else {
+                vec![100, 200]
+            }
+        );
+        assert!(inv.list_users().await.unwrap().is_empty());
+        first.assert_async().await;
+        second.assert_async().await;
+    }
 }
 
 #[tokio::test]
