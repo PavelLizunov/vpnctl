@@ -859,8 +859,166 @@ async fn sync_from_settings_recovers_via_refresh_flow_on_bearer_401() {
     let after = inv.get_boosty_settings().await.unwrap();
     assert_eq!(after.refresh_token.as_deref(), Some("new-ref"));
     assert_eq!(
-        after.access_token, None,
-        "stale access token must be cleared after recovery"
+        after.access_token.as_deref(),
+        Some("new-acc"),
+        "refreshed access token must be reused after recovery"
+    );
+
+    sync_from_settings_at(&inv, &after, ApplyMode::DryRun, &server.url())
+        .await
+        .expect("next pass must reuse the recovered session without refreshing");
+    m_refresh.assert_async().await;
+}
+
+#[tokio::test]
+async fn forbidden_roster_does_not_rotate_session() {
+    let mut server = mockito::Server::new_async().await;
+    let _forbidden = server
+        .mock("GET", "/v1/blog/ninitux/subscribers")
+        .match_query(mockito::Matcher::Any)
+        .with_status(403)
+        .create_async()
+        .await;
+    let refresh = server
+        .mock("POST", "/oauth/token/")
+        .expect(0)
+        .create_async()
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let settings = BoostySettings {
+        blog_url: Some("ninitux".into()),
+        access_token: Some("test-access".into()),
+        refresh_token: Some("test-refresh".into()),
+        device_id: Some("test-device".into()),
+        ..Default::default()
+    };
+    inv.set_boosty_settings(&settings).await.unwrap();
+    let before = inv.recent_audit(100).await.unwrap().len();
+    let error = sync_from_settings_at(&inv, &settings, ApplyMode::Full, &server.url())
+        .await
+        .unwrap_err();
+    let summary = vpnctl_boosty_bridge::sync_failure_summary(&error);
+    assert!(summary.contains("owner"));
+    assert!(!summary.contains("credentials are dead"));
+    assert_eq!(
+        inv.get_boosty_settings().await.unwrap().refresh_token,
+        settings.refresh_token
+    );
+    assert_eq!(inv.recent_audit(100).await.unwrap().len(), before);
+    refresh.assert_async().await;
+}
+
+#[tokio::test]
+async fn inconsistent_roster_pages_cannot_mutate_users_lapses_or_reports() {
+    let first_sub = subscriber(100, "First payer", "active");
+    for (first, second) in [
+        (
+            json!({"data":[first_sub.clone()],"total":2,"limit":100,"offset":0}),
+            json!({"data":[],"total":2,"limit":100,"offset":1}),
+        ),
+        (
+            json!({"data":[first_sub.clone()],"total":2,"limit":100,"offset":0}),
+            json!({"data":[first_sub.clone()],"total":2,"limit":100,"offset":1}),
+        ),
+        (
+            json!({"data":[first_sub.clone()],"total":2,"limit":100,"offset":0}),
+            json!({"data":[subscriber(200,"Second payer","active")],"total":3,"limit":100,"offset":1}),
+        ),
+        (
+            json!({"data":[first_sub.clone()],"total":2,"limit":100,"offset":0}),
+            json!({"data":[subscriber(200,"Second payer","active")],"total":2,"limit":100,"offset":0}),
+        ),
+        (
+            json!({"data":[first_sub.clone(),first_sub.clone()],"total":2,"limit":100,"offset":0}),
+            json!({}),
+        ),
+    ] {
+        let mut server = mockito::Server::new_async().await;
+        let _first = server
+            .mock("GET", "/v1/blog/ninitux/subscribers")
+            .match_query(mockito::Matcher::UrlEncoded("offset".into(), "0".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(first.to_string())
+            .create_async()
+            .await;
+        let _second = server
+            .mock("GET", "/v1/blog/ninitux/subscribers")
+            .match_query(mockito::Matcher::UrlEncoded("offset".into(), "1".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(second.to_string())
+            .create_async()
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+            .await
+            .unwrap();
+        inv.add_user(&user("absent", false)).await.unwrap();
+        inv.link_boosty_subscriber(&UserId("absent".into()), 999)
+            .await
+            .unwrap();
+        let before = inv.recent_audit(100).await.unwrap().len();
+        let client = ApiClient::new(reqwest::Client::new(), server.url());
+        assert!(
+            sync_once_with_policy(&client, &inv, "ninitux", ApplyMode::Full, 0, true)
+                .await
+                .is_err()
+        );
+        let users = inv.list_users().await.unwrap();
+        assert_eq!(users.len(), 1);
+        assert!(!users[0].disabled);
+        assert_eq!(inv.list_boosty_links_with_lapse().await.unwrap()[0].2, None);
+        assert!(inv.boosty_last_report().await.unwrap().is_none());
+        assert_eq!(inv.recent_audit(100).await.unwrap().len(), before);
+    }
+}
+
+#[tokio::test]
+async fn complete_paginated_roster_provisions_once_and_preserves_existing_links() {
+    let mut server = mockito::Server::new_async().await;
+    let _first = server.mock("GET", "/v1/blog/ninitux/subscribers")
+        .match_query(mockito::Matcher::UrlEncoded("offset".into(),"0".into()))
+        .with_status(200).with_header("content-type","application/json")
+        .with_body(json!({"data":[subscriber(100,"Linked payer","active")],"total":2,"limit":100,"offset":0}).to_string())
+        .create_async().await;
+    let _second = server
+        .mock("GET", "/v1/blog/ninitux/subscribers")
+        .match_query(mockito::Matcher::UrlEncoded("offset".into(), "1".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({"data":[subscriber(200,"New payer","active")],"total":2,"limit":100,"offset":1})
+                .to_string(),
+        )
+        .create_async()
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    inv.add_user(&user("manual", false)).await.unwrap();
+    inv.link_boosty_subscriber(&UserId("manual".into()), 100)
+        .await
+        .unwrap();
+    let client = ApiClient::new(reqwest::Client::new(), server.url());
+    let first = sync_once_with_policy(&client, &inv, "ninitux", ApplyMode::Full, 0, true)
+        .await
+        .unwrap();
+    assert_eq!(first.provisioned, vec!["boosty-200"]);
+    let retry = sync_once_with_policy(&client, &inv, "ninitux", ApplyMode::Full, 0, true)
+        .await
+        .unwrap();
+    assert!(retry.provisioned.is_empty());
+    assert_eq!(inv.list_users().await.unwrap().len(), 2);
+    assert!(
+        inv.get_user(&UserId("boosty-100".into()))
+            .await
+            .unwrap()
+            .is_none()
     );
 }
 
