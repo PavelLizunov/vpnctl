@@ -282,7 +282,20 @@ async fn boosty_grants_reserve_addresses_in_the_creation_transaction() {
         .unwrap();
     assert_eq!(octet, Some(2));
     let audits = inv.recent_audit(10).await.unwrap();
-    assert_eq!(audits.len(), 1);
-    assert_eq!(audits[0].action, "user.grant");
-    assert_eq!(audits[0].payload.as_ref().unwrap()["wg_octet"], 2);
+    assert_eq!(
+        audits.len(),
+        2,
+        "creation and initial grant are both audited"
+    );
+    let grant = audits
+        .iter()
+        .find(|row| row.action == "user.grant")
+        .unwrap();
+    assert_eq!(grant.payload.as_ref().unwrap()["wg_octet"], 2);
+    let provision = audits
+        .iter()
+        .find(|row| row.action == "boosty.provision")
+        .unwrap();
+    assert_eq!(provision.target.as_deref(), Some("boosty-user"));
+    assert_eq!(provision.payload.as_ref().unwrap()["servers_granted"], 1);
 }

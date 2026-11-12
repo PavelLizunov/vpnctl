@@ -169,10 +169,14 @@ impl BridgeError {
 }
 
 pub fn sync_failure_summary(err: &BridgeError) -> String {
+    if matches!(err, BridgeError::Api(boosty_api::error::ApiError::HttpStatus { status, .. }) if *status == reqwest::StatusCode::FORBIDDEN)
+    {
+        return "Boosty denied access to subscribers. On /admin/boosty, check the blog and reconnect using its owner's Boosty account.".into();
+    }
     if err.is_auth_failure() {
         format!(
-            "Boosty auth failed — stored credentials are dead (the bridge cannot self-heal): \
-             paste a fresh refresh token + device id on /admin/boosty. ({err})"
+            "Boosty session needs reconnecting: open /admin/boosty and use the \
+             Connect Boosty button. ({err})"
         )
     } else {
         format!("Boosty sync failed (network/API; usually transient): {err}")
@@ -189,7 +193,8 @@ mod tests {
         let err = BridgeError::Auth(boosty_api::error::AuthError::EmptyRefreshToken);
         let s = sync_failure_summary(&err);
         assert!(s.contains("/admin/boosty"), "{s}");
-        assert!(s.contains("cannot self-heal"), "{s}");
+        assert!(s.contains("Connect Boosty button"), "{s}");
+        assert!(!s.contains("paste"), "{s}");
         assert!(
             !s.to_lowercase().contains("ssh"),
             "operator-action policy: {s}"
@@ -206,7 +211,7 @@ mod tests {
         ));
         let s = sync_failure_summary(&err);
         assert!(err.is_auth_failure());
-        assert!(s.contains("credentials are dead"), "{s}");
+        assert!(s.contains("needs reconnecting"), "{s}");
         assert!(!s.contains("usually transient"), "{s}");
     }
 

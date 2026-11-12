@@ -2,6 +2,23 @@
 
 Deferred work items with enough context to pick up cold. Newest first.
 
+## Boosty: independent authorization and stale lapse decisions
+
+Quick Connect copies a browser session. The bridge can preserve and reuse its
+tokens, but a browser logout, revocation or competing refresh can invalidate
+that session. For the current import flow, use a separate private window and
+close it after confirmation so ordinary browsing does not rotate the same grant. Investigate a supported independent authorization before
+promising unattended operation across browser-session revocation. Recovery
+must remain a web action; never ask operators to extract credentials manually.
+
+Remaining reconcile debt: `observe_boosty_lapse` needs an expected-subscriber
+guard and transactional mutation auditing, like `set_boosty_user_disabled`.
+Protected absences in an anomalous roster must not start the lapse clock.
+Manual lapse-confirmation forms also need to reject decisions after unlink,
+relink or subscription recovery instead of using unrestricted user disable.
+Cover these interleavings with deterministic tests and preserve existing
+subscription identities and grants.
+
 ## Remove the SQLx SQLite security backport
 
 `vendor/sqlx-sqlite` preserves official SQLx 0.8.6 Rust sources and changes only

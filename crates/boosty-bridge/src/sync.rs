@@ -106,7 +106,7 @@ pub async fn sync_from_settings_at(
     let mut active_client = if let Some(refresh) = client.refresh_token().await
         && let Some(device) = settings.device_id.as_deref()
     {
-        build_persisted_refresh_client(inv, &refresh, device, base_url).await?
+        build_persisted_refresh_client(inv, settings, &refresh, device, base_url).await?
     } else {
         client
     };
@@ -121,7 +121,10 @@ pub async fn sync_from_settings_at(
     .await;
 
     if let Err(ref err) = result
-        && err.is_auth_failure()
+        && matches!(
+            err,
+            BridgeError::Api(boosty_api::error::ApiError::Unauthorized)
+        )
         && used_bearer
         && let (Some(refresh), Some(device)) = (
             settings.refresh_token.as_deref(),
@@ -134,7 +137,8 @@ pub async fn sync_from_settings_at(
             target = "boosty_bridge",
             "bearer token returned auth failure; attempting refresh recovery flow"
         );
-        active_client = build_persisted_refresh_client(inv, refresh, device, base_url).await?;
+        active_client =
+            build_persisted_refresh_client(inv, settings, refresh, device, base_url).await?;
         result = sync_once_with_policy(
             &active_client,
             inv,
@@ -144,16 +148,6 @@ pub async fn sync_from_settings_at(
             settings.auto_create_users,
         )
         .await;
-        if result.is_ok()
-            && let Some(stale_token) = settings.access_token.as_deref()
-            && let Err(e) = inv.clear_boosty_access_token(stale_token).await
-        {
-            tracing::warn!(
-                target = "boosty_bridge",
-                error = %e,
-                "clearing stale access token after refresh recovery failed"
-            );
-        }
     }
 
     if mode != ApplyMode::DryRun
@@ -204,9 +198,7 @@ pub async fn sync_once_with_policy(
     grace_days: u16,
     auto_create_users: bool,
 ) -> Result<SyncReport, BridgeError> {
-    let subscribers = client
-        .get_all_subscribers(blog, Some("on_time"), Some("gt"))
-        .await?;
+    let subscribers = crate::roster::fetch_complete_roster(client, blog).await?;
     let now = i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -371,10 +363,11 @@ pub async fn sync_once_with_policy(
                     continue;
                 }
                 match provision_boosty_user(inv, subscriber_id).await {
-                    Ok(user_id) => {
+                    Ok(Some(user_id)) => {
                         report.linked += 1;
                         report.provisioned.push(user_id);
                     }
+                    Ok(None) => {}
                     Err(e) => {
                         report.errors.push(format!(
                             "provision Boosty subscriber {subscriber_id} failed: {e}"
@@ -400,7 +393,7 @@ pub async fn sync_once_with_policy(
 async fn provision_boosty_user(
     inv: &SqliteInventory,
     subscriber_id: i64,
-) -> Result<String, BridgeError> {
+) -> Result<Option<String>, BridgeError> {
     let id = format!("boosty-{subscriber_id}");
     let (wireguard_private, wireguard_pubkey) = vpnctl_crypto::gen_wireguard_keypair();
     let user = User {
@@ -414,33 +407,13 @@ async fn provision_boosty_user(
         disabled: false,
     };
     match inv.add_boosty_user(&user, subscriber_id).await {
-        Ok(grants) => {
-            if let Err(e) = inv
-                .audit(
-                    "boosty-bridge",
-                    "boosty.provision",
-                    Some(&id),
-                    Some(&serde_json::json!({
-                        "subscriber_id": subscriber_id,
-                        "servers_granted": grants,
-                    })),
-                )
-                .await
-            {
-                tracing::warn!(
-                    target = "boosty_bridge",
-                    user = %id,
-                    error = %e,
-                    "audit boosty.provision failed"
-                );
-            }
-            Ok(id)
-        }
+        Ok(_) => Ok(Some(id)),
         Err(SqliteInventoryError::AlreadyExists(_)) => inv
             .list_boosty_links()
             .await?
             .into_iter()
-            .find_map(|(uid, sid)| (sid == subscriber_id).then_some(uid.0))
+            .find(|(_, sid)| *sid == subscriber_id)
+            .map(|_| None)
             .ok_or_else(|| {
                 BridgeError::Config(format!(
                     "vpnctl user `{id}` already exists and is not linked to subscriber {subscriber_id}"
