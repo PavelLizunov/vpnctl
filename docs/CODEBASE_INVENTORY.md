@@ -5,8 +5,8 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 426 (282 prod / 144 test)
-- **Total Rust LOC:** 148,808 (84,540 prod / 64,268 test)
+- **Tracked Rust Files:** 427 (282 prod / 145 test)
+- **Total Rust LOC:** 148,831 (84,540 prod / 64,291 test)
 - **Database Migrations:** 69
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 131
 
@@ -19,12 +19,12 @@
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,419 (13) | 0 (0) | **1,419** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 318 (1) | 125 (1) | **443** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 193 (1) | 454 (2) | **647** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 47 tests | 16,083 (54) | 19,241 (52) | **35,324** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 48 tests | 16,083 (54) | 19,264 (53) | **35,347** |
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 6,753 (14) | 1,554 (6) | **8,307** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,236 (20) | 4,817 (12) | **9,053** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,778 (4) | 1,191 (5) | **2,969** |
 | `vpnctld` | `daemon` | 0.9.0 | lib, bin, 10 tests | 45,950 (149) | 34,166 (61) | **80,116** |
-| **Total** | | | | **84,540 (282)** | **64,268 (144)** | **148,808** |
+| **Total** | | | | **84,540 (282)** | **64,291 (145)** | **148,831** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -34,6 +34,7 @@
 | `crates/inventory/src/sqlite/tests.rs` | 1,948 | `crates/inventory` | Prod |
 | `daemon/src/health_monitor/tests.rs` | 1,845 | `daemon` | Prod |
 | `crates/kernels/src/caddy/tests.rs` | 1,800 | `crates/kernels` | Prod |
+| `vendor/sqlx-sqlite/src/connection/explain.rs` | 1,779 | `other` | Prod |
 | `crates/kernels/src/sing_box/tests.rs` | 1,711 | `crates/kernels` | Prod |
 | `daemon/tests/admin_smoke/alerts_health.rs` | 1,514 | `daemon` | Test |
 | `daemon/tests/sub_endpoint/mihomo.rs` | 1,324 | `daemon` | Test |
@@ -54,7 +55,6 @@
 | `crates/inventory/src/sqlite/health.rs` | 1,019 | `crates/inventory` | Prod |
 | `daemon/tests/admin_smoke/user_detail/traffic_activity.rs` | 1,018 | `daemon` | Test |
 | `daemon/tests/admin_smoke/shell_nav/shell_assets_nav.rs` | 1,014 | `daemon` | Test |
-| `daemon/tests/admin_smoke/user_detail/wireguard.rs` | 1,004 | `daemon` | Test |
 
 ## Database Migrations (69)
 

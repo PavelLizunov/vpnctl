@@ -2,6 +2,14 @@
 
 Deferred work items with enough context to pick up cold. Newest first.
 
+## Remove the SQLx SQLite security backport
+
+`vendor/sqlx-sqlite` preserves official SQLx 0.8.6 Rust sources and changes only
+the SQLite dependency requirement to the fixed `libsqlite3-sys =0.39.1`.
+Remove the root Cargo patch and vendor package when a reviewed published SQLx
+release supports fixed bundled SQLite. Preserve inventory/migration compatibility
+and re-run the gates in `docs/specs/dependency-security-remediation.md`.
+
 ## Deploy All lock retry on concurrent user auto-deploy
 
 **Status:** closed in code. `daemon/src/wizard_bootstrap/redeploy.rs` routes
@@ -26,16 +34,10 @@ decommissioned via hoster console, schedule a separate verified migration to pur
 
 ## Release path (musl) has no CI coverage
 
-The canonical release build (`just build-release`, static musl) was verified
-by hand for the FIRST time on 2026-08-23 (linux-worker: `musl-tools` +
-`cmake` + `rustup target add x86_64-unknown-linux-musl` → `static-pie`
-binary, ~3 min). CI never exercises it, so a dependency bump could silently
-break the only documented release path. Fix: add a (possibly advisory) CI job
-that installs musl-tools + cmake and runs
-`cargo build --release --target x86_64-unknown-linux-musl -p vpnctld -p vpnctl`
-so breakage surfaces at PR time. Note: the 2026-08-23 prod deploy shipped a
-same-distro `x86_64-unknown-linux-gnu` build (bookworm worker → bookworm
-host) — proven, but not the canonical static target.
+**Status:** closed in code. The blocking `static musl release` CI job installs
+musl-tools and cmake, runs `just build-release`, and verifies that both daemon
+and CLI have no ELF interpreter. Dependency changes exercise the canonical
+release path before acceptance.
 
 ## Unverified gap closures
 

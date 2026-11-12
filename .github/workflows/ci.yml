@@ -92,6 +92,39 @@ jobs:
       - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2
 
+  static-musl:
+    name: static musl release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: static-musl
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: musl build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools cmake
+      - name: canonical release build
+        run: just build-release
+      - name: verify daemon and CLI have no dynamic interpreter
+        run: |
+          for binary in vpnctld vpnctl; do
+            artifact="target/x86_64-unknown-linux-musl/release/$binary"
+            test -x "$artifact"
+            program_headers="$(readelf --program-headers "$artifact")"
+            if [[ "$program_headers" == *INTERP* ]]; then
+              echo "$binary unexpectedly requires a dynamic interpreter" >&2
+              exit 1
+            fi
+          done
+
   managed-node-artifacts:
     name: managed sing-box accounting artifacts
     runs-on: ubuntu-latest
