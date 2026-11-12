@@ -21,10 +21,12 @@ pub(crate) async fn fetch_complete_roster(
             .get_subscribers(blog, Some(100), Some(offset), Some("on_time"), Some("gt"))
             .await?;
         let total = *expected_total.get_or_insert(page.total);
-        if page.offset != offset
+        // Boosty reports the next position; older responses use the page start.
+        let next_offset = offset.saturating_add(page.data.len() as u64);
+        if ![offset, next_offset].contains(&page.offset)
             || page.total != total
             || (page.data.is_empty() && offset < total)
-            || offset.saturating_add(page.data.len() as u64) > total
+            || next_offset > total
             || page
                 .data
                 .iter()

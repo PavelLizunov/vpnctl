@@ -15,6 +15,8 @@
   device ID from one import. An incomplete import fails before saving anything.
 - Reject incomplete, mispositioned or duplicate subscriber pages before any
   reconciliation mutations. A changing total aborts the pass for a later retry.
+  Response `offset` may identify the current start or the next position (the
+  requested start plus actual returned rows); other positions are rejected.
 - Recheck subscriber links in the auto-create transaction. If any link already
   exists, do not create or report another user. Intentional manual links from
   multiple VPN users to one subscriber remain supported.
