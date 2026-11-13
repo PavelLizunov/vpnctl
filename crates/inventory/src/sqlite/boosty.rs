@@ -155,6 +155,17 @@ impl SqliteInventory {
             _ => vpnctl_crypto::gen_sub_token().map_err(SqliteInventoryError::CryptoIo)?,
         };
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let linked: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE boosty_subscriber_id = ?1)",
+        )
+        .bind(subscriber_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if linked {
+            return Err(SqliteInventoryError::AlreadyExists(
+                "Boosty subscriber is already linked".into(),
+            ));
+        }
         let inserted = sqlx::query(
             "INSERT INTO users (
                 id, uuid, tuic_password, wireguard_pubkey, wireguard_private,
@@ -203,6 +214,20 @@ impl SqliteInventory {
             .execute(&mut *tx)
             .await?;
         }
+        sqlx::query(
+            "INSERT INTO audit_log (actor, action, target, payload)
+             VALUES ('boosty-bridge', 'boosty.provision', ?1, ?2)",
+        )
+        .bind(&user.id.0)
+        .bind(
+            serde_json::json!({
+                "subscriber_id": subscriber_id,
+                "servers_granted": grants,
+            })
+            .to_string(),
+        )
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(grants)
     }
@@ -330,6 +355,55 @@ impl SqliteInventory {
         }
         tx.commit().await?;
         Ok(changed)
+    }
+
+    /// Save an OAuth session only while the credentials used to refresh still match.
+    pub async fn save_boosty_session(
+        &self,
+        expected: &BoostySettings,
+        access_token: &str,
+        refresh_token: &str,
+    ) -> Result<bool> {
+        if access_token.trim().is_empty() || refresh_token.trim().is_empty() {
+            return Err(SqliteInventoryError::Invalid(
+                "Boosty returned an empty session token".into(),
+            ));
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let matches: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM boosty_settings
+              WHERE id = 1 AND blog_url IS ?1 AND access_token IS ?2
+                AND refresh_token IS ?3 AND device_id IS ?4)",
+        )
+        .bind(&expected.blog_url)
+        .bind(&expected.access_token)
+        .bind(&expected.refresh_token)
+        .bind(&expected.device_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !matches {
+            return Ok(false);
+        }
+        if expected.access_token.as_deref() != Some(access_token)
+            || expected.refresh_token.as_deref() != Some(refresh_token)
+        {
+            sqlx::query(
+                "UPDATE boosty_settings SET access_token = ?1, refresh_token = ?2,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 1",
+            )
+            .bind(access_token)
+            .bind(refresh_token)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "INSERT INTO audit_log (actor, action, target, payload)
+                 VALUES ('boosty-bridge', 'boosty.session.refreshed', 'boosty_settings', NULL)",
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(true)
     }
 
     pub async fn clear_boosty_access_token(&self, expected: &str) -> Result<bool> {

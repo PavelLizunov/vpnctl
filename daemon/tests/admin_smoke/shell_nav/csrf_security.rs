@@ -37,6 +37,14 @@ async fn admin_unmatched_paths_do_not_leak_admin_fingerprint() {
             headers.get("permissions-policy").is_none(),
             "GET {path} leaks Permissions-Policy (admin fingerprint)"
         );
+        assert!(
+            headers.get("x-robots-tag").is_none(),
+            "GET {path} leaks X-Robots-Tag (admin fingerprint)"
+        );
+        assert!(
+            headers.get("cache-control").is_none(),
+            "GET {path} must not inherit dynamic admin Cache-Control"
+        );
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let s = String::from_utf8_lossy(&body);
         assert!(
@@ -124,6 +132,10 @@ async fn admin_responses_carry_security_headers() {
         headers.get("referrer-policy").map(|v| v.to_str().unwrap()),
         Some("same-origin")
     );
+    assert_eq!(
+        headers.get("cache-control").map(|v| v.to_str().unwrap()),
+        Some("no-store")
+    );
     let perm = headers
         .get("permissions-policy")
         .expect("Permissions-Policy must be set")
@@ -134,6 +146,11 @@ async fn admin_responses_carry_security_headers() {
             && perm.contains("microphone=()")
             && perm.contains("geolocation=()"),
         "Permissions-Policy must block sensor / device APIs: {perm}"
+    );
+    assert_eq!(
+        headers.get("x-robots-tag").map(|v| v.to_str().unwrap()),
+        Some("noindex, nofollow"),
+        "admin responses must carry X-Robots-Tag to prevent search engine indexing"
     );
 }
 

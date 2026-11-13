@@ -1,8 +1,48 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+
+use boosty_api::{api_client::ApiClient, model::Subscriber};
+
+use crate::types::BridgeError;
 
 use crate::types::{SubscriberSnapshot, SyncReport};
 
 const TOMBSTONE_RETENTION_SECS: i64 = 90 * 86_400;
+
+pub(crate) async fn fetch_complete_roster(
+    client: &ApiClient,
+    blog: &str,
+) -> Result<Vec<Subscriber>, BridgeError> {
+    let mut subscribers = Vec::new();
+    let mut ids = HashSet::new();
+    let mut expected_total = None;
+    loop {
+        let offset = subscribers.len() as u64;
+        let page = client
+            .get_subscribers(blog, Some(100), Some(offset), Some("on_time"), Some("gt"))
+            .await?;
+        let total = *expected_total.get_or_insert(page.total);
+        // Boosty reports the next position; older responses use the page start.
+        let next_offset = offset.saturating_add(page.data.len() as u64);
+        if ![offset, next_offset].contains(&page.offset)
+            || page.total != total
+            || (page.data.is_empty() && offset < total)
+            || next_offset > total
+            || page
+                .data
+                .iter()
+                .any(|subscriber| !ids.insert(subscriber.id))
+        {
+            return Err(BridgeError::Config(
+                "Boosty returned an incomplete or inconsistent subscriber roster; retry synchronization"
+                    .into(),
+            ));
+        }
+        subscribers.extend(page.data);
+        if subscribers.len() as u64 == total {
+            return Ok(subscribers);
+        }
+    }
+}
 
 pub(crate) type AuditEvent = (String, Option<String>, serde_json::Value);
 

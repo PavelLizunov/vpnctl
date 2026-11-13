@@ -105,7 +105,7 @@ pub(crate) async fn boosty_page(
     let default_blog_js = serde_json::to_string(default_blog).unwrap_or_default();
 
     let bookmarklet_js = format!(
-        r#"(function(){{function toast(icon,title,desc,color){{var el=document.getElementById('vpnctl-toast');if(!el){{el=document.createElement('div');el.id='vpnctl-toast';el.style.cssText='position:fixed;top:20px;right:20px;z-index:2147483647;background:#18181b;color:#fff;padding:14px 18px;border-radius:10px;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;font-size:13px;box-shadow:0 12px 36px rgba(0,0,0,0.6);border:2px solid '+color+';display:flex;align-items:center;gap:12px;max-width:380px;line-height:1.4;';document.body.appendChild(el);}}el.style.borderColor=color;el.textContent='';var iS=document.createElement('span');iS.style.cssText='font-size:22px;flex-shrink:0;';iS.textContent=icon;var cD=document.createElement('div');var tB=document.createElement('b');tB.style.cssText='color:'+color+';font-size:14px;';tB.textContent=title;var dD=document.createElement('div');dD.style.cssText='color:#d4d4d8;margin-top:2px;';dD.textContent=desc;cD.appendChild(tB);cD.appendChild(dD);el.appendChild(iS);el.appendChild(cD);}}if(location.hostname!=='boosty.to'&&!location.hostname.endsWith('.boosty.to')){{toast('⚠️','vpnctl Connect','Откройте вкладку блога на boosty.to и нажмите закладку снова!','#f59e0b');return;}}toast('🔄','vpnctl Connect','Считываем токены авторизации Boosty...','#3b82f6');function c(n){{var m=document.cookie.match(new RegExp('(?:^|; )'+n+'=([^;]*)'));return m?decodeURIComponent(m[1]):null;}}var lsAuth=null,lsClient=null;try{{lsAuth=localStorage.getItem('auth');lsClient=localStorage.getItem('_clientId')||localStorage.getItem('_clentId');}}catch(e){{}}var a=lsAuth||c('auth'),d=lsClient||c('_clientId');if(!a){{toast('❌','vpnctl Connect','Токены не найдены. Убедитесь, что вы авторизованы на boosty.to!','#ef4444');return;}}try{{var j=JSON.parse(a),p=location.pathname.split('/').filter(Boolean),b=(p.length>0&&!['app','feed','dialog','settings','messages'].includes(p[0]))?p[0]:'';b=b||{default_blog_js};var origin={admin_origin_js};var payload={{v:2,blog:b,access_token:j.accessToken||'',refresh_token:j.refreshToken||'',device_id:d||''}};toast('✅','vpnctl Connect','Токены блога «'+b+'» найдены! Перенаправляем в админку...','#22c55e');setTimeout(function(){{location.href=origin+'/admin/boosty#quick_connect='+encodeURIComponent(JSON.stringify(payload));}},500);}}catch(e){{toast('❌','vpnctl Connect','Ошибка чтения токенов: '+e,'#ef4444');}}}})();"#
+        r#"(function(){{function toast(icon,title,desc,color){{var el=document.getElementById('vpnctl-toast');if(!el){{el=document.createElement('div');el.id='vpnctl-toast';el.style.cssText='position:fixed;top:20px;right:20px;z-index:2147483647;background:#18181b;color:#fff;padding:14px 18px;border-radius:10px;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;font-size:13px;box-shadow:0 12px 36px rgba(0,0,0,0.6);border:2px solid '+color+';display:flex;align-items:center;gap:12px;max-width:380px;line-height:1.4;';document.body.appendChild(el);}}el.style.borderColor=color;el.textContent='';var iS=document.createElement('span');iS.style.cssText='font-size:22px;flex-shrink:0;';iS.textContent=icon;var cD=document.createElement('div');var tB=document.createElement('b');tB.style.cssText='color:'+color+';font-size:14px;';tB.textContent=title;var dD=document.createElement('div');dD.style.cssText='color:#d4d4d8;margin-top:2px;';dD.textContent=desc;cD.appendChild(tB);cD.appendChild(dD);el.appendChild(iS);el.appendChild(cD);}}if(location.hostname!=='boosty.to'&&!location.hostname.endsWith('.boosty.to')){{toast('⚠️','vpnctl Connect','Откройте вкладку блога на boosty.to и нажмите закладку снова!','#f59e0b');return;}}toast('🔄','vpnctl Connect','Считываем токены авторизации Boosty...','#3b82f6');function c(n){{var m=document.cookie.match(new RegExp('(?:^|; )'+n+'=([^;]*)'));return m?decodeURIComponent(m[1]):null;}}var lsAuth=null,lsClient=null;try{{lsAuth=localStorage.getItem('auth');lsClient=localStorage.getItem('_clientId')||localStorage.getItem('_clentId');}}catch(e){{}}var a=lsAuth||c('auth'),d=lsClient||c('_clientId')||c('_clentId');if(!a){{toast('❌','vpnctl Connect','Токены не найдены. Убедитесь, что вы авторизованы на boosty.to!','#ef4444');return;}}try{{var j=JSON.parse(a),p=location.pathname.split('/').filter(Boolean),b=(p.length>0&&!['app','feed','dialog','settings','messages'].includes(p[0]))?p[0]:'';b=b||{default_blog_js};var origin={admin_origin_js};var payload={{v:2,blog:b,access_token:j.accessToken||'',refresh_token:j.refreshToken||'',device_id:d||''}};if(!b||!payload.access_token||!payload.refresh_token||!payload.device_id){{toast('❌','vpnctl Connect','Нужна полная сессия для автоматического продления. Откройте свой блог и войдите в Boosty заново.','#ef4444');return;}}toast('✅','vpnctl Connect','Токены блога «'+b+'» найдены! Перенаправляем в админку...','#22c55e');setTimeout(function(){{location.href=origin+'/admin/boosty#quick_connect='+encodeURIComponent(JSON.stringify(payload));}},500);}}catch(e){{toast('❌','vpnctl Connect','Ошибка чтения токенов: '+e,'#ef4444');}}}})();"#
     );
     let bookmarklet_href = format!("javascript:{}", bookmarklet_js);
 
@@ -691,6 +691,16 @@ pub(crate) async fn boosty_page(
 }
 
 pub(crate) async fn boosty_settings_save(State(state): State<AppState>, body: String) -> Response {
+    let quick_connect = form_field(&body, "quick_sync_now").is_some();
+    if quick_connect
+        && ["blog_url", "access_token", "refresh_token", "device_id"]
+            .iter()
+            .any(|field| form_field(&body, field).is_none_or(|value| value.trim().is_empty()))
+    {
+        return bad_request(
+            "Quick Connect requires a blog, access token, refresh token and device ID from the same Boosty session. Open your Boosty blog and use Connect Boosty again.",
+        );
+    }
     let mut s = match state.inv.get_boosty_settings().await {
         Ok(s) => s,
         Err(e) => return internal_error(anyhow::Error::new(e)),
@@ -736,7 +746,7 @@ pub(crate) async fn boosty_settings_save(State(state): State<AppState>, body: St
         return internal_error(anyhow::Error::new(e));
     }
 
-    if form_field(&body, "quick_sync_now").is_some()
+    if quick_connect
         && s.enabled
         && let Err(resp) =
             run_boosty_sync_and_deploy(&state, s.auto_disable_lapsed, "boosty.quick_connect").await

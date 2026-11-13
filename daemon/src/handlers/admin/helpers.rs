@@ -762,6 +762,29 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_referer_rejects_ascii_controls_and_preserves_encoded_urls() {
+        for byte in (0u8..=b' ').chain(std::iter::once(0x7f)) {
+            for raw in [
+                format!("/admin/servers/123{}tail", char::from(byte)),
+                format!(
+                    "https://example.com/admin/users?name=a{}b",
+                    char::from(byte)
+                ),
+            ] {
+                assert_eq!(sanitize_referer(Some(&raw)), "/admin/", "byte {byte:#04x}");
+            }
+        }
+        for raw in [
+            "/admin/users?name=two%20words#details",
+            "/admin/servers/123?value=%09%00%7F",
+        ] {
+            assert_eq!(sanitize_referer(Some(raw)), raw);
+            let absolute = format!("https://example.com{raw}");
+            assert_eq!(sanitize_referer(Some(&absolute)), raw);
+        }
+    }
+
+    #[test]
     fn valid_user_id_validation() {
         assert!(valid_user_id("alice"));
         assert!(valid_user_id("user.123"));

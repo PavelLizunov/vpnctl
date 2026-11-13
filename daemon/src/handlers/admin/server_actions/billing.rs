@@ -288,4 +288,27 @@ mod tests {
         );
         assert_eq!(safe_return_to(None), "/admin/servers/billing");
     }
+
+    #[test]
+    fn safe_return_to_rejects_ascii_controls_inside_allowed_targets() {
+        for byte in (0u8..=b' ').chain(std::iter::once(0x7f)) {
+            for target in [
+                format!("/admin/servers/123{}tail", char::from(byte)),
+                format!("/admin/servers?name=a{}b", char::from(byte)),
+                format!("/admin/servers#section{}tail", char::from(byte)),
+            ] {
+                assert_eq!(
+                    safe_return_to(Some(target)),
+                    "/admin/servers/billing",
+                    "byte {byte:#04x}"
+                );
+            }
+        }
+        for target in [
+            "/admin/servers?name=two%20words#details",
+            "/admin/servers/123?value=%09%00%7F",
+        ] {
+            assert_eq!(safe_return_to(Some(target.to_string())), target);
+        }
+    }
 }
