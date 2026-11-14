@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 use std::net::IpAddr;
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -207,10 +210,11 @@ pub(super) fn session(value: &CorpSessionInput, now: i64) -> CorpResult<()> {
         || value.expires_at > now.saturating_add(86_400)
         || !hex_digest(&value.token_hash)
         || value.csrf_token.len() != 43
-        || !value
-            .csrf_token
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        || !URL_SAFE_NO_PAD
+            .decode(&value.csrf_token)
+            .is_ok_and(|bytes| {
+                bytes.len() == 32 && URL_SAFE_NO_PAD.encode(&bytes) == value.csrf_token
+            })
     {
         return Err(invalid("invalid session digest, CSRF or expiration"));
     }

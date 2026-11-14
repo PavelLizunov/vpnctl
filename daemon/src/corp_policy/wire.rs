@@ -163,7 +163,10 @@ fn import_public_key(encoded: &str) -> Result<VerifyingKey, PolicyError> {
 }
 
 fn decode_base64(value: &str, maximum_bytes: usize) -> Result<Vec<u8>, PolicyError> {
-    if value.is_empty() || value.len() > maximum_bytes.div_ceil(3) * 4 || value.len() % 4 != 0 {
+    if value.is_empty()
+        || value.len() > maximum_bytes.div_ceil(3) * 4
+        || !value.len().is_multiple_of(4)
+    {
         return Err(PolicyError);
     }
     let bytes = STANDARD.decode(value).map_err(|_| PolicyError)?;

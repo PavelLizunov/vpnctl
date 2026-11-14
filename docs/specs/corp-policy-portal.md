@@ -104,3 +104,14 @@ Actions before the next product block. The PR remains draft.
 Next: isolated HTTP/browser/operator surfaces and verified-egress eligibility,
 then client provisioning and activation runbooks. Current source and CI evidence
 does not establish a live site or migrated clients.
+
+First CI at `fca36dfe2535082f80d7fd43f811cdd2c8b89159` passed compilation,
+formatting, dependency policy, secret scanning, static musl release and Docker
+SSH suites. Clippy stopped on a manual divisibility predicate; the storage suite
+passed 31 of 32 tests and exposed acceptance of a noncanonical CSRF token. Both
+findings were recorded before correction. The follow-up keeps the original
+tests, uses the standard divisibility predicate and strictly validates the
+32-byte URL-safe CSRF encoding. Its independent diff-only review returned no
+findings; formatting, generated files, whitespace and diff secret checks pass.
+Fresh exact-head CI is required. Other test suites after the failed inventory
+suite are not claimed as executed by the stopped `cargo test` job.
