@@ -9,10 +9,12 @@
   - Строгая валидация домена: букмарклет срабатывает только на `boosty.to` и `*.boosty.to`.
   - LocalStorage-First: букмарклет считывает активные токены (`auth`, `_clientId`) в первую очередь из `localStorage`, используя куки только как резерв.
   - Bearer-First аутентификация: при наличии `access_token` клиент обращается к API напрямую через Bearer-токен, избегая гонок и ошибок `invalid_grant` на эндпоинте `/oauth/token/`. Ротация через `refresh_token` вызывается только при необходимости продления (по 401).
-  - Sync persists each rotated refresh token immediately after OAuth succeeds,
+  - Sync persists both session tokens immediately after OAuth succeeds,
     before requesting subscribers, including during bearer recovery and dry-run.
     Persistence errors abort the pass. The roster uses the resulting bearer
-    token so pagination cannot silently rotate credentials. A token rejected
+    token so pagination cannot silently rotate credentials. Subsequent passes
+    reuse the saved access token until HTTP 401. HTTP 403 does not refresh.
+    A token rejected
     during that pass is retried by a subsequent sync.
   - Web/CLI settings saves preserve the stored refresh token unless the operator
     supplies a replacement. `set_boosty_settings` treats `refresh_token: None`

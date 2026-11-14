@@ -335,6 +335,95 @@ async fn boosty_page_sanitizes_untrusted_proto_and_malformed_host() {
 }
 
 #[tokio::test]
+async fn boosty_page_ignores_untrusted_https_and_preserves_ipv6() {
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    for host in [
+        "[2001:db8::1]:8080",
+        "192.0.2.1:8080",
+        "vpn.example.test:8443",
+    ] {
+        let mut req = Request::builder()
+            .uri("/admin/boosty")
+            .header("host", host)
+            .header("x-forwarded-proto", "https")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(
+            "198.51.100.10:12345".parse::<SocketAddr>().unwrap(),
+        ));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(html.contains(&format!("http://{host}")), "{host}");
+        assert!(!html.contains(&format!("https://{host}")), "{host}");
+    }
+}
+
+#[tokio::test]
+async fn boosty_quick_connect_rejects_incomplete_session_before_saving() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let app = router(s);
+    let before = inv.recent_audit(100).await.unwrap().len();
+    for missing in ["blog_url", "access_token", "refresh_token", "device_id"] {
+        let mut fields = vec!["quick_sync_now=1", "enabled=on"];
+        for (field, value) in [
+            ("blog_url", "blog_url=test-blog"),
+            ("access_token", "access_token=test-access"),
+            ("refresh_token", "refresh_token=test-refresh"),
+            ("device_id", "device_id=test-device"),
+        ] {
+            if field != missing {
+                fields.push(value);
+            }
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                add_same_origin(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/admin/boosty/settings")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header("referer", format!("http://{SAME_ORIGIN_HOST}/admin/boosty")),
+                )
+                .body(Body::from(fields.join("&")))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = String::from_utf8(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.starts_with("vpnctl admin: "));
+        assert!(body.contains("Quick Connect requires"));
+        assert!(!inv.get_boosty_settings().await.unwrap().enabled);
+        assert!(
+            inv.get_boosty_settings()
+                .await
+                .unwrap()
+                .access_token
+                .is_none()
+        );
+        assert_eq!(inv.recent_audit(100).await.unwrap().len(), before);
+    }
+}
+
+#[tokio::test]
 async fn boosty_page_explains_bearer_first_and_refresh_recovery_in_both_languages() {
     let dir = TempDir::new().unwrap();
     let app = router(state(&dir).await);

@@ -63,6 +63,13 @@ operational history lives in git history, not in a memory file.
 
    Run `cargo fmt --all` BEFORE testing, not only `--check` — agent-written
    tests and mass text-replaces are the most frequent fmt-only CI failures.
+
+   On a control-plane host that prohibits compilation, use the publication
+   exception in `docs/specs/agent-workflow.md`: review, format, scan secrets,
+   and check generated files locally, then publish a draft PR. GitHub Actions
+   must run all five commands and `just ci` on the candidate before it becomes
+   ready or merges. Record unavailable local checks as not-run; never disable
+   the host's build guard or depend on a separate build VM.
 3. After push, watch CI to completion: `gh run watch <id> --exit-status`; red →
    `gh run view --log-failed` → fix. Never stack new commits on unresolved red
    CI — the next commit is either its hotfix or waits.

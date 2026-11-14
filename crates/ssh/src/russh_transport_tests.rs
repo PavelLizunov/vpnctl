@@ -185,7 +185,7 @@ impl russh::server::Handler for StalledAuthHandler {
     async fn auth_publickey(
         &mut self,
         _user: &str,
-        _publickey: &PublicKey,
+        _publickey: russh::server::VerifiedPublicKey<'_>,
     ) -> std::result::Result<russh::server::Auth, Self::Error> {
         if self.stall_pubkey {
             tokio::time::sleep(Duration::from_secs(10)).await;
@@ -337,7 +337,7 @@ impl russh::server::Handler for StalledChannelHandler {
     async fn auth_publickey(
         &mut self,
         _user: &str,
-        _publickey: &PublicKey,
+        _publickey: russh::server::VerifiedPublicKey<'_>,
     ) -> std::result::Result<russh::server::Auth, Self::Error> {
         Ok(russh::server::Auth::Accept)
     }

@@ -35,6 +35,27 @@ fn boosty_time(ts: Option<i64>) -> String {
         .unwrap_or_else(|| "—".into())
 }
 
+fn boosty_admin_origin(headers: &HeaderMap, trusted_proto: Option<&str>) -> String {
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .filter(|host| {
+            !host.is_empty()
+                && host.len() <= 259
+                && host.bytes().all(|b| {
+                    b.is_ascii_alphanumeric()
+                        || matches!(b, b'.' | b'-' | b'_' | b':' | b'[' | b']')
+                })
+                && reqwest::Url::parse(&format!("http://{host}")).is_ok()
+        })
+        .unwrap_or("vpnctld");
+    let proto = match trusted_proto {
+        Some("https") => "https",
+        _ => "http",
+    };
+    format!("{proto}://{host}")
+}
+
 pub(crate) async fn boosty_page(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -93,39 +114,20 @@ pub(crate) async fn boosty_page(
                 .is_some_and(|v| !v.is_empty())
                 && settings.device_id.as_deref().is_some_and(|v| !v.is_empty())));
 
-    let host_raw = headers
-        .get(axum::http::header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("vpnctld");
-    let host = if !host_raw.is_empty()
-        && host_raw.len() <= 253
-        && host_raw
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
-    {
-        host_raw
-    } else {
-        "vpnctld"
-    };
-
     let peer_ip = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ci| ci.0.ip());
     let forwarded_proto = peer_ip
         .and_then(|ip| crate::real_ip::resolve_trusted_header(&headers, ip, "x-forwarded-proto"));
-    let proto = match forwarded_proto.as_deref() {
-        Some("https") => "https",
-        _ => "http",
-    };
-    let admin_origin = format!("{proto}://{host}");
+    let admin_origin = boosty_admin_origin(&headers, forwarded_proto.as_deref());
     let default_blog = settings.blog_url.as_deref().unwrap_or("");
 
     let admin_origin_js = serde_json::to_string(&admin_origin).unwrap_or_default();
     let default_blog_js = serde_json::to_string(default_blog).unwrap_or_default();
 
     let bookmarklet_js = format!(
-        r#"(function(){{function toast(icon,title,desc,color){{var el=document.getElementById('vpnctl-toast');if(!el){{el=document.createElement('div');el.id='vpnctl-toast';el.style.cssText='position:fixed;top:20px;right:20px;z-index:2147483647;background:#18181b;color:#fff;padding:14px 18px;border-radius:10px;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;font-size:13px;box-shadow:0 12px 36px rgba(0,0,0,0.6);border:2px solid '+color+';display:flex;align-items:center;gap:12px;max-width:380px;line-height:1.4;';document.body.appendChild(el);}}el.style.borderColor=color;el.textContent='';var iS=document.createElement('span');iS.style.cssText='font-size:22px;flex-shrink:0;';iS.textContent=icon;var cD=document.createElement('div');var tB=document.createElement('b');tB.style.cssText='color:'+color+';font-size:14px;';tB.textContent=title;var dD=document.createElement('div');dD.style.cssText='color:#d4d4d8;margin-top:2px;';dD.textContent=desc;cD.appendChild(tB);cD.appendChild(dD);el.appendChild(iS);el.appendChild(cD);}}if(location.hostname!=='boosty.to'&&!location.hostname.endsWith('.boosty.to')){{toast('⚠️','vpnctl Connect','Откройте вкладку блога на boosty.to и нажмите закладку снова!','#f59e0b');return;}}toast('🔄','vpnctl Connect','Считываем токены авторизации Boosty...','#3b82f6');function c(n){{var m=document.cookie.match(new RegExp('(?:^|; )'+n+'=([^;]*)'));return m?decodeURIComponent(m[1]):null;}}var lsAuth=null,lsClient=null;try{{lsAuth=localStorage.getItem('auth');lsClient=localStorage.getItem('_clientId')||localStorage.getItem('_clentId');}}catch(e){{}}var a=lsAuth||c('auth'),d=lsClient||c('_clientId');if(!a){{toast('❌','vpnctl Connect','Токены не найдены. Убедитесь, что вы авторизованы на boosty.to!','#ef4444');return;}}try{{var j=JSON.parse(a),p=location.pathname.split('/').filter(Boolean),b=(p.length>0&&!['app','feed','dialog','settings','messages'].includes(p[0]))?p[0]:'';b=b||{default_blog_js};var origin={admin_origin_js};var payload={{v:2,blog:b,access_token:j.accessToken||'',refresh_token:j.refreshToken||'',device_id:d||''}};toast('✅','vpnctl Connect','Токены блога «'+b+'» найдены! Перенаправляем в админку...','#22c55e');setTimeout(function(){{location.href=origin+'/admin/boosty#quick_connect='+encodeURIComponent(JSON.stringify(payload));}},500);}}catch(e){{toast('❌','vpnctl Connect','Ошибка чтения токенов: '+e,'#ef4444');}}}})();"#
+        r#"(function(){{function toast(icon,title,desc,color){{var el=document.getElementById('vpnctl-toast');if(!el){{el=document.createElement('div');el.id='vpnctl-toast';el.style.cssText='position:fixed;top:20px;right:20px;z-index:2147483647;background:#18181b;color:#fff;padding:14px 18px;border-radius:10px;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;font-size:13px;box-shadow:0 12px 36px rgba(0,0,0,0.6);border:2px solid '+color+';display:flex;align-items:center;gap:12px;max-width:380px;line-height:1.4;';document.body.appendChild(el);}}el.style.borderColor=color;el.textContent='';var iS=document.createElement('span');iS.style.cssText='font-size:22px;flex-shrink:0;';iS.textContent=icon;var cD=document.createElement('div');var tB=document.createElement('b');tB.style.cssText='color:'+color+';font-size:14px;';tB.textContent=title;var dD=document.createElement('div');dD.style.cssText='color:#d4d4d8;margin-top:2px;';dD.textContent=desc;cD.appendChild(tB);cD.appendChild(dD);el.appendChild(iS);el.appendChild(cD);}}if(location.hostname!=='boosty.to'&&!location.hostname.endsWith('.boosty.to')){{toast('⚠️','vpnctl Connect','Откройте вкладку блога на boosty.to и нажмите закладку снова!','#f59e0b');return;}}toast('🔄','vpnctl Connect','Считываем токены авторизации Boosty...','#3b82f6');function c(n){{var m=document.cookie.match(new RegExp('(?:^|; )'+n+'=([^;]*)'));return m?decodeURIComponent(m[1]):null;}}var lsAuth=null,lsClient=null;try{{lsAuth=localStorage.getItem('auth');lsClient=localStorage.getItem('_clientId')||localStorage.getItem('_clentId');}}catch(e){{}}var a=lsAuth||c('auth'),d=lsClient||c('_clientId')||c('_clentId');if(!a){{toast('❌','vpnctl Connect','Токены не найдены. Убедитесь, что вы авторизованы на boosty.to!','#ef4444');return;}}try{{var j=JSON.parse(a),p=location.pathname.split('/').filter(Boolean),b=(p.length>0&&!['app','feed','dialog','settings','messages'].includes(p[0]))?p[0]:'';b=b||{default_blog_js};var origin={admin_origin_js};var payload={{v:2,blog:b,access_token:j.accessToken||'',refresh_token:j.refreshToken||'',device_id:d||''}};if(!b||!payload.access_token||!payload.refresh_token||!payload.device_id){{toast('❌','vpnctl Connect','Нужна полная сессия для автоматического продления. Откройте свой блог и войдите в Boosty заново.','#ef4444');return;}}toast('✅','vpnctl Connect','Токены блога «'+b+'» найдены! Перенаправляем в админку...','#22c55e');setTimeout(function(){{location.href=origin+'/admin/boosty#quick_connect='+encodeURIComponent(JSON.stringify(payload));}},500);}}catch(e){{toast('❌','vpnctl Connect','Ошибка чтения токенов: '+e,'#ef4444');}}}})();"#
     );
     let bookmarklet_href = format!("javascript:{}", bookmarklet_js);
 
@@ -711,6 +713,16 @@ pub(crate) async fn boosty_page(
 }
 
 pub(crate) async fn boosty_settings_save(State(state): State<AppState>, body: String) -> Response {
+    let quick_connect = form_field(&body, "quick_sync_now").is_some();
+    if quick_connect
+        && ["blog_url", "access_token", "refresh_token", "device_id"]
+            .iter()
+            .any(|field| form_field(&body, field).is_none_or(|value| value.trim().is_empty()))
+    {
+        return bad_request(
+            "Quick Connect requires a blog, access token, refresh token and device ID from the same Boosty session. Open your Boosty blog and use Connect Boosty again.",
+        );
+    }
     let mut s = match state.inv.get_boosty_settings().await {
         Ok(s) => s,
         Err(e) => return internal_error(anyhow::Error::new(e)),
@@ -756,7 +768,7 @@ pub(crate) async fn boosty_settings_save(State(state): State<AppState>, body: St
         return internal_error(anyhow::Error::new(e));
     }
 
-    if form_field(&body, "quick_sync_now").is_some()
+    if quick_connect
         && s.enabled
         && let Err(resp) =
             run_boosty_sync_and_deploy(&state, s.auto_disable_lapsed, "boosty.quick_connect").await
@@ -973,6 +985,87 @@ mod tests {
     use std::time::Duration;
     use vpnctl_core::{KernelId, Registry, Server, ServerId, User, UserId};
     use vpnctl_inventory::SqliteInventory;
+
+    #[test]
+    fn bookmarklet_origin_preserves_valid_authorities() {
+        for host in [
+            "vpnctld",
+            "vpn.example.test:8443",
+            "192.0.2.1:8080",
+            "[2001:db8::1]",
+            "[2001:db8::1]:8080",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(axum::http::header::HOST, host.parse().unwrap());
+            assert_eq!(
+                boosty_admin_origin(&headers, None),
+                format!("http://{host}")
+            );
+            assert_eq!(
+                boosty_admin_origin(&headers, Some("https")),
+                format!("https://{host}")
+            );
+        }
+    }
+
+    #[test]
+    fn bookmarklet_origin_rejects_invalid_authority_as_a_whole() {
+        for host in [
+            "",
+            "evil.example/path",
+            "evil.example?query",
+            "evil.example#fragment",
+            "user@evil.example",
+            "evil.example\\path",
+            "evil.example:65536",
+            "2001:db8::1",
+            "[2001:::1]:8080",
+            "evil.example%2fpath",
+            "evil.example bad",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(axum::http::header::HOST, host.parse().unwrap());
+            assert_eq!(
+                boosty_admin_origin(&headers, None),
+                "http://vpnctld",
+                "{host:?}"
+            );
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(axum::http::header::HOST, "a".repeat(260).parse().unwrap());
+        assert_eq!(boosty_admin_origin(&headers, None), "http://vpnctld");
+        assert_eq!(
+            boosty_admin_origin(&HeaderMap::new(), None),
+            "http://vpnctld"
+        );
+    }
+
+    #[test]
+    fn bookmarklet_scheme_requires_an_exact_trusted_https_header() {
+        let peer = "192.0.2.10".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::HOST,
+            "[2001:db8::1]:8080".parse().unwrap(),
+        );
+        for value in ["https", "http", "https,http", "javascript:alert(1)"] {
+            headers.insert("x-forwarded-proto", value.parse().unwrap());
+            for trusted in [&[peer][..], &[][..]] {
+                let proto = crate::real_ip::resolve_trusted_header_with(
+                    &headers,
+                    peer,
+                    "x-forwarded-proto",
+                    trusted,
+                );
+                let expected = if !trusted.is_empty() && value == "https" {
+                    "https://[2001:db8::1]:8080"
+                } else {
+                    "http://[2001:db8::1]:8080"
+                };
+                assert_eq!(boosty_admin_origin(&headers, proto.as_deref()), expected);
+            }
+        }
+    }
 
     #[tokio::test]
     async fn manual_sync_cancellation_still_queues_redeploy() {

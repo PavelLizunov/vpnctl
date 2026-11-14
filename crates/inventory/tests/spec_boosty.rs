@@ -433,6 +433,47 @@ async fn boosty_user_and_all_server_grants_are_created_atomically() {
 }
 
 #[tokio::test]
+async fn auto_create_rechecks_existing_subscriber_links_inside_transaction() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_user(&user("manual")).await.unwrap();
+    inv.link_boosty_subscriber(&UserId("manual".into()), 123)
+        .await
+        .unwrap();
+    let before = inv.recent_audit(100).await.unwrap().len();
+    assert!(matches!(
+        inv.add_boosty_user(&user("boosty-123"), 123).await,
+        Err(vpnctl_inventory::SqliteInventoryError::AlreadyExists(_))
+    ));
+    assert_eq!(inv.list_users().await.unwrap().len(), 1);
+    assert_eq!(inv.recent_audit(100).await.unwrap().len(), before);
+}
+
+#[tokio::test]
+async fn auto_create_rolls_back_user_and_grants_when_provision_audit_fails() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server("de")).await.unwrap();
+    let raw =
+        sqlx::SqlitePool::connect(&format!("sqlite://{}", dir.path().join("inv.db").display()))
+            .await
+            .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER reject_provision BEFORE INSERT ON audit_log
+        WHEN NEW.action = 'boosty.provision'
+        BEGIN SELECT RAISE(ABORT, 'test audit failure'); END",
+    )
+    .execute(&raw)
+    .await
+    .unwrap();
+    let before = inv.recent_audit(100).await.unwrap().len();
+    assert!(inv.add_boosty_user(&user("boosty-123"), 123).await.is_err());
+    assert!(inv.list_users().await.unwrap().is_empty());
+    assert_eq!(inv.recent_audit(100).await.unwrap().len(), before);
+    raw.close().await;
+}
+
+#[tokio::test]
 async fn clear_boosty_access_token_cas_guard() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
