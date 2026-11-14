@@ -78,15 +78,16 @@ pub fn router(state: AppState) -> Router {
             ),
         );
 
-    public_router
-        .with_state(state)
+    let legacy = public_router
+        .with_state(state.clone())
         .merge(admin_router)
+        .layer(RequestBodyLimitLayer::new(8 * 1024))
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(15),
-        ))
-        .layer(RequestBodyLimitLayer::new(8 * 1024))
-        .layer(trace_layer)
+        ));
+
+    crate::corp_portal::isolate(legacy, state).layer(trace_layer)
 }
 
 pub(crate) fn admin_assets_dir() -> PathBuf {

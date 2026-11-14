@@ -5,8 +5,8 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 437 (288 prod / 149 test)
-- **Total Rust LOC:** 154,281 (86,282 prod / 67,999 test)
+- **Tracked Rust Files:** 444 (293 prod / 151 test)
+- **Total Rust LOC:** 158,435 (87,704 prod / 70,731 test)
 - **Database Migrations:** 70
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 131
 
@@ -23,14 +23,15 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 6,753 (14) | 1,554 (6) | **8,307** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,236 (20) | 4,817 (12) | **9,053** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,778 (4) | 1,191 (5) | **2,969** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 12 tests | 46,604 (152) | 35,413 (63) | **82,017** |
-| **Total** | | | | **86,282 (288)** | **67,999 (149)** | **154,281** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 14 tests | 48,026 (157) | 38,145 (65) | **86,171** |
+| **Total** | | | | **87,704 (293)** | **70,731 (151)** | **158,435** |
 
 ## Largest Rust Modules (Top 25)
 
 | File | LOC | Crate | Role |
 |---|---|---|---|
 | `daemon/tests/admin_smoke/settings_integrations.rs` | 2,575 | `daemon` | Test |
+| `daemon/tests/spec_corp_policy_http.rs` | 1,958 | `daemon` | Test |
 | `crates/inventory/tests/spec_corp_policy.rs` | 1,949 | `crates/inventory` | Test |
 | `crates/inventory/src/sqlite/tests.rs` | 1,948 | `crates/inventory` | Prod |
 | `daemon/src/health_monitor/tests.rs` | 1,845 | `daemon` | Prod |
@@ -46,15 +47,14 @@
 | `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,200 | `daemon` | Test |
 | `daemon/src/handlers/admin/boosty.rs` | 1,170 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,164 | `daemon` | Test |
+| `daemon/src/handlers/auth.rs` | 1,153 | `daemon` | Prod |
 | `crates/ssh/src/subprocess.rs` | 1,148 | `crates/ssh` | Prod |
-| `daemon/src/handlers/auth.rs` | 1,144 | `daemon` | Prod |
 | `daemon/src/protocol_assurance_poller.rs` | 1,100 | `daemon` | Prod |
 | `crates/inventory/tests/spec_node_health.rs` | 1,097 | `crates/inventory` | Test |
 | `daemon/src/wizard_bootstrap/tests.rs` | 1,085 | `daemon` | Prod |
 | `cli/src/cmd/server.rs` | 1,048 | `cli` | Prod |
 | `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,043 | `daemon` | Prod |
 | `crates/inventory/src/sqlite/health.rs` | 1,019 | `crates/inventory` | Prod |
-| `daemon/tests/admin_smoke/user_detail/traffic_activity.rs` | 1,018 | `daemon` | Test |
 
 ## Database Migrations (70)
 

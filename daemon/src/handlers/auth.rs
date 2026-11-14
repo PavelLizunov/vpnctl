@@ -114,13 +114,13 @@ const LOGIN_WINDOW: Duration = Duration::from_secs(60);
 const LOGIN_ATTEMPTS: u8 = 5;
 const MAX_LOGIN_CLIENTS: usize = 1024;
 
-#[derive(Default)]
-struct LoginThrottle {
+#[derive(Debug, Default)]
+pub(crate) struct LoginThrottle {
     attempts: Mutex<HashMap<Option<IpAddr>, (Instant, u8)>>,
 }
 
 impl LoginThrottle {
-    fn try_acquire(&self, ip: Option<IpAddr>, now: Instant) -> bool {
+    pub(crate) fn try_acquire(&self, ip: Option<IpAddr>, now: Instant) -> bool {
         let Ok(mut attempts) = self.attempts.lock() else {
             return false;
         };
@@ -145,7 +145,7 @@ impl LoginThrottle {
         true
     }
 
-    fn clear(&self, ip: Option<IpAddr>) {
+    pub(crate) fn clear(&self, ip: Option<IpAddr>) {
         if let Ok(mut attempts) = self.attempts.lock() {
             attempts.remove(&ip);
         }
@@ -348,7 +348,7 @@ pub(crate) async fn deny_all_misconfigured(_req: Request, _next: Next) -> Respon
 /// attempts from many addresses cannot exhaust the blocking pool and CPU.
 const MAX_CONCURRENT_VERIFICATIONS: usize = 4;
 
-static VERIFY_PERMITS: tokio::sync::Semaphore =
+pub(crate) static VERIFY_PERMITS: tokio::sync::Semaphore =
     tokio::sync::Semaphore::const_new(MAX_CONCURRENT_VERIFICATIONS);
 
 async fn verify_basic(
@@ -356,16 +356,25 @@ async fn verify_basic(
     auth: BasicAuth,
     permits: &'static tokio::sync::Semaphore,
 ) -> bool {
+    bounded_password_work(permits, move || check_basic(Some(&header), &auth))
+        .await
+        .unwrap_or(false)
+}
+
+pub(crate) async fn bounded_password_work<T: Send + 'static>(
+    permits: &'static tokio::sync::Semaphore,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
     let Ok(permit) = permits.acquire().await else {
-        return false;
+        return None;
     };
     tokio::task::spawn_blocking(move || {
         // The blocking job outlives a cancelled HTTP request.
         let _permit = permit;
-        check_basic(Some(&header), &auth)
+        work()
     })
     .await
-    .unwrap_or(false)
+    .ok()
 }
 
 fn check_basic(header: Option<&HeaderValue>, auth: &BasicAuth) -> bool {

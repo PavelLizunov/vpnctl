@@ -6,7 +6,7 @@ Add the approved corporate site-rule portal at `admin.corp.ninitux.com` to
 vpnctld. This is one fixed Corp subscription bound to an existing UserId, not a
 general tenancy or operator-role redesign. The owner approved implementation on
 2026-11-14. Base: `cc071d3143886ccf1cd0869011a694ab67882181`; PR targets `main`.
-The VPNRouter client is green at `b874f33faea7daf464ada1e5cf73750bdfd573a2` in
+The VPNRouter client is green at `b4703c1228ae8f4b2ca12bccf084db4a25f55360` in
 [VPNRouter #675](https://github.com/PavelLizunov/VPNRouter/pull/675), targeting
 `business`. No merge, release, deployment or activation is authorized here.
 
@@ -74,51 +74,62 @@ Do not expose signing private keys/passwords in the client export or logs.
 
 ## Outcome
 
-Implementation in progress. Client CI was independently checked: 13 successes
-and three expected skipped manual delivery jobs at `b874f33`. Backend source
-reconnaissance is recorded in [corp-policy-findings.md](corp-policy-findings.md).
-Backend compilation, tests, UI and live verification have not run.
+Client PR #675 is green at `b4703c1228ae8f4b2ca12bccf084db4a25f55360`:
+13 applicable successes and three expected skipped manual private-delivery jobs.
+The lead inspected all four retained Windows/Linux synthetic 340/420 px client
+screenshots. Source/CI evidence does not establish a live portal, released
+installer or migrated clients.
 
-The first backend publication contains wire signing/validation and durable SQLite
-storage only. It does not register HTTP routes or enable the portal. Independent
-diff-only wire review returned no findings. Storage review found the missing
-payload/envelope/digest binding; the lead tightened persistence validation and
-the contract, then source-checked the bounded correction. Findings remain open
-pending exact-head CI, as recorded in the ledger.
+Backend foundation is green at `908bcacd9a1c2e41ddc058eb1d6aca47516d10da`,
+run `43650614943`: all 11 checks succeeded. The canonical gate log records
+exit code 0 for check, formatting, Clippy, tests, deny and `just ci`; static musl
+and Docker SSH suites also passed. The foundation has 61 independently authored
+spec tests: 28 wire, 32 storage and one signing/storage/reopen roundtrip.
+Earlier CI findings and their corrections are recorded in
+[corp-policy-findings.md](corp-policy-findings.md).
 
-An independent implementation-blind test writer authored 61 tests: 28 wire,
-32 storage and one genuine P-256 signing/storage/reopen/verification roundtrip.
-They cover shared client vectors, domain limits, replay/concurrency, credential
-and user revocation, audit rollback, counter exhaustion and inconsistent exact
-publication bytes. No tests have been executed on the control-plane workstation.
+The next publication adds the isolated Corp HTTP/browser surface and fixed
+Business eligibility, following [HTTP](corp-policy-http.md) and
+[eligibility](corp-policy-eligibility.md) contracts. It includes the Russian
+editor, signed complete-list publication, history/restore, separate sessions,
+and the independent read-only client capability. The binding remains disabled
+until explicitly configured; this block adds no operator setup or activation.
 
-Local publication checks on 2026-11-15: `cargo fmt --all`, format check,
-`git diff --check`, generated project-map and CSS checks, metadata validation
-(`--locked --offline --no-deps`) and gitleaks 8.30.1 whole-tree scan all exited 0.
-The copied wire/domain/seed/PSL fixtures match the pinned client bytes. Offline
-dependency fetching exited 101 because `russh v0.65.1` is not cached; it was not a
-compilation/test attempt. Check, Clippy, test, deny and `just ci` are not run
-locally under the control-plane publication exception and must pass in GitHub
-Actions before the next product block. The PR remains draft.
+Independent diff-only eligibility review returned no findings. HTTP review found
+a timeout outside response hardening and a missing uncertain-publication state
+for 408 replies. Both were recorded before correction: each host branch now
+owns its timeout, Corp hardens the normalized timeout reply, and the editor
+requires reconciliation after a publication timeout. The lead source-checked
+these bounded corrections. There is no claim of an independent final-feature
+review or of runtime verification for an unpublished diff.
 
-Next: isolated HTTP/browser/operator surfaces and verified-egress eligibility,
-then client provisioning and activation runbooks. Current source and CI evidence
-does not establish a live site or migrated clients.
+An implementation-blind test writer added 51 tests: 32 HTTP and 19 eligibility.
+They exercise real router login, signing, storage, revocation, limits, conflicts,
+restore, expiry, current grants/configuration, fixed client selection and
+fingerprint invalidation. A delayed body checks the 408 boundary. Synthetic
+router page exports contain only selected security headers and scrubbed markup;
+they support the separate CI browser interaction and narrow-width screenshot
+job. Its scenarios include publication timeouts both before and after commit.
 
-First CI at `fca36dfe2535082f80d7fd43f811cdd2c8b89159` passed compilation,
-formatting, dependency policy, secret scanning, static musl release and Docker
-SSH suites. Clippy stopped on a manual divisibility predicate; the storage suite
-passed 31 of 32 tests and exposed acceptance of a noncanonical CSRF token. Both
-findings were recorded before correction. The follow-up keeps the original
-tests, uses the standard divisibility predicate and strictly validates the
-32-byte URL-safe CSRF encoding. Its independent diff-only review returned no
-findings; formatting, generated files, whitespace and diff secret checks pass.
-Fresh exact-head CI is required. Other test suites after the failed inventory
-suite are not claimed as executed by the stopped `cargo test` job.
+No builds, tests, browser rendering or SDK installations run on the control-plane
+workstation. Local publication checks on 2026-11-15 exited 0: formatting and
+format check, locked offline metadata, generated project map and CSS checks,
+JavaScript syntax checks, workflow YAML parsing, working/staged whitespace and
+gitleaks 8.30.1 over the complete staged diff. The independent browser-test review
+identified missing WebSocket interception; the lead recorded and corrected it
+before these final checks. All runtime gates for this HTTP block remain pending
+exact-head CI. The PR stays draft. Offline Cargo dependency resolution
+updated the SQLx dev-dependency lock entry, then exited 101 because russh 0.65.1
+is not cached; it was not a compilation or test attempt.
 
-At `e3554372b9c95e0ba046dbeb590ebdbbe461da42`, Clippy and all 32 Corp storage
-tests passed. The existing inventory transaction guard then rejected the new
-deferred current-policy read transaction. The one-line follow-up adopts the
-repository's `BEGIN IMMEDIATE` convention while preserving the credential and
-publication snapshot; no test is changed. This uses the documented single-surface
-small-hotfix review exception. Full exact-head CI remains required.
+Remaining implementation: authenticated operator web controls for setup,
+password/reader/signer rotation, session revocation and protected provisioning
+export; genuine fresh egress verification tied to the effective Corp connection;
+trusted client provisioning/migration and ingress/backup/rollback runbooks.
+Same-host TCP and UDP transport siblings must be covered by egress proof or by an
+explicit portal transport constraint before activation. With no Reality flow
+partition, the client can group WS/XHTTP with non-VLESS siblings for TCP too;
+first-selected-VLESS eligibility alone does not establish portal egress.
+No address is approved merely
+because it appears in inventory, DNS or an SSH curl. Merge, release, deployment
+and activation remain separate owner commands.
