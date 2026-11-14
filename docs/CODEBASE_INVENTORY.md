@@ -6,7 +6,7 @@
 
 - **Workspace Crates:** 10
 - **Tracked Rust Files:** 428 (282 prod / 146 test)
-- **Total Rust LOC:** 149,573 (84,711 prod / 64,862 test)
+- **Total Rust LOC:** 149,729 (84,814 prod / 64,915 test)
 - **Database Migrations:** 69
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 131
 
@@ -23,14 +23,14 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 6,753 (14) | 1,554 (6) | **8,307** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,236 (20) | 4,817 (12) | **9,053** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,778 (4) | 1,191 (5) | **2,969** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 10 tests | 46,030 (149) | 34,225 (61) | **80,255** |
-| **Total** | | | | **84,711 (282)** | **64,862 (146)** | **149,573** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 10 tests | 46,133 (149) | 34,278 (61) | **80,411** |
+| **Total** | | | | **84,814 (282)** | **64,915 (146)** | **149,729** |
 
 ## Largest Rust Modules (Top 25)
 
 | File | LOC | Crate | Role |
 |---|---|---|---|
-| `daemon/tests/admin_smoke/settings_integrations.rs` | 2,522 | `daemon` | Test |
+| `daemon/tests/admin_smoke/settings_integrations.rs` | 2,575 | `daemon` | Test |
 | `crates/inventory/src/sqlite/tests.rs` | 1,948 | `crates/inventory` | Prod |
 | `daemon/src/health_monitor/tests.rs` | 1,845 | `daemon` | Prod |
 | `crates/kernels/src/caddy/tests.rs` | 1,800 | `crates/kernels` | Prod |
@@ -43,13 +43,13 @@
 | `crates/boosty-bridge/tests/sync_integration.rs` | 1,285 | `crates/boosty-bridge` | Test |
 | `daemon/tests/admin_smoke/dashboard.rs` | 1,227 | `daemon` | Test |
 | `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,200 | `daemon` | Test |
+| `daemon/src/handlers/admin/boosty.rs` | 1,170 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,164 | `daemon` | Test |
 | `crates/ssh/src/subprocess.rs` | 1,148 | `crates/ssh` | Prod |
 | `daemon/src/handlers/auth.rs` | 1,144 | `daemon` | Prod |
 | `daemon/src/protocol_assurance_poller.rs` | 1,100 | `daemon` | Prod |
 | `crates/inventory/tests/spec_node_health.rs` | 1,097 | `crates/inventory` | Test |
 | `daemon/src/wizard_bootstrap/tests.rs` | 1,085 | `daemon` | Prod |
-| `daemon/src/handlers/admin/boosty.rs` | 1,067 | `daemon` | Prod |
 | `cli/src/cmd/server.rs` | 1,048 | `cli` | Prod |
 | `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,043 | `daemon` | Prod |
 | `crates/inventory/src/sqlite/health.rs` | 1,019 | `crates/inventory` | Prod |

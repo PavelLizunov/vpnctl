@@ -1,5 +1,7 @@
 use crate::handlers::admin::icons::icon;
-use axum::extract::{Path, State};
+use std::net::SocketAddr;
+
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use maud::{Markup, html};
@@ -33,9 +35,31 @@ fn boosty_time(ts: Option<i64>) -> String {
         .unwrap_or_else(|| "—".into())
 }
 
+fn boosty_admin_origin(headers: &HeaderMap, trusted_proto: Option<&str>) -> String {
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .filter(|host| {
+            !host.is_empty()
+                && host.len() <= 259
+                && host.bytes().all(|b| {
+                    b.is_ascii_alphanumeric()
+                        || matches!(b, b'.' | b'-' | b'_' | b':' | b'[' | b']')
+                })
+                && reqwest::Url::parse(&format!("http://{host}")).is_ok()
+        })
+        .unwrap_or("vpnctld");
+    let proto = match trusted_proto {
+        Some("https") => "https",
+        _ => "http",
+    };
+    format!("{proto}://{host}")
+}
+
 pub(crate) async fn boosty_page(
     headers: HeaderMap,
     State(state): State<AppState>,
+    req: axum::extract::Request,
 ) -> Result<Markup, Response> {
     let (theme, accent, lang) = theme_accent_lang(&headers);
 
@@ -90,15 +114,13 @@ pub(crate) async fn boosty_page(
                 .is_some_and(|v| !v.is_empty())
                 && settings.device_id.as_deref().is_some_and(|v| !v.is_empty())));
 
-    let host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("vpnctld");
-    let proto = headers
-        .get("x-forwarded-proto")
-        .and_then(|p| p.to_str().ok())
-        .unwrap_or("http");
-    let admin_origin = format!("{proto}://{host}");
+    let peer_ip = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip());
+    let forwarded_proto = peer_ip
+        .and_then(|ip| crate::real_ip::resolve_trusted_header(&headers, ip, "x-forwarded-proto"));
+    let admin_origin = boosty_admin_origin(&headers, forwarded_proto.as_deref());
     let default_blog = settings.blog_url.as_deref().unwrap_or("");
 
     let admin_origin_js = serde_json::to_string(&admin_origin).unwrap_or_default();
@@ -963,6 +985,87 @@ mod tests {
     use std::time::Duration;
     use vpnctl_core::{KernelId, Registry, Server, ServerId, User, UserId};
     use vpnctl_inventory::SqliteInventory;
+
+    #[test]
+    fn bookmarklet_origin_preserves_valid_authorities() {
+        for host in [
+            "vpnctld",
+            "vpn.example.test:8443",
+            "192.0.2.1:8080",
+            "[2001:db8::1]",
+            "[2001:db8::1]:8080",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(axum::http::header::HOST, host.parse().unwrap());
+            assert_eq!(
+                boosty_admin_origin(&headers, None),
+                format!("http://{host}")
+            );
+            assert_eq!(
+                boosty_admin_origin(&headers, Some("https")),
+                format!("https://{host}")
+            );
+        }
+    }
+
+    #[test]
+    fn bookmarklet_origin_rejects_invalid_authority_as_a_whole() {
+        for host in [
+            "",
+            "evil.example/path",
+            "evil.example?query",
+            "evil.example#fragment",
+            "user@evil.example",
+            "evil.example\\path",
+            "evil.example:65536",
+            "2001:db8::1",
+            "[2001:::1]:8080",
+            "evil.example%2fpath",
+            "evil.example bad",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(axum::http::header::HOST, host.parse().unwrap());
+            assert_eq!(
+                boosty_admin_origin(&headers, None),
+                "http://vpnctld",
+                "{host:?}"
+            );
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(axum::http::header::HOST, "a".repeat(260).parse().unwrap());
+        assert_eq!(boosty_admin_origin(&headers, None), "http://vpnctld");
+        assert_eq!(
+            boosty_admin_origin(&HeaderMap::new(), None),
+            "http://vpnctld"
+        );
+    }
+
+    #[test]
+    fn bookmarklet_scheme_requires_an_exact_trusted_https_header() {
+        let peer = "192.0.2.10".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::HOST,
+            "[2001:db8::1]:8080".parse().unwrap(),
+        );
+        for value in ["https", "http", "https,http", "javascript:alert(1)"] {
+            headers.insert("x-forwarded-proto", value.parse().unwrap());
+            for trusted in [&[peer][..], &[][..]] {
+                let proto = crate::real_ip::resolve_trusted_header_with(
+                    &headers,
+                    peer,
+                    "x-forwarded-proto",
+                    trusted,
+                );
+                let expected = if !trusted.is_empty() && value == "https" {
+                    "https://[2001:db8::1]:8080"
+                } else {
+                    "http://[2001:db8::1]:8080"
+                };
+                assert_eq!(boosty_admin_origin(&headers, proto.as_deref()), expected);
+            }
+        }
+    }
 
     #[tokio::test]
     async fn manual_sync_cancellation_still_queues_redeploy() {

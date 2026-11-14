@@ -312,6 +312,59 @@ async fn boosty_settings_save_via_web() {
 }
 
 #[tokio::test]
+async fn boosty_page_sanitizes_untrusted_proto_and_malformed_host() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    let req = Request::builder()
+        .uri("/admin/boosty")
+        .header("host", "evil.com/bad#")
+        .header("x-forwarded-proto", "javascript:alert(1)")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&bytes).unwrap();
+
+    assert!(
+        html.contains("http://vpnctld") && html.contains("var origin="),
+        "untrusted X-Forwarded-Proto and malformed Host must fall back to http://vpnctld origin: {html}"
+    );
+}
+
+#[tokio::test]
+async fn boosty_page_ignores_untrusted_https_and_preserves_ipv6() {
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+    for host in [
+        "[2001:db8::1]:8080",
+        "192.0.2.1:8080",
+        "vpn.example.test:8443",
+    ] {
+        let mut req = Request::builder()
+            .uri("/admin/boosty")
+            .header("host", host)
+            .header("x-forwarded-proto", "https")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(
+            "198.51.100.10:12345".parse::<SocketAddr>().unwrap(),
+        ));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(html.contains(&format!("http://{host}")), "{host}");
+        assert!(!html.contains(&format!("https://{host}")), "{host}");
+    }
+}
+
+#[tokio::test]
 async fn boosty_quick_connect_rejects_incomplete_session_before_saving() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
