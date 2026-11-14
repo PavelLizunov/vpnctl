@@ -5227,10 +5227,12 @@ dependencies = [
 name = "vpnctl-inventory"
 version = "0.9.0"
 dependencies = [
+ "base64",
  "chrono",
  "fs2",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "tempfile",
  "thiserror 2.0.18",
@@ -5297,14 +5299,17 @@ dependencies = [
  "chrono-tz",
  "clap",
  "futures-core",
+ "getrandom 0.3.4",
  "hmac 0.12.1",
  "http-body-util",
  "hyper",
  "hyper-util",
+ "idna",
  "ipnet",
  "maud",
  "maxminddb",
  "nix",
+ "p256",
  "percent-encoding",
  "qrcode",
  "reqwest 0.12.28",
@@ -5322,6 +5327,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
  "vpnctl-boosty-bridge",
  "vpnctl-core",
  "vpnctl-crypto",
@@ -5330,6 +5336,7 @@ dependencies = [
  "vpnctl-kernels",
  "vpnctl-protocols",
  "vpnctl-ssh",
+ "zeroize",
 ]
 
 [[package]]

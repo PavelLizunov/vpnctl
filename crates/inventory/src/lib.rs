@@ -35,3 +35,9 @@ pub use sqlite::{
     VpnUserDestinationRow, VpnUserSessionRow, VpnUserSourceIpRow, advance_date_by_cycle,
     convert_minor, monthly_equivalent, sum_nic_deltas, validate_due_date,
 };
+
+pub use sqlite::{
+    CORP_MAX_REVISION, CorpCredentials, CorpPublication, CorpReaderToken, CorpRecord, CorpResult,
+    CorpRevision, CorpSession, CorpSessionInput, CorpSetup, CorpSigningKey, CorpStatus,
+    CorpStoreError, CorpVerifiedEgress,
+};

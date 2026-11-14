@@ -1,0 +1,25 @@
+# Corp implementation findings
+
+Source baseline: `cc071d3143886ccf1cd0869011a694ab67882181`. Findings below are
+new-feature integration gaps, not claims of existing production compromise.
+Record confirmed review findings before fixing or deferring them. Status remains
+open until correction and relevant exact-head CI evidence are recorded.
+
+| ID | Severity | Evidence and required disposition | Status |
+|---|---|---|---|
+| CORP-EGRESS | P1 | `sqlite/servers/address.rs` derives known VPN addresses from inventory/DNS ingress. It does not establish per-subscription actual NAT egress. Use explicit verified mappings intersected with current eligible servers. | Open; portal block |
+| CORP-USER | P1 | `subscription_render_inputs` does not reject `users.disabled`; existing callers check the user separately. The Corp reader, browser gate and commit/session transactions must reject absent/disabled users. | Open; storage/portal blocks |
+| CORP-PROFILE | P1 | Generic app-config collectors emit variants not selectable by Business. Client `BusinessDefaults.GetServerChoices` at `b874f33` selects direct VLESS and deduplicates hosts. Freeze that profile and reuse renderer validation instead of authorizing all inventory or emitted variants. | Open; portal block |
+| CORP-HOST | P1 | `app/routes.rs` merges public/operator routes without host separation. Corp requires outer exclusive host dispatch, including disabled/unknown-path cases, so its host cannot expose operator routes. | Open; portal block |
+| CORP-AUTH | P1 | Operator BasicAuth permits absent-auth local installations, uses stateless SameSite=Lax sessions; operator CSRF allows Referer fallback and authority-only matching. Corp requires independent revocable sessions, exact HTTPS Origin, CSRF, strict cookies and bounded verification. New secret-management operator routes require configured authentication. | Open; portal block |
+| CORP-ATOMIC | P1 | `SqliteInventory::audit` uses the pool independently; several existing credential actions audit after mutation. New Corp mutation/publication must audit within the same transaction. WAL `synchronous=NORMAL` does not establish acknowledged publication durability through host power loss. Use durable transaction settings for Corp writes. | Open; storage block |
+| CORP-LIMIT | P2 | Global `RequestBodyLimitLayer(8 KiB)` would reject valid complete Corp policies despite a larger inner layer. Split legacy and Corp limits explicitly. | Open; portal block |
+| CORP-URL-AUTHORITY | P2 | Draft wire module self-review: WHATWG `url::Url` can reinterpret `https:///example.com` as a valid hostname. The editor contract requires an actual nonempty HTTP(S) authority. Reject an empty raw authority before parsing and test malformed slash forms against the shared normalization contract. | Open; wire correction pending CI |
+| CORP-PAYLOAD-FIELDS | P1 | Draft storage self-review: publication validation initially expected eight payload fields, but wire v1 defines seven (`schema`, `policy_id`, `key_id`, `revision`, `published_at`, `apply`, `rules`). This would reject all valid publications. Correct the field count and retain independently authored successful-publication tests. | Open; storage correction pending CI |
+| CORP-READER-TOKEN-PADDING | P2 | Draft storage validator admits `=` inside reader tokens. Shared bearer-token grammar permits padding only at the end after a nonempty allowed-character prefix. Reject interior padding; state the exact grammar in the storage spec. | Open; storage correction pending CI |
+| CORP-AUTH-EXHAUSTION | P1 | Lead source review: the bound-user disable trigger saturates auth/config generations at the maximum. If Corp stays enabled, disabling and re-enabling the user at that boundary can admit an in-flight session issuance with the unchanged generation. At exhausted counters, disable Corp permanently so re-enabling requires a forbidden counter reset; ordinary nonexhausted transitions still advance generations. | Open; trigger correction pending CI |
+| CORP-AUDIT-BORROW | P2 | Draft storage source review: the private audit helper accepts an owned JSON value but only borrows it to serialize, conflicting with the workspace's needless-pass-by-value gate. Borrow the value at this helper boundary. Clippy has not run locally; CI remains the authority. | Open; source correction pending CI |
+| CORP-PUBLICATION-BINDING | P2 | Independent storage diff review: publication validates payload metadata, envelope shape and digest syntax independently. A caller can advance the floor with a stale envelope or a digest for different bytes. Although the initial spec delegated this consistency check to the daemon, persistence must itself bind decoded canonical envelope payload to exact payload bytes and compute the lowercase SHA-256 before mutation. Cryptographic signature validation stays in the daemon. | Open; storage correction pending CI |
+
+Reconnaissance: separate native eligibility/routing and storage/auth source
+readers; lead checked cited sources. No tests or live reproduction performed.
