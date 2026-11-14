@@ -115,3 +115,10 @@ tests, uses the standard divisibility predicate and strictly validates the
 findings; formatting, generated files, whitespace and diff secret checks pass.
 Fresh exact-head CI is required. Other test suites after the failed inventory
 suite are not claimed as executed by the stopped `cargo test` job.
+
+At `e3554372b9c95e0ba046dbeb590ebdbbe461da42`, Clippy and all 32 Corp storage
+tests passed. The existing inventory transaction guard then rejected the new
+deferred current-policy read transaction. The one-line follow-up adopts the
+repository's `BEGIN IMMEDIATE` convention while preserving the credential and
+publication snapshot; no test is changed. This uses the documented single-surface
+small-hotfix review exception. Full exact-head CI remains required.

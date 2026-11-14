@@ -512,7 +512,7 @@ impl SqliteInventory {
         expected_config_version: u64,
     ) -> CorpResult<Option<CorpRevision>> {
         // One read snapshot binds credential version and current publication.
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let status = required_record(&mut tx).await?.status;
         require_active(&mut tx, &status).await?;
         require_version(&status, expected_config_version)?;
