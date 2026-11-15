@@ -20,6 +20,7 @@ use super::schedulers::{
 
 #[derive(Clone)]
 pub struct AppState {
+    pub corp_egress: Arc<crate::corp_egress::EgressController>,
     pub inv: SqliteInventory,
     pub(crate) admin_session_secret: Arc<String>,
     pub registry: Arc<Registry>,
@@ -154,6 +155,7 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<(Router, tokio::task:
 
     let geo = crate::geoip::GeoLookup::from_env();
     let state = AppState {
+        corp_egress: Arc::new(crate::corp_egress::EgressController::disabled()),
         inv,
         admin_session_secret,
         registry,
@@ -181,6 +183,7 @@ pub fn make_app_state_with_rate_limiter(
     let (access_log_tx, handle) = access_log::spawn_writer(inv.clone());
     (
         AppState {
+            corp_egress: Arc::new(crate::corp_egress::EgressController::disabled()),
             inv,
             admin_session_secret: Arc::new("test-only-session-secret".into()),
             registry,

@@ -6,8 +6,11 @@ Implementation contract frozen against green HTTP candidate
 `5758b2010ee24306cf19eb4576db83d7a534f1a6` on 2026-11-15. Implement one
 strictly authenticated operator page for setup, credential overlap, access
 shutdown, session revocation, protected capability export and sanitized status.
-The binding starts disabled. This preparation block does not implement actual
-egress probes or activate access; those follow after the client transport fix.
+The binding starts disabled. The original preparation block did not implement
+egress probes or activate access. The current controller/probe/enable contract
+is [exit observation lifecycle](corp-policy-egress.md); it supersedes the
+preparation-only restrictions below. The default production runner remains
+unavailable until the bounded helper integration is implemented and verified.
 No deployment, client migration or general operator-auth redesign belongs here.
 
 Independent tests derive from this contract and use isolated inventory plus the
@@ -84,7 +87,7 @@ resets a generation/revision, publishes content or changes user grants.
 | `/signers/remove` | `expected_config_version`, `key_id`, `confirm=true` | Reject active/unknown key or any key needed to validate current or retained history; otherwise remove. |
 | `/sessions/revoke` | `expected_config_version`, `confirm=true` | Call `revoke_corp_sessions`, including when no sessions exist. |
 | `/export` | `expected_config_version`, `reader_id` | Protected capability download; no mutation, rotation or audit-on-read. |
-| `/probe` | `expected_config_version`, `server_id` | Until a trusted proof provider is separately specified, return 503 with sanitized “verification unavailable”; no network or mutation. |
+| `/probe` | `expected_config_version`, `server_id` | Queue an owned proof job and return 303 using the [lifecycle contract](corp-policy-egress.md). An unavailable runner returns 503 and preserves saved proof. |
 
 Ordinary committed changes return 303 to `/admin/corp`. Setup/password rotation
 return 200 with the one-time password and a continue link, never a secret in a
@@ -123,11 +126,14 @@ its per-request eligibility/fingerprint/24-hour expiry checks; the operator
 switch alone never grants access. Revision 0 is allowed and clearly shown as
 “no policy published”; enabling does not seed/publish or bypass reader 404.
 
-The unresolved effective TCP/UDP transport proof in CORP-EGRESS-PROOF and
-CORP-PORTAL-TRANSPORT blocks enabling in this implementation slice. Render the
-button disabled with an explanation; a crafted enable POST returns 503 without
-mutation until the lead approves and specifies that proof gate. Disable, repair,
-rotation and session revocation work while disabled or the bound user is absent.
+The client now pins portal TCP/DNS to the exact selected VLESS outbound and
+rejects portal UDP. The [lifecycle contract](corp-policy-egress.md) therefore
+requires full selected TCP endpoint coverage, successful runner cleanup and a
+current observed IP before enabling. The default production runner is still
+unavailable in this slice: its button stays disabled and a crafted enable POST
+returns 503. Injected runners exercise the complete gate in isolated CI.
+Disable, repair, rotation and session revocation work while disabled or the bound
+user is absent.
 
 Status reads use `eligible_servers` and `corp_verified_egress`, comparing current
 fingerprints and timestamps; no DNS resolution, server SSH or assurance pass can

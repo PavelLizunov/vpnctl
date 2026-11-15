@@ -75,6 +75,9 @@ fn store_error(error_value: &CorpStoreError) -> Response {
 pub(super) async fn handle(State(state): State<PortalState>, request: Request) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
+    if path == "/api/v1/corp/egress-observation" {
+        return observation(&state.app, request).await;
+    }
     if method == Method::GET {
         match path.as_str() {
             "/assets/corp.css" => {
@@ -642,4 +645,40 @@ async fn reader(app: &AppState, headers: &HeaderMap) -> Response {
         Ok(None) => error(StatusCode::NOT_FOUND, "Правила ещё не опубликованы."),
         Err(error_value) => store_error(&error_value),
     }
+}
+
+async fn observation(app: &AppState, request: Request) -> Response {
+    if request.method() != Method::POST {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+    if request.uri().query().is_some() {
+        return StatusCode::UNPROCESSABLE_ENTITY.into_response();
+    }
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|peer| peer.0.ip());
+    let trusted =
+        peer.is_some_and(|ip| crate::real_ip::is_trusted_proxy(security::canonical_ip(ip)));
+    let Some(ip) = security::resolve_client_ip(request.headers(), peer, trusted) else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    let Some(token) = single_header(request.headers(), "authorization")
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|v| Zeroizing::new(v.to_owned()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    match to_bytes(request.into_body(), 1024).await {
+        Ok(body) if body.is_empty() => {}
+        Ok(_) => return StatusCode::UNPROCESSABLE_ENTITY.into_response(),
+        Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+    }
+    if app.corp_egress.observe(&token, ip).is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Ok(value) = HeaderValue::from_str(&token) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    (StatusCode::NO_CONTENT, [("x-corp-probe", value)]).into_response()
 }

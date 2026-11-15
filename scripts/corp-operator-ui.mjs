@@ -11,7 +11,7 @@ export async function verifyOperator(browser, expect, shot) {
   const css = await readFile(source, "utf8");
   assert.equal(await readFile(path.join(fixtures, "assets/operator.css"), "utf8"), css);
   const pages = {};
-  for (const name of ["setup", "status", "password-result", "conflict"]) {
+  for (const name of ["setup", "status", "password-result", "conflict", "egress-ready", "egress-running", "egress-failed", "egress-enabled"]) {
     const metadata = JSON.parse(await readFile(path.join(fixtures, `${name}.json`), "utf8"));
     assert.equal(metadata.status, name === "conflict" ? 409 : 200);
     assert.equal(metadata.headers["cache-control"], "no-store");
@@ -45,15 +45,19 @@ export async function verifyOperator(browser, expect, shot) {
           } else if (request.method() === "GET" && url.pathname === "/admin/corp/assets/operator.css") {
             await route.fulfill({ status: 200, contentType: "text/css", body: css });
           } else if (request.method() === "POST") {
-            assert.equal(url.pathname, name === "setup" ? "/admin/corp/setup" : "/admin/corp/password/rotate");
+            const action = { setup: "setup", status: "password/rotate", "egress-ready": "enabled", "egress-failed": "probe" }[name];
+            assert.ok(action, `Unexpected submission from ${name}`);
+            assert.equal(url.pathname, `/admin/corp/${action}`);
             assert.equal(request.headers().origin, origin);
             const form = new URLSearchParams(request.postData());
             assert.match(form.get("csrf"), /^v1\.\d+\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}$/);
-            assert.equal(form.get(name === "setup" ? "confirm_binding" : "confirm"), "true");
+            if (action !== "probe") assert.equal(form.get(name === "setup" ? "confirm_binding" : "confirm"), "true");
             if (name === "setup") assert.equal(form.get("user_id"), "synthetic-user");
             else assert.match(form.get("expected_config_version"), /^[1-9]\d*$/);
+            if (action === "enabled") assert.equal(form.get("enabled"), "true");
+            if (action === "probe") assert.match(form.get("server_id"), /^[A-Za-z0-9_.-]{1,64}$/);
             posts.push(url.pathname);
-            await route.fulfill(pages["password-result"]);
+            await route.fulfill(pages[action === "enabled" ? "egress-enabled" : action === "probe" ? "egress-running" : "password-result"]);
           } else {
             throw new Error(`Unexpected operator request: ${request.method()} ${url.pathname}`);
           }
@@ -105,6 +109,33 @@ export async function verifyOperator(browser, expect, shot) {
         if (name === "conflict") {
           await expect(page.getByRole("link", { name: "Загрузить текущее состояние", exact: true })).toHaveAttribute("href", "/admin/corp");
           assert.equal(await page.locator("form").count(), 0, "Conflict must require a state reload");
+        }
+        if (name.startsWith("egress-")) {
+          await expect(page.getByRole("link", { name: "Обновить состояние проверки", exact: true })).toHaveAttribute("href", "/admin/corp");
+          if (name === "egress-ready") {
+            const form = page.locator('form[action="/admin/corp/enabled"]').filter({ has: page.locator('input[name="enabled"][value="true"]') });
+            await expect(form.getByRole("button")).toBeEnabled();
+            await form.getByRole("button").click();
+            assert.equal(posts.length, 0, "Enabling access requires confirmation");
+            await form.getByRole("checkbox").check();
+            await form.getByRole("button").click();
+            await expect(page.locator("dd").filter({ hasText: /^Включён$/ })).toBeVisible();
+            assert.deepEqual(posts, ["/admin/corp/enabled"]);
+            await shot(page, "operator-egress-enable-confirmed", width);
+          } else if (name === "egress-failed") {
+            await expect(page.getByText("Проверка не удалась.", { exact: false })).toBeVisible();
+            await expect(page.getByRole("button", { name: "Включить доступ", exact: true })).toBeEnabled();
+            await page.getByRole("button", { name: "Проверить выход", exact: true }).click();
+            await expect(page.getByText("Проверка выполняется.", { exact: false })).toBeVisible();
+            assert.deepEqual(posts, ["/admin/corp/probe"]);
+            await shot(page, "operator-egress-retry-submitted", width);
+          } else if (name === "egress-running") {
+            await expect(page.getByText("Проверка выполняется.", { exact: false })).toBeVisible();
+            await page.getByRole("link", { name: "Обновить состояние проверки", exact: true }).click();
+            assert.deepEqual(posts, [], "Refreshing status must not resubmit the probe");
+          } else {
+            await expect(page.locator("dd").filter({ hasText: /^Включён$/ })).toBeVisible();
+          }
         }
         completed.push(`${width}/operator-${name}`);
       } finally {

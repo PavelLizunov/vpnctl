@@ -3,7 +3,7 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
 };
 use std::collections::{BTreeMap, BTreeSet};
-use vpnctl_core::UserId;
+use vpnctl_core::{ServerId, UserId};
 use vpnctl_inventory::{CorpCredentials, CorpSetup, CorpStoreError};
 use zeroize::Zeroizing;
 
@@ -129,6 +129,14 @@ fn store(error: &CorpStoreError) -> super::Failure {
         _ => unavailable(),
     }
 }
+fn probe_error(error: crate::corp_egress::ProbeError) -> super::Failure {
+    use crate::corp_egress::ProbeError;
+    match error {
+        ProbeError::Busy | ProbeError::Conflict => fail(StatusCode::CONFLICT),
+        ProbeError::NotFound => fail(StatusCode::NOT_FOUND),
+        ProbeError::Unavailable | ProbeError::Failed | ProbeError::CleanupFailed => unavailable(),
+    }
+}
 
 pub(super) async fn perform(state: &OperatorState, path: &str, form: &Form) -> Result<Response> {
     let action = path
@@ -167,7 +175,7 @@ pub(super) async fn perform(state: &OperatorState, path: &str, form: &Form) -> R
     let mut enabled = record.status.enabled;
     match action {
         "enabled" => match form.get("enabled")? {
-            "true" => return Err(unavailable()),
+            "true" => enabled = true,
             "false" => enabled = false,
             _ => return Err(fail(StatusCode::UNPROCESSABLE_ENTITY)),
         },
@@ -272,22 +280,47 @@ pub(super) async fn perform(state: &OperatorState, path: &str, form: &Form) -> R
         }
         "export" => return export(state, &record, form.id("reader_id")?, version).await,
         "probe" => {
-            form.id("server_id")?;
-            return Ok(super::error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Проверка недоступна: доверенный механизм проверки выхода ещё не подключён. Сохранённые результаты не изменены.",
-            ));
+            let server = ServerId(form.id("server_id")?.to_owned());
+            let ticket = state
+                .app
+                .corp_egress
+                .queue_probe(state.app.clone(), version, server)
+                .await
+                .map_err(probe_error)?;
+            // The controller owns the accepted job through cleanup, independently of this response.
+            drop(ticket);
+            return Ok(Redirect::to("/admin/corp").into_response());
         }
         _ => return Err(fail(StatusCode::NOT_FOUND)),
     }
     // Removing authority must work even if existing cryptographic material is corrupt.
-    if action != "enabled" {
+    if action != "enabled" || enabled {
         credentials::validate(&record.credentials)?;
+    }
+    if action == "enabled"
+        && enabled
+        && !state
+            .app
+            .corp_egress
+            .ready_to_enable(&state.app, version)
+            .await
+            .map_err(probe_error)?
+    {
+        return Err(unavailable());
     }
     state
         .app
         .inv
-        .update_corp_security(version, enabled, &record.credentials, actor(action))
+        .update_corp_security(
+            version,
+            enabled,
+            &record.credentials,
+            if action == "enabled" && enabled {
+                "operator-corp-enable"
+            } else {
+                actor(action)
+            },
+        )
         .await
         .map_err(|error| store(&error))?;
     match reveal {

@@ -72,7 +72,7 @@ sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runti
 tower = { version = "0.5", features = ["util"] }
 serde-saphyr = { workspace = true, features = ["deserialize"] }
 http-body-util = "0.1"
-tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread", "test-util"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 vpnctl-ssh = { path = "../crates/ssh" }
 testcontainers = { version = "0.25", default-features = false }

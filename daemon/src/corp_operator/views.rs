@@ -23,14 +23,25 @@ pub(super) fn reveal(password: &str) -> Response {
     Html(document("Пароль создан", &format!("<section><h2>Сохраните пароль сейчас</h2><p>Пароль показывается только один раз. Передайте его разрешённым сотрудникам по защищённому каналу.</p><code id=\"corp-generated-password\">{}</code><p>Повторное открытие страницы не восстановит пароль. Если ответ потерян, сначала проверьте состояние, затем выполните новую ротацию.</p><a href=\"/admin/corp\">Продолжить</a></section>", escape(password)))).into_response()
 }
 fn form(action: &str, csrf: &str, version: Option<u64>, fields: &str, label: &str) -> String {
+    actionable_form(action, csrf, version, fields, label, true)
+}
+fn actionable_form(
+    action: &str,
+    csrf: &str,
+    version: Option<u64>,
+    fields: &str,
+    label: &str,
+    available: bool,
+) -> String {
     let version = version
         .map(|version| {
             format!("<input type=\"hidden\" name=\"expected_config_version\" value=\"{version}\">")
         })
         .unwrap_or_default();
     format!(
-        "<form method=\"post\" action=\"/admin/corp/{action}\"><input type=\"hidden\" name=\"csrf\" value=\"{}\">{version}{fields}<button type=\"submit\">{}</button></form>",
+        "<form method=\"post\" action=\"/admin/corp/{action}\"><input type=\"hidden\" name=\"csrf\" value=\"{}\">{version}{fields}<button type=\"submit\"{}>{}</button></form>",
         escape(csrf),
+        if available { "" } else { " disabled" },
         escape(label)
     )
 }
@@ -96,6 +107,14 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
         .await
         .map_err(|_| unavailable())?;
     let now = (config.clock)();
+    let provider_available = state.app.corp_egress.available();
+    let enable_ready = provider_available
+        && state
+            .app
+            .corp_egress
+            .ready_to_enable(&state.app, status.config_version)
+            .await
+            .unwrap_or(false);
     let mut server_rows = String::new();
     let mut ready = false;
     for server in servers {
@@ -121,10 +140,26 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
         } else {
             "Проверка устарела"
         };
+        let attempt_label = match state.app.corp_egress.attempt(&server.server_id).state {
+            crate::corp_egress::AttemptState::Idle => "Проверка ещё не запускалась",
+            crate::corp_egress::AttemptState::Running => {
+                "Проверка выполняется. Обновите состояние через некоторое время"
+            }
+            crate::corp_egress::AttemptState::Verified => "Проверка завершена, результат сохранён",
+            crate::corp_egress::AttemptState::Failed => {
+                "Проверка не удалась. Можно повторить попытку"
+            }
+            crate::corp_egress::AttemptState::Conflict => {
+                "Конфигурация изменилась. Проверьте состояние и повторите попытку"
+            }
+            crate::corp_egress::AttemptState::Unavailable => {
+                "Проверка временно недоступна. Повторите попытку позднее"
+            }
+        };
         server_rows.push_str(&format!(
-            "<li><h3>{}</h3><p>{state_label}</p>{}</li>",
+            "<li><h3>{}</h3><p>Сохранённое подтверждение: {state_label}</p><p>Последняя попытка: {attempt_label}</p>{}</li>",
             escape(&server.label),
-            form(
+            actionable_form(
                 "probe",
                 &csrf,
                 version,
@@ -132,7 +167,12 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
                     "<input type=\"hidden\" name=\"server_id\" value=\"{}\">",
                     escape(&server.server_id.0)
                 ),
-                "Проверить выход (недоступно)"
+                if provider_available {
+                    "Проверить выход"
+                } else {
+                    "Проверить выход (недоступно)"
+                },
+                provider_available,
             )
         ));
     }
@@ -163,7 +203,20 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
     if status.revision == 0 {
         body.push_str("<p>Правила ещё не опубликованы (редакция 0).</p>");
     }
-    body.push_str("<section><h2>Доступ</h2><p>Включение заблокировано: проверка фактического выхода TCP/UDP ещё не реализована.</p><button type=\"button\" disabled>Включить доступ</button>");
+    body.push_str("<section><h2>Доступ</h2>");
+    if !provider_available {
+        body.push_str("<p>Включение недоступно: механизм проверки выхода не подключён.</p>");
+    } else if !enable_ready {
+        body.push_str("<p>Для включения нужен доступный пользователь и актуальное подтверждение выхода. Запустите проверку сервера и обновите состояние.</p>");
+    }
+    body.push_str(&actionable_form(
+        "enabled",
+        &csrf,
+        version,
+        &format!("<input type=\"hidden\" name=\"enabled\" value=\"true\">{CONFIRM}"),
+        "Включить доступ",
+        enable_ready,
+    ));
     body.push_str(&form(
         "enabled",
         &csrf,
@@ -256,7 +309,13 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
         }
         body.push_str("</article>");
     }
-    body.push_str("</section><section><h2>Проверка серверов</h2><p>Проверка недоступна до подключения доверенного механизма подтверждения выхода. Неуспешная попытка не обновляет сохранённые результаты.</p><ul>");
+    body.push_str("</section><section><h2>Проверка серверов</h2>");
+    if !provider_available {
+        body.push_str(
+            "<p>Проверка недоступна до подключения доверенного механизма подтверждения выхода.</p>",
+        );
+    }
+    body.push_str("<p>Проверка продолжается после закрытия страницы. Неуспешная попытка не обновляет сохранённые результаты.</p><p><a href=\"/admin/corp\">Обновить состояние проверки</a></p><ul>");
     body.push_str(&server_rows);
     if server_rows.is_empty() {
         body.push_str("<li>Нет подходящих серверов</li>");

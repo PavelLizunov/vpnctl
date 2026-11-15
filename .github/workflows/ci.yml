@@ -101,7 +101,7 @@ jobs:
           echo "CORP_UI_SCREENSHOT_DIR=$RUNNER_TEMP/corp-ui-screenshots" >> "$GITHUB_ENV"
           echo "CORP_UI_TOOLING_DIR=$RUNNER_TEMP/corp-ui-tooling" >> "$GITHUB_ENV"
       - name: export pages from real synthetic router tests
-        run: cargo test -p vpnctld --test spec_corp_policy_http --test spec_corp_operator
+        run: cargo test -p vpnctld --test spec_corp_policy_http --test spec_corp_operator --test spec_corp_egress
       - uses: actions/setup-node@v5
         with:
           node-version: '22.21.1'
