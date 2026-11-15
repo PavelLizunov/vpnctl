@@ -137,6 +137,15 @@ pub(super) async fn server_detail_render(
         (Some(pending), Some(measurement)) => Some(pending || measurement.provisioned_at.is_none()),
         _ => None,
     };
+    let path_current = state
+        .inv
+        .current_service_path(
+            &sid,
+            chrono::Utc::now(),
+            crate::quality_poller::path_max_age_secs(),
+        )
+        .await;
+    let path_incidents = state.inv.service_path_incidents(&sid, 20).await;
     let assurance_rows = state
         .inv
         .latest_protocol_assurance_for_server(&sid)
@@ -593,6 +602,7 @@ pub(super) async fn server_detail_render(
         ], lang))
 
         @if tab == ServerTab::Status {
+            (crate::handlers::admin::path_availability::detail_section(path_current.as_ref().ok().and_then(|s| s.as_ref()), path_incidents.as_deref().ok(), lang))
             div.ed-detail-grid {
                 div {
                     (server_detail_uptime_section(

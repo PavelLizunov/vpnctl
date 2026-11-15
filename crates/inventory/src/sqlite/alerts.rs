@@ -205,7 +205,7 @@ impl SqliteInventory {
                  telegram_next_attempt_at = ?2
              WHERE id = ?1 AND telegram_delivered_at IS NULL AND telegram_gave_up_at IS NULL
                AND ((?3 = 0 AND telegram_attempts = 0)
-                 OR (?3 = 1 AND acked_at IS NULL
+                 OR (?3 = 1 AND (acked_at IS NULL OR (kind LIKE 'server.path.recovered.%' AND telegram_attempts = 0))
                      AND julianday(created_at) > julianday(?4, '-24 hours')
                      AND julianday(COALESCE(telegram_next_attempt_at,
                          strftime('%Y-%m-%dT%H:%M:%fZ', created_at, '+5 minutes'))) <= julianday(?4)))
@@ -227,7 +227,8 @@ impl SqliteInventory {
         let rows = sqlx::query(
             "SELECT id, created_at, kind, server_id, severity, summary, payload_json, acked_at
              FROM admin_alerts
-             WHERE acked_at IS NULL AND telegram_delivered_at IS NULL AND telegram_gave_up_at IS NULL
+             WHERE (acked_at IS NULL OR (kind LIKE 'server.path.recovered.%' AND telegram_attempts = 0))
+               AND telegram_delivered_at IS NULL AND telegram_gave_up_at IS NULL
                AND julianday(created_at) > julianday(?1, '-24 hours')
                AND julianday(COALESCE(telegram_next_attempt_at,
                    strftime('%Y-%m-%dT%H:%M:%fZ', created_at, '+5 minutes'))) <= julianday(?1)
@@ -278,7 +279,8 @@ impl SqliteInventory {
     pub async fn expire_alert_telegram_deliveries(&self, now: DateTime<Utc>) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE admin_alerts SET telegram_gave_up_at = ?1, telegram_next_attempt_at = NULL
-             WHERE acked_at IS NULL AND telegram_delivered_at IS NULL AND telegram_gave_up_at IS NULL
+             WHERE (acked_at IS NULL OR (kind LIKE 'server.path.recovered.%' AND telegram_attempts = 0))
+               AND telegram_delivered_at IS NULL AND telegram_gave_up_at IS NULL
                AND julianday(created_at) <= julianday(?1, '-24 hours')",
         )
         .bind(now.to_rfc3339())

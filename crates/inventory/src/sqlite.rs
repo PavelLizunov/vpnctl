@@ -7,6 +7,7 @@ mod boosty;
 mod corp;
 mod health;
 mod models;
+mod reachability;
 mod servers;
 mod sessions;
 mod settings;

@@ -446,6 +446,50 @@ pub fn render_alert(
                     "Открой страницу сервера и проверь матрицу протоколов: генерация конфига сама по себе не доказывает внешнюю доступность.".into())),
             )
         }
+        kind if kind.starts_with("server.path.unavailable.")
+            || kind.starts_with("server.path.recovered.") =>
+        {
+            let recovered = kind.starts_with("server.path.recovered.");
+            let vantage = ps(payload, "vantage").map(code).unwrap_or_default();
+            let checked = ps(payload, "checked_at").map(code).unwrap_or_default();
+            (
+                if recovered {
+                    pick(
+                        loc,
+                        format!("TCP path recovered — {subj}"),
+                        format!("TCP-доступ восстановился — {subj}"),
+                    )
+                } else {
+                    pick(
+                        loc,
+                        format!("TCP path unavailable — {subj}"),
+                        format!("TCP-доступ пропал — {subj}"),
+                    )
+                },
+                pick(
+                    loc,
+                    format!(
+                        "TCP VPN ports from {vantage}: two {} rounds. Checked {checked}. Host state, UDP and VPN authentication are separate checks.",
+                        if recovered { "successful" } else { "failed" }
+                    ),
+                    format!(
+                        "TCP-порты VPN из сети {vantage}: два {} раунда. Проверено {checked}. Состояние узла, UDP и вход в VPN проверяются отдельно.",
+                        if recovered {
+                            "успешных"
+                        } else {
+                            "неудачных"
+                        }
+                    ),
+                ),
+                Some(pick(
+                    loc,
+                    "Open the server page for the incident bounds and saved activity snapshot."
+                        .into(),
+                    "Открой страницу сервера: там границы эпизода и сохранённый срез активности."
+                        .into(),
+                )),
+            )
+        }
         "server.quality.degraded" if severity == "info" => {
             let score = u(payload, "score")
                 .map(|s| code(&format!("{s}/100")))

@@ -14,6 +14,12 @@ use vpnctl_inventory::{
 };
 
 const DEFAULT_INTERVAL_SECS: u64 = 5 * 60;
+
+pub(crate) fn path_max_age_secs() -> u64 {
+    crate::config::parse_positive_secs("VPNCTLD_QUALITY_INTERVAL_SECS", DEFAULT_INTERVAL_SECS)
+        .saturating_mul(2)
+        .saturating_add(30)
+}
 const ATTEMPTS_PER_TARGET: u32 = 3;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const QUALITY_ALERT_LOW: u8 = 60;
@@ -220,6 +226,13 @@ async fn sample_server(
     };
     inv.record_service_quality_sample_for_targets(&sample, &service_targets, &control_targets)
         .await?;
+    let measurement = inv
+        .service_quality_measurement_for_server(&server.id)
+        .await?;
+    if let Some(identity) = measurement.target_identity.as_deref() {
+        inv.record_service_path(&sample, identity, path_max_age_secs())
+            .await?;
+    }
     let score = inv
         .provisioned_service_quality_for_server(&server.id, 24, QUALITY_MIN_SAMPLES)
         .await?;

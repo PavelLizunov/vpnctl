@@ -42,6 +42,7 @@ impl std::fmt::Debug for ProbeRequest {
         f.write_str("ProbeRequest { .. }")
     }
 }
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait ProbeRunner: std::fmt::Debug + Send + Sync {
     fn available(&self) -> bool;
