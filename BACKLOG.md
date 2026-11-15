@@ -14,22 +14,13 @@ rate-limited web check action when full-path checks share that budget. Invalid
 probe profiles must become Unknown without granting access to extra users.
 See `docs/specs/current-path-availability.md`.
 
-## Remove the temporary SQLite driver dependency backport
-
-The security gate uses patched `libsqlite3-sys 0.39.1` through the vendored
-SQLx 0.8.6 SQLite driver and `russh 0.65.1`, without advisory suppressions.
-Remove `vendor/sqlx-sqlite` and its workspace patch when a compatible published
-SQLx release supports the patched bindings; retain inventory/backup and static
-musl compatibility checks. See `docs/specs/dependency-security-backports.md`.
-The declared workspace Rust version also needs reconciliation with dependency
-requirements: even the previously selected russh required Rust 1.89.
-
 ## Boosty: independent authorization and stale lapse decisions
 
 Quick Connect copies a browser session. The bridge can preserve and reuse its
 tokens, but a browser logout, revocation or competing refresh can invalidate
 that session. For the current import flow, use a separate private window and
-close it after confirmation so ordinary browsing does not rotate the same grant. Investigate a supported independent authorization before
+close it after confirmation so ordinary browsing does not rotate the same grant.
+Investigate a supported independent authorization before
 promising unattended operation across browser-session revocation. Recovery
 must remain a web action; never ask operators to extract credentials manually.
 
@@ -48,6 +39,11 @@ the SQLite dependency requirement to the fixed `libsqlite3-sys =0.39.1`.
 Remove the root Cargo patch and vendor package when a reviewed published SQLx
 release supports fixed bundled SQLite. Preserve inventory/migration compatibility
 and re-run the gates in `docs/specs/dependency-security-remediation.md`.
+The live-base backport also documents inventory/backup and static musl checks in
+`docs/specs/dependency-security-backports.md`; retain those gates and the reviewed
+`russh 0.65.1` dependency without advisory suppressions. The declared workspace
+Rust version still needs reconciliation with dependency requirements: even the
+previously selected russh required Rust 1.89.
 
 ## VexVPN single-server import compatibility
 

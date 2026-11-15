@@ -818,8 +818,8 @@ async fn admin_server_delete_client_entry_returns_conflict_with_targets() {
 async fn admin_server_delete_cascades_grants_and_audits() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    seed(&s.inv, 2, 2, &[]).await;
-    // Deploy guards are process-wide; isolate this fixture from concurrent s0 deploy tests.
+    seed(&s.inv, 1, 2, &[]).await;
+    // Deploy locks are process-wide, so this deletion needs its own server ID.
     let mut target = s
         .inv
         .get_server(&ServerId("s0".into()))
@@ -827,7 +827,7 @@ async fn admin_server_delete_cascades_grants_and_audits() {
         .unwrap()
         .unwrap();
     target.id = ServerId("delete-cascade-target".into());
-    target.address = "192.0.2.210".into();
+    target.address = "192.0.2.91".into();
     s.inv.add_server(&target).await.unwrap();
     for user in ["u0", "u1"] {
         s.inv.grant(&UserId(user.into()), &target.id).await.unwrap();

@@ -6,7 +6,6 @@ mod base;
 mod boosty;
 mod corp;
 mod health;
-mod migration_compat;
 mod models;
 mod reachability;
 mod servers;

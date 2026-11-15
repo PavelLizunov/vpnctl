@@ -1,14 +1,23 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-use std::path::PathBuf;
+use std::{path::Path, path::PathBuf};
 
-use sqlx::{Row, SqlitePool};
+use sqlx::{
+    Row, SqlitePool,
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+};
 use tempfile::TempDir;
 use vpnctl_core::{KernelId, ProtocolId, Server, ServerId, User, UserId};
-use vpnctl_inventory::{ServerTrafficLimit, SqliteInventory};
+use vpnctl_inventory::{
+    ServerTrafficLimit, ServicePathStatus, ServiceQualitySample, SqliteInventory,
+};
 
 const REINDEX_ACTION: &str = "migration.server_traffic.reindex";
 const USERS: [&str; 3] = ["fixture-alpha", "fixture-beta", "fixture-gamma"];
+
+#[path = "support/legacy_70.rs"]
+mod legacy_70;
+use legacy_70::{frozen_checksum, install_legacy_70};
 
 #[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
 struct MigrationMarker {
@@ -28,9 +37,6 @@ struct DatabaseSnapshot {
 
 struct Fixture {
     dir: TempDir,
-    corporate_70: MigrationMarker,
-    traffic_71: MigrationMarker,
-    path_72: MigrationMarker,
 }
 
 fn server_id() -> ServerId {
@@ -76,6 +82,19 @@ fn quota() -> ServerTrafficLimit {
         reset_day: 15,
         warning_pct: 80,
     }
+}
+
+async fn connect(path: &Path) -> SqlitePool {
+    SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(path)
+                .create_if_missing(true)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap()
 }
 
 async fn marker(pool: &SqlitePool, version: i64) -> MigrationMarker {
@@ -157,7 +176,6 @@ async fn retained_contents(pool: &SqlitePool) -> Vec<(String, Vec<Vec<String>>)>
     let mut tables = vec![];
     for table in table_names(pool).await {
         if table == "_sqlx_migrations"
-            || table == "audit_log"
             || table.starts_with("sqlite_")
             || table.starts_with("corp_policy_")
             || table.starts_with("service_path_")
@@ -170,132 +188,117 @@ async fn retained_contents(pool: &SqlitePool) -> Vec<(String, Vec<Vec<String>>)>
     tables
 }
 
+async fn assert_current_migrations(pool: &SqlitePool) {
+    let rows: Vec<(i64, String, bool)> = sqlx::query_as(
+        "SELECT version, description, success FROM _sqlx_migrations
+         WHERE version BETWEEN 70 AND 72 ORDER BY version",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0], (70, "server traffic limits".into(), true));
+    assert_eq!(rows[1], (71, "corp policy".into(), true));
+    assert_eq!(rows[2].0, 72);
+    assert!(rows[2].2);
+    assert_eq!(marker(pool, 70).await.checksum, frozen_checksum());
+    let tables = table_names(pool).await;
+    for table in [
+        "corp_policy_settings",
+        "server_traffic_limits",
+        "service_path_states",
+        "service_path_incidents",
+    ] {
+        assert!(tables.iter().any(|name| name == table), "missing {table}");
+    }
+    assert_eq!(reindex_count(pool).await, 0);
+}
+
 impl Fixture {
     async fn new() -> Self {
-        let dir = TempDir::new().unwrap();
-        let inv = SqliteInventory::open(&dir.path().join("inventory.db"))
-            .await
-            .unwrap();
-        inv.add_server(&server()).await.unwrap();
-        for (index, id) in USERS.iter().enumerate() {
-            inv.add_user(&user(id)).await.unwrap();
-            inv.grant(&UserId((*id).into()), &server_id())
-                .await
-                .unwrap();
-            inv.set_grant_client_uuid(&UserId((*id).into()), &server_id(), &grant_uuid(index))
-                .await
-                .unwrap();
-        }
-        inv.set_server_secret(
-            &server_id(),
-            "fixture.identity.secret",
-            "fixture-secret-value",
+        let f = Self {
+            dir: TempDir::new().unwrap(),
+        };
+        let pool = f.pool().await;
+        install_legacy_70(&pool).await;
+        sqlx::query(
+            "UPDATE _sqlx_migrations SET installed_on = '2026-01-02T03:04:05Z',
+             execution_time = 1234567 WHERE version = 70",
         )
+        .execute(&pool)
         .await
         .unwrap();
-        inv.set_server_traffic_limit(&server_id(), Some(&quota()), "spec-operator")
+        sqlx::query(
+            "INSERT INTO servers (id, address, ssh_user, hoster)
+             VALUES (?1, ?2, 'root', 'generic')",
+        )
+        .bind(server_id().0)
+        .bind(server().address)
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (index, id) in USERS.iter().enumerate() {
+            let expected = user(id);
+            sqlx::query(
+                "INSERT INTO users
+                    (id, uuid, tuic_password, sub_token, disabled, monthly_bandwidth_limit_bytes)
+                 VALUES (?1, ?2, ?3, ?4, 0, 987654321)",
+            )
+            .bind(id)
+            .bind(expected.uuid)
+            .bind(expected.tuic_password)
+            .bind(expected.sub_token)
+            .execute(&pool)
             .await
             .unwrap();
-        inv.close().await;
-        let pool = Self::pool_at(&dir).await;
-        let corporate_70 = marker(&pool, 70).await;
-        let traffic_71 = marker(&pool, 71).await;
-        let path_72 = marker(&pool, 72).await;
-        assert_eq!(traffic_71.description, "server traffic limits");
-        assert!(traffic_71.success);
-        assert_eq!(reindex_count(&pool).await, 0);
-        pool.close().await;
-        Self {
-            dir,
-            corporate_70,
-            traffic_71,
-            path_72,
+            sqlx::query(
+                "INSERT INTO grants (user_id, server_id, client_uuid, wg_octet, granted_at)
+                 VALUES (?1, ?2, ?3, ?4, '2026-01-02T03:04:05Z')",
+            )
+            .bind(id)
+            .bind(server_id().0)
+            .bind(grant_uuid(index))
+            .bind(i64::try_from(index).unwrap() + 17)
+            .execute(&pool)
+            .await
+            .unwrap();
         }
+        sqlx::query(
+            "INSERT INTO server_secrets (server_id, key, value)
+             VALUES (?1, 'fixture.identity.secret', 'fixture-secret-value')",
+        )
+        .bind(server_id().0)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let limit = quota();
+        sqlx::query(
+            "INSERT INTO server_traffic_limits
+                (server_id, limit_bytes, direction, reset_day, warning_pct)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(server_id().0)
+        .bind(i64::try_from(limit.limit_bytes).unwrap())
+        .bind(limit.direction)
+        .bind(i64::from(limit.reset_day))
+        .bind(i64::from(limit.warning_pct))
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(marker(&pool, 70).await.checksum, frozen_checksum());
+        let tables = table_names(&pool).await;
+        assert!(!tables.iter().any(|name| name.starts_with("corp_policy_")));
+        assert!(!tables.iter().any(|name| name.starts_with("service_path_")));
+        pool.close().await;
+        f
     }
 
     fn path(&self) -> PathBuf {
         self.dir.path().join("inventory.db")
     }
 
-    async fn pool_at(dir: &TempDir) -> SqlitePool {
-        let pool = SqlitePool::connect(&format!(
-            "sqlite://{}",
-            dir.path().join("inventory.db").display()
-        ))
-        .await
-        .unwrap();
-        sqlx::query("PRAGMA foreign_keys = ON")
-            .execute(&pool)
-            .await
-            .unwrap();
-        pool
-    }
-
     async fn pool(&self) -> SqlitePool {
-        Self::pool_at(&self.dir).await
-    }
-
-    async fn remove_path_schema(pool: &SqlitePool) {
-        sqlx::raw_sql(
-            "DROP TABLE service_path_states;
-             DROP TABLE service_path_incidents;
-             DELETE FROM _sqlx_migrations WHERE version = 72;",
-        )
-        .execute(pool)
-        .await
-        .unwrap();
-    }
-
-    async fn legacy(&self, keep_collision: bool) {
-        let pool = self.pool().await;
-        Self::remove_path_schema(&pool).await;
-        sqlx::raw_sql(
-            "DROP TRIGGER corp_bound_user_deleted;
-             DROP TRIGGER corp_bound_user_disabled;
-             DROP TABLE corp_policy_sessions;
-             DROP TABLE corp_policy_egress;
-             DROP TABLE corp_policy_revisions;
-             DROP TABLE corp_policy_settings;
-             DELETE FROM _sqlx_migrations WHERE version = 70;",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        if keep_collision {
-            sqlx::query(
-                "INSERT INTO _sqlx_migrations
-                    (version, description, installed_on, success, checksum, execution_time)
-                 SELECT 70, description, installed_on, success, checksum, execution_time
-                 FROM _sqlx_migrations WHERE version = 71",
-            )
-            .execute(&pool)
-            .await
-            .unwrap();
-        } else {
-            sqlx::query("UPDATE _sqlx_migrations SET version = 70 WHERE version = 71")
-                .execute(&pool)
-                .await
-                .unwrap();
-        }
-        let legacy = marker(&pool, 70).await;
-        let mut expected = self.traffic_71.clone();
-        expected.version = 70;
-        assert_eq!(legacy, expected);
-        pool.close().await;
-    }
-
-    async fn main_format(&self) {
-        let pool = self.pool().await;
-        Self::remove_path_schema(&pool).await;
-        sqlx::raw_sql(
-            "DROP TABLE server_traffic_limits;
-             DELETE FROM _sqlx_migrations WHERE version = 71;",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        assert_eq!(marker(&pool, 70).await, self.corporate_70);
-        pool.close().await;
+        connect(&self.path()).await
     }
 
     async fn assert_identities(&self, inv: &SqliteInventory) {
@@ -328,24 +331,6 @@ impl Fixture {
         );
     }
 
-    async fn assert_current_migrations(&self, pool: &SqlitePool) {
-        for expected in [&self.corporate_70, &self.traffic_71, &self.path_72] {
-            let actual = marker(pool, expected.version).await;
-            assert_eq!(actual.description, expected.description);
-            assert_eq!(actual.checksum, expected.checksum);
-            assert!(actual.success);
-        }
-        let tables = table_names(pool).await;
-        for table in [
-            "corp_policy_settings",
-            "server_traffic_limits",
-            "service_path_states",
-            "service_path_incidents",
-        ] {
-            assert!(tables.iter().any(|name| name == table), "missing {table}");
-        }
-    }
-
     async fn assert_failed_open_unchanged(&self) {
         let pool = self.pool().await;
         let before = snapshot(&pool).await;
@@ -357,15 +342,13 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn legacy_production_70_moves_once_preserving_quotas_and_all_existing_identities() {
+async fn frozen_production_70_upgrades_normally_without_rewriting_any_legacy_data() {
     let f = Fixture::new().await;
-    f.legacy(false).await;
     let pool = f.pool().await;
     let before = retained_contents(&pool).await;
-    let legacy = marker(&pool, 70).await;
-    let original_audits = table_contents(&pool, "audit_log").await.len();
+    let original_70 = marker(&pool, 70).await;
     pool.close().await;
-
+    let mut upgraded_snapshot = None;
     for _ in 0..3 {
         let inv = SqliteInventory::open(&f.path()).await.unwrap();
         f.assert_identities(&inv).await;
@@ -373,48 +356,56 @@ async fn legacy_production_70_moves_once_preserving_quotas_and_all_existing_iden
             inv.get_server_traffic_limit(&server_id()).await.unwrap(),
             Some(quota())
         );
+        assert!(inv.corp_record().await.unwrap().is_none());
         let pool = f.pool().await;
-        f.assert_current_migrations(&pool).await;
-        let mut moved = legacy.clone();
-        moved.version = 71;
-        assert_eq!(marker(&pool, 71).await, moved);
+        assert_current_migrations(&pool).await;
+        assert_eq!(marker(&pool, 70).await, original_70);
         assert_eq!(retained_contents(&pool).await, before);
-        assert_eq!(reindex_count(&pool).await, 1);
-        assert_eq!(
-            table_contents(&pool, "audit_log").await.len(),
-            original_audits + 1
-        );
+        let current = snapshot(&pool).await;
+        if let Some(expected) = &upgraded_snapshot {
+            assert_eq!(&current, expected);
+        } else {
+            upgraded_snapshot = Some(current);
+        }
         pool.close().await;
         inv.close().await;
     }
 }
 
 #[tokio::test]
-async fn main_format_70_applies_normal_migrations_without_a_compatibility_audit() {
+async fn current_main_71_upgrades_path_history_preserving_both_published_migration_records() {
     let f = Fixture::new().await;
-    f.main_format().await;
-    for _ in 0..2 {
-        let inv = SqliteInventory::open(&f.path()).await.unwrap();
-        f.assert_identities(&inv).await;
-        assert_eq!(
-            inv.get_server_traffic_limit(&server_id()).await.unwrap(),
-            None
-        );
-        let pool = f.pool().await;
-        f.assert_current_migrations(&pool).await;
-        assert_eq!(marker(&pool, 70).await, f.corporate_70);
-        assert_eq!(reindex_count(&pool).await, 0);
-        pool.close().await;
-        inv.close().await;
-    }
-}
-
-#[tokio::test]
-async fn legacy_marker_with_an_unknown_checksum_fails_without_any_schema_or_data_changes() {
-    let f = Fixture::new().await;
-    f.legacy(false).await;
+    let inv = SqliteInventory::open(&f.path()).await.unwrap();
+    inv.close().await;
     let pool = f.pool().await;
-    let mut checksum = f.traffic_71.checksum.clone();
+    sqlx::raw_sql(
+        "DROP TABLE service_path_states;
+         DROP TABLE service_path_incidents;
+         DELETE FROM _sqlx_migrations WHERE version = 72;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let original_70 = marker(&pool, 70).await;
+    let original_71 = marker(&pool, 71).await;
+    let before = retained_contents(&pool).await;
+    pool.close().await;
+    let inv = SqliteInventory::open(&f.path()).await.unwrap();
+    f.assert_identities(&inv).await;
+    let pool = f.pool().await;
+    assert_current_migrations(&pool).await;
+    assert_eq!(marker(&pool, 70).await, original_70);
+    assert_eq!(marker(&pool, 71).await, original_71);
+    assert_eq!(retained_contents(&pool).await, before);
+    pool.close().await;
+    inv.close().await;
+}
+
+#[tokio::test]
+async fn unknown_production_70_checksum_fails_without_any_schema_or_data_changes() {
+    let f = Fixture::new().await;
+    let pool = f.pool().await;
+    let mut checksum = frozen_checksum();
     *checksum.first_mut().unwrap() ^= 0xff;
     sqlx::query("UPDATE _sqlx_migrations SET checksum = ?1 WHERE version = 70")
         .bind(checksum)
@@ -426,20 +417,15 @@ async fn legacy_marker_with_an_unknown_checksum_fails_without_any_schema_or_data
 }
 
 #[tokio::test]
-async fn legacy_70_and_existing_71_collision_fails_without_any_schema_or_data_changes() {
+async fn conflicting_71_metadata_fails_without_reindexing_or_changing_existing_identities() {
     let f = Fixture::new().await;
-    f.legacy(true).await;
-    f.assert_failed_open_unchanged().await;
-}
-
-#[tokio::test]
-async fn matching_traffic_checksum_with_wrong_description_is_not_a_recognized_legacy_marker() {
-    let f = Fixture::new().await;
-    f.legacy(false).await;
     let pool = f.pool().await;
     sqlx::query(
-        "UPDATE _sqlx_migrations SET description = 'unknown legacy feature' WHERE version = 70",
+        "INSERT INTO _sqlx_migrations
+            (version, description, installed_on, success, checksum, execution_time)
+         VALUES (71, 'server traffic limits', '2026-01-02T03:04:05Z', 1, ?1, 7654321)",
     )
+    .bind(frozen_checksum())
     .execute(&pool)
     .await
     .unwrap();
@@ -448,9 +434,8 @@ async fn matching_traffic_checksum_with_wrong_description_is_not_a_recognized_le
 }
 
 #[tokio::test]
-async fn unsuccessful_legacy_marker_is_not_reindexed() {
+async fn unsuccessful_production_70_marker_fails_without_history_or_identity_changes() {
     let f = Fixture::new().await;
-    f.legacy(false).await;
     let pool = f.pool().await;
     sqlx::query("UPDATE _sqlx_migrations SET success = 0 WHERE version = 70")
         .execute(&pool)
@@ -461,14 +446,11 @@ async fn unsuccessful_legacy_marker_is_not_reindexed() {
 }
 
 #[tokio::test]
-async fn restoring_a_production_format_snapshot_reindexes_once_and_preserves_all_identities() {
+async fn restoring_frozen_production_70_preserves_its_metadata_quotas_and_all_identities() {
     let f = Fixture::new().await;
-    f.legacy(false).await;
     let source = f.pool().await;
     let before = retained_contents(&source).await;
-    let mut moved = marker(&source, 70).await;
-    moved.version = 71;
-    let original_audits = table_contents(&source, "audit_log").await.len();
+    let original_70 = marker(&source, 70).await;
     let snapshot_path = f.dir.path().join("production-format-snapshot.db");
     sqlx::query("VACUUM INTO ?1")
         .bind(snapshot_path.to_str().unwrap())
@@ -476,24 +458,18 @@ async fn restoring_a_production_format_snapshot_reindexes_once_and_preserves_all
         .await
         .unwrap();
     source.close().await;
-
     let restored_dir = TempDir::new().unwrap();
     let destination = restored_dir.path().join("inventory.db");
     assert!(!destination.exists());
     vpnctl_inventory::restore_from(&snapshot_path, &destination)
         .await
         .unwrap();
-    let restored_pool = Fixture::pool_at(&restored_dir).await;
-    f.assert_current_migrations(&restored_pool).await;
-    assert_eq!(marker(&restored_pool, 71).await, moved);
+    let restored_pool = connect(&destination).await;
+    assert_current_migrations(&restored_pool).await;
+    assert_eq!(marker(&restored_pool, 70).await, original_70);
     assert_eq!(retained_contents(&restored_pool).await, before);
-    assert_eq!(reindex_count(&restored_pool).await, 1);
-    assert_eq!(
-        table_contents(&restored_pool, "audit_log").await.len(),
-        original_audits + 1
-    );
+    let restored_snapshot = snapshot(&restored_pool).await;
     restored_pool.close().await;
-
     for _ in 0..2 {
         let inv = SqliteInventory::open(&destination).await.unwrap();
         f.assert_identities(&inv).await;
@@ -501,15 +477,51 @@ async fn restoring_a_production_format_snapshot_reindexes_once_and_preserves_all
             inv.get_server_traffic_limit(&server_id()).await.unwrap(),
             Some(quota())
         );
-        let pool = Fixture::pool_at(&restored_dir).await;
-        assert_eq!(marker(&pool, 71).await, moved);
-        assert_eq!(reindex_count(&pool).await, 1);
-        assert_eq!(retained_contents(&pool).await, before);
-        assert_eq!(
-            table_contents(&pool, "audit_log").await.len(),
-            original_audits + 1
-        );
+        let pool = connect(&destination).await;
+        assert_eq!(snapshot(&pool).await, restored_snapshot);
+        assert_eq!(marker(&pool, 70).await, original_70);
+        assert_eq!(reindex_count(&pool).await, 0);
         pool.close().await;
         inv.close().await;
     }
+}
+
+#[tokio::test]
+async fn fresh_main_inventory_has_published_history_and_can_record_current_tcp_path() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("inventory.db");
+    let inv = SqliteInventory::open(&path).await.unwrap();
+    inv.add_server(&server()).await.unwrap();
+    let round = ServiceQualitySample {
+        ts: "2020-01-02T12:00:00Z".parse().unwrap(),
+        server_id: server_id(),
+        vantage: "Fixture measurement network".into(),
+        target_count: 1,
+        available_targets: 1,
+        attempts: 1,
+        successes: 1,
+        tcp_rtt_ms: vec![20],
+        control_attempts: 0,
+        control_successes: 0,
+        control_rtt_ms: vec![],
+        icmp_attempts: None,
+        icmp_successes: None,
+        icmp_rtt_ms: None,
+    };
+    inv.record_service_path(&round, "fixture-network:tcp-population", 120)
+        .await
+        .unwrap();
+    let current = inv
+        .current_service_path(&server_id(), round.ts, 120)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.status, ServicePathStatus::Available);
+    assert_eq!(current.vantage, round.vantage);
+    assert_eq!(current.checked_at, round.ts);
+    assert_eq!(current.last_success_at, Some(round.ts));
+    let pool = connect(&path).await;
+    assert_current_migrations(&pool).await;
+    pool.close().await;
+    inv.close().await;
 }

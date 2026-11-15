@@ -232,13 +232,16 @@ jobs:
           install -m 0755 target/node-artifacts/sing-box "$staging/bin/sing-box"
           install -m 0755 target/node-artifacts/singbox-stats-helper "$staging/bin/singbox-stats-helper"
           git archive "$VPNCTL_BUILD_SHA" daemon/assets | tar -xf - --strip-components=1 -C "$staging"
-          # Only tracked frontend asset types are permitted; reject symlinks,
-          # configuration, inventory, environment and key files from this tree.
+          # Permit frontend assets and these fixed public Corp datasets only.
+          # Reject symlinks, other configuration, inventory, env and key files.
           test -z "$(find "$staging/assets" -mindepth 1 ! -type d ! -type f -print -quit)"
-          test -z "$(find "$staging/assets" -type f ! \( -name '*.css' -o -name '*.js' -o -name '*.svg' -o -name '*.woff2' -o -name '*LICENSE.txt' \
-            -o -path "$staging/assets/corp-policy/business-rules.json" -o -path "$staging/assets/corp-policy/domains.json" \
-            -o -path "$staging/assets/corp-policy/v1.json" -o -path "$staging/assets/corp-policy/public_suffix_list.dat" \
-            -o -path "$staging/assets/corp-policy/public_suffix_list.source.txt" \) -print -quit)"
+          test -z "$(find "$staging/assets" -type f ! \( \
+            -name '*.css' -o -name '*.js' -o -name '*.svg' -o -name '*.woff2' -o -name '*LICENSE.txt' -o \
+            -path "$staging/assets/corp-policy/business-rules.json" -o \
+            -path "$staging/assets/corp-policy/domains.json" -o \
+            -path "$staging/assets/corp-policy/public_suffix_list.dat" -o \
+            -path "$staging/assets/corp-policy/public_suffix_list.source.txt" -o \
+            -path "$staging/assets/corp-policy/v1.json" \) -print -quit)"
           printf '%s\n' "$VPNCTL_BUILD_SHA" > "$staging/SOURCE_SHA"
           (
             cd "$staging"
