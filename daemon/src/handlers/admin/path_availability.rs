@@ -4,9 +4,8 @@ use crate::i18n::{Locale, tr};
 use maud::{Markup, html};
 use vpnctl_inventory::{ServicePathIncident, ServicePathState, ServicePathStatus};
 
-pub(super) fn status_badge(state: Option<&ServicePathState>, lang: Locale) -> Markup {
-    let status = state.map_or(ServicePathStatus::Unknown, |s| s.status);
-    let (label, color) = match status {
+fn status_label(status: ServicePathStatus, lang: Locale) -> (&'static str, &'static str) {
+    match status {
         ServicePathStatus::Available => (tr(lang, "TCP reachable", "TCP доступен"), "var(--soft)"),
         ServicePathStatus::Degraded => (tr(lang, "Deterioration", "Ухудшение"), "var(--acc)"),
         ServicePathStatus::Unreachable => {
@@ -19,7 +18,12 @@ pub(super) fn status_badge(state: Option<&ServicePathState>, lang: Locale) -> Ma
             tr(lang, "Unknown / stale", "Нет свежих данных"),
             "var(--mute)",
         ),
-    };
+    }
+}
+
+pub(super) fn status_badge(state: Option<&ServicePathState>, lang: Locale) -> Markup {
+    let status = state.map_or(ServicePathStatus::Unknown, |s| s.status);
+    let (label, color) = status_label(status, lang);
     html! {
         span data-path-status=(format!("{status:?}").to_lowercase()) style=(format!("color: {color};")) {
             (label)
@@ -27,6 +31,63 @@ pub(super) fn status_badge(state: Option<&ServicePathState>, lang: Locale) -> Ma
         @if let Some(state) = state {
             small.ed-grid__mut style="display:block;" {
                 (state.vantage) " · " (format_msk_iso(state.checked_at))
+            }
+        }
+    }
+}
+
+pub(super) fn fleet_summary(
+    servers: &[vpnctl_core::Server],
+    paths: &std::collections::HashMap<vpnctl_core::ServerId, ServicePathState>,
+    lang: Locale,
+) -> Markup {
+    let statuses = [
+        ServicePathStatus::Unreachable,
+        ServicePathStatus::Degraded,
+        ServicePathStatus::Recovering,
+        ServicePathStatus::Unknown,
+        ServicePathStatus::Available,
+    ];
+    let state_for = |server: &vpnctl_core::Server| {
+        paths
+            .get(&server.id)
+            .map_or(ServicePathStatus::Unknown, |s| s.status)
+    };
+    html! {
+        section #fleet-current-path style="margin-top:18px;" {
+            h2 { (tr(lang, "Availability now", "Доступность сейчас")) }
+            p.ed-grid__mut {
+                (tr(lang,
+                    "TCP VPN ports from the measurement network. Two failed rounds confirm an outage; two successful rounds confirm recovery. UDP and VPN login are checked separately.",
+                    "TCP-порты VPN из сети проверки. Два неудачных раунда подтверждают отказ, два успешных — восстановление. UDP и вход в VPN проверяются отдельно."))
+            }
+            @if servers.is_empty() {
+                p {
+                    (tr(lang, "No servers to monitor. ", "Пока нет серверов для проверки. "))
+                    a href="/admin/servers/new" { (tr(lang, "Add server", "Добавить сервер")) }
+                }
+            } @else {
+                div style="display:flex;flex-wrap:wrap;gap:8px 20px;" {
+                    @for status in statuses {
+                        @let (label, color) = status_label(status, lang);
+                        @let count = servers.iter().filter(|s| state_for(s) == status).count();
+                        span data-path-count=(format!("{status:?}").to_lowercase()) style=(format!("color:{color};")) {
+                            (label) ": " b { (count) }
+                        }
+                    }
+                }
+                div style="display:flex;flex-wrap:wrap;gap:12px 24px;margin-top:12px;" {
+                    @for status in statuses.into_iter().filter(|s| *s != ServicePathStatus::Available) {
+                        @for server in servers.iter().filter(|s| state_for(s) == status) {
+                            div data-path-server=(server.id.0) {
+                                a.ed-grid__id href=(format!("/admin/servers/{}/status#current-path-availability", path_segment_encode(&server.id.0))) {
+                                    (server.id.0)
+                                }
+                                " · " (status_badge(paths.get(&server.id), lang))
+                            }
+                        }
+                    }
+                }
             }
         }
     }

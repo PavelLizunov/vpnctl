@@ -193,6 +193,27 @@ async fn dashboard_render(
         tracing::warn!(target = "vpnctld::admin", error = %e, "list_servers (fleet) failed");
         Vec::new()
     });
+    let mut current_paths = std::collections::HashMap::new();
+    let path_now = chrono::Utc::now();
+    for server in &server_list_fleet {
+        match state
+            .inv
+            .current_service_path(
+                &server.id,
+                path_now,
+                crate::quality_poller::path_max_age_secs(),
+            )
+            .await
+        {
+            Ok(Some(path)) => {
+                current_paths.insert(server.id.clone(), path);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(target = "vpnctld::admin", server = %server.id, %error, "dashboard current path query failed");
+            }
+        }
+    }
 
     let fleet_uptime: Vec<(
         vpnctl_core::ServerId,
@@ -363,7 +384,8 @@ async fn dashboard_render(
     let body = html! {
         div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageDashboard)) }
         (dashboard_summary_bar(&stats, conns_now, lang))
-        (dashboard_fleet_table(&server_list_fleet, &latest_health_per_server, &active_conns_now, &nic_day, &kernel_versions, lang))
+        (crate::handlers::admin::path_availability::fleet_summary(&server_list_fleet, &current_paths, lang))
+        (dashboard_fleet_table(&server_list_fleet, &latest_health_per_server, &active_conns_now, &nic_day, &kernel_versions, &current_paths, lang))
         (detail_tabs(
             "/admin",
             tab.slug(),
