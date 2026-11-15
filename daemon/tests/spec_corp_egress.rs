@@ -978,6 +978,8 @@ async fn sixty_second_total_budget_prevents_starting_another_endpoint_without_ca
             .status(),
         StatusCode::NO_CONTENT
     );
+    // Resolve SQLite state before pausing Tokio: its worker uses real time.
+    let version = f.version().await;
     tokio::time::pause();
     tokio::time::advance(std::time::Duration::from_secs(61)).await;
     assert_eq!(
@@ -987,7 +989,7 @@ async fn sixty_second_total_budget_prevents_starting_another_endpoint_without_ca
     assert_eq!(
         f.state
             .corp_egress
-            .queue_probe(f.state.clone(), f.version().await, sid())
+            .queue_probe(f.state.clone(), version, sid())
             .await
             .unwrap_err(),
         ProbeError::Busy
