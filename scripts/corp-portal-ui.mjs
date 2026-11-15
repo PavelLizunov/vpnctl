@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { verifyOperator } from "./corp-operator-ui.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const requiredEnv = (name) => {
@@ -402,6 +403,7 @@ try {
       console.log(`Passed ${width}/${name}`);
     }
   }
+  completed.push(...await verifyOperator(browser, expect, shot));
 } finally {
   await writeFile(path.join(screenshots, "completed-scenarios.json"), `${JSON.stringify(completed, null, 2)}\n`);
   await browser.close();

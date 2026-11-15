@@ -80,7 +80,7 @@ pub(crate) fn isolate(legacy: Router, app: AppState) -> Router {
     }))
 }
 
-fn secure(mut response: Response) -> Response {
+pub(crate) fn secure(mut response: Response) -> Response {
     for (name, value) in [
         ("cache-control", "no-store"),
         ("x-content-type-options", "nosniff"),

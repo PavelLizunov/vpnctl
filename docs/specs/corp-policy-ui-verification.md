@@ -33,23 +33,37 @@ connecting upstream; an attempted socket is a test failure.
 
 ## Verification checklist
 
-- [ ] All four pages render using actual assets and CSP without page errors,
+- [x] All four pages render using actual assets and CSP without page errors,
   unexpected requests, horizontal overflow, or clipped confirmation controls.
-- [ ] Normalize a pasted URL, preview, choose route/comment, add, search,
+- [x] Normalize a pasted URL, preview, choose route/comment, add, search,
   edit, remove, and save the complete resulting list; empty lists remain valid.
-- [ ] Apply-now confirmation blocks submission until interruption consent;
+- [x] Apply-now confirmation blocks submission until interruption consent;
   success copy covers connected and stopped clients without claiming universal
   application. History restores a prior list as a greater revision.
-- [ ] Conflict and 401 keep the draft; conflict requires reload and access loss
+- [x] Conflict and 401 keep the draft; conflict requires reload and access loss
   disables editing. Failed history remains explicitly retryable.
-- [ ] All four 408 combinations preserve draft and block writes before reload;
+- [x] All four 408 combinations preserve draft and block writes before reload;
   reconciled rules/revision and the next deliberate write use current state.
-- [ ] Capture login, denied, unavailable, editor, normalized preview, history,
+- [x] Capture login, denied, unavailable, editor, normalized preview, history,
   confirmation, long Russian success/status and error states at both widths.
 - [x] Local JavaScript syntax and scoped whitespace checks pass (exit 0).
-  Workflow YAML parses. Browser execution and screenshot inspection remain
-  pending until the exact candidate's CI artifacts exist.
+  Actionlint 1.7.12 validates workflow expressions. Browser scenarios passed
+  for head 5758b2010ee24306cf19eb4576db83d7a534f1a6 in run 43700716817;
+  artifact 14155914657 contains both widths. Lead inspected the principal
+  login, access, editing, consent, history, error and long-text screenshots.
 
 Independent diff-only review found that HTTP routing alone did not intercept
 WebSockets. The finding was recorded before the lead added the explicit socket
 block; its bounded source correction was checked without browser execution.
+
+## Operator controls extension (runtime validation pending)
+
+The same pinned browser CI job now exports `spec_corp_operator` fixtures under
+`CORP_OPERATOR_UI_OUTPUT_DIR`. `corp-operator-ui.mjs` verifies setup, populated
+status (including an eligible unverified server), one-time synthetic password and
+CAS-conflict pages with actual CSS/security headers at 340/420px. Browser forms
+must require explicit confirmation before setup/password rotation, retain CSRF
+and configuration-version fields, keep every action visible and require reload
+following a conflict. Requests and WebSockets are intercepted without a server;
+no production data, cookies or network are used. The existing portal scenarios
+remain mandatory. New screenshots and interaction results await exact-head CI.

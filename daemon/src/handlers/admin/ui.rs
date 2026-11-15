@@ -113,6 +113,7 @@ pub(crate) fn topbar(active: &str, lang: crate::i18n::Locale, alerts_unacked: u6
                         }
                     }
                 }
+                a href="/admin/corp" { "Corp" }
             }
             span.ed-tb__r {
                 form method="get" action="/admin/search" style="display: flex; margin: 0;" {

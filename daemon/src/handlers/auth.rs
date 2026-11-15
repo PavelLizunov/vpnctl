@@ -213,6 +213,92 @@ impl BasicAuth {
         }))
     }
 
+    pub(crate) async fn authenticate_operator(&self, headers: &HeaderMap) -> bool {
+        if extract_cookie(headers, SESSION_COOKIE)
+            .is_some_and(|value| self.verify_session(value, now_unix()))
+        {
+            return true;
+        }
+        let Some(header) = headers.get(header::AUTHORIZATION).cloned() else {
+            return false;
+        };
+        if !self.login_throttle.try_acquire(None, Instant::now()) {
+            return false;
+        }
+        let valid = verify_basic(header, self.clone(), &VERIFY_PERMITS).await;
+        if valid {
+            self.login_throttle.clear(None);
+        }
+        valid
+    }
+
+    pub(crate) fn operator_session_cookie(&self) -> String {
+        build_session_cookie(&self.sign_session(now_unix()), Some("https"))
+    }
+
+    fn operator_csrf_mac(&self, origin: &str, issued: &str, nonce: &str) -> Option<Vec<u8>> {
+        let mut mac = Hmac::<Sha256>::new_from_slice(self.session_key.as_ref()).ok()?;
+        mac.update(b"vpnctl-corp-operator-csrf-v1\0");
+        mac.update(
+            format!(
+                "{}:{}{}:{}:{issued}:{nonce}",
+                self.user.len(),
+                self.user,
+                origin.len(),
+                origin
+            )
+            .as_bytes(),
+        );
+        Some(mac.finalize().into_bytes().to_vec())
+    }
+
+    pub(crate) fn operator_csrf(&self, origin: &str, now: i64) -> Option<String> {
+        if now <= 0 {
+            return None;
+        }
+        let mut nonce = [0u8; 32];
+        getrandom::fill(&mut nonce).ok()?;
+        let nonce = URL_SAFE_NO_PAD.encode(nonce);
+        let issued = now.to_string();
+        let mac = self.operator_csrf_mac(origin, &issued, &nonce)?;
+        Some(format!(
+            "v1.{issued}.{nonce}.{}",
+            URL_SAFE_NO_PAD.encode(mac)
+        ))
+    }
+
+    pub(crate) fn verify_operator_csrf(&self, origin: &str, token: &str, now: i64) -> bool {
+        let fields: Vec<_> = token.split('.').collect();
+        if fields.len() != 4 || fields[0] != "v1" {
+            return false;
+        }
+        let Ok(issued) = fields[1].parse::<i64>() else {
+            return false;
+        };
+        if issued <= 0
+            || issued.to_string() != fields[1]
+            || issued > now
+            || issued.checked_add(3600).is_none_or(|expiry| now >= expiry)
+        {
+            return false;
+        }
+        let Ok(nonce) = URL_SAFE_NO_PAD.decode(fields[2]) else {
+            return false;
+        };
+        let Ok(mac) = URL_SAFE_NO_PAD.decode(fields[3]) else {
+            return false;
+        };
+        if nonce.len() != 32
+            || mac.len() != 32
+            || URL_SAFE_NO_PAD.encode(nonce) != fields[2]
+            || URL_SAFE_NO_PAD.encode(&mac) != fields[3]
+        {
+            return false;
+        }
+        self.operator_csrf_mac(origin, fields[1], fields[2])
+            .is_some_and(|expected| bool::from(mac.ct_eq(&expected)))
+    }
+
     fn sign_session(&self, now: u64) -> String {
         let exp = now.saturating_add(session_ttl_secs());
         let payload = format!("v1|{exp}|{user}", user = self.user.as_str());
@@ -359,6 +445,27 @@ async fn verify_basic(
     bounded_password_work(permits, move || check_basic(Some(&header), &auth))
         .await
         .unwrap_or(false)
+}
+
+pub(crate) fn bounded_corp_password_hash(phc: &str) -> Option<PasswordHash<'_>> {
+    let parsed = PasswordHash::new(phc).ok()?;
+    let params = argon2::Params::try_from(&parsed).ok()?;
+    let mut salt = [0u8; 64];
+    if parsed.algorithm.as_str() != "argon2id"
+        || parsed.version != Some(19)
+        || !(8192..=65536).contains(&params.m_cost())
+        || !(1..=4).contains(&params.t_cost())
+        || !(1..=4).contains(&params.p_cost())
+        || parsed.hash.is_none_or(|hash| hash.len() != 32)
+        || !parsed.salt.is_some_and(|encoded| {
+            encoded
+                .decode_b64(&mut salt)
+                .is_ok_and(|bytes| (16..=64).contains(&bytes.len()))
+        })
+    {
+        return None;
+    }
+    Some(parsed)
 }
 
 pub(crate) async fn bounded_password_work<T: Send + 'static>(

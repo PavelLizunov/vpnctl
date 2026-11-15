@@ -1,7 +1,7 @@
 use std::net::IpAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use argon2::password_hash::{PasswordHash, PasswordVerifier};
+use argon2::password_hash::PasswordVerifier;
 use axum::extract::Request;
 use axum::http::{HeaderMap, header, uri::Authority};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -10,7 +10,7 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use super::{COOKIE, HOST, ORIGIN};
-use crate::handlers::auth::{VERIFY_PERMITS, bounded_password_work};
+use crate::handlers::auth::{VERIFY_PERMITS, bounded_corp_password_hash, bounded_password_work};
 
 pub fn resolve_client_ip(
     headers: &HeaderMap,
@@ -148,27 +148,9 @@ pub(super) fn now() -> i64 {
 
 pub(super) async fn verify_password(password: Zeroizing<String>, phc: Zeroizing<String>) -> bool {
     bounded_password_work(&VERIFY_PERMITS, move || {
-        let Ok(parsed) = PasswordHash::new(&phc) else {
+        let Some(parsed) = bounded_corp_password_hash(&phc) else {
             return false;
         };
-        let Ok(params) = argon2::Params::try_from(&parsed) else {
-            return false;
-        };
-        let mut salt = [0u8; 64];
-        if parsed.algorithm.as_str() != "argon2id"
-            || parsed.version != Some(19)
-            || !(8192..=65536).contains(&params.m_cost())
-            || !(1..=4).contains(&params.t_cost())
-            || !(1..=4).contains(&params.p_cost())
-            || parsed.hash.is_none_or(|hash| hash.len() != 32)
-            || !parsed.salt.is_some_and(|encoded| {
-                encoded
-                    .decode_b64(&mut salt)
-                    .is_ok_and(|bytes| (16..=64).contains(&bytes.len()))
-            })
-        {
-            return false;
-        }
         argon2::Argon2::default()
             .verify_password(password.as_bytes(), &parsed)
             .is_ok()

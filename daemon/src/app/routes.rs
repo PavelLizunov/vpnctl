@@ -18,6 +18,19 @@ use crate::handlers::auth::BasicAuth;
 use super::state::AppState;
 
 pub fn router(state: AppState) -> Router {
+    let config = crate::corp_operator::OperatorConfig::from_parts(
+        std::env::var("VPNCTLD_ADMIN_USER").ok(),
+        std::env::var("VPNCTLD_ADMIN_PASSWORD").ok(),
+        std::env::var("VPNCTLD_CORP_OPERATOR_ORIGIN").ok(),
+        &state.admin_session_secret,
+    );
+    router_with_corp_operator(state, config)
+}
+
+pub fn router_with_corp_operator(
+    state: AppState,
+    config: crate::corp_operator::OperatorConfig,
+) -> Router {
     let trace_layer = TraceLayer::new_for_http().make_span_with(|req: &Request<_>| {
         let matched = req
             .extensions()
@@ -87,7 +100,8 @@ pub fn router(state: AppState) -> Router {
             Duration::from_secs(15),
         ));
 
-    crate::corp_portal::isolate(legacy, state).layer(trace_layer)
+    let operator = crate::corp_operator::isolate(legacy, state.clone(), config);
+    crate::corp_portal::isolate(operator, state).layer(trace_layer)
 }
 
 pub(crate) fn admin_assets_dir() -> PathBuf {

@@ -6,6 +6,7 @@ pub mod boosty_sync_poller;
 pub mod clash_api;
 pub mod clash_poller;
 pub mod config;
+pub mod corp_operator;
 pub mod corp_policy;
 pub mod corp_portal;
 pub mod dns_resolver;
