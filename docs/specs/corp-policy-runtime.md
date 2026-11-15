@@ -221,3 +221,13 @@ pending under the existing retained-stream deadline. Two independently authored
 regressions verify the actual unaccepted kernel socket, absence of SOCKS bytes,
 unchanged tuple, eventual acceptance and timeout cleanup. All 14 runtime tests
 require a fresh CI run; no local runtime execution occurred.
+
+
+Verified runtime baseline `3116a257bb09678c634a58dbdbd9727ef2ed6509`, run
+`43714819498`: all 12 jobs passed. Canonical logs record exit0 for the five
+Cargo commands and `just ci`; all 14 runtime cases passed, including delayed
+acceptance, timeout cleanup and persistent cleanup-error poison. Independent
+final wire/export/client-validation/eligibility/routing diff review returned no
+findings. The [managed artifact gate](corp-policy-managed-verification.md) adds
+separate pinned-binary evidence; [delivery](corp-policy-delivery.md) owns later
+live ingress, private client migration and endpoint compatibility checks.

@@ -9,8 +9,9 @@ shutdown, session revocation, protected capability export and sanitized status.
 The binding starts disabled. The original preparation block did not implement
 egress probes or activate access. The current controller/probe/enable contract
 is [exit observation lifecycle](corp-policy-egress.md); it supersedes the
-preparation-only restrictions below. The default production runner remains
-unavailable until the bounded helper integration is implemented and verified.
+preparation-only restrictions below. The production bounded helper is implemented and green at `3116a25`; its
+construction and availability follow [owned runtime](corp-policy-runtime.md).
+Test constructors remain unavailable unless explicitly injected.
 No deployment, client migration or general operator-auth redesign belongs here.
 
 Independent tests derive from this contract and use isolated inventory plus the
@@ -129,9 +130,11 @@ switch alone never grants access. Revision 0 is allowed and clearly shown as
 The client now pins portal TCP/DNS to the exact selected VLESS outbound and
 rejects portal UDP. The [lifecycle contract](corp-policy-egress.md) therefore
 requires full selected TCP endpoint coverage, successful runner cleanup and a
-current observed IP before enabling. The default production runner is still
-unavailable in this slice: its button stays disabled and a crafted enable POST
-returns 503. Injected runners exercise the complete gate in isolated CI.
+current observed IP before enabling. The default
+production runner is now supplied by the owned-runtime integration. Missing or
+untrusted runtime still disables the button and returns503; test constructors
+remain unavailable unless explicitly injected. Real-process CI exercises the
+owned helper gate, without claiming deployed endpoint proof.
 Disable, repair, rotation and session revocation work while disabled or the bound
 user is absent.
 

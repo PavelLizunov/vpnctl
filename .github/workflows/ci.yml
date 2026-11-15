@@ -185,6 +185,14 @@ jobs:
         run: |
           /tmp/sing-box version | grep -q with_v2ray_api
           test -x /tmp/singbox-stats-helper
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: corp-managed-runtime
+      - name: verify Corp probes with the managed runtime
+        env:
+          VPNCTL_CORP_TEST_SING_BOX: /tmp/sing-box
+        run: cargo test -p vpnctld --test spec_corp_probe_runtime managed_ -- --ignored
 
 
   gitleaks:

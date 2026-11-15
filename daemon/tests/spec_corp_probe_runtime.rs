@@ -55,14 +55,27 @@ mod spec {
     }
 
     fn openssl(dir: &Path, args: &[&str]) {
-        let status = Command::new("/usr/bin/openssl")
-            .current_dir(dir)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .expect("CI requires /usr/bin/openssl for local TLS fixture generation");
+        let mut child = ForeignChild(
+            Command::new("/usr/bin/openssl")
+                .current_dir(dir)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("CI requires /usr/bin/openssl for local TLS fixture generation"),
+        );
+        let deadline = Instant::now() + EVENT;
+        let status = loop {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "OpenSSL fixture generation exceeded its deadline"
+            );
+            std::thread::yield_now();
+        };
         assert!(status.success(), "TLS fixture generation failed");
     }
 
@@ -166,12 +179,13 @@ mod spec {
             let listener = UnixListener::bind(&event_path).unwrap();
             let executable = root.join("managed-helper");
             let settings = format!(
-                "#!/usr/bin/python3\nMODE = {}\nEVENT_PATH = {}\nCERT_PATH = {}\nKEY_PATH = {}\nFOREIGN_PATH = {}\n",
+                "#!/usr/bin/python3\nMODE = {}\nEVENT_PATH = {}\nCERT_PATH = {}\nKEY_PATH = {}\nFOREIGN_PATH = {}\nHTTPS_TRANSCRIPT = {}\n",
                 json!(mode),
                 json!(event_path),
                 json!(root.join("leaf.pem")),
                 json!(root.join("leaf.key")),
-                json!(root.join("foreign.sock"))
+                json!(root.join("foreign.sock")),
+                json!(include_str!("fixtures/corp-probe/https.py"))
             );
             fs::write(
                 &executable,
@@ -289,6 +303,26 @@ mod spec {
         fn drop(&mut self) {
             let _ = self.0.kill();
             let _ = self.0.wait();
+        }
+    }
+
+    impl ForeignChild {
+        async fn wait_bounded(&mut self) -> std::process::ExitStatus {
+            timeout(EVENT, async {
+                loop {
+                    if let Some(status) = self.0.try_wait().unwrap() {
+                        break status;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("fixture child exceeded its bounded exit deadline")
+        }
+
+        async fn stop(&mut self) {
+            self.0.kill().unwrap();
+            self.wait_bounded().await;
         }
     }
 
@@ -879,5 +913,254 @@ while control.recv(1):
             false
         );
         fixture.assert_clean(&session.config);
+    }
+
+    fn install_managed_artifact(fixture: &Fixture) {
+        let artifact = PathBuf::from(
+            std::env::var_os("VPNCTL_CORP_TEST_SING_BOX")
+                .expect("managed CI must supply checksum-verified VPNCTL_CORP_TEST_SING_BOX"),
+        );
+        assert!(
+            artifact.is_absolute(),
+            "managed artifact path must be absolute"
+        );
+        assert!(
+            fs::symlink_metadata(&artifact)
+                .unwrap()
+                .file_type()
+                .is_file(),
+            "managed artifact must be an actual regular file"
+        );
+        fs::copy(artifact, &fixture.executable).unwrap();
+        private(&fixture.executable, 0o700);
+    }
+
+    async fn managed_endpoint(fixture: &Fixture, role: &str) -> (ForeignChild, Events, u16) {
+        let script = fixture.root.join("managed-endpoint.py");
+        let settings = format!(
+            "ROLE = {}\nMODE = 'valid'\nEVENT_PATH = {}\nCERT_PATH = {}\nKEY_PATH = {}\nHTTPS_TRANSCRIPT = {}\n",
+            json!(role),
+            json!(fixture.root.join("events.sock")),
+            json!(fixture.root.join("leaf.pem")),
+            json!(fixture.root.join("leaf.key")),
+            json!(include_str!("fixtures/corp-probe/https.py"))
+        );
+        fs::write(
+            &script,
+            settings + include_str!("fixtures/corp-probe/managed_endpoint.py"),
+        )
+        .unwrap();
+        private(&script, 0o600);
+        let child = ForeignChild(
+            Command::new("/usr/bin/python3")
+                .arg(&script)
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let mut events = fixture.accept().await;
+        let ready = events.until("endpoint_ready").await;
+        let port = u16::try_from(ready["port"].as_u64().unwrap()).unwrap();
+        (child, events, port)
+    }
+
+    fn write_private_json(path: &Path, value: &Value) {
+        use std::{io::Write, os::unix::fs::OpenOptionsExt};
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .unwrap();
+        serde_json::to_writer(&mut file, value).unwrap();
+        file.flush().unwrap();
+    }
+
+    fn managed_client(fixture: &Fixture, port: u16) -> Value {
+        json!({"type":"vless", "tag":"managed-selected", "server":"127.0.0.1",
+            "server_port":port, "uuid":outbound()["uuid"],
+            "tls":{"enabled":true,"server_name":"admin.corp.ninitux.com",
+                "certificate_path":fixture.root.join("ca.pem")}})
+    }
+
+    #[tokio::test]
+    #[ignore = "requires checksum-verified pinned managed sing-box artifact in CI"]
+    async fn managed_runtime_tcp_and_websocket_roundtrip() {
+        for websocket in [false, true] {
+            let fixture = Fixture::new("valid", "valid");
+            install_managed_artifact(&fixture);
+            let (mut observer, mut observed, observer_port) =
+                managed_endpoint(&fixture, "observer").await;
+            let reservation = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let server_port = reservation.local_addr().unwrap().port();
+            let mut inbound = json!({"type":"vless","tag":"fixture-in","listen":"127.0.0.1",
+                "listen_port":server_port,"users":[{"uuid":outbound()["uuid"]}],
+                "tls":{"enabled":true,"certificate_path":fixture.root.join("leaf.pem"),
+                    "key_path":fixture.root.join("leaf.key")}});
+            let mut client = managed_client(&fixture, server_port);
+            if websocket {
+                let transport = json!({"type":"ws","path":"/corp-fixture/"});
+                inbound["transport"] = transport.clone();
+                client["transport"] = transport;
+            }
+            let server_config = json!({"log":{"disabled":true},"inbounds":[inbound],
+                "outbounds":[{"type":"direct","tag":"fixture-direct"}],
+                "route":{"rules":[
+                    {"domain":["admin.corp.ninitux.com"],"port":[443],"action":"route",
+                        "outbound":"fixture-direct","override_address":"127.0.0.1","override_port":observer_port},
+                    {"action":"reject"}],"final":"fixture-direct"}});
+            let server_path = fixture.root.join("vless-server.json");
+            write_private_json(&server_path, &server_config);
+            drop(reservation);
+            let mut server = ForeignChild(
+                Command::new(&fixture.executable)
+                    .args(["run", "-c"])
+                    .arg(&server_path)
+                    .current_dir(&fixture.root)
+                    .env_clear()
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            timeout(EVENT, async {
+                loop {
+                    assert!(
+                        server.0.try_wait().unwrap().is_none(),
+                        "managed VLESS server exited before readiness"
+                    );
+                    match tokio::net::TcpStream::connect(("127.0.0.1", server_port)).await {
+                        Ok(stream) => {
+                            drop(stream);
+                            break Ok::<(), std::io::Error>(());
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                            tokio::task::yield_now().await
+                        }
+                        Err(error) => break Err(error),
+                    }
+                }
+            })
+            .await
+            .expect("managed VLESS server did not become ready")
+            .expect("loopback VLESS readiness failed");
+            let mut config = fixture.config();
+            config.work_timeout = Duration::from_secs(10);
+            let runner = Arc::new(SingBoxRunner::new(config).unwrap());
+            let owned = Arc::clone(&runner);
+            let probe = tokio::spawn(async move { owned.run(request(client)).await });
+            let receipt = observed.until("request").await;
+            assert_eq!(
+                receipt["token"],
+                token(),
+                "separate observer must validate the real runner's exact HTTPS request"
+            );
+            observed.until("response_sent").await;
+            assert_eq!(
+                timeout(Duration::from_secs(14), probe)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                Ok(()),
+                "managed websocket={websocket}"
+            );
+            assert_eq!(fs::read_dir(&fixture.work).unwrap().count(), 0);
+            assert!(runner.available());
+            server.stop().await;
+            observer.stop().await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires checksum-verified pinned managed sing-box artifact in CI"]
+    async fn managed_runtime_reality_and_xhttp_exact_config_check_only() {
+        for xhttp in [false, true] {
+            let fixture = Fixture::new("valid", "valid");
+            install_managed_artifact(&fixture);
+            let (mut endpoint, mut events, port) = managed_endpoint(&fixture, "hold").await;
+            openssl(
+                &fixture.root,
+                &["genpkey", "-algorithm", "X25519", "-out", "reality.key"],
+            );
+            private(&fixture.root.join("reality.key"), 0o600);
+            openssl(
+                &fixture.root,
+                &[
+                    "pkey",
+                    "-in",
+                    "reality.key",
+                    "-pubout",
+                    "-outform",
+                    "DER",
+                    "-out",
+                    "reality-public.der",
+                ],
+            );
+            let public = fs::read(fixture.root.join("reality-public.der")).unwrap();
+            assert_eq!(
+                public.len(),
+                44,
+                "OpenSSL X25519 SubjectPublicKeyInfo has a 32-byte raw key"
+            );
+            let mut client = managed_client(&fixture, port);
+            client["tls"] = json!({"enabled":true,"server_name":"admin.corp.ninitux.com",
+                "utls":{"enabled":true,"fingerprint":"chrome"},
+                "reality":{"enabled":true,"public_key":URL_SAFE_NO_PAD.encode(&public[12..]),"short_id":"0123456789abcdef"}});
+            if xhttp {
+                client["transport"] = json!({"type":"xhttp","path":"/corp-fixture/","mode":"auto"});
+            } else {
+                client["flow"] = json!("xtls-rprx-vision");
+                client["packet_encoding"] = json!("xudp");
+            }
+            let expected = client.clone();
+            let mut config = fixture.config();
+            config.work_timeout = Duration::from_secs(10);
+            let runner = Arc::new(SingBoxRunner::new(config).unwrap());
+            let owned = Arc::clone(&runner);
+            let probe = tokio::spawn(async move { owned.run(request(client)).await });
+            events.until("endpoint_accepted").await;
+            let entries: Vec<_> = fs::read_dir(&fixture.work)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+            assert_eq!(entries.len(), 1);
+            let captured_path = entries[0].join("config.json");
+            let captured: Value =
+                serde_json::from_slice(&fs::read(&captured_path).unwrap()).unwrap();
+            assert_eq!(captured["outbounds"], json!([expected]));
+            assert!(!captured.to_string().contains(&token()));
+            let mut check = ForeignChild(
+                Command::new(&fixture.executable)
+                    .args(["check", "-c"])
+                    .arg(&captured_path)
+                    .current_dir(&fixture.root)
+                    .env_clear()
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            assert!(
+                check.wait_bounded().await.success(),
+                "pinned managed check must accept exact captured Reality/XHTTP configuration"
+            );
+            assert!(
+                timeout(Duration::from_secs(14), probe)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_err(),
+                "a held local endpoint cannot certify a handshake"
+            );
+            assert_eq!(fs::read_dir(&fixture.work).unwrap().count(), 0);
+            endpoint.stop().await;
+            // This proves config acceptance only; deployed Reality and XHTTP
+            // handshake compatibility remains a separate delivery gate.
+        }
     }
 }
