@@ -86,6 +86,7 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<(Router, tokio::task:
     ));
 
     drop(crate::wg_stats_poller::spawn_wg_stats_poller(inv.clone()));
+    drop(crate::ssh_access::spawn_poller(inv.clone()));
 
     drop(crate::dns_resolver::spawn_dns_resolver(
         inv.clone(),

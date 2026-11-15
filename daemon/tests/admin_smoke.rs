@@ -29,6 +29,8 @@ mod servers;
 mod settings_integrations;
 #[path = "admin_smoke/shell_nav.rs"]
 mod shell_nav;
+#[path = "admin_smoke/ssh_access.rs"]
+mod ssh_access;
 #[path = "admin_smoke/user_detail.rs"]
 mod user_detail;
 #[path = "admin_smoke/users.rs"]

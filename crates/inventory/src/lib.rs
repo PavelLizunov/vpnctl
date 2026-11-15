@@ -8,6 +8,10 @@ pub mod quality;
 pub mod reachability;
 pub use reachability::{ServicePathIncident, ServicePathState, ServicePathStatus};
 pub mod sqlite;
+mod ssh_access;
+pub use ssh_access::{
+    SshAccessCheck, SshAccessFailure, SshAccessRoute, SshAccessState, SshAccessStatus,
+};
 
 pub use jump_resolver::{JumpResolverError, resolve_jump_host};
 

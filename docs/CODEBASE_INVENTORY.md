@@ -5,10 +5,10 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 496 (323 prod / 173 test)
-- **Total Rust LOC:** 180,194 (95,539 prod / 84,655 test)
-- **Database Migrations:** 72
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 143
+- **Tracked Rust Files:** 502 (327 prod / 175 test)
+- **Total Rust LOC:** 181,536 (96,214 prod / 85,322 test)
+- **Database Migrations:** 73
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 144
 
 ## Workspace Crates & Targets
 
@@ -19,12 +19,12 @@
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,419 (13) | 0 (0) | **1,419** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 318 (1) | 125 (1) | **443** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 193 (1) | 454 (2) | **647** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 55 tests | 17,976 (61) | 25,329 (61) | **43,305** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 56 tests | 18,187 (63) | 25,813 (62) | **44,000** |
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 6,753 (14) | 1,554 (6) | **8,307** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,236 (20) | 4,817 (12) | **9,053** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,757 (4) | 1,191 (5) | **2,948** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 22 tests | 55,016 (183) | 48,254 (81) | **103,270** |
-| **Total** | | | | **95,539 (323)** | **84,655 (173)** | **180,194** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 22 tests | 55,480 (185) | 48,437 (82) | **103,917** |
+| **Total** | | | | **96,214 (327)** | **85,322 (175)** | **181,536** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -56,7 +56,7 @@
 | `crates/ssh/src/subprocess.rs` | 1,127 | `crates/ssh` | Prod |
 | `daemon/src/protocol_assurance_poller.rs` | 1,100 | `daemon` | Prod |
 
-## Database Migrations (72)
+## Database Migrations (73)
 
 | Version | Migration Name | File | Lines |
 |---|---|---|---|
@@ -132,8 +132,9 @@
 | `0070` | server traffic limits | `crates/inventory/migrations/0070_server_traffic_limits.sql` | 8 |
 | `0071` | corp policy | `crates/inventory/migrations/0071_corp_policy.sql` | 68 |
 | `0072` | service path incidents | `crates/inventory/migrations/0072_service_path_incidents.sql` | 16 |
+| `0073` | ssh access | `crates/inventory/migrations/0073_ssh_access.sql` | 7 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (143)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (144)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -214,6 +215,7 @@
 | `POST` | `/admin/servers/{id}/set-fingerprint` | `admin::server_set_fingerprint` |
 | `GET` | `/admin/servers/{id}/setup` | `admin::server_detail_setup` |
 | `POST` | `/admin/servers/{id}/ss2022-mode` | `admin::server_set_ss2022_mode` |
+| `POST` | `/admin/servers/{id}/ssh-check` | `admin::ssh_access::recheck` |
 | `GET` | `/admin/servers/{id}/status` | `admin::server_detail` |
 | `POST` | `/admin/servers/{id}/traffic-limit` | `admin::server_set_traffic_limit` |
 | `POST` | `/admin/servers/{id}/udp-pair` | `admin::server_set_udp_pair` |

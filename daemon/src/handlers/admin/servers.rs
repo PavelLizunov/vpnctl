@@ -28,11 +28,15 @@ fn server_row(
         (vpnctl_core::ServerId, vpnctl_core::ProtocolId),
         bool,
     >,
-    health: Option<&vpnctl_inventory::NodeHealthRow>,
-    path: Option<&vpnctl_inventory::ServicePathState>,
+    observations: (
+        Option<&vpnctl_inventory::NodeHealthRow>,
+        Option<&vpnctl_inventory::ServicePathState>,
+        Option<&vpnctl_inventory::SshAccessStatus>,
+    ),
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
+    let (health, path, ssh_access) = observations;
     let mut visible_protos: Vec<&str> = Vec::with_capacity(s.enabled_protocols.len());
     let mut hidden_protos: Vec<&str> = Vec::new();
     for p in &s.enabled_protocols {
@@ -98,6 +102,7 @@ fn server_row(
                 (s.address) ":" (s.ssh_port)
             }
             td { (super::path_availability::status_badge(path, lang)) }
+            td.ed-grid__sm { (super::ssh_access::inline_status(s, ssh_access, lang)) }
             td.ed-grid__mut { (s.hoster) }
             td.num { b { (user_count) } " " (tr(lang, "users", "польз.")) }
             td.ed-grid__sm {
@@ -143,7 +148,19 @@ pub(crate) async fn servers(
     .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
     let mut paths = std::collections::HashMap::new();
+    let mut ssh_access = std::collections::HashMap::new();
     for server in &server_list {
+        if let Ok(status) = state
+            .inv
+            .ssh_access_for_server(
+                &server.id,
+                chrono::Utc::now(),
+                crate::ssh_access::max_age_secs(),
+            )
+            .await
+        {
+            ssh_access.insert(server.id.clone(), status);
+        }
         match state
             .inv
             .current_service_path(
@@ -319,6 +336,7 @@ pub(crate) async fn servers(
                             th { (crate::i18n::tr(lang, "server", "сервер")) }
                             th { (crate::i18n::tr(lang, "endpoint", "адрес")) }
                             th { (crate::i18n::tr(lang, "TCP path now", "TCP сейчас")) }
+                            th { (crate::i18n::tr(lang, "SSH access", "SSH-доступ")) }
                             th { (crate::i18n::tr(lang, "hoster", "хостер")) }
                             th.num { (crate::i18n::tr(lang, "grants", "гранты")) }
                             th { (crate::i18n::tr(lang, "protocols", "протоколы")) }
@@ -334,8 +352,7 @@ pub(crate) async fn servers(
                                 s,
                                 user_counts.get(&s.id).copied().unwrap_or(0),
                                 &hidden_matrix,
-                                latest_health.get(&s.id),
-                                paths.get(&s.id),
+                                (latest_health.get(&s.id), paths.get(&s.id), ssh_access.get(&s.id)),
                                 lang,
                             ))
                         }
