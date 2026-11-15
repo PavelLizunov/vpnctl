@@ -24,6 +24,7 @@ export async function verifyOperator(browser, expect, shot) {
   for (const width of [340, 420]) {
     for (const name of Object.keys(pages)) {
       const context = await browser.newContext({
+        offline: true,
         viewport: { width, height: 900 }, locale: "ru-RU", timezoneId: "UTC",
         colorScheme: "light", reducedMotion: "reduce", serviceWorkers: "block",
       });

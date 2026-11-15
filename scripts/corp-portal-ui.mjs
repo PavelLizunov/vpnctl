@@ -53,6 +53,7 @@ function writes(harness) {
 
 async function harness(pageName, width) {
   const context = await browser.newContext({
+    offline: true,
     viewport: { width, height: 900 }, deviceScaleFactor: 1,
     locale: "ru-RU", timezoneId: "UTC", reducedMotion: "reduce", serviceWorkers: "block",
   });
@@ -96,9 +97,8 @@ async function harness(pageName, width) {
         assert.deepEqual([...form], [["password", "synthetic-browser-password"]]);
         calls.push({ endpoint });
         state.authenticated = true;
-        await route.fulfill({
-          status: 303, headers: { location: "/", "cache-control": "no-store", "referrer-policy": "no-referrer" }, body: "",
-        });
+        // Chromium bypasses route interception on redirects; HTTP tests cover the server's 303.
+        await route.fulfill(pages.editor);
         return;
       }
       assert.ok(state.authenticated, "Access page attempted an API call");
@@ -400,9 +400,10 @@ try {
         if (name === "login") {
           await h.page.getByLabel("Пароль", { exact: true }).fill("synthetic-browser-password");
           await h.page.getByRole("button", { name: "Войти", exact: true }).click();
+          await expect(h.page).toHaveURL(`${origin}/login`);
+          assert.equal(h.calls.filter(({ endpoint }) => endpoint === "/login").length, 1);
           await idle(h.page);
           await expect(h.page.locator("#draft-status")).toContainText("Версия 7.");
-          assert.equal(h.calls.filter(({ endpoint }) => endpoint === "/login").length, 1);
           await shot(h.page, "login-submitted", width);
         }
       } finally { await h.close(); }

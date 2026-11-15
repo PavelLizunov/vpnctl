@@ -322,3 +322,14 @@ browser checks remain CI-only and are pending for this
 correction. Client portal transport at VPNRouter `098b7d34` is green (13
 successful jobs, three expected manual-delivery skips); that is source/CI
 evidence, not a deployed portal or actual-egress proof.
+
+Browser fixture follow-up at `1770616`: all 75 independent Corp HTTP tests
+passed, but Playwright Chromium bypasses request routing after a synthetic
+redirect. The login scenario now fulfills the intercepted native form POST
+with the actual editor HTML/headers directly. It asserts the exact submitted
+Origin/body and one POST; HTTP tests retain the real server's 303 contract.
+Both browser contexts also use offline mode in addition to HTTP/WebSocket
+interception, so a request outside routing cannot reach the real portal.
+This combination still requires exact-head browser CI; no local browser ran.
+Independent diff-only review returned no findings. Local format, JS syntax,
+generated-file, workflow, whitespace and secret checks pass before publication.
