@@ -518,6 +518,26 @@ pub fn render_alert(
                 )),
             )
         }
+        "server.traffic_limit" | "server.traffic_exhausted" => {
+            let used = u(payload, "used_bytes")
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "?".into());
+            let limit = u(payload, "limit_bytes")
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "?".into());
+            let direction = ps(payload, "direction")
+                .map(esc)
+                .unwrap_or_else(|| "RX+TX".into());
+            (
+                pick(loc, format!("Hoster traffic limit — {subj}"), format!("Лимит трафика хостера — {subj}")),
+                pick(loc,
+                    format!("Observed traffic: at least {used} of {limit} bytes ({direction}). Missing history can increase the actual usage."),
+                    format!("Измеренный расход: не менее {used} из {limit} байт ({direction}). При неполной истории фактический расход может быть больше.")),
+                Some(pick(loc,
+                    "Open the server's Activity → Hoster traffic to review usage and the quota settings.".into(),
+                    "Открой «Активность → Трафик хостера» сервера: проверь расход и настройки лимита.".into())),
+            )
+        }
         "user.traffic_limit" => {
             let pct = u(payload, "used_pct").or_else(|| u(payload, "pct"));
             let pcts = pct

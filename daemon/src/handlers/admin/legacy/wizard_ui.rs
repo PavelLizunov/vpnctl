@@ -27,6 +27,12 @@ pub(crate) async fn wizard_new(headers: HeaderMap, State(state): State<AppState>
             ))
         }
 
+        p.ed-muted {
+            (tr(lang,
+                "Only VLESS+REALITY is enabled by default. Enable other protocols on the server's Protocols page. If SSH uses TCP 443, VLESS stays off until you choose a different listen port there.",
+                "По умолчанию включается только VLESS+REALITY. Остальные протоколы включаются на вкладке «Протоколы» сервера. Если SSH занимает TCP 443, VLESS останется выключенным: сначала выбери для него другой порт на этой вкладке."))
+        }
+
         form method="post" action="/admin/servers/new"
              style="margin: 24px 0; padding: 18px 20px; border: 1px solid var(--rule); background: var(--paper); display: flex; flex-direction: column; gap: 14px;" {
             div style="display: flex; flex-direction: column; gap: 4px;" {

@@ -43,6 +43,12 @@ pub(crate) async fn alerts(
             tr(lang, "on next ok probe", "при следующей ok-пробе")
         } else if kind.starts_with("server.fingerprint.drift") {
             tr(lang, "on match", "при совпадении")
+        } else if matches!(kind, "server.traffic_limit" | "server.traffic_exhausted") {
+            tr(
+                lang,
+                "on confirmed lower usage or quota removal",
+                "при подтверждённом спаде расхода или удалении лимита",
+            )
         } else if kind.starts_with("user.traffic_limit") {
             tr(lang, "on usage drop", "при спаде расхода")
         } else {

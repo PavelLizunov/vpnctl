@@ -60,3 +60,10 @@ impl SqliteInventory {
 - [ ] Helper timeout, malformed response, and unavailable API fail closed without resetting counters.
 - [ ] Existing Clash server-wide rows and AmneziaWG user rows are not duplicated.
 - [ ] Share-link/subscription byte-equality tests, targeted tests, `just ci`, independent review, and GitHub CI pass.
+
+## Full node / hoster usage
+
+Per-user attribution is separate from full NIC traffic and hoster quotas. GAP
+is already included in RX+TX and is never billed to an individual user by
+inference. See [full-node-traffic.md](full-node-traffic.md) for monthly windows,
+coverage quality, per-server quotas and warnings.

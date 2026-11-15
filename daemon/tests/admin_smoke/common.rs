@@ -400,3 +400,27 @@ pub(crate) async fn ticketed_sse_uri(app: &axum::Router, path: &str) -> String {
     .await;
     format!("{path}?ticket={}", ticket.trim())
 }
+
+pub(crate) async fn seed_nic_traffic(inv: &SqliteInventory, sid: &ServerId, rx: u64, tx: u64) {
+    for (rx, tx) in [(0, 0), (rx, tx)] {
+        inv.record_node_health(
+            sid,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("eth0"),
+            Some(rx),
+            Some(tx),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+}
