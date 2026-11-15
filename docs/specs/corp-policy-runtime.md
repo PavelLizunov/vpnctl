@@ -91,6 +91,9 @@ build, not an arbitrary system sing-box from PATH.
   and insufficient. Bound proc reads/iterations and check child liveness before
   and after. Fail closed on inaccessible/malformed proc state. Retain this exact
   TcpStream through TLS and cleanup; never close/reopen it for the HTTPS request.
+  A matching socket with inode0 is pending kernel accept/fd installation, not
+  ownership proof or malformed proc data. Wait boundedly on the same stream
+  until its nonzero inode is owned; send no SOCKS bytes before that proof.
 
 ## SOCKS and HTTPS transcript
 
@@ -209,3 +212,12 @@ then stopped because libsqlite3-sys source was not cached offline; no compilatio
 or package installation was attempted. Canonical builds/tests, actual runtime
 fixtures and full browser/static-musl gates must pass at the candidate SHA in CI.
 No live service, probe, deployment or activation was used.
+
+CI follow-up at `4f459ed` (run `43713828537`): compilation, Clippy, static
+musl, Docker SSH and browser verification passed. Runtime tests exposed the
+pending-accept inode0 race before helper acceptance; the cancellation failures
+occurred before cancellation was requested. The source now leaves ownership
+pending under the existing retained-stream deadline. Two independently authored
+regressions verify the actual unaccepted kernel socket, absence of SOCKS bytes,
+unchanged tuple, eventual acceptance and timeout cleanup. All 14 runtime tests
+require a fresh CI run; no local runtime execution occurred.

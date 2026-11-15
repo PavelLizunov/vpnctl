@@ -576,10 +576,10 @@ fn ownership_snapshot(
         }
         if fields[1] == local && fields[2] == remote && fields[3] == "01" {
             let inode = fields[9].parse::<u64>().map_err(|_| ProbeError::Failed)?;
-            if inode == 0 {
-                return Err(ProbeError::Failed);
+            // The connected socket has no inode until accept installs its fd.
+            if inode != 0 {
+                inodes.insert(format!("socket:[{inode}]"));
             }
-            inodes.insert(format!("socket:[{inode}]"));
         }
     }
     if inodes.is_empty() {

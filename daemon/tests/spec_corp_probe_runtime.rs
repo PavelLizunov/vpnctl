@@ -403,6 +403,62 @@ mod spec {
     }
 
     #[tokio::test]
+    async fn pending_kernel_accept_retains_one_stream_without_socks_until_child_owns_it() {
+        let fixture = Fixture::new("delayed_accept", "valid");
+        let runner = fixture.runner();
+        let mut session = fixture.start(&runner).await;
+        let pending = session.events.until("pending_accept").await;
+        assert_eq!(pending["inode"], 0);
+        assert_eq!(pending["queued_bytes"], 0);
+        assert_eq!(pending["connections"], 1);
+        assert!(
+            !session.task.is_finished(),
+            "pending accept must not reject a valid retained connection"
+        );
+        assert_eq!(runner.run(request(outbound())).await, Err(ProbeError::Busy));
+        session.events.write.write_all(b"inspect\n").await.unwrap();
+        let checked = session.events.until("pending_accept_checked").await;
+        assert_eq!(
+            checked["remote"], pending["remote"],
+            "the same client TCP tuple must remain established"
+        );
+        assert_eq!(
+            checked["queued_bytes"], 0,
+            "no SOCKS bytes may precede ownership proof"
+        );
+        assert_eq!(checked["connections"], 1);
+        assert!(!session.task.is_finished());
+        session.events.write.write_all(b"release\n").await.unwrap();
+        assert_eq!(session.events.until("request").await["token"], token());
+        assert_eq!(result(session.task).await, Ok(()));
+        fixture.assert_clean(&session.config);
+    }
+
+    #[tokio::test]
+    async fn pending_kernel_accept_without_release_expires_and_cleans_the_owned_child() {
+        let fixture = Fixture::new("delayed_accept", "valid");
+        let mut config = fixture.config();
+        config.work_timeout = Duration::from_secs(1);
+        let runner = Arc::new(SingBoxRunner::new(config).unwrap());
+        let started = Instant::now();
+        let mut session = fixture.start(&runner).await;
+        let pending = session.events.until("pending_accept").await;
+        assert_eq!(pending["inode"], 0);
+        assert_eq!(pending["queued_bytes"], 0);
+        assert!(!session.task.is_finished());
+        assert!(result(session.task).await.is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "unaccepted connection must obey the absolute work and cleanup budgets"
+        );
+        fixture.assert_clean(&session.config);
+        assert!(
+            runner.available(),
+            "a clean pending-accept timeout must not poison the runtime"
+        );
+    }
+
+    #[tokio::test]
     async fn socks_tls_http_failures_never_certify_and_always_reap() {
         for (mode, certificate) in [
             ("early_exit", "valid"),

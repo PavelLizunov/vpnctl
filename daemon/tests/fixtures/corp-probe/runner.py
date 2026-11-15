@@ -2,6 +2,7 @@
 """Actual child-owned SOCKS/TLS fixture. Paths/settings are prepended by Rust."""
 import json
 import os
+import select
 import socket
 import ssl
 import stat
@@ -52,7 +53,51 @@ try:
     listener = socket.socket()
     listener.bind(("127.0.0.1", inbound["listen_port"]))
     listener.listen(1)
-    stream, _ = listener.accept()
+    pending_remote = None
+    if MODE == "delayed_accept":
+        event("listening")
+        # Readability establishes that the kernel queued a real connection,
+        # without installing its accepted socket in this process's fd table.
+        select.select([listener], [], [])
+        local = "0100007F:%04X" % inbound["listen_port"]
+
+        def pending_snapshot():
+            with open("/proc/self/net/tcp", encoding="ascii") as source:
+                rows = [line.split() for line in source.readlines()[1:]]
+            rows = [row for row in rows if row[1] == local and row[3] != "0A"]
+            assert len(rows) == 1, "exactly one retained TCP connection is required"
+            row = rows[0]
+            assert row[3] == "01", "the original connection must stay established"
+            assert int(row[9]) == 0, "accepted fd must not exist before release"
+            queued_bytes = int(row[4].split(":")[1], 16)
+            assert queued_bytes == 0, "SOCKS bytes arrived before child ownership"
+            return dict(remote=row[2], inode=0, queued_bytes=queued_bytes,
+                        connections=len(rows))
+
+        pending = pending_snapshot()
+        pending_remote = pending["remote"]
+        event("pending_accept", **pending)
+        while True:
+            command = b""
+            while not command.endswith(b"\n"):
+                command += exact(control, 1)
+            pending = pending_snapshot()
+            assert pending["remote"] == pending_remote, "runner replaced its TCP stream"
+            if command == b"release\n":
+                break
+            assert command == b"inspect\n"
+            event("pending_accept_checked", **pending)
+    stream, peer = listener.accept()
+    if pending_remote is not None:
+        assert peer == ("127.0.0.1", int(pending_remote.split(":")[1], 16))
+        listener.setblocking(False)
+        try:
+            extra, _ = listener.accept()
+        except BlockingIOError:
+            pass
+        else:
+            extra.close()
+            raise AssertionError("runner queued a second TCP connection")
     listener.close()
     event("accepted")
     if MODE in ("stall", "controlled"):
