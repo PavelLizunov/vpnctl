@@ -6,7 +6,7 @@
 
 - **Workspace Crates:** 10
 - **Tracked Rust Files:** 451 (298 prod / 153 test)
-- **Total Rust LOC:** 165,133 (89,701 prod / 75,432 test)
+- **Total Rust LOC:** 165,148 (89,701 prod / 75,447 test)
 - **Database Migrations:** 70
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 131
 
@@ -23,8 +23,8 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 6,753 (14) | 1,554 (6) | **8,307** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,236 (20) | 4,817 (12) | **9,053** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,778 (4) | 1,191 (5) | **2,969** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 16 tests | 49,950 (162) | 42,401 (67) | **92,351** |
-| **Total** | | | | **89,701 (298)** | **75,432 (153)** | **165,133** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 16 tests | 49,950 (162) | 42,416 (67) | **92,366** |
+| **Total** | | | | **89,701 (298)** | **75,447 (153)** | **165,148** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -44,7 +44,7 @@
 | `daemon/tests/spec_corp_policy_eligibility.rs` | 1,404 | `daemon` | Test |
 | `daemon/tests/sub_endpoint/mihomo.rs` | 1,324 | `daemon` | Test |
 | `daemon/tests/admin_smoke/server_detail/setup_config.rs` | 1,318 | `daemon` | Test |
-| `daemon/tests/admin_smoke/servers.rs` | 1,303 | `daemon` | Test |
+| `daemon/tests/admin_smoke/servers.rs` | 1,318 | `daemon` | Test |
 | `crates/boosty-bridge/tests/sync_integration.rs` | 1,285 | `crates/boosty-bridge` | Test |
 | `daemon/src/handlers/auth.rs` | 1,260 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/dashboard.rs` | 1,227 | `daemon` | Test |
