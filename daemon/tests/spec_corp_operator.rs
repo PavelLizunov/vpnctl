@@ -159,7 +159,7 @@ impl Fixture {
         let (state, job) =
             app::make_app_state_for_tests(inv, Arc::new(vpnctl_kernels::build_registry().unwrap()));
         let clock = Arc::new(AtomicI64::new(NOW));
-        let router = app::router_with_corp_operator(state.clone(), config(clock.clone()));
+        let router = app::router_with_corp_operator(state.clone(), config(Arc::clone(&clock)));
         Self {
             state,
             router,
@@ -1791,7 +1791,7 @@ async fn emergency_disable_preserves_mismatched_signer_pair_and_revokes_sessions
     let digest = "b".repeat(64);
     let session = vpnctl_inventory::CorpSessionInput {
         token_hash: digest.clone(),
-        csrf_token: "B".repeat(43),
+        csrf_token: URL_SAFE_NO_PAD.encode([1_u8; 32]),
         expires_at: NOW + 100,
     };
     f.state
@@ -1912,7 +1912,7 @@ async fn emergency_disable_with_corrupt_pair_rolls_back_on_audit_failure() {
     let before = corrupt_enabled_signer_pair(&f).await;
     let session = vpnctl_inventory::CorpSessionInput {
         token_hash: "c".repeat(64),
-        csrf_token: "C".repeat(43),
+        csrf_token: URL_SAFE_NO_PAD.encode([2_u8; 32]),
         expires_at: NOW + 100,
     };
     f.state
