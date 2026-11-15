@@ -56,6 +56,22 @@ async fn delivery_shows_chain_url_and_qr_when_both_members_are_granted() {
 }
 
 #[tokio::test]
+async fn delivery_chain_summary_uses_subscription_label_fallbacks_without_custom_names() {
+    let dir = TempDir::new().unwrap();
+    let (state, _) = state_with_chain(&dir, true).await;
+    for id in ["s0", "s1"] {
+        state
+            .inv
+            .set_server_display_name(&ServerId(id.into()), None)
+            .await
+            .unwrap();
+    }
+    let html = fetch_html(router(state), "/admin/users/u0/delivery").await;
+    assert!(html.contains("S1 via S0"));
+    assert!(!html.contains("s1 via s0"));
+}
+
+#[tokio::test]
 async fn delivery_omits_chain_artefact_when_entry_grant_is_missing() {
     let dir = TempDir::new().unwrap();
     let (state, _token) = state_with_chain(&dir, false).await;

@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use maud::{Markup, html};
 
 use crate::AppState;
-use crate::handlers::admin::helpers::{format_msk, format_msk_iso};
+use crate::handlers::admin::helpers::{ServerNames, format_msk, format_msk_iso, named_server};
 use crate::i18n::{Locale, tr};
 
 pub(crate) async fn user_online_badge(
@@ -14,6 +14,7 @@ pub(crate) async fn user_online_badge(
     uid: &vpnctl_core::UserId,
     server_ids: &[vpnctl_core::ServerId],
     last_seen: Option<DateTime<Utc>>,
+    names: &ServerNames,
     lang: Locale,
 ) -> Markup {
     let mut conns_per_server: BTreeMap<String, u32> = BTreeMap::new();
@@ -68,11 +69,6 @@ pub(crate) async fn user_online_badge(
     html! {
         @if online {
             @let server_count = conns_per_server.len();
-            @let server_list = conns_per_server
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ");
             span.ed-stat.ed-stat--active
                 title=(tr(
                     lang,
@@ -87,7 +83,12 @@ pub(crate) async fn user_online_badge(
                 " "
                 @if server_count == 1 { (tr(lang, "on ", "на ")) }
                 @else { (tr(lang, "across ", "на ")) }
-                span.ed-mono { (server_list) }
+                span.ed-mono {
+                    @for (index, sid) in conns_per_server.keys().enumerate() {
+                        @if index > 0 { ", " }
+                        (named_server(&vpnctl_core::ServerId(sid.clone()), names))
+                    }
+                }
             }
         } @else {
             span.ed-stat.ed-stat--unknown

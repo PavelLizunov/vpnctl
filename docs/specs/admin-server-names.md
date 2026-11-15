@@ -7,6 +7,8 @@
 - Show that name on the fleet dashboard, server list/detail and user overview,
   access and delivery pages. Keep technical IDs visible as secondary identity;
   URLs, forms, grants, keys, stored IDs and subscription bytes stay unchanged.
+- This includes the online-presence badge, pending-deploy notice and lower
+  grant/revoke list on user pages. Chain summaries use the same label fallback.
 
 ## Interface / data contract
 - Read configured names through the existing inventory API. Reuse one escaped
