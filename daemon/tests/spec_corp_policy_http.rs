@@ -414,7 +414,7 @@ mod spec {
         security_headers(response);
     }
 
-    fn write_body(expected_revision: u64, apply: &str, confirmed: bool, rules: Value) -> String {
+    fn write_body(expected_revision: u64, apply: &str, confirmed: bool, rules: &Value) -> String {
         json!({"expected_revision": expected_revision, "apply": apply, "confirm_interrupt": confirmed, "rules": rules}).to_string()
     }
 
@@ -1297,7 +1297,7 @@ mod spec {
             .call(browser_request(
                 "POST",
                 "/api/corp/rules",
-                Body::from(write_body(0, "next_connection", false, rules.clone())),
+                Body::from(write_body(0, "next_connection", false, &rules)),
                 Some(&cookie),
                 Some(&csrf),
             ))
@@ -1317,7 +1317,7 @@ mod spec {
             .call(browser_request(
                 "POST",
                 "/api/corp/rules",
-                Body::from(write_body(0, "next_connection", false, json!([]))),
+                Body::from(write_body(0, "next_connection", false, &json!([]))),
                 Some(&cookie),
                 Some(&csrf),
             ))
@@ -1328,7 +1328,7 @@ mod spec {
             .call(browser_request(
                 "POST",
                 "/api/corp/rules",
-                Body::from(write_body(1, "now", false, json!([]))),
+                Body::from(write_body(1, "now", false, &json!([]))),
                 Some(&cookie),
                 Some(&csrf),
             ))
@@ -1338,7 +1338,7 @@ mod spec {
             .call(browser_request(
                 "POST",
                 "/api/corp/rules",
-                Body::from(write_body(1, "now", true, json!([]))),
+                Body::from(write_body(1, "now", true, &json!([]))),
                 Some(&cookie),
                 Some(&csrf),
             ))
@@ -1366,7 +1366,7 @@ mod spec {
     {
         let fixture = Fixture::new(true, true).await;
         let (cookie, csrf) = fixture.login().await;
-        let normal = write_body(0, "next_connection", false, json!([]));
+        let normal = write_body(0, "next_connection", false, &json!([]));
         let invalid = [
             normal.replacen('{', "{\"unknown\":1,", 1),
             normal.replacen('{', "{\"expected_revision\":0,", 1),
@@ -1375,15 +1375,15 @@ mod spec {
                 0,
                 "next_connection",
                 false,
-                json!([{"domain":"EXAMPLE.COM","action":"direct","comment":""}]),
+                &json!([{"domain":"EXAMPLE.COM","action":"direct","comment":""}]),
             ),
             write_body(
                 0,
                 "next_connection",
                 false,
-                json!([{"domain":"uiscom.ru","action":"direct","comment":""}]),
+                &json!([{"domain":"uiscom.ru","action":"direct","comment":""}]),
             ),
-            write_body(0, "later", false, json!([])),
+            write_body(0, "later", false, &json!([])),
             "{}".to_owned(),
         ];
         for body in invalid {
@@ -1513,7 +1513,7 @@ mod spec {
         let fixture = Fixture::new(true, true).await;
         let (cookie, csrf) = fixture.login().await;
         let rules: Vec<_> = (0..40).map(|i| json!({"domain":format!("site-{i}.example.com"),"action":"direct","comment":"a".repeat(240)})).collect();
-        let body = write_body(0, "next_connection", false, json!(rules));
+        let body = write_body(0, "next_connection", false, &json!(rules));
         assert!(body.len() > 8192 && body.len() < 65536);
         assert_eq!(
             fixture
@@ -1652,7 +1652,7 @@ mod spec {
             .call(browser_request(
                 "POST",
                 "/api/corp/rules",
-                Body::from(write_body(0, "next_connection", false, json!([]))),
+                Body::from(write_body(0, "next_connection", false, &json!([]))),
                 Some(&cookie),
                 Some(&csrf),
             ))
@@ -1699,7 +1699,7 @@ mod spec {
             .call(browser_request(
                 "POST",
                 "/api/corp/rules",
-                Body::from(write_body(0, "next_connection", false, json!([]))),
+                Body::from(write_body(0, "next_connection", false, &json!([]))),
                 Some(&cookie),
                 Some(&csrf),
             ))
@@ -1740,14 +1740,14 @@ mod spec {
         let first = browser_request(
             "POST",
             "/api/corp/rules",
-            Body::from(write_body(0, "next_connection", false, json!([]))),
+            Body::from(write_body(0, "next_connection", false, &json!([]))),
             Some(&cookie),
             Some(&csrf),
         );
         let second = browser_request(
             "POST",
             "/api/corp/rules",
-            Body::from(write_body(0, "now", true, json!([]))),
+            Body::from(write_body(0, "now", true, &json!([]))),
             Some(&cookie),
             Some(&csrf),
         );

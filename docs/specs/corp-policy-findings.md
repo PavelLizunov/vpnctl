@@ -36,6 +36,18 @@ open until correction and relevant exact-head CI evidence are recorded.
 | CORP-CSRF-DUPLICATE-STATUS | P2 | Independent HTTP test at e6679eb expects 403 for duplicate X-Corp-CSRF on an authenticated mutation, but outer ambiguous-header validation returns 400. Leave CSRF duplication to the existing single-header session check so it rejects the request with the contractual 403. No duplicate is allowed and the test remains unchanged. Job 132766539109, spec_corp_policy_http.rs:1077. | Open; source correction pending CI |
 | CORP-SUPPRESSION-FIXTURE | P2 | HTTP test at e6679eb does not deny the suppressed fixture because set_server_suppressed sets only the observation timestamp; existing effective subscription suppression also requires set_server_auto_suppress(true). The eligibility fixture has the same missing precondition. Correct fixture setup against the existing opt-in contract and retain denial/removal assertions; do not change existing subscription semantics to fit the fixture. Job 132766539109, spec_corp_policy_http.rs:1220. | Open; independent fixture correction pending CI |
 | CORP-LEGACY-HOST-COMPAT | P2 | Full test job 132766538950 at e6679eb fails the pre-existing admin test boosty_page_sanitizes_untrusted_proto_and_malformed_host (400 instead of 200). Corp dispatch rejects unrelated malformed Host values before the legacy handler can sanitize them to its safe origin. Preserve that legacy handling for malformed values unrelated to Corp; reject malformed Corp-shaped values and conflicting URI authority before any fallback. Keep the existing regression and add Corp-boundary cases. | Open; source correction pending CI |
+| CORP-CI-HTTP-HELPER-BORROW | P2 | At 82c906d, Cargo check passes but Clippy and the Clippy stage of just ci reject write_body's owned Value in spec_corp_policy_http.rs:417. The helper only serializes rules. Borrow the Value and update callers without changing request data or assertions. Run 43700100787, jobs 132769142094/132769142043. | Open; correction and exact-head CI pending |
+| CORP-CI-BROWSER-RUNNER | P2 | At 82c906d, all 34 HTTP tests pass in browser job 132769142113, then Playwright 1.56.1 cannot install Chromium dependencies on ubuntu26.04-x64 selected by ubuntu-latest. Pin only the browser job to supported ubuntu-24.04; retain the pinned browser version and all interaction checks. Browser scenarios and screenshots have not run. | Open; correction and exact-head CI pending |
 
 Reconnaissance: separate native eligibility/routing and storage/auth source
 readers; lead checked cited sources. No tests or live reproduction performed.
+
+CI follow-up at `82c906d`: run `43700100787`, test job `132769142036`,
+passed the 34 HTTP and 19 eligibility spec tests and all 540 active admin smoke
+tests (one ignored). The separate browser job also passed all 34 HTTP tests,
+then stopped before browser execution on the unsupported runner OS. The two
+remaining CI corrections change only test-helper borrowing and the browser
+runner version. Independent diff-only review returned no findings. Local format,
+actionlint, generated-file, whitespace and secret checks pass; compilation,
+runtime tests and browser execution remain CI-only. Fresh exact-head CI is
+required before closing these findings or continuing the next feature block.
