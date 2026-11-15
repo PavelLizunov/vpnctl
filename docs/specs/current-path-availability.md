@@ -1,7 +1,7 @@
 # Spec: Current TCP path availability and incident evidence
 
 ## Intent & invariants
-- Detect current loss/recovery from existing completed quality rounds, separately from the 24h quality score. Add no network traffic, credentials, grants, restarts, suppression or subscription changes.
+- Detect current loss/recovery from existing completed quality rounds, separately from the 24h quality score. Add no network traffic, credentials, grants or restarts. Confirmed transitions also drive the opt-in subscription hiding described in [TCP subscription suppression](tcp-subscription-suppression.md).
 - Report only TCP reachability from the named measurement network; never infer host shutdown, UDP failure, TSPU cause or user blame. Node health and Protocol Assurance remain separate evidence.
 - Persist state, incidents and an immutable first-deterioration snapshot. A daemon restart, duplicate sample or operator acknowledgement cannot erase/reopen an incident.
 

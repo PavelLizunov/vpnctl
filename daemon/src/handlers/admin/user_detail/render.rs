@@ -61,6 +61,7 @@ pub(crate) async fn user_detail_render(
         .list_fleet_servers()
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let names = crate::handlers::admin::helpers::server_names(&state.inv, &all_servers).await?;
     let granted_ids: HashSet<vpnctl_core::ServerId> =
         servers.iter().map(|s| s.id.clone()).collect();
 
@@ -565,6 +566,7 @@ pub(crate) async fn user_detail_render(
                 &traffic_by_server,
                 &all_servers,
                 &granted_ids,
+                &names,
                 lang,
             ).await)
         }
@@ -585,6 +587,7 @@ pub(crate) async fn user_detail_render(
                 &share_links,
                 &wg_capable_granted,
                 &wg_capable_inventory,
+                &names,
                 lang,
             ))
         }
@@ -600,6 +603,7 @@ pub(crate) async fn user_detail_render(
                 &access_protos,
                 &hidden_per_server,
                 &user_overrides,
+                &names,
                 lang,
             ))
         }

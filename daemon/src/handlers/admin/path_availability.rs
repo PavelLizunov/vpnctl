@@ -39,6 +39,7 @@ pub(super) fn status_badge(state: Option<&ServicePathState>, lang: Locale) -> Ma
 pub(super) fn fleet_summary(
     servers: &[vpnctl_core::Server],
     paths: &std::collections::HashMap<vpnctl_core::ServerId, ServicePathState>,
+    names: &crate::handlers::admin::helpers::ServerNames,
     lang: Locale,
 ) -> Markup {
     let statuses = [
@@ -81,7 +82,7 @@ pub(super) fn fleet_summary(
                         @for server in servers.iter().filter(|s| state_for(s) == status) {
                             div data-path-server=(server.id.0) {
                                 a.ed-grid__id href=(format!("/admin/servers/{}/status#current-path-availability", path_segment_encode(&server.id.0))) {
-                                    (server.id.0)
+                                    (crate::handlers::admin::helpers::named_server(&server.id, names))
                                 }
                                 " · " (status_badge(paths.get(&server.id), lang))
                             }
@@ -109,8 +110,8 @@ pub(super) fn detail_section(
             }
             p.ed-grid__mut {
                 (tr(lang,
-                    "Two failed rounds confirm an outage; two successful rounds confirm recovery. Missing measurements remain unknown. No automatic access changes or restarts.",
-                    "Два неудачных раунда подтверждают отказ, два успешных — восстановление. Без свежих измерений состояние неизвестно. Детектор не меняет доступы и не перезапускает службы."))
+                    "Two failed rounds confirm an outage; two successful rounds confirm recovery. Missing measurements remain unknown. When auto-suppress is enabled, confirmed outages hide this server from subscriptions until recovery. Grants, keys and running services stay unchanged.",
+                    "Два неудачных раунда подтверждают отказ, два успешных — восстановление. Без свежих измерений состояние неизвестно. При включённом авто-скрытии подтверждённый отказ убирает сервер из подписок до восстановления. Доступы, ключи и работающие службы сохраняются."))
             }
             h3 { (tr(lang, "Path incident history", "История отказов пути")) }
             @match incidents {

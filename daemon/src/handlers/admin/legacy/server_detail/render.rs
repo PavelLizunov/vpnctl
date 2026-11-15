@@ -324,6 +324,8 @@ pub(super) async fn server_detail_render(
         .server_display_name(&sid)
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let effective_name =
+        crate::handlers::vpn_router::server_display_label(&server.id.0, display_name.as_deref());
 
     let (auto_suppress_optin, suppressed_at) = state
         .inv
@@ -425,7 +427,9 @@ pub(super) async fn server_detail_render(
             }
         }
         div.ed-headrow {
-            h1.ed-sumbar__h { (server.id.0) }
+            h1.ed-sumbar__h {
+                (crate::handlers::admin::helpers::server_identity(&server.id, Some(&effective_name)))
+            }
             @if let Some(h) = latest.as_ref() {
                 @if h.sing_box_active == Some(true) {
                     span.ed-stat.ed-stat--active {

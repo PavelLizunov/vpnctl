@@ -69,6 +69,8 @@ stateless; the inventory owns mutable state and server secrets.
 - [Commercial operations runbook (RU)](docs/specs/commercial-operations.md)
 - [backup/restore contract](docs/specs/backup-restore.md)
 - [Current TCP availability and incidents](docs/specs/current-path-availability.md)
+- [Automatic hiding and recovery of TCP-unreachable routes](docs/specs/tcp-subscription-suppression.md)
+- [Matching server names in the admin UI and subscriptions](docs/specs/admin-server-names.md)
 - [Protocol testing](docs/PROTOCOL_TESTING.md)
 - [Deferred work](BACKLOG.md)
 

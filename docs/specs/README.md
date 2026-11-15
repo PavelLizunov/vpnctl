@@ -26,6 +26,8 @@ Two kinds of documents live here:
    (or equivalent mutation) and then passes with the implementation.
 
    Recent feature micro-specs:
+   - [`admin-server-names.md`](admin-server-names.md) — Subscription names in operator lists, server pages and client access controls
+   - [`tcp-subscription-suppression.md`](tcp-subscription-suppression.md) — Confirmed TCP outages automatically hide routes until confirmed recovery
    - [`boosty-income-and-connect.md`](boosty-income-and-connect.md) — Boosty income tracking, P&L cost coverage & 1-click bookmarklet
    - [`currency-exchange.md`](currency-exchange.md) — Multi-currency conversion engine & total spend tracking
    - [`server-billing.md`](server-billing.md) — Server rental and payment scheduling

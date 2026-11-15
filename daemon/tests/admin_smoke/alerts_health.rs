@@ -425,7 +425,7 @@ async fn dispatch_alerts_reopens_after_manual_ack_while_still_down() {
 }
 
 #[tokio::test]
-async fn dispatch_alerts_auto_suppress_sets_and_clears_with_optin() {
+async fn dispatch_ssh_alerts_never_suppress_tcp_routes() {
     let dir = TempDir::new().unwrap();
     let st = state(&dir).await;
     let inv = st.inv.clone();
@@ -455,8 +455,8 @@ async fn dispatch_alerts_auto_suppress_sets_and_clears_with_optin() {
         vpnctld::node_probe_poller::dispatch_alerts(&inv, &plain, &fail(), &mut fs).await;
     }
     assert!(
-        inv.is_server_auto_suppressed(&opted.id).await.unwrap(),
-        "opted-in server must be suppressed after the threshold"
+        !inv.is_server_auto_suppressed(&opted.id).await.unwrap(),
+        "SSH failures must not suppress VPN TCP routes, even with auto-suppress enabled"
     );
     assert!(
         !inv.is_server_auto_suppressed(&plain.id).await.unwrap(),
@@ -472,12 +472,12 @@ async fn dispatch_alerts_auto_suppress_sets_and_clears_with_optin() {
     .await;
     assert!(
         !inv.is_server_auto_suppressed(&opted.id).await.unwrap(),
-        "recovery must auto-restore the server to the subscription"
+        "SSH success leaves the unsuppressed TCP route unchanged"
     );
 }
 
 #[tokio::test]
-async fn dispatch_alerts_auto_restore_survives_daemon_restart() {
+async fn dispatch_ssh_success_preserves_tcp_suppression_after_restart() {
     let dir = TempDir::new().unwrap();
     let st = state(&dir).await;
     let inv = st.inv.clone();
@@ -509,8 +509,8 @@ async fn dispatch_alerts_auto_restore_survives_daemon_restart() {
     )
     .await;
     assert!(
-        !inv.is_server_auto_suppressed(&server.id).await.unwrap(),
-        "a successful probe must clear suppression even with no Recovered transition (restart-safe)"
+        inv.is_server_auto_suppressed(&server.id).await.unwrap(),
+        "successful management SSH must not restore a TCP-suppressed route after restart"
     );
 }
 

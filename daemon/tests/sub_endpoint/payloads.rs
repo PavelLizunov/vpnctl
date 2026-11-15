@@ -32,6 +32,113 @@ fn empty_singbox_bytes() -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn confirmed_tcp_outage_hides_routes_and_recovery_restores_exact_response_bytes() {
+    use base64::Engine;
+    use chrono::{Duration, Utc};
+    use vpnctl_inventory::ServiceQualitySample;
+
+    for format in ["uri", "default", "stock", "mihomo", "app"] {
+        let dir = TempDir::new().unwrap();
+        let (state, token) = seed(&dir).await;
+        let inv = &state.inv;
+        let sid = ServerId("srv".into());
+        let uid = UserId("alice".into());
+        let original_user = inv.get_user(&uid).await.unwrap().unwrap();
+        let secrets = inv.list_server_secrets(&sid).await.unwrap();
+        let mut healthy = inv.get_server(&sid).await.unwrap().unwrap();
+        healthy.id = ServerId("healthy".into());
+        healthy.address = "198.51.100.52".into();
+        inv.add_server(&healthy).await.unwrap();
+        for (key, value) in &secrets {
+            inv.set_server_secret(&healthy.id, key, value)
+                .await
+                .unwrap();
+        }
+        inv.grant(&uid, &healthy.id).await.unwrap();
+        inv.set_server_auto_suppress(&sid, true).await.unwrap();
+        let device = "f1f2f3f4f5f6f7f8f9f0f1f2f3f4f5f6";
+        inv.set_vpn_router_device_id(&uid, device).await.unwrap();
+        let (path, ua) = match format {
+            "uri" => (format!("/sub/{token}"), "v2rayN/7.0"),
+            "default" => (format!("/sub/{token}"), "sing-box/1.14"),
+            "stock" => (format!("/sub/{token}?format=sing-box"), "sing-box/1.14"),
+            "mihomo" => (format!("/api/v1/sub/{token}"), "clash.meta/1.19"),
+            _ => (format!("/api/v1/app/config/{device}"), "v2rayN/7.0"),
+        };
+        let fetch = || async {
+            let response = router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri(&path)
+                        .header("user-agent", ua)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{format}");
+            response.into_body().collect().await.unwrap().to_bytes()
+        };
+        let readable = |body: &[u8]| {
+            String::from_utf8(
+                base64::engine::general_purpose::STANDARD
+                    .decode(body)
+                    .unwrap_or_else(|_| body.to_vec()),
+            )
+            .unwrap()
+        };
+        let before = fetch().await;
+        assert!(readable(&before).contains("10.0.0.1"), "{format}");
+        let base = Utc::now() - Duration::seconds(60);
+        for (offset, successes) in [(0, 0), (10, 0), (20, 3), (30, 3)] {
+            let sample = ServiceQualitySample {
+                ts: base + Duration::seconds(offset),
+                server_id: sid.clone(),
+                vantage: "fixture measurement network".into(),
+                target_count: 1,
+                available_targets: u32::from(successes > 0),
+                attempts: 3,
+                successes,
+                tcp_rtt_ms: vec![10; successes as usize],
+                control_attempts: 3,
+                control_successes: 3,
+                control_rtt_ms: vec![10; 3],
+                icmp_attempts: None,
+                icmp_successes: None,
+                icmp_rtt_ms: None,
+            };
+            inv.record_service_path(&sample, "fixture:tcp-vpn-port", 120)
+                .await
+                .unwrap();
+            let body = fetch().await;
+            if matches!(offset, 10 | 20) {
+                assert_ne!(body, before, "confirmed outage must change {format} bytes");
+                assert!(
+                    !readable(&body).contains("10.0.0.1"),
+                    "hidden route leaked in {format}"
+                );
+                assert!(
+                    readable(&body).contains("198.51.100.52"),
+                    "healthy route disappeared from {format}"
+                );
+            } else {
+                assert_eq!(
+                    body, before,
+                    "unchanged/restored {format} must match every byte"
+                );
+            }
+        }
+        let current_user = inv.get_user(&uid).await.unwrap().unwrap();
+        assert_eq!(current_user.uuid, original_user.uuid);
+        assert_eq!(current_user.sub_token, original_user.sub_token);
+        assert_eq!(current_user.tuic_password, original_user.tuic_password);
+        assert_eq!(inv.list_server_secrets(&sid).await.unwrap(), secrets);
+        assert_eq!(inv.users_for_server(&sid).await.unwrap().len(), 1);
+        assert_eq!(inv.users_for_server(&healthy.id).await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn health_returns_stable_runtime_contract() {
     let dir = TempDir::new().unwrap();
     let (state, _) = seed(&dir).await;

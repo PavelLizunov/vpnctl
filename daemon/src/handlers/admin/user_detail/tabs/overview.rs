@@ -26,6 +26,7 @@ pub(crate) async fn render_overview_tab(
     traffic_by_server: &[(ServerId, u64, u64)],
     all_servers: &[Server],
     granted_ids: &HashSet<ServerId>,
+    names: &crate::handlers::admin::helpers::ServerNames,
     lang: Locale,
 ) -> Markup {
     html! {
@@ -181,7 +182,7 @@ pub(crate) async fn render_overview_tab(
                     user,
                     (lifecycle, last_seen, access_aggregates, ua_clusters),
                     traffic_by_server,
-                    (all_servers, granted_ids),
+                    (all_servers, granted_ids, names),
                     lang,
                 ))
             }

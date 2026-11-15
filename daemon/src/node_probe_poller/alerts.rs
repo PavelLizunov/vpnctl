@@ -81,25 +81,6 @@ pub async fn dispatch_alerts(
                     "insert server.unreachable alert failed"
                 ),
             }
-            match inv.server_auto_suppress_state(&server.id).await {
-                Ok((true, _)) => {
-                    if let Err(e) = inv.set_server_suppressed(&server.id, true).await {
-                        tracing::warn!(
-                            target = "vpnctld::node_probe",
-                            server = %server.id.0,
-                            error = %e,
-                            "auto-suppress set failed"
-                        );
-                    }
-                }
-                Ok((false, _)) => {}
-                Err(e) => tracing::warn!(
-                    target = "vpnctld::node_probe",
-                    server = %server.id.0,
-                    error = %e,
-                    "auto-suppress state read failed"
-                ),
-            }
         }
         UnreachableTransition::Recovered => {
             let subject = server_subject(inv, &server.id).await;
@@ -122,17 +103,6 @@ pub async fn dispatch_alerts(
             .await;
         }
         UnreachableTransition::NoChange => {}
-    }
-
-    if matches!(outcome, ProbeOutcome::Ok(_))
-        && let Err(e) = inv.set_server_suppressed(&server.id, false).await
-    {
-        tracing::warn!(
-            target = "vpnctld::node_probe",
-            server = %server.id.0,
-            error = %e,
-            "auto-restore (clear suppressed) failed"
-        );
     }
 
     if let ProbeOutcome::Ok(probe) = outcome {

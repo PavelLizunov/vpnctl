@@ -234,7 +234,7 @@ async fn v2_user_access_renders_grant_state_table_and_identities() {
         .0;
     let row = table
         .split("<tr ")
-        .find(|row| row.contains("<b>s0</b>"))
+        .find(|row| row.contains(r#"data-server-id="s0""#))
         .unwrap()
         .split_once("</tr>")
         .unwrap()

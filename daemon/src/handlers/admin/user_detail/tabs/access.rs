@@ -23,6 +23,7 @@ pub(crate) fn render_access_tab(
     access_protos: &HashMap<ServerId, Vec<String>>,
     hidden_per_server: &HashMap<ServerId, HashMap<ProtocolId, bool>>,
     user_overrides: &HashMap<(ServerId, ProtocolId), bool>,
+    names: &crate::handlers::admin::helpers::ServerNames,
     lang: Locale,
 ) -> Markup {
     html! {
@@ -57,7 +58,7 @@ pub(crate) fn render_access_tab(
                     @let sid_enc = path_segment_encode(&srv.id.0);
                     @let uid_enc = path_segment_encode(&user.id.0);
                     tr class=(if is_granted && is_pending { "on-warn" } else { "" }) {
-                        td { b { (srv.id.0) } }
+                        td { b { (crate::handlers::admin::helpers::named_server(&srv.id, names)) } }
                         td.ed-grid__sm {
                             @if is_granted {
                                 span style="color: var(--green);" { (status("check", lang, "Granted", "Выдан")) " " }
