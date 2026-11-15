@@ -99,7 +99,7 @@ mod tests {
     fn readme_protocol_counts_and_dpi_tiers_match_registry() {
         use vpnctl_core::DpiRisk;
 
-        let readme = include_str!("../../../README.md");
+        let readme = include_str!("../../../docs/guide.md");
         let registry = build_registry().unwrap();
         let count = registry.protocol_ids().len();
         assert!(readme.contains(&format!("**{count} protocols**")));

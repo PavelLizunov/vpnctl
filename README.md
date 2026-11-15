@@ -1,381 +1,86 @@
 # vpnctl
 
+A Linux control plane for self-hosted VPN servers: manage nodes, users and
+subscriptions from one web admin UI, using SSH without a node-side agent.
+
+**[Deployment guide](docs/specs/deployment.md)** ·
+[Releases](https://github.com/PavelLizunov/vpnctl/releases) ·
+[Full guide](docs/guide.md)
+
+Linux x86_64 · Rust · SQLite · English and Russian admin UI.
+
 [![CI](https://github.com/PavelLizunov/vpnctl/actions/workflows/ci.yml/badge.svg)](https://github.com/PavelLizunov/vpnctl/actions/workflows/ci.yml)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.89%2B%20(2024%20ed)-orange.svg)](rust-toolchain.toml)
-[![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)](#project-size)
-[![Version](https://img.shields.io/badge/version-0.9.0-blue.svg)](#production-health-check)
+[![Rust](https://img.shields.io/badge/Rust-2024%20edition-orange.svg)](Cargo.toml)
+[![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)](docs/guide.md#project-size)
 
-Lightweight, fail-safe, Linux-only **control plane** for self-hosted VPN
-infrastructure. CLI + daemon + admin UI from a single workspace; SSH-first,
-no node-side agent, plug-in architecture for adding new wire protocols or
-node daemons.
+## What it does
 
-Built as a successor to a bash-based deployment toolkit, with type-safe
-state, transactional inventory, audit-on-mutation, and an editorial-style
-admin UI that's the operator's **only** required surface — every CLI
-action also has a web button.
+- Add a server through the web wizard: paste its address and root password,
+  then follow bootstrap, hardening and deployment progress.
+- Create users and grant access; hand each user an importable subscription,
+  QR code or native configuration file.
+- Manage several VPN protocols and node kernels through one inventory.
+  See the [supported combinations](docs/guide.md#architecture).
+- Monitor current TCP availability, incident history, node health, traffic
+  and historical service quality. TCP reachability is scoped to the named
+  measurement network; it does not verify a VPN login or UDP.
+- Review alerts and audit history, manage billing and optionally connect Boosty.
+- Keep subscription identities in SQLite, with snapshot and encrypted
+  disaster-recovery backup workflows.
 
-> **Canonical home:** [github.com/PavelLizunov/vpnctl](https://github.com/PavelLizunov/vpnctl).
-> Issues and PRs go on GitHub.
-
-**Operating policy:** [Commercial operations runbook (RU)](docs/specs/commercial-operations.md)
-classifies update risks, staged rollout and rollback gates, and commercial go-live
-prerequisites. It is a policy and acceptance checklist, not a production-readiness
-certificate or a zero-downtime guarantee.
-
-## Status — v0.9 in flight
-
-Operating in production across multiple nodes, with a bilingual EN/RU
-admin UI, cumulative per-user sing-box V2Ray Stats accounting, and per-node
-clash-api health probing.
-
-### Project size
-
-A quick sense of scale (the authoritative protocol/kernel lists live in
-[Architecture](#architecture) and the registry — `vpnctl registry`):
-
-| Aspect | Value |
-|---|---|
-| Protocols × Kernels | **12 protocols** × **4 kernels**, fully orthogonal (see [Architecture](#architecture)) |
-| Inventory | SQLite via `sqlx`, audit-on-mutation |
-| Toolchain | Rust **1.89+**, edition **2024** · static musl Linux x86_64 binaries (`x86_64-unknown-linux-musl`) |
-
-### What ships today
-
-| Area | State |
-|---|---|
-| Workspace + traits + CI | ✅ |
-| SSH transport (subprocess `/usr/bin/ssh`, glibc 2.36 compatible) | ✅ |
-| `vpnctl` CLI — server / user / grant / deploy / sub / status / migrate / bootstrap | ✅ |
-| `vpnctld` daemon — REST API + `/sub/<token>` + Admin UI + per-IP rate-limit + persistent bans | ✅ |
-| Inventory — sqlx + SQLite, migrations, audit_log, retention scheduler | ✅ |
-| Kernels — `sing-box`, `amneziawg`, `caddy` (naive / vless-ws cover site), `xray` | ✅ |
-| Protocols — `vless+reality`, `tuic-v5`, `hysteria2`, `shadowsocks-2022`, `wireguard`, `amneziawg2`, `amneziawg3`, `anytls`, `trojan`, `naive`, `vless-ws`, `vless+xhttp` | ✅ (12 across 4 kernels) |
-| Hosters — DigitalOcean / Cloudzy / Generic (SSH port quirks) | ✅ |
-| Add-server **wizard** (Phase E) — paste IP+root password, SSE-streamed bootstrap | ✅ |
-| Backups — [hourly SQLite snapshots and daily encrypted DR bundles](docs/specs/backup-restore.md), restore CLI/web self-test + CI-protected byte-equality (`restore_e2e`) + in-product Disaster Recovery section | ✅ |
-| Subscription endpoint — byte-equivalent migration from legacy Python server | ✅ |
-| Chain-capable subscriptions — stock sing-box JSON plus capability-gated VPNRouter app-config metadata, both with fail-closed entry filtering | ✅ |
-| Boosty subscription bridge — optionally auto-creates complete users for new eligible paid subscribers, grants current VPN-exit servers at creation, preserves existing users’ grants, and supports a configurable disable grace period | ✅ |
-| Protocol visibility — per-(server, protocol) hide + per-(user, server, protocol) deny with OR-semantics | ✅ |
-| DPI-risk tiers — Strong: `naive`, `vless+reality`, `vless+xhttp`, `vless-ws`; Moderate: `amneziawg2`, `amneziawg3`, `anytls`, `tuic-v5`; Weak: `hysteria2`, `shadowsocks-2022`, `trojan`, `wireguard` | ✅ |
-| Monitoring — 24h sub-fetch sparkline + heavy-users heatmap + filtered `/admin/sharing` risk page + per-user UA fingerprint heuristic | ✅ |
-| Traffic accounting — cumulative per-user sing-box V2Ray Stats (Clash for live metadata; AmneziaWG independent) | ✅ |
-| Audit timeline — paginated + filtered + CSV export | ✅ |
-| Infra alerts — `admin_alerts` state-machine on Phase H node probe, Telegram bot transport, bulk-ack button | ✅ |
-| **Uptime SLO** — per-server 24h/7d/30d chips on detail page + fleet-wide tile on dashboard | ✅ |
-| Bilingual EN/RU shell + nav + body copy (wave 2 shipped; wave 3 in flight) | ✅ |
-| Workspace test suite, GitHub Actions CI green | ✅ |
-
-SS2022 defaults to the legacy shared key. The server's **Protocols** tab can
-switch AES methods to per-user keys for revocation on deploy, or back to shared
-mode. After switching and deploying, every SS2022 user must re-import their
-profile. See the [compatibility contract](docs/specs/migration-compatibility.md#shadowsocks-2022-per-user-keys-d7-01).
-
-### Deployment state and service quality
-
-Automatic deploy requests coalesce per server and reconcile the latest saved
-configuration with bounded follow-up attempts. The server page distinguishes
-queued, applying, failed/pending, unknown, and audit-confirmed application.
-After a daemon restart, pending changes remain visible; unfinished jobs are not
-automatically replayed. Use the web Deploy button to retry.
-
-Quality starts only after the first successful deployment and compares one
-measured target set and vantage at a time. Ordinary redeploys do not reset
-failures. Legacy samples remain stored as history but cannot be pooled into a
-known current population. The failure percentage measures **TCP connection
-attempts**, not packet loss or authenticated VPN connectivity. Configuration
-application is separate from external protocol-assurance evidence; absent
-external evidence remains **not checked**. Monitoring also offers a manual private
-check of configured effective ports from the controller and reachable inventory
-servers over their existing trusted SSH connections. Each observation identifies its
-source; a server is not tested from itself, and an unavailable source is not a
-failed target. It reports TCP connection results, not VPN handshakes or censorship;
-UDP remains unchecked. Results are kept in memory until daemon restart, and hostname
-targets use the first inventory-resolved IP. The **Node reachability** page compares
-TCP ports across sources, updates automatically during a run, and separates UDP
-ports and missing measurements from connection failures. On larger inventories,
-repeat runs rotate batches of up to 32 ports and four server sources.
-
-See the [deployment/readiness contract](docs/specs/deploy-readiness-quality.md).
-Migration 0056 is additive; binary rollback must use the documented
-[pre-upgrade snapshot restore procedure](docs/specs/backup-restore.md), not assume
-an older binary accepts a database containing a newer migration.
-
-### Backups and recovery
-
-See the [backup/restore contract](docs/specs/backup-restore.md) for the daemon's
-hourly SQLite snapshots, the separate daily encrypted DR bundles, their
-retention and off-site delivery, and the full recovery procedure.
-
-### AmneziaWG 2.0 / 3.1 integration
-
-The `amneziawg2` and `amneziawg3` protocols use separate sing-box endpoints,
-UDP ports 51821/51822 and address pools 10.72.0.0/16 / 10.73.0.0/16,
-with IPv6 pools fd72:72::/64 / fd73:73::/64. Client files route both IP families.
-AWG server deployment requires a literal server IP so private destinations and
-the configured node address can be rejected for VPN peers.
-They do not change the legacy `wireguard` protocol or `amneziawg` kernel.
-The operator enables each version on the server page and downloads its native
-`.conf` from the user's **Delivery** tab. These files require a client supporting
-the specified AmneziaWG version; they are deliberately excluded from generic
-sing-box subscriptions and share links.
-
-Downloads require an enabled, granted user, a visible protocol and complete
-key material. GET requests never generate or rotate keys. User WireGuard keys
-are shared across these protocols: an explicit Generate/Rotate action also
-changes existing WireGuard client identity. Server keys and profile seeds remain
-stable across deploys; a partially stored server keypair is rejected rather than
-silently replaced. Client addresses are derived from the user public key;
-unrelated grant changes do not renumber them, and collisions fail closed.
-
-**Kernel requirement:** use the pinned `1.14.2-vpnctl.2` security release.
-Its predecessor `1.14.0-vpnctl.5` was verified against official AmneziaWG 3.1
-with real TCP/UDP transfers; that historical result does not certify a new release.
-`1.14.0-vpnctl.3` accepts
-configuration but fails AWG3 data transfer and must not be used for this integration.
-Protocol changes schedule a targeted automatic deployment using current inventory.
-If a deployment is busy or the inventory changes during preparation, the server
-page provides a manual retry; keys and profiles are preserved. See the
-[AWG specification](docs/specs/amneziawg2-3.md).
-
-### Known gaps (carried into v0.9)
-
-- **Wave-3 EN/RU translation** — server-detail Kernels / Enabled-
-  protocols / drift / deploy-key body (~600 lines) and user-detail
-  sub-token / WG / traffic-limit / per-protocol grid body (~800 lines)
-  remain English-only.
-- **Stale-fingerprint detection** — TOFU host-key rotation today
-  surfaces as a cryptic `server.unreachable` alert. A proactive
-  `server.fingerprint.changed` alert with one-click «accept new» would
-  close the gap.
-
-See [`AGENTS.md`](AGENTS.md) for the agent contract and
-[`docs/specs/`](docs/specs/) for the standing contracts (architecture,
-workflow, deployment, compatibility, backups). Deferred work lives in
-[`BACKLOG.md`](BACKLOG.md); operational history lives in git.
-
-## Architecture
-
-Two orthogonal abstractions — adding either side does **not** touch
-the other:
-
-| Trait | Meaning | Examples |
-|---|---|---|
-| `Kernel` | Node-side daemon that holds the connections | `sing-box`, `amneziawg`, `caddy`, `xray` |
-| `Protocol` | Wire format presented to the client | `vless+reality`, `tuic-v5`, `hysteria2`, `shadowsocks-2022`, `wireguard`, `amneziawg2`, `amneziawg3`, `anytls`, `trojan`, `naive`, `vless-ws`, `vless+xhttp` |
-
-A `Kernel` declares which `Protocol`s it can host (`Kernel::supported_protocols()`).
-`Registry::validate_server` catches incompatible combinations **before** an
-SSH session opens.
-
-Adding a new kernel (e.g. `xray`) = one new file in `crates/kernels/src/` +
-one `register_kernel` line in `crates/kernels/src/registry.rs`. Adding a new
-protocol = one new file in `crates/protocols/src/` + one `register_protocol`
-line in the same shared builder. CLI, inventory, SSH layer, daemon, admin UI,
-and crypto stay **unaffected**.
-
-Protocols are **stateless** — per-server secrets arrive via `RenderCtx`,
-never live on the protocol struct.
-
-### Subscription formats
-
-The canonical public route (`https://ninitux.com/api/v1/sub/<token>`) defaults to the Mihomo / Omarchy YAML format without requiring a query parameter. The legacy `GET /sub/<token>` route is unchanged: without a selector it keeps its existing sing-box/UA behavior, while `?format=mihomo` and `?format=sing-box` remain explicit options.
-
-- **Mihomo / Omarchy format** (default for public `https://ninitux.com/api/v1/sub/<token>`, legacy query `?format=mihomo`): Renders a ready YAML configuration for
-  Mihomo, Omarchy, and Clash Meta. Exports `vless+reality` and `hysteria2`, plus Trojan,
-  AnyTLS and TUIC when a node certificate pin has been collected by deployment.
-  Self-signed TLS proxies include the pin when available; unsupported protocols are omitted.
-  Chained routes use Mihomo `dialer-proxy`, failing closed
-  (omitting target nodes) when their direct entry node is unavailable or unusable.
-- **Stock sing-box format** (`?format=sing-box`): Delivers stock sing-box JSON where chained targets
-  carry native `detour` fields and disappear fail-closed when their entry has no usable outbound.
-  Fork-only protocols such as `vless+xhttp` remain available to VPNRouter/sing-box-lx but are omitted from stock format exports.
-
-## Workspace layout
-
-```
-vpnctl/
-├── crates/
-│   ├── core/             traits Kernel & Protocol, Registry, domain types,
-│   │                     build provenance (build_version)
-│   ├── crypto/           UUID v4, x25519, REALITY short_id, password gen
-│   ├── host-fingerprint/ ssh-keyscan wrapper + SHA256 validate_shape
-│   ├── ssh/              SshTransport trait + russh implementations
-│   ├── protocols/        vless+reality, tuic-v5, hysteria2, ss-2022, wg,
-│   │                     amneziawg2, amneziawg3, anytls, trojan, naive, vless-ws,
-│   │                     vless+xhttp
-│   ├── kernels/          sing-box (full), amneziawg, caddy, xray
-│   ├── inventory/        SqliteInventory, migrations, audit_log
-│   └── boosty-bridge/    Boosty subscription → user reconcile/sync
-├── cli/                  clap binary `vpnctl`
-└── daemon/               axum binary `vpnctld` (admin UI + /sub + REST)
-```
+The web UI is the operator surface. The CLI provides automation, scripting
+and recovery commands. Existing client configurations have a
+[compatibility contract](docs/specs/migration-compatibility.md).
 
 ## Quickstart
 
-```bash
-just check       # cargo check --workspace --all-targets
-just test        # cargo test --workspace
-just clippy      # cargo clippy --workspace --all-targets -- -D warnings
-just fmt         # rustfmt all crates
-just deny        # cargo deny check (no openssl-sys, no native-tls)
-just ci          # full local CI sweep before push
+The [deployment contract](docs/specs/deployment.md) covers the controller
+build, installation and runtime settings. The
+[developer quickstart](docs/guide.md#quickstart) lists workspace checks and
+CLI examples.
 
-just run uuid          # generate a fresh UUID v4
-just run registry      # list registered kernels & protocols
-```
+With the controller running, open the admin UI, use **Servers → Add server**,
+then create a user and grant access from their page.
 
-### Production health check
+The [operator flows](docs/guide.md#operator-flows-all-web-driven) pair each
+web action with its automation command. End-user import instructions are in
+the [client setup guides](docs/CLIENT_GUIDES.md).
 
-`vpnctld` exposes an unauthenticated, read-only liveness endpoint. Check the
-daemon directly on its default listen address with:
+## Production health check
 
-```bash
-curl --fail --silent --show-error http://127.0.0.1:18402/api/v1/health
-```
+The [health and build-provenance guide](docs/guide.md#production-health-check)
+explains the health endpoint, version suffix and production install paths.
+Read the [deployment contract](docs/specs/deployment.md) before a rollout.
 
-The response is HTTP `200 OK` with a minimal JSON body. `version` is the
-stable SemVer — machine-readable and safe to grep/parse. `build` adds
-provenance: the same SemVer plus the short Git SHA the binary was built from
-(`+unknown` when `VPNCTL_BUILD_SHA` is unset, even inside a Git checkout):
+## Architecture
 
-```json
-{"status":"ok","version":"0.9.0","build":"0.9.0+a1b2c3d"}
-```
+Node kernels and wire protocols are independent. Protocol rendering is
+stateless; the inventory owns mutable state and server secrets.
 
-**Release rule.** SemVer (`version`) changes only intentionally, when a
-release is cut — it is the operator-facing contract. The build SHA (`build`)
-is included only when `VPNCTL_BUILD_SHA` is set at compile time, so two daemons
-that both report `version: 0.9.0` can be distinguished by their supplied build SHA.
-The same `<semver>+<sha>` stamp is shown in the admin UI footer/masthead and by
-`vpnctl --version`, giving one provenance string across the deployed daemon
-and CLI. The SHA is baked in at compile time: `scripts/deploy.sh` exports
-`VPNCTL_BUILD_SHA` before `cargo build`, and `vpnctl_core::build_version()`
-reads it via `option_env!` — no build script and no `git` at runtime
-(without that environment variable the stamp falls back to `+unknown`).
+- [Architecture and supported protocols](docs/guide.md#architecture)
+- [Workspace layout](docs/guide.md#workspace-layout)
+- [Standing architecture contract](docs/specs/architecture.md)
 
-Use the deployment's public base URL instead of `127.0.0.1:18402` to verify
-the reverse-proxy path as well. This endpoint reports `vpnctld` process
-liveness only: it does not read or mutate inventory and does not probe VPN
-nodes.
+## Documentation
 
-`GET /api/v1/stats/sub-access` requires the same authentication as the admin
-UI; its URL and JSON format are unchanged. The HTTP server allows up to 256
-active connections and gives clients 15 seconds to finish request headers.
-See the [deployment contract](docs/specs/deployment.md) for runtime limits.
+- [Full guide: features, build, operator flows and known gaps](docs/guide.md)
+- [Specification index](docs/specs/README.md)
+- [Commercial operations runbook (RU)](docs/specs/commercial-operations.md)
+- [backup/restore contract](docs/specs/backup-restore.md)
+- [Current TCP availability and incidents](docs/specs/current-path-availability.md)
+- [Protocol testing](docs/PROTOCOL_TESTING.md)
+- [Deferred work](BACKLOG.md)
 
-## Operator flows (all web-driven)
+## Development
 
-Every action below has both a CLI subcommand and a web button. The web
-form is the canonical operator surface; CLI is for automation /
-scripting / disaster recovery.
-
-User creation generates a WireGuard keypair by default in both web and CLI.
-`vpnctl user add <name> --wireguard-pubkey <key>` keeps an external public key;
-legacy `.conf` download requires both halves, otherwise use Generate/Rotate on
-the user's Delivery tab and deploy the server.
-
-| Goal | Web | CLI |
-|---|---|---|
-| Add a new server | `/admin/servers/new` wizard, SSE-streamed bootstrap | `vpnctl bootstrap <id> --address <ip>` (password via `--root-password` or `VPNCTL_ROOT_PW`), then `vpnctl deploy <id>` |
-| Add a user | `/admin/users` + form | `vpnctl user add <name>` |
-| Grant a user access to a server | `/admin/users/<id>` per-server toggle | `vpnctl grant <user> <server>` |
-| Get subscription URL / QR / config | `/admin/users/<id>` (clipboard / QR / `.conf` download) | `vpnctl sub <user>` |
-| Set client 2-hop detour | `/admin/servers/<id>` («Client entry / Входной сервер») | `vpnctl server set-client-detour-via <target> <upstream>` (or `--clear`) |
-| Hide a Weak protocol from public render | `/admin/servers/<id>` chip click | `vpnctl server protocol hide <id> <pid>` |
-| Pin host fingerprint | `/admin/servers/<id>` → «auto via ssh-keyscan» button | `vpnctl server set-fingerprint <id> --from-keyscan` |
-| Inspect Boosty bridge & income | `/admin/boosty` (1-click bookmarklet, MRR & roster) | `vpnctl boosty status` (global `--output json` for automation) |
-| Manage server billing & P&L | `/admin/servers/billing` (multi-currency, P&L coverage) | (none; web-only) |
-| Ack all infra alerts | `/admin/alerts` → «ack all (N)» button | (none; web-only) |
-| Restore a decrypted SQLite snapshot | `/admin/settings/backups` self-test, then CLI restore with vpnctld stopped | `vpnctl restore <snapshot>` |
-| Unpack an encrypted recovery bundle | Recovery host; restore extracted `inv.db` and the other files before starting vpnctld | `scripts/vpnctl-restore.sh <archive.tar.zst.age> <age-private-key-file>` |
-
-CLI `migrate from-bash` verifies inventory-pinned SSH host keys. For a first
-import without a pin, pass `--server <IP> --trusted-fingerprint <SHA256:...>`
-using the fingerprint from the hoster's console. See the
-[migration contract](docs/specs/migration-compatibility.md).
-
-CLI `user disable` and `user enable` save inventory state and list the pending
-`vpnctl deploy <id>` commands needed to apply node access changes. Add `--deploy`
-to immediately deploy that pending set; any failed deploy returns a nonzero exit
-code while preserving the saved inventory state. CLI `sub`
-exits nonzero if a selected share link cannot be generated. See the
-[CLI correctness contract](docs/specs/cli-correctness.md).
-
-### Client setup guides
-
-User-facing setup instructions for all platforms (**iOS**, **Android**, **Windows**, **macOS**, **Linux**, **Android TV**) are documented in [`docs/CLIENT_GUIDES.md`](docs/CLIENT_GUIDES.md).
-
-### Connect with an already-installed deploy key
-
-On `/admin/servers/<id>/setup`, use **Deploy key already installed**, enter the
-SSH user (for example `debian`), and click **Check key and save**. No password or
-reference key is required. The server must have a trusted host fingerprint pinned
-in setup; non-root accounts must support passwordless `sudo`.
-The daemon checks its existing deploy key and privileges before saving the user;
-a failed check keeps the previous login. This action does not install keys,
-deploy VPN configuration, grant access, or restart services. Key installation
-via password/reference key remains a separate form on the same page. See the
-[setup contract](docs/specs/setup-existing-deploy-key.md).
-
-### Client detour vs SSH jump_via
-
-- **Client detour** (`client_detour_via`): configures a 2-hop VPN client outbound chain where a target server dials out through an entry server in generated subscriptions. Set via `/admin/servers/<id>` («Client entry / Входной сервер») or `vpnctl server set-client-detour-via <target> <upstream>` (`--clear` to remove).
-- **SSH `jump_via`**: configures an SSH ProxyJump bastion host used exclusively by the control plane for node administration over SSH.
-
-Client detour chaining is independent of SSH `jump_via`. It supports up to one hop across granted `vpn-exit` servers; self-reference, cycles, and nested chains are rejected. The VPNRouter app-config endpoint publishes a chained VLESS target only when the client advertises `detour-v1`; legacy and generic URI clients continue to receive the unchanged target-omitting response.
-
-### Boosty status JSON
-
-`vpnctl boosty status` keeps its human-readable text output by default. For
-automation, the global output flag emits a stable, single-line JSON object:
-
-```bash
-vpnctl --output json boosty status
-```
-
-```json
-{"enabled":true,"blog":"creator","access_token":"••••cdef","refresh_token":"••••3456","device_id":"••••wxyz","poll_interval_secs":3600,"auto_disable_lapsed":false,"grace_days":14,"auto_create_users":true,"linked_users":12}
-```
-
-`access_token`, `refresh_token`, and `device_id` are always masked as
-`••••<last4>`; unset credentials are reported as `(unset)`. The command reads
-the configured bridge state from the inventory and does not contact Boosty.
-
-### Binary provisioning
-
-Kernels that ship a prebuilt engine binary (such as the `naive` Caddy build)
-install it from the control-node cache under `/var/lib/vpnctl/cache/`,
-uploaded to the node and **SHA256-verified** there before an atomic install.
-The install is **content-aware**: refresh the cached binary with a patched build
-and the next `vpnctl deploy` reinstalls it automatically when the cache
-binary's hash differs from the on-node copy — no manual on-node deletion needed.
-An unchanged cache binary is a no-op (idempotent).
-
-## SSH integration tests
-
-```bash
-VPNCTL_TEST_HOST=<your-test-host> \
-VPNCTL_TEST_USER=<ssh-user> \
-VPNCTL_TEST_KEY=$HOME/.ssh/id_ed25519 \
-  cargo test -p vpnctl-ssh --test integration -- --ignored
-```
-
-## Roadmap (high-level)
-
-- **v0.1** scaffold + CI ✅
-- **v0.2** SSH transport, SQLite inventory, CLI subcommands ✅
-- **v0.3** bootstrap fresh-node, ProxyJump, subscription URLs ✅
-- **v0.4** daemon + REST + `/sub/<token>` + admin UI shell + dashboard ✅
-- **v0.5** admin UI feature delivery — users/grants/regen/abuse-signal ✅
-- **v0.6** backups + bash-migration ✅
-- **v0.7** add-server wizard + protocol breadth (8 protocols) + monitoring + audit + UA fingerprint + Phase H node probe ✅
-- **v0.8** restore close-out · uptime SLO chips · bulk-ack alerts · subscription-server migration · DPI-risk tiers · bilingual EN/RU ✅
-- **v0.9** Xray/XHTTP · Boosty automation · fleet kernel versions and quality ranking 🚧 in flight
-- **v1.0** _"everything in roadmap shipped + months of operating experience without rolling back"_
+[AGENTS.md](AGENTS.md) is the project instruction file. The
+[agent workflow](docs/specs/agent-workflow.md) defines review and verification.
+Run `just ci` for the canonical checks. See the
+[SSH integration tests](docs/guide.md#ssh-integration-tests) for target checks.
+Historical investigations are recoverable from Git history.
 
 ## License
 
-AGPL-3.0-or-later.
+[AGPL-3.0-or-later](LICENSE). Vendored components retain their own licences;
+see [vendor provenance](vendor/README.md).

@@ -12,7 +12,7 @@ def read(path):
 
 class RepositoryDocsTest(unittest.TestCase):
     def test_add_server_row_documents_wizard_and_bootstrap_arguments(self):
-        row = next(line for line in read("README.md").splitlines()
+        row = next(line for line in read("docs/guide.md").splitlines()
                    if line.startswith("| Add a new server |"))
         self.assertIn("`/admin/servers/new` wizard", row)
         self.assertIn("`vpnctl bootstrap <id> --address <ip>`", row)
@@ -22,7 +22,7 @@ class RepositoryDocsTest(unittest.TestCase):
         self.assertNotIn("<password>", row)
 
     def test_readme_build_provenance_requires_compile_time_environment(self):
-        readme = read("README.md")
+        readme = read("docs/guide.md")
         self.assertIn("only when `VPNCTL_BUILD_SHA` is set at compile time", readme)
         self.assertIn("`+unknown` when `VPNCTL_BUILD_SHA` is unset, even inside a Git checkout", readme)
         self.assertIn("`scripts/deploy.sh` exports", readme)
