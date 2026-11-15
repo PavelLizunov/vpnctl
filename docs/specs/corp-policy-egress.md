@@ -9,6 +9,11 @@ has an unavailable runner until explicitly supplied. This is source preparation,
 not a live probe, deployment or activation. The selected TCP plan and renewal
 contracts in [egress preparation](corp-policy-egress-preparation.md) apply.
 
+The following block records the lifecycle baseline. Current production runner
+construction and refresh wiring are specified by [owned runtime](corp-policy-runtime.md),
+which supersedes its preparation-only disabled-production statements. Test
+constructors remain isolated and disabled.
+
 ## Public daemon seam
 
 Module `vpnctld::corp_egress` exposes the following API. New public types have
@@ -211,3 +216,12 @@ The next required block is the bounded sing-box runner: exact retained-socket
 ownership, authenticated SOCKS, verified TLS and challenge echo, private config,
 safe process-group teardown and production refresh wiring. Injected-runner tests
 do not establish actual egress proof. No deployment or activation was performed.
+
+
+Verified lifecycle baseline: `79b03a1aa0438b88f5abd03e8c5255adead1bae4`,
+run `43711228300`, all 12 jobs passed. Canonical logs record exit 0 for all
+five Cargo commands and `just ci`; full tests include all 26 egress cases and
+540 active admin smoke tests. Browser artifact `14159864044` records 38 page
+and interaction groups. Lead inspected narrow ready/running/failed/enabled
+screens, including bottom controls, saved proof versus attempt and native
+confirmation. No production egress or deployment was exercised.

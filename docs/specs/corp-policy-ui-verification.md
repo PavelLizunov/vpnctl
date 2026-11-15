@@ -56,7 +56,7 @@ Independent diff-only review found that HTTP routing alone did not intercept
 WebSockets. The finding was recorded before the lead added the explicit socket
 block; its bounded source correction was checked without browser execution.
 
-## Operator controls extension (runtime validation pending)
+## Operator controls extension
 
 The same pinned browser CI job now exports `spec_corp_operator` fixtures under
 `CORP_OPERATOR_UI_OUTPUT_DIR`. `corp-operator-ui.mjs` verifies setup, populated
@@ -66,4 +66,8 @@ must require explicit confirmation before setup/password rotation, retain CSRF
 and configuration-version fields, keep every action visible and require reload
 following a conflict. Requests and WebSockets are intercepted without a server;
 no production data, cookies or network are used. The existing portal scenarios
-remain mandatory. New screenshots and interaction results await exact-head CI.
+remain mandatory. At lifecycle baseline `79b03a1`, run `43711228300`, all 12
+CI jobs passed. Artifact `14159864044` records 38 page/interaction groups,
+including ready/running/failed/enabled operator states, native enable confirmation,
+probe retry and nonmutating status reload. Lead inspected the narrow pages and
+bottom controls. New source changes still require fresh exact-head CI.
