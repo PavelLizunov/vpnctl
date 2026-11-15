@@ -97,11 +97,12 @@ jobs:
       - name: configure temporary browser paths
         run: |
           echo "CORP_UI_OUTPUT_DIR=$RUNNER_TEMP/corp-ui-fixtures" >> "$GITHUB_ENV"
+          echo "CORP_DIAGNOSTICS_UI_OUTPUT_DIR=$RUNNER_TEMP/corp-diagnostics-ui-fixtures" >> "$GITHUB_ENV"
           echo "CORP_OPERATOR_UI_OUTPUT_DIR=$RUNNER_TEMP/corp-operator-ui-fixtures" >> "$GITHUB_ENV"
           echo "CORP_UI_SCREENSHOT_DIR=$RUNNER_TEMP/corp-ui-screenshots" >> "$GITHUB_ENV"
           echo "CORP_UI_TOOLING_DIR=$RUNNER_TEMP/corp-ui-tooling" >> "$GITHUB_ENV"
       - name: export pages from real synthetic router tests
-        run: cargo test -p vpnctld --test spec_corp_policy_http --test spec_corp_operator --test spec_corp_egress
+        run: cargo test -p vpnctld --test spec_corp_policy_http --test spec_corp_operator --test spec_corp_egress --test corp_diagnostics_ui_fixture
       - uses: actions/setup-node@v5
         with:
           node-version: '22.21.1'

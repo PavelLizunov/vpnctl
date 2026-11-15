@@ -3,6 +3,8 @@ use std::net::IpAddr;
 use maud::{DOCTYPE, Markup, html};
 
 pub(super) const CSS: &str = include_str!("../../assets/corp-portal/corp.css");
+pub(super) const DIAGNOSTICS_JS: &str =
+    include_str!("../../assets/corp-portal/corp-diagnostics.js");
 pub(super) const JS: &str = include_str!("../../assets/corp-portal/corp.js");
 
 fn page(title: &str, body: &Markup) -> String {
@@ -104,6 +106,10 @@ pub(super) fn editor() -> String {
                         p.muted { "Выберите, как открывать сайты: напрямую или через VPN." }
                     }
                     button.quiet.editor-control id="logout" type="button" disabled { "Выйти" }
+                }
+                nav.portal-nav aria-label="Разделы" {
+                    a href="/" aria-current="page" { "Правила" }
+                    a href="/diagnostics" { "Диагностика" }
                 }
                 noscript {
                     p.notice.error { "Для изменения правил включите JavaScript в браузере и обновите страницу." }
@@ -208,6 +214,44 @@ pub(super) fn editor() -> String {
                     div.dialog-actions {
                         button id="cancel-confirm" type="button" { "Отмена" }
                         button.primary id="accept-confirm" type="button" { "Подтвердить" }
+                    }
+                }
+            }
+        },
+    )
+}
+
+pub(super) fn diagnostics(csrf: &str) -> String {
+    page(
+        "Диагностика",
+        &html! {
+            script src="/assets/corp-diagnostics.js" defer {}
+            main.editor id="corp-diagnostics" data-csrf=(csrf) {
+                header.page-header {
+                    div { p.brand { "Corp" } h1 { "Диагностика" }
+                        p.muted { "Отчёты приложения и результаты анализа. Выводы требуют проверки по приведённым свидетельствам." }
+                    }
+                    button id="diagnostics-logout" type="button" { "Выйти" }
+                }
+                nav.portal-nav aria-label="Разделы" {
+                    a href="/" { "Правила" }
+                    a href="/diagnostics" aria-current="page" { "Диагностика" }
+                }
+                noscript { p.notice.error { "Чтобы просмотреть отчёты, включите JavaScript и обновите страницу." } }
+                p id="diagnostics-status" role="status" aria-live="polite" { "Загружаем отчёты…" }
+                p.notice.error id="diagnostics-error" role="alert" hidden {}
+                a.button href="/diagnostics" id="diagnostics-login" hidden { "Войти снова" }
+                div.actions { button id="diagnostics-refresh" type="button" { "Обновить список" } }
+                div.diagnostics-layout {
+                    section.card aria-labelledby="reports-title" {
+                        h2 id="reports-title" { "Полученные отчёты" }
+                        p.muted.small { "Имя устройства сообщает приложение; оно не подтверждает личность отправителя." }
+                        ul.report-list id="diagnostics-list" {}
+                        button id="diagnostics-more" type="button" hidden { "Ещё отчёты" }
+                    }
+                    section.card id="diagnostics-detail" aria-labelledby="diagnostics-detail-title" tabindex="-1" {
+                        h2 id="diagnostics-detail-title" { "Выберите отчёт" }
+                        div id="diagnostics-detail-body" { p.muted { "Здесь появятся выводы, свидетельства и сведения о модели." } }
                     }
                 }
             }
