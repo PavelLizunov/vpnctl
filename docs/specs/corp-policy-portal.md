@@ -133,3 +133,11 @@ first-selected-VLESS eligibility alone does not establish portal egress.
 No address is approved merely
 because it appears in inventory, DNS or an SSH curl. Merge, release, deployment
 and activation remain separate owner commands.
+
+Candidate `4db751c6743ed0c136d28e4c2e36b425e4b4b1d1` was published, but
+workflow run `43697460159` failed validation before creating any jobs. The three
+browser paths used `runner.temp` in job-level environment values, where that
+context is unavailable. Independent diff review and actionlint 1.7.12 confirmed
+the error. The follow-up initializes paths in a step through `RUNNER_TEMP` and
+`GITHUB_ENV`; no runtime tests are claimed for the rejected candidate. The
+correction is limited to CI setup and requires fresh exact-head results.

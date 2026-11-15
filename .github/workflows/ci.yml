@@ -89,14 +89,15 @@ jobs:
     name: Corp portal browser verification
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      CORP_UI_OUTPUT_DIR: ${{ runner.temp }}/corp-ui-fixtures
-      CORP_UI_SCREENSHOT_DIR: ${{ runner.temp }}/corp-ui-screenshots
-      CORP_UI_TOOLING_DIR: ${{ runner.temp }}/corp-ui-tooling
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: configure temporary browser paths
+        run: |
+          echo "CORP_UI_OUTPUT_DIR=$RUNNER_TEMP/corp-ui-fixtures" >> "$GITHUB_ENV"
+          echo "CORP_UI_SCREENSHOT_DIR=$RUNNER_TEMP/corp-ui-screenshots" >> "$GITHUB_ENV"
+          echo "CORP_UI_TOOLING_DIR=$RUNNER_TEMP/corp-ui-tooling" >> "$GITHUB_ENV"
       - name: export pages from real synthetic router tests
         run: cargo test -p vpnctld --test spec_corp_policy_http
       - uses: actions/setup-node@v5
