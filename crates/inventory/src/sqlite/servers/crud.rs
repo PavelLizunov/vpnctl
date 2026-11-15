@@ -26,8 +26,8 @@ impl SqliteInventory {
             )));
         }
         let res = sqlx::query(
-            "INSERT INTO servers (id, address, ssh_port, ssh_user, hoster, jump_via, trusted_host_fingerprint, usage_coefficient)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO servers (id, address, ssh_port, ssh_user, hoster, jump_via, trusted_host_fingerprint, usage_coefficient, auto_suppress_when_unreachable)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         )
         .bind(&s.id.0)
         .bind(&s.address)
@@ -37,6 +37,7 @@ impl SqliteInventory {
         .bind(s.jump_via.as_ref().map(|v| v.0.clone()))
         .bind(&s.trusted_host_fingerprint)
         .bind(s.usage_coefficient)
+        .bind(i64::from(registration_actor.is_some()))
         .execute(&mut *tx)
         .await;
         map_unique(res, format!("server {}", s.id.0))?;

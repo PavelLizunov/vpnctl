@@ -223,6 +223,7 @@ impl SqliteInventory {
         .bind(serde_json::to_string(&stored)?)
         .execute(&mut *tx)
         .await?;
+        reconcile_tcp_suppression(&mut tx, sample, target_identity, &stored, max_gap_secs).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -264,6 +265,45 @@ impl SqliteInventory {
             .map(|json| Ok(serde_json::from_str(&json)?))
             .collect()
     }
+}
+
+async fn reconcile_tcp_suppression(
+    tx: &mut Transaction<'_, Sqlite>,
+    sample: &ServiceQualitySample,
+    target_identity: &str,
+    stored: &StoredPath,
+    max_age_secs: u64,
+) -> Result<()> {
+    let age = Utc::now().signed_duration_since(sample.ts);
+    if age < chrono::Duration::zero() || age > freshness_window(max_age_secs) {
+        return Ok(());
+    }
+    let latest: String = sqlx::query_scalar(
+        "SELECT target_identity FROM service_path_states WHERE server_id = ?1
+         ORDER BY julianday(checked_at) DESC, rowid DESC LIMIT 1",
+    )
+    .bind(&sample.server_id.0)
+    .fetch_one(&mut **tx)
+    .await?;
+    if latest != target_identity {
+        return Ok(());
+    }
+    let enabled: bool =
+        sqlx::query_scalar("SELECT auto_suppress_when_unreachable FROM servers WHERE id = ?1")
+            .bind(&sample.server_id.0)
+            .fetch_one(&mut **tx)
+            .await?;
+    if enabled {
+        let suppressed = match stored.current.status {
+            ServicePathStatus::Unreachable => Some(true),
+            ServicePathStatus::Available if stored.successes >= 2 => Some(false),
+            _ => None,
+        };
+        if let Some(suppressed) = suppressed {
+            SqliteInventory::set_server_suppressed_on(tx, &sample.server_id, suppressed).await?;
+        }
+    }
+    Ok(())
 }
 
 async fn incident_alert(

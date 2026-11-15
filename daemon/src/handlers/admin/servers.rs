@@ -4,7 +4,10 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use maud::{Markup, html};
 
-use super::helpers::{internal_error, kernel_versions_inline, render_page, theme_accent_lang};
+use super::helpers::{
+    internal_error, kernel_versions_inline, render_page, server_identity, server_names,
+    theme_accent_lang,
+};
 use crate::AppState;
 use crate::http_util::path_segment_encode;
 
@@ -33,6 +36,7 @@ fn server_row(
         Option<&vpnctl_inventory::ServicePathState>,
         Option<&vpnctl_inventory::SshAccessStatus>,
     ),
+    name: Option<&str>,
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
@@ -92,7 +96,7 @@ fn server_row(
         tr class=(if has_health_warning { "on-warn" } else { "" }) {
             td.ed-grid__mut { (format!("{:02}", idx + 1)) }
             td {
-                a.ed-grid__id href=(detail_href) { (s.id.0) }
+                a.ed-grid__id href=(detail_href) { (server_identity(&s.id, name)) }
                 @if has_health_warning {
                     " " span.ed-grid__flag title=(health_warnings.join(" · ")) { (status("triangle-alert", lang, "Health warning", "Предупреждение здоровья")) }
                 }
@@ -146,6 +150,8 @@ pub(crate) async fn servers(
         state.inv.latest_node_health_fleet(),
     )
     .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
+    let names = server_names(&state.inv, &server_list).await?;
 
     let mut paths = std::collections::HashMap::new();
     let mut ssh_access = std::collections::HashMap::new();
@@ -248,7 +254,7 @@ pub(crate) async fn servers(
                 div style="display:grid;gap:5px;margin-top:6px;font-family:var(--mono);font-size:11px;" {
                     @for server in &server_list {
                         div style="display:flex;justify-content:space-between;gap:16px;border-bottom:1px dotted var(--rule);padding:3px 0;" {
-                            a href=(format!("/admin/servers/{}", path_segment_encode(&server.id.0))) style="color:var(--ink);" { (server.id.0) }
+                            a href=(format!("/admin/servers/{}", path_segment_encode(&server.id.0))) style="color:var(--ink);" { (server_identity(&server.id, names.get(&server.id).map(String::as_str))) }
                             (kernel_versions_inline(
                                 server,
                                 latest_health
@@ -353,6 +359,7 @@ pub(crate) async fn servers(
                                 user_counts.get(&s.id).copied().unwrap_or(0),
                                 &hidden_matrix,
                                 (latest_health.get(&s.id), paths.get(&s.id), ssh_access.get(&s.id)),
+                                names.get(&s.id).map(String::as_str),
                                 lang,
                             ))
                         }

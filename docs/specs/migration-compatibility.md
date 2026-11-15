@@ -49,6 +49,11 @@ Behavior rules:
   preserve each imported server's UUID through `grants.client_uuid`.
 - Hidden protocols stay running on the node (cached client URIs keep working);
   hiding only removes them from fresh renders.
+- Automatic server hiding follows confirmed TCP outages when enabled. It removes
+  routes from fresh subscriptions and app-config without changing grants or keys;
+  confirmed recovery restores the exact prior response bytes. Existing cached
+  profiles change when clients refresh their subscription. See
+  [TCP subscription suppression](tcp-subscription-suppression.md).
 - After sing-box deployment collects `tls.cert_sha256`, fresh Hysteria2 links
   add `pinSHA256`; Mihomo adds certificate fingerprints and enables pinned
   Trojan, AnyTLS and TUIC proxies. Existing certificates, credentials and

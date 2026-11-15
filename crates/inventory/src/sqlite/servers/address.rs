@@ -1,4 +1,5 @@
 use crate::sqlite::{Result, SqliteInventory, SqliteInventoryError};
+use sqlx::{Sqlite, Transaction};
 use std::collections::HashSet;
 use std::net::{IpAddr, ToSocketAddrs};
 use vpnctl_core::ServerId;
@@ -160,6 +161,9 @@ impl SqliteInventory {
             tx.commit().await?;
             return Ok(());
         }
+        if !enabled && prior_suppressed.is_some() {
+            Self::set_server_suppressed_on(&mut tx, sid, false).await?;
+        }
         sqlx::query(
             "UPDATE servers SET auto_suppress_when_unreachable = ?1, suppressed_at = ?2 WHERE id = ?3",
         )
@@ -236,10 +240,20 @@ impl SqliteInventory {
 
     pub async fn set_server_suppressed(&self, sid: &ServerId, suppressed: bool) -> Result<bool> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let changed = Self::set_server_suppressed_on(&mut tx, sid, suppressed).await?;
+        tx.commit().await?;
+        Ok(changed)
+    }
+
+    pub(in crate::sqlite) async fn set_server_suppressed_on(
+        tx: &mut Transaction<'_, Sqlite>,
+        sid: &ServerId,
+        suppressed: bool,
+    ) -> Result<bool> {
         let prior: Option<(Option<String>,)> =
             sqlx::query_as("SELECT suppressed_at FROM servers WHERE id = ?1")
                 .bind(&sid.0)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut **tx)
                 .await?;
         let prior_suppressed = match prior {
             Some((s,)) => s.is_some(),
@@ -251,7 +265,6 @@ impl SqliteInventory {
             }
         };
         if prior_suppressed == suppressed {
-            tx.commit().await?;
             return Ok(false);
         }
         sqlx::query(
@@ -261,7 +274,7 @@ impl SqliteInventory {
         )
         .bind(i64::from(suppressed))
         .bind(&sid.0)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
         sqlx::query(
             "INSERT INTO audit_log (actor, action, target, payload) VALUES (?1, ?2, ?3, ?4)",
@@ -274,9 +287,8 @@ impl SqliteInventory {
         })
         .bind(&sid.0)
         .bind(serde_json::json!({ "server_id": sid.0 }).to_string())
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-        tx.commit().await?;
         Ok(true)
     }
 

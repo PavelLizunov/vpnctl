@@ -111,3 +111,82 @@ async fn unknown_server_errors_invalid() {
         Err(SqliteInventoryError::Invalid(_))
     ));
 }
+
+#[tokio::test]
+async fn failed_suppression_audit_rolls_back_the_tcp_observation_and_can_be_retried() {
+    use chrono::{Duration, Utc};
+    use sqlx::Connection;
+    use vpnctl_inventory::{ServicePathStatus, ServiceQualitySample};
+
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let server = srv("rollback");
+    inv.add_server(&server).await.unwrap();
+    inv.set_server_auto_suppress(&server.id, true)
+        .await
+        .unwrap();
+    let first = Utc::now() - Duration::seconds(20);
+    let sample = |ts| ServiceQualitySample {
+        ts,
+        server_id: server.id.clone(),
+        vantage: "fixture-network".into(),
+        target_count: 1,
+        available_targets: 0,
+        attempts: 3,
+        successes: 0,
+        tcp_rtt_ms: vec![],
+        control_attempts: 0,
+        control_successes: 0,
+        control_rtt_ms: vec![],
+        icmp_attempts: None,
+        icmp_successes: None,
+        icmp_rtt_ms: None,
+    };
+    inv.record_service_path(&sample(first), "fixture:tcp", 120)
+        .await
+        .unwrap();
+    let mut connection = sqlx::SqliteConnection::connect(&format!(
+        "sqlite://{}",
+        dir.path().join("inv.db").display()
+    ))
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER reject_suppression_audit BEFORE INSERT ON audit_log
+         WHEN NEW.action = 'server.auto_suppressed'
+         BEGIN SELECT RAISE(FAIL, 'fixture rejects suppression audit'); END",
+    )
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    let second = sample(first + Duration::seconds(10));
+    assert!(
+        inv.record_service_path(&second, "fixture:tcp", 120)
+            .await
+            .is_err()
+    );
+    assert!(!inv.is_server_auto_suppressed(&server.id).await.unwrap());
+    let state = inv
+        .current_service_path(&server.id, Utc::now(), 120)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.checked_at, first);
+    assert_eq!(state.status, ServicePathStatus::Degraded);
+    assert!(
+        inv.service_path_incidents(&server.id, 10).await.unwrap()[0]
+            .confirmed_at
+            .is_none()
+    );
+    assert_eq!(audit_count(&inv, "server.auto_suppressed").await, 0);
+
+    sqlx::query("DROP TRIGGER reject_suppression_audit")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    inv.record_service_path(&second, "fixture:tcp", 120)
+        .await
+        .unwrap();
+    assert!(inv.is_server_auto_suppressed(&server.id).await.unwrap());
+    assert_eq!(audit_count(&inv, "server.auto_suppressed").await, 1);
+}

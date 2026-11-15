@@ -23,6 +23,8 @@ mod private_checks;
 mod readiness_quality_spec;
 #[path = "admin_smoke/server_detail.rs"]
 mod server_detail;
+#[path = "admin_smoke/server_names.rs"]
+mod server_names;
 #[path = "admin_smoke/servers.rs"]
 mod servers;
 #[path = "admin_smoke/settings_integrations.rs"]

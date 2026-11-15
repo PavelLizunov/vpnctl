@@ -902,7 +902,7 @@ async fn admin_delivery_share_links_empty_when_user_disabled() {
         "disabled user must not have share links in delivery"
     );
     assert!(
-        !html.contains("s0 · vless+reality"),
+        !html.contains(r#"data-share-server="s0" data-share-protocol="vless+reality""#),
         "disabled user must not have protocol items listed in per-protocol share links"
     );
 }
@@ -951,11 +951,11 @@ async fn admin_delivery_share_links_skip_auto_suppressed_server() {
 
     let html = fetch_html(router(s), "/admin/users/u0/delivery").await;
     assert!(
-        !html.contains("s0 · vless+reality"),
+        !html.contains(r#"data-share-server="s0" data-share-protocol="vless+reality""#),
         "auto-suppressed server s0 must be excluded from delivery share links"
     );
     assert!(
-        html.contains("s1 · vless+reality"),
+        html.contains(r#"data-share-server="s1" data-share-protocol="vless+reality""#),
         "healthy server s1 must remain in delivery share links"
     );
 }
@@ -994,8 +994,8 @@ async fn admin_delivery_share_links_skip_hidden_and_user_disabled_protocols() {
         .unwrap();
 
     let html_before = fetch_html(router(s.clone()), "/admin/users/u0/delivery").await;
-    assert!(html_before.contains("s0 · vless+reality"));
-    assert!(html_before.contains("s0 · tuic-v5"));
+    assert!(html_before.contains(r#"data-share-server="s0" data-share-protocol="vless+reality""#));
+    assert!(html_before.contains(r#"data-share-server="s0" data-share-protocol="tuic-v5""#));
 
     s.inv
         .set_server_protocol_hidden(&sid, &ProtocolId("vless+reality".into()), true)
@@ -1004,11 +1004,11 @@ async fn admin_delivery_share_links_skip_hidden_and_user_disabled_protocols() {
 
     let html_hidden = fetch_html(router(s.clone()), "/admin/users/u0/delivery").await;
     assert!(
-        !html_hidden.contains("s0 · vless+reality"),
+        !html_hidden.contains(r#"data-share-server="s0" data-share-protocol="vless+reality""#),
         "hidden protocol must not render in share links"
     );
     assert!(
-        html_hidden.contains("s0 · tuic-v5"),
+        html_hidden.contains(r#"data-share-server="s0" data-share-protocol="tuic-v5""#),
         "unhidden protocol tuic-v5 must render"
     );
 
@@ -1019,7 +1019,7 @@ async fn admin_delivery_share_links_skip_hidden_and_user_disabled_protocols() {
 
     let html_disabled = fetch_html(router(s), "/admin/users/u0/delivery").await;
     assert!(
-        !html_disabled.contains("s0 · tuic-v5"),
+        !html_disabled.contains(r#"data-share-server="s0" data-share-protocol="tuic-v5""#),
         "per-user-disabled protocol must not render in share links"
     );
 }

@@ -17,12 +17,13 @@ pub(crate) fn user_overview_summary(
     inventory: (
         &[vpnctl_core::Server],
         &std::collections::HashSet<vpnctl_core::ServerId>,
+        &crate::handlers::admin::helpers::ServerNames,
     ),
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
     let (lifecycle, last_seen, aggregates, ua_clusters) = facts;
-    let (all_servers, granted_ids) = inventory;
+    let (all_servers, granted_ids, names) = inventory;
     let likely_shared = user_is_likely_shared(aggregates, ua_clusters);
     let traffic_total: u64 = traffic
         .iter()
@@ -83,7 +84,7 @@ pub(crate) fn user_overview_summary(
                             @let total = up.saturating_add(*down);
                             @let share = total.saturating_mul(100).checked_div(traffic_total).unwrap_or(0);
                             tr {
-                                td { a.ed-grid__id href=(format!("/admin/servers/{}", path_segment_encode(&sid.0))) { (sid.0) } }
+                                td { a.ed-grid__id href=(format!("/admin/servers/{}", path_segment_encode(&sid.0))) { (crate::handlers::admin::helpers::named_server(sid, names)) } }
                                 td.num { (humanize_bytes(*up)) }
                                 td.num { (humanize_bytes(*down)) }
                                 td.num { b { (humanize_bytes(total)) } }
@@ -100,11 +101,11 @@ pub(crate) fn user_overview_summary(
             div.ed-grants-summary {
                 @for server in all_servers {
                     @if granted_ids.contains(&server.id) {
-                        a.ed-grant-chip.on href=(format!("/admin/servers/{}", path_segment_encode(&server.id.0))) { (status("check", lang, "Granted", "Выдан")) " " (server.id.0) }
+                        a.ed-grant-chip.on href=(format!("/admin/servers/{}", path_segment_encode(&server.id.0))) { (status("check", lang, "Granted", "Выдан")) " " (crate::handlers::admin::helpers::named_server(&server.id, names)) }
                     } @else {
                         form method="post" action=(format!("/admin/users/{}/grants/{}", path_segment_encode(&user.id.0), path_segment_encode(&server.id.0))) {
                             button.ed-grant-chip.off type="submit" title=(tr(lang, "Grant this server", "Выдать этот сервер")) {
-                                (icon("plus")) (server.id.0) " — " (tr(lang, "not granted · grant", "не выдан · выдать"))
+                                (icon("plus")) (crate::handlers::admin::helpers::named_server(&server.id, names)) " — " (tr(lang, "not granted · grant", "не выдан · выдать"))
                             }
                         }
                     }

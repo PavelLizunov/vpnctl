@@ -502,8 +502,8 @@ pub(crate) fn server_detail_auto_suppress_section(
         div.ed-art-eyebrow
             title=(tr(
                 lang,
-                "When ON, the daemon removes this server from clients' subscriptions after it fails the unreachable threshold (3 consecutive SSH probes ≈ 30 min) and restores it on the first successful probe. OFF (default) = a down server stays in the subscription and clients fall back on their own.",
-                "Когда ВКЛ, демон убирает этот сервер из подписок клиентов после порога недоступности (3 неудачные SSH-пробы подряд ≈ 30 мин) и возвращает при первой успешной пробе. ВЫКЛ (по умолчанию) = упавший сервер остаётся в подписке, клиенты фолбэкаются сами.",
+                "Enabled for new servers. Two fully failed TCP VPN-port rounds from the measurement network hide this server from subscriptions; two fully successful rounds restore it. Missing measurements and SSH availability do not trigger hiding or recovery. Grants and keys stay unchanged.",
+                "Включено для новых серверов. Два полностью неудачных раунда TCP-портов VPN из сети проверки скрывают сервер из подписок; два полностью успешных возвращают его. Отсутствие измерений и состояние SSH не вызывают скрытие или возврат. Доступы и ключи сохраняются.",
             )) {
             (tr(lang, "AUTO-SUPPRESS WHEN DOWN", "АВТО-СКРЫТИЕ ПРИ ПАДЕНИИ"))
         }
@@ -515,7 +515,7 @@ pub(crate) fn server_detail_auto_suppress_section(
         } @else {
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
                 @if opt_in {
-                    (tr(lang, "Armed — server is currently reachable; will auto-hide if it goes down.", "Взведено — сервер сейчас доступен; авто-скроется если упадёт."))
+                    (tr(lang, "Enabled — waiting for confirmed TCP outage or recovery evidence.", "Включено — скрытие и возврат только по подтверждённым TCP-проверкам."))
                 } @else {
                     (tr(lang, "Off — a down server stays in the subscription (clients fall back themselves).", "Выкл — упавший сервер остаётся в подписке (клиенты фолбэкаются сами)."))
                 }

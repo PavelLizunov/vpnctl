@@ -12,6 +12,43 @@ const VALID_THEMES: &[&str] = &["default", "newsprint", "foxed", "ink"];
 const VALID_ACCENTS: &[&str] = &["default", "rust", "forest", "plum"];
 const VALID_LANGS: &[&str] = &["en", "ru"];
 
+pub(crate) type ServerNames = std::collections::HashMap<vpnctl_core::ServerId, String>;
+
+pub(crate) async fn server_names(
+    inv: &vpnctl_inventory::SqliteInventory,
+    servers: &[vpnctl_core::Server],
+) -> Result<ServerNames, Response> {
+    let mut names = ServerNames::new();
+    for server in servers {
+        let custom = inv
+            .server_display_name(&server.id)
+            .await
+            .map_err(|error| internal_error(anyhow::Error::new(error)))?;
+        names.insert(
+            server.id.clone(),
+            crate::handlers::vpn_router::server_display_label(&server.id.0, custom.as_deref()),
+        );
+    }
+    Ok(names)
+}
+
+pub(crate) fn server_identity(id: &vpnctl_core::ServerId, name: Option<&str>) -> Markup {
+    let name = name.unwrap_or(&id.0);
+    html! {
+        span data-server-id=(id.0) data-server-name=(name)
+             style="display:inline-flex;flex-direction:column;align-items:flex-start;min-width:0;" {
+            span style="overflow-wrap:anywhere;" { (name) }
+            @if name != id.0 {
+                small.ed-grid__mut style="font-size:11px;font-weight:400;" { "ID: " (id.0) }
+            }
+        }
+    }
+}
+
+pub(crate) fn named_server(id: &vpnctl_core::ServerId, names: &ServerNames) -> Markup {
+    server_identity(id, names.get(id).map(String::as_str))
+}
+
 pub(crate) async fn topbar_alert_count(state: &AppState) -> u64 {
     state.inv.unacked_alert_count().await.unwrap_or(0)
 }

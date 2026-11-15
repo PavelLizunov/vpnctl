@@ -25,6 +25,7 @@ pub(crate) fn render_delivery_tab(
     share_links: &[(ServerId, ProtocolId, String)],
     wg_capable_granted: &[&ServerId],
     wg_capable_inventory: &[&ServerId],
+    names: &crate::handlers::admin::helpers::ServerNames,
     lang: Locale,
 ) -> Markup {
     html! {
@@ -95,7 +96,7 @@ pub(crate) fn render_delivery_tab(
                 }
                 @for (sid, version, ready) in amnezia_files {
                     div style="margin: 8px 0;" {
-                        span.ed-mono { (sid.0) " · AmneziaWG " (if *version == 2 { "2.0" } else { "3.1" }) " " }
+                        span.ed-mono { (crate::handlers::admin::helpers::named_server(sid, names)) " · AmneziaWG " (if *version == 2 { "2.0" } else { "3.1" }) " " }
                         @if *ready {
                             a.ed-abtn.ed-abtn--secondary href=(format!("/admin/users/{}/amneziawg/{version}/conf/{}",
                                 path_segment_encode(&user.id.0), path_segment_encode(&sid.0))) {
@@ -228,7 +229,7 @@ pub(crate) fn render_delivery_tab(
                                             (crate::i18n::tr(lang, "Currently granted: ", "Текущие гранты: "))
                                             @for (i, s) in servers.iter().enumerate() {
                                                 @if i > 0 { ", " }
-                                                span.ed-mono { (s.id.0) }
+                                                span.ed-mono { (crate::handlers::admin::helpers::named_server(&s.id, names)) }
                                             }
                                             (crate::i18n::tr(lang, " — none have ", " — ни у одного нет "))
                                             span.ed-mono { "wireguard" }
@@ -243,7 +244,7 @@ pub(crate) fn render_delivery_tab(
                                                 ))
                                                 @for (i, sid) in wg_capable_inventory.iter().enumerate() {
                                                     @if i > 0 { ", " }
-                                                    span.ed-mono { (sid.0) }
+                                                    span.ed-mono { (crate::handlers::admin::helpers::named_server(sid, names)) }
                                                 }
                                                 "."
                                             }
@@ -269,7 +270,7 @@ pub(crate) fn render_delivery_tab(
                                             (crate::i18n::tr(lang, "Granted servers ", "Выданные серверы "))
                                             @for (i, sid) in wg_capable_granted.iter().enumerate() {
                                                 @if i > 0 { ", " }
-                                                span.ed-mono { (sid.0) }
+                                                span.ed-mono { (crate::handlers::admin::helpers::named_server(sid, names)) }
                                             }
                                             (crate::i18n::tr(
                                                 lang,
@@ -293,7 +294,7 @@ pub(crate) fn render_delivery_tab(
                                     @for (sid, _pid, link) in &wg_links {
                                         details style="margin-bottom: 4px; border-bottom: 1px dotted var(--rule);" {
                                             summary style="cursor: pointer; font-family: var(--mono); font-size: 11px; color: var(--ink); padding: 5px 0;" {
-                                                (icon("server")) (crate::i18n::tr(lang, "server ", "сервер ")) b { (sid.0) }
+                                                (icon("server")) (crate::i18n::tr(lang, "server ", "сервер ")) b { (crate::handlers::admin::helpers::named_server(sid, names)) }
                                                 span style="color: var(--mute);" {
                                                     " · " (link.len()) (crate::i18n::tr(lang, " chars", " символов")) " · QR"
                                                 }
@@ -355,7 +356,7 @@ pub(crate) fn render_delivery_tab(
                                             (crate::i18n::tr(lang, "Granted WG servers ", "Выданные WG-серверы "))
                                             @for (i, sid) in wg_capable_granted.iter().enumerate() {
                                                 @if i > 0 { ", " }
-                                                span.ed-mono { (sid.0) }
+                                                span.ed-mono { (crate::handlers::admin::helpers::named_server(sid, names)) }
                                             }
                                             (crate::i18n::tr(
                                                 lang,
@@ -383,7 +384,7 @@ pub(crate) fn render_delivery_tab(
                                     @for (sid, link) in amnezia_links {
                                         details style="margin-bottom: 4px; border-bottom: 1px dotted var(--rule);" {
                                             summary style="cursor: pointer; font-family: var(--mono); font-size: 11px; color: var(--ink); padding: 5px 0;" {
-                                                (icon("server")) (crate::i18n::tr(lang, "server ", "сервер ")) b { (sid.0) }
+                                                (icon("server")) (crate::i18n::tr(lang, "server ", "сервер ")) b { (crate::handlers::admin::helpers::named_server(sid, names)) }
                                                 span style="color: var(--mute);" {
                                                     " · " (link.len()) (crate::i18n::tr(lang, " chars", " символов")) " · QR"
                                                 }
@@ -425,7 +426,7 @@ pub(crate) fn render_delivery_tab(
                                     @for (sid, link) in awg_links {
                                         details style="margin-bottom: 4px; border-bottom: 1px dotted var(--rule);" {
                                             summary style="cursor: pointer; font-family: var(--mono); font-size: 11px; color: var(--ink); padding: 5px 0;" {
-                                                (icon("server")) (crate::i18n::tr(lang, "server ", "сервер ")) b { (sid.0) }
+                                                (icon("server")) (crate::i18n::tr(lang, "server ", "сервер ")) b { (crate::handlers::admin::helpers::named_server(sid, names)) }
                                                 span style="color: var(--mute);" {
                                                     " · " (link.len()) (crate::i18n::tr(lang, " chars", " символов")) " · QR"
                                                 }
@@ -510,8 +511,9 @@ pub(crate) fn render_delivery_tab(
                     } @else {
                         ul style="list-style: none; padding: 0; margin-top: 8px; font-family: var(--mono); font-size: 11px; line-height: 1.7; color: var(--soft);" {
                             @for (sid, pid, link) in share_links {
-                                li style="padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
-                                    span style="color: var(--mute);" { (sid.0) " · " (pid.0) " · " }
+                                li data-share-server=(sid.0) data-share-protocol=(pid.0)
+                                   style="padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
+                                    span style="color: var(--mute);" { (crate::handlers::admin::helpers::named_server(sid, names)) " · " (pid.0) " · " }
                                     (link)
                                 }
                             }
