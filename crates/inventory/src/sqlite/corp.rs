@@ -313,6 +313,79 @@ impl SqliteInventory {
         Ok(status)
     }
 
+    pub async fn refresh_corp_egress(
+        &self,
+        expected_config_version: u64,
+        previous: &[CorpVerifiedEgress],
+        refreshed: &[CorpVerifiedEgress],
+        actor: &str,
+    ) -> CorpResult<CorpStatus> {
+        validation::actor(actor)?;
+        let previous = validation::egress(previous)?;
+        let refreshed = validation::egress(refreshed)?;
+        if previous.len() != refreshed.len()
+            || previous.iter().zip(&refreshed).any(|(old, new)| {
+                old.server_id != new.server_id
+                    || old.ip != new.ip
+                    || old.configuration_fingerprint != new.configuration_fingerprint
+                    || new.verified_at < old.verified_at
+            })
+        {
+            return Err(CorpStoreError::InvalidInput(
+                "renewal must preserve exit identities and not backdate proof",
+            ));
+        }
+        let mut conn = durable_connection(self).await?;
+        let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
+        let status = required_record(&mut tx).await?.status;
+        require_version(&status, expected_config_version)?;
+        if egress_on(&mut tx).await? != previous {
+            return Err(CorpStoreError::Conflict);
+        }
+        if !user_enabled(&mut tx, &status.user_id).await? {
+            return Err(CorpStoreError::Unavailable);
+        }
+        for entry in &refreshed {
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM servers WHERE id = ?1)")
+                    .bind(&entry.server_id.0)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if !exists {
+                return Err(CorpStoreError::InvalidInput(
+                    "verified exit server does not exist",
+                ));
+            }
+        }
+        if previous == refreshed {
+            tx.commit().await?;
+            return Ok(status);
+        }
+        for (old, entry) in previous.iter().zip(&refreshed) {
+            if old.verified_at == entry.verified_at {
+                continue;
+            }
+            sqlx::query(
+                "UPDATE corp_policy_egress SET verified_at = ?1 WHERE server_id = ?2 AND ip = ?3",
+            )
+            .bind(entry.verified_at)
+            .bind(&entry.server_id.0)
+            .bind(entry.ip.to_string())
+            .execute(&mut *tx)
+            .await?;
+        }
+        audit(
+            &mut tx,
+            actor,
+            "corp.egress.refresh",
+            &status,
+            &serde_json::json!({"count": refreshed.len()}),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(status)
+    }
+
     pub async fn corp_verified_egress(&self) -> CorpResult<Vec<CorpVerifiedEgress>> {
         let mut conn = self.pool.acquire().await?;
         egress_on(&mut conn).await

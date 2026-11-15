@@ -1946,4 +1946,449 @@ mod spec {
         assert!(!debug.contains(&String::from_utf8(publication.envelope.clone()).unwrap()));
         assert!(!debug.contains(&format!("{:?}", publication.envelope)));
     }
+
+    fn egress_snapshot(rows: &[CorpVerifiedEgress]) -> Vec<(String, IpAddr, String, i64)> {
+        let mut rows = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.server_id.0.clone(),
+                    row.ip,
+                    row.configuration_fingerprint.clone(),
+                    row.verified_at,
+                )
+            })
+            .collect::<Vec<_>>();
+        rows.sort();
+        rows
+    }
+
+    async fn refresh_state() -> (State, CorpStatus, Vec<CorpVerifiedEgress>) {
+        let (state, status) = enabled_state().await;
+        state.inv.add_server(&server()).await.unwrap();
+        let rows = vec![egress("192.0.2.25"), egress("2001:db8::25")];
+        let status = state
+            .inv
+            .replace_corp_egress(status.config_version, &rows, ACTOR)
+            .await
+            .unwrap();
+        (state, status, rows)
+    }
+
+    #[tokio::test]
+    async fn refresh_changes_only_timestamps_preserves_session_credentials_and_exact_history() {
+        let (state, status, previous) = refresh_state().await;
+        let published = state
+            .inv
+            .publish_corp_policy(&publication(&status), ACTOR)
+            .await
+            .unwrap();
+        let record = state.inv.corp_record().await.unwrap().unwrap();
+        let login = session(71, NOW + 3600);
+        state
+            .inv
+            .issue_corp_session(record.status.auth_generation, &login, NOW, ACTOR)
+            .await
+            .unwrap();
+        let before = audit_count(&state).await;
+        let mut refreshed = previous.clone();
+        refreshed[0].verified_at += 10;
+        refreshed[1].verified_at += 20;
+        let result = state
+            .inv
+            .refresh_corp_egress(record.status.config_version, &previous, &refreshed, ACTOR)
+            .await
+            .unwrap();
+        assert_eq!(status_snapshot(&result), status_snapshot(&record.status));
+        let after = state.inv.corp_record().await.unwrap().unwrap();
+        assert_eq!(
+            after.credentials.password_phc,
+            record.credentials.password_phc
+        );
+        assert_eq!(
+            after.credentials.reader_tokens[0].token,
+            record.credentials.reader_tokens[0].token
+        );
+        assert_eq!(
+            after.credentials.signing_keys[0].pkcs8,
+            record.credentials.signing_keys[0].pkcs8
+        );
+        assert_eq!(
+            after.credentials.signing_keys[0].spki,
+            record.credentials.signing_keys[0].spki
+        );
+        assert_eq!(
+            egress_snapshot(&state.inv.corp_verified_egress().await.unwrap()),
+            egress_snapshot(&refreshed)
+        );
+        let retained = state
+            .inv
+            .corp_session(&login.token_hash, NOW)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.auth_generation, record.status.auth_generation);
+        assert_eq!(retained.config_version, record.status.config_version);
+        assert_eq!(retained.csrf_token, login.csrf_token);
+        assert_eq!(retained.expires_at, login.expires_at);
+        let history = state.inv.corp_history(100).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].payload, published.payload);
+        assert_eq!(history[0].envelope, published.envelope);
+        assert_eq!(history[0].payload_sha256, published.payload_sha256);
+        assert_eq!(audit_count(&state).await, before + 1);
+        let mut connection = sql_connection(&state).await;
+        let audit = sqlx::query("SELECT * FROM audit_log")
+            .fetch_all(&mut connection)
+            .await
+            .unwrap();
+        let refresh_rows = audit
+            .iter()
+            .filter(|row| {
+                (0..row.columns().len()).any(|i| {
+                    row.try_get::<String, _>(i)
+                        .is_ok_and(|s| s == "corp.egress.refresh")
+                })
+            })
+            .count();
+        assert_eq!(refresh_rows, 1);
+        drop(connection);
+        // An identity replacement retains its stronger authority/session invalidation.
+        refreshed[0].configuration_fingerprint = "b".repeat(64);
+        let replaced = state
+            .inv
+            .replace_corp_egress(result.config_version, &refreshed, ACTOR)
+            .await
+            .unwrap();
+        assert_eq!(replaced.config_version, result.config_version + 1);
+        assert_eq!(replaced.auth_generation, result.auth_generation + 1);
+        assert!(
+            state
+                .inv
+                .corp_session(&login.token_hash, NOW)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_normalized_noop_and_empty_disabled_binding_do_not_write_audit() {
+        let (state, status, previous) = refresh_state().await;
+        let normalized = [egress("2001:db8::25"), egress("::ffff:192.0.2.25")];
+        let before = audit_count(&state).await;
+        // Audit rejection also proves a normalized no-op never attempts an insert.
+        fail_audit(&state).await;
+        let same = state
+            .inv
+            .refresh_corp_egress(status.config_version, &normalized, &previous, ACTOR)
+            .await
+            .unwrap();
+        assert_eq!(status_snapshot(&same), status_snapshot(&status));
+        assert_eq!(audit_count(&state).await, before);
+        allow_audit(&state).await;
+        let empty = self::state().await;
+        let disabled = empty.inv.create_corp(&setup(), ACTOR).await.unwrap();
+        let before = audit_count(&empty).await;
+        let same = empty
+            .inv
+            .refresh_corp_egress(disabled.config_version, &[], &[], ACTOR)
+            .await
+            .unwrap();
+        assert_eq!(status_snapshot(&same), status_snapshot(&disabled));
+        assert_eq!(audit_count(&empty).await, before);
+        empty.inv.add_server(&server()).await.unwrap();
+        let status = empty
+            .inv
+            .replace_corp_egress(disabled.config_version, &previous, ACTOR)
+            .await
+            .unwrap();
+        let mut refreshed = previous.clone();
+        refreshed[0].verified_at += 1;
+        assert!(
+            !empty
+                .inv
+                .refresh_corp_egress(status.config_version, &previous, &refreshed, ACTOR)
+                .await
+                .unwrap()
+                .enabled
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_requires_exact_version_and_previous_timestamps_without_audit() {
+        let (state, status, previous) = refresh_state().await;
+        let mut refreshed = previous.clone();
+        refreshed[0].verified_at += 2;
+        let before = audit_count(&state).await;
+        assert!(matches!(
+            state
+                .inv
+                .refresh_corp_egress(status.config_version - 1, &previous, &refreshed, ACTOR)
+                .await,
+            Err(CorpStoreError::Conflict)
+        ));
+        let mut stale = previous.clone();
+        stale[0].verified_at -= 1;
+        assert!(matches!(
+            state
+                .inv
+                .refresh_corp_egress(status.config_version, &stale, &refreshed, ACTOR)
+                .await,
+            Err(CorpStoreError::Conflict)
+        ));
+        assert!(matches!(
+            state
+                .inv
+                .refresh_corp_egress(status.config_version, &[], &[], ACTOR)
+                .await,
+            Err(CorpStoreError::Conflict)
+        ));
+        assert_eq!(audit_count(&state).await, before);
+        assert_eq!(
+            egress_snapshot(&state.inv.corp_verified_egress().await.unwrap()),
+            egress_snapshot(&previous)
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_rejects_identity_changes_backdating_duplicates_and_actor_bounds() {
+        let (state, status, previous) = refresh_state().await;
+        let mut invalid = Vec::new();
+        let mut row = previous[0].clone();
+        row.ip = "192.0.2.26".parse().unwrap();
+        invalid.push(vec![row, previous[1].clone()]);
+        let mut row = previous[0].clone();
+        row.configuration_fingerprint = "b".repeat(64);
+        invalid.push(vec![row, previous[1].clone()]);
+        let mut row = previous[0].clone();
+        row.server_id = ServerId("different-server".to_owned());
+        invalid.push(vec![row, previous[1].clone()]);
+        invalid.push(vec![previous[0].clone()]);
+        invalid.push(vec![previous[0].clone(), egress("::ffff:192.0.2.25")]);
+        for timestamp in [NOW - 1, 0, 253_402_300_800] {
+            let mut rows = previous.clone();
+            rows[0].verified_at = timestamp;
+            invalid.push(rows);
+        }
+        for fingerprint in ["A".repeat(64), "a".repeat(63), "g".repeat(64)] {
+            let mut rows = previous.clone();
+            rows[0].configuration_fingerprint = fingerprint;
+            invalid.push(rows);
+        }
+        let before = audit_count(&state).await;
+        for rows in invalid {
+            assert!(matches!(
+                state
+                    .inv
+                    .refresh_corp_egress(status.config_version, &previous, &rows, ACTOR)
+                    .await,
+                Err(CorpStoreError::InvalidInput(_))
+            ));
+        }
+        // Invalid previous input is validated independently, before the row CAS.
+        for rows in [
+            vec![previous[0].clone(), egress("::ffff:192.0.2.25")],
+            vec![CorpVerifiedEgress {
+                verified_at: 0,
+                ..previous[0].clone()
+            }],
+        ] {
+            assert!(matches!(
+                state
+                    .inv
+                    .refresh_corp_egress(status.config_version, &rows, &rows, ACTOR)
+                    .await,
+                Err(CorpStoreError::InvalidInput(_))
+            ));
+        }
+        for actor in [
+            "".to_owned(),
+            "a".repeat(129),
+            "line\nbreak".to_owned(),
+            "é".repeat(65),
+        ] {
+            assert!(matches!(
+                state
+                    .inv
+                    .refresh_corp_egress(status.config_version, &previous, &previous, &actor)
+                    .await,
+                Err(CorpStoreError::InvalidInput(_))
+            ));
+        }
+        assert_eq!(audit_count(&state).await, before);
+        assert_eq!(
+            egress_snapshot(&state.inv.corp_verified_egress().await.unwrap()),
+            egress_snapshot(&previous)
+        );
+        assert!(
+            state
+                .inv
+                .refresh_corp_egress(status.config_version, &previous, &previous, &"é".repeat(64))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_requires_existing_binding_and_enabled_existing_user_even_for_noop() {
+        let empty = state().await;
+        assert!(matches!(
+            empty.inv.refresh_corp_egress(1, &[], &[], ACTOR).await,
+            Err(CorpStoreError::Unavailable)
+        ));
+        for deleted in [false, true] {
+            let (state, _, previous) = refresh_state().await;
+            if deleted {
+                state.inv.remove_user(&user().id).await.unwrap();
+            } else {
+                state.inv.set_user_disabled(&user().id, true).await.unwrap();
+            }
+            let status = state.inv.corp_record().await.unwrap().unwrap().status;
+            let before = audit_count(&state).await;
+            assert!(matches!(
+                state
+                    .inv
+                    .refresh_corp_egress(status.config_version, &previous, &previous, ACTOR)
+                    .await,
+                Err(CorpStoreError::Unavailable)
+            ));
+            assert_eq!(audit_count(&state).await, before);
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_audit_failure_rolls_back_all_timestamps_and_preserves_sessions() {
+        let (state, status, previous) = refresh_state().await;
+        let login = session(72, NOW + 3600);
+        state
+            .inv
+            .issue_corp_session(status.auth_generation, &login, NOW, ACTOR)
+            .await
+            .unwrap();
+        let before = audit_count(&state).await;
+        let mut refreshed = previous.clone();
+        for row in &mut refreshed {
+            row.verified_at += 1;
+        }
+        fail_audit(&state).await;
+        assert!(matches!(
+            state
+                .inv
+                .refresh_corp_egress(status.config_version, &previous, &refreshed, ACTOR)
+                .await,
+            Err(CorpStoreError::Inventory(_))
+        ));
+        assert_eq!(
+            egress_snapshot(&state.inv.corp_verified_egress().await.unwrap()),
+            egress_snapshot(&previous)
+        );
+        assert_eq!(
+            status_snapshot(&state.inv.corp_record().await.unwrap().unwrap().status),
+            status_snapshot(&status)
+        );
+        assert!(
+            state
+                .inv
+                .corp_session(&login.token_hash, NOW)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(audit_count(&state).await, before);
+        allow_audit(&state).await;
+        state
+            .inv
+            .refresh_corp_egress(status.config_version, &previous, &refreshed, ACTOR)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_refreshes_of_same_previous_rows_have_one_winner() {
+        let (state, status, previous) = refresh_state().await;
+        let second = SqliteInventory::open(&state.path).await.unwrap();
+        let mut first_rows = previous.clone();
+        let mut second_rows = previous.clone();
+        for row in &mut first_rows {
+            row.verified_at += 10;
+        }
+        for row in &mut second_rows {
+            row.verified_at += 20;
+        }
+        let before = audit_count(&state).await;
+        let (a, b) = tokio::join!(
+            state
+                .inv
+                .refresh_corp_egress(status.config_version, &previous, &first_rows, ACTOR),
+            second.refresh_corp_egress(status.config_version, &previous, &second_rows, ACTOR),
+        );
+        assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+        assert!(matches!(
+            (&a, &b),
+            (Ok(_), Err(CorpStoreError::Conflict)) | (Err(CorpStoreError::Conflict), Ok(_))
+        ));
+        let winner = if a.is_ok() { first_rows } else { second_rows };
+        assert_eq!(
+            egress_snapshot(&state.inv.corp_verified_egress().await.unwrap()),
+            egress_snapshot(&winner)
+        );
+        assert_eq!(audit_count(&state).await, before + 1);
+        assert_eq!(
+            status_snapshot(&state.inv.corp_record().await.unwrap().unwrap().status),
+            status_snapshot(&status)
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_accepts_512_rows_maximum_timestamp_and_exhausted_authority_counters() {
+        let (state, _) = enabled_state().await;
+        state.inv.add_server(&server()).await.unwrap();
+        let previous = (1..=512)
+            .map(|i| CorpVerifiedEgress {
+                verified_at: 1,
+                ..egress(&format!("2001:db8::{i:x}"))
+            })
+            .collect::<Vec<_>>();
+        let status = state.inv.corp_record().await.unwrap().unwrap().status;
+        state
+            .inv
+            .replace_corp_egress(status.config_version, &previous, ACTOR)
+            .await
+            .unwrap();
+        let mut connection = sql_connection(&state).await;
+        sqlx::query(
+            "UPDATE corp_policy_settings SET auth_generation = ?, config_version = ? WHERE id = 1",
+        )
+        .bind(i64::try_from(CORP_MAX_REVISION).unwrap())
+        .bind(i64::try_from(CORP_MAX_REVISION).unwrap())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        drop(connection);
+        let status = state.inv.corp_record().await.unwrap().unwrap().status;
+        let mut refreshed = previous.clone();
+        for row in &mut refreshed {
+            row.verified_at = 253_402_300_799;
+        }
+        let same = state
+            .inv
+            .refresh_corp_egress(status.config_version, &previous, &refreshed, ACTOR)
+            .await
+            .unwrap();
+        assert_eq!(status_snapshot(&same), status_snapshot(&status));
+        assert_eq!(
+            egress_snapshot(&state.inv.corp_verified_egress().await.unwrap()),
+            egress_snapshot(&refreshed)
+        );
+        let mut oversized = refreshed.clone();
+        oversized.push(egress("2001:db8::ffff"));
+        assert!(matches!(
+            state
+                .inv
+                .refresh_corp_egress(status.config_version, &oversized, &oversized, ACTOR)
+                .await,
+            Err(CorpStoreError::InvalidInput(_))
+        ));
+    }
 }

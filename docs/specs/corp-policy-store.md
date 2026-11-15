@@ -93,6 +93,9 @@ impl SqliteInventory {
     pub async fn replace_corp_egress(&self, expected_config_version: u64,
         entries: &[CorpVerifiedEgress], actor: &str) -> CorpResult<CorpStatus>;
     pub async fn corp_verified_egress(&self) -> CorpResult<Vec<CorpVerifiedEgress>>;
+    pub async fn refresh_corp_egress(&self, expected_config_version: u64,
+        previous: &[CorpVerifiedEgress], refreshed: &[CorpVerifiedEgress],
+        actor: &str) -> CorpResult<CorpStatus>;
     pub async fn issue_corp_session(&self, expected_auth_generation: u64,
         session: &CorpSessionInput, now: i64, actor: &str) -> CorpResult<()>;
     pub async fn corp_session(&self, token_hash: &str, now: i64) -> CorpResult<Option<CorpSession>>;
@@ -150,6 +153,11 @@ payload/envelope bodies also stay out of Debug. No error/audit includes secrets.
   config/auth generations and revokes sessions on an actual change only.
   Entries normalize by canonical `(server_id, IP)` before comparison, so array
   order is immaterial.
+- Timestamp-only renewal uses `refresh_corp_egress` and the complete previous
+  row set as an additional CAS. It preserves generations and sessions, permits
+  only nondecreasing timestamps for unchanged identities, and atomically audits
+  actual renewal. The detailed bounds, user/no-op checks and failure contract
+  are owned by [egress preparation](corp-policy-egress-preparation.md).
 - Sessions: token_hash is exactly 64 lowercase hex characters (SHA-256 computed
   by daemon); CSRF is exactly 43 URL-safe unpadded base64 characters from 32 random
   bytes. `now` is positive bounded Unix seconds; expiration must be in

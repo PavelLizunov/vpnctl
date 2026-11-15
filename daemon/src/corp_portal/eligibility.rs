@@ -22,6 +22,12 @@ pub struct CorpEligibleServer {
     pub configuration_fingerprint: String,
 }
 
+// Outbound values contain credentials and must not be logged or serialized.
+pub struct CorpProbePlan {
+    pub server: CorpEligibleServer,
+    pub outbounds: Vec<serde_json::Value>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum EligibilityError {
     #[error("corporate eligibility inventory is unavailable")]
@@ -36,6 +42,7 @@ struct Choice {
     protocol: &'static str,
     host: String,
     connection: String,
+    outbound: serde_json::Value,
 }
 
 const PROFILES: [(&str, &str, Option<&str>); 3] = [
@@ -48,6 +55,28 @@ pub async fn eligible_servers(
     state: &AppState,
     user_id: &UserId,
 ) -> Result<Vec<CorpEligibleServer>, EligibilityError> {
+    Ok(collect_plans(state, user_id)
+        .await?
+        .into_iter()
+        .map(|plan| plan.server)
+        .collect())
+}
+
+pub async fn probe_plan(
+    state: &AppState,
+    user_id: &UserId,
+    server_id: &ServerId,
+) -> Result<Option<CorpProbePlan>, EligibilityError> {
+    Ok(collect_plans(state, user_id)
+        .await?
+        .into_iter()
+        .find(|plan| &plan.server.server_id == server_id))
+}
+
+async fn collect_plans(
+    state: &AppState,
+    user_id: &UserId,
+) -> Result<Vec<CorpProbePlan>, EligibilityError> {
     let Some(user) = enabled_user(state, user_id).await? else {
         return Ok(Vec::new());
     };
@@ -71,11 +100,18 @@ pub async fn eligible_servers(
     for (index, choices) in groups {
         let input = &inputs[index];
         let fingerprint = configuration_fingerprint(state, user_id, input, &choices).await?;
-        result.push(CorpEligibleServer {
-            server_id: input.server.id.clone(),
-            label: server_display_label(&input.server.id.0, input.display_name.as_deref()),
-            hosts: choices.into_iter().map(|choice| choice.host).collect(),
-            configuration_fingerprint: fingerprint,
+        let (hosts, outbounds) = choices
+            .into_iter()
+            .map(|choice| (choice.host, choice.outbound))
+            .unzip();
+        result.push(CorpProbePlan {
+            server: CorpEligibleServer {
+                server_id: input.server.id.clone(),
+                label: server_display_label(&input.server.id.0, input.display_name.as_deref()),
+                hosts,
+                configuration_fingerprint: fingerprint,
+            },
+            outbounds,
         });
     }
     if enabled_user(state, user_id).await?.is_none() {
@@ -136,17 +172,63 @@ fn collect_choices(
                     continue;
                 };
                 if hosts.insert(host.clone()) {
+                    let outbound = render_outbound(state, input, user, &id, &host)?;
                     choices.push(Choice {
                         input_index,
                         protocol,
                         host,
                         connection,
+                        outbound,
                     });
                 }
             }
         }
     }
     Ok(choices)
+}
+
+fn render_outbound(
+    state: &AppState,
+    input: &SubscriptionServer,
+    user: &User,
+    protocol: &ProtocolId,
+    selected_host: &str,
+) -> Result<serde_json::Value, EligibilityError> {
+    let renderer = state
+        .registry
+        .protocol(protocol)
+        .ok_or(EligibilityError::InvalidConfiguration)?;
+    let client = user.with_per_server_uuid(&input.client_uuid);
+    let context = RenderCtx::new(&input.server, &input.secrets);
+    let outbound = renderer
+        .client_config(&context, &client)
+        .map_err(|_| EligibilityError::InvalidConfiguration)?;
+    let object = outbound
+        .as_object()
+        .ok_or(EligibilityError::InvalidConfiguration)?;
+    let host = object
+        .get("server")
+        .and_then(serde_json::Value::as_str)
+        .map(normalize_host);
+    let uuid = object.get("uuid").and_then(serde_json::Value::as_str);
+    let port = object
+        .get("server_port")
+        .and_then(serde_json::Value::as_u64);
+    if object.get("type").and_then(serde_json::Value::as_str) != Some("vless")
+        || uuid.is_none_or(|uuid| uuid.trim().is_empty())
+        || object.contains_key("detour")
+        || port.is_none_or(|port| port == 0 || port > u64::from(u16::MAX))
+        || host.as_deref() != Some(selected_host)
+    {
+        return Err(EligibilityError::InvalidConfiguration);
+    }
+    Ok(outbound)
+}
+
+fn normalize_host(host: &str) -> String {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.parse::<std::net::IpAddr>()
+        .map_or_else(|_| host.to_ascii_lowercase(), |ip| ip.to_string())
 }
 
 fn parse_choice(link: &str) -> Result<Option<(String, String)>, EligibilityError> {
@@ -157,11 +239,7 @@ fn parse_choice(link: &str) -> Result<Option<(String, String)>, EligibilityError
         .map_err(|_| EligibilityError::InvalidConfiguration)?;
     let host = parsed
         .host_str()
-        .map(|host| {
-            host.trim_start_matches('[')
-                .trim_end_matches(']')
-                .to_ascii_lowercase()
-        })
+        .map(normalize_host)
         .filter(|host| !host.is_empty())
         .ok_or(EligibilityError::InvalidConfiguration)?;
     let identity = percent_encoding::percent_decode_str(parsed.username())
@@ -256,12 +334,13 @@ async fn configuration_fingerprint(
                 "protocol": choice.protocol,
                 "host": choice.host,
                 "connection": choice.connection,
+                "outbound": choice.outbound,
                 "secrets": secrets,
             })
         })
         .collect();
     let material = json!({
-        "profile": "vpnrouter-business-direct-vless-v1",
+        "profile": "vpnrouter-business-portal-tcp-v2",
         "user": user_id.0,
         "server": server.id.0,
         "address": server.address,
@@ -273,7 +352,23 @@ async fn configuration_fingerprint(
         "kernels": kernels,
         "endpoints": endpoints,
     });
-    let bytes =
-        serde_json::to_vec(&material).map_err(|_| EligibilityError::InvalidConfiguration)?;
+    let bytes = serde_json::to_vec(&canonical_value(material))
+        .map_err(|_| EligibilityError::InvalidConfiguration)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn canonical_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(object) => {
+            let sorted: BTreeMap<_, _> = object
+                .into_iter()
+                .map(|(key, value)| (key, canonical_value(value)))
+                .collect();
+            serde_json::Value::Object(sorted.into_iter().collect())
+        }
+        serde_json::Value::Array(array) => {
+            serde_json::Value::Array(array.into_iter().map(canonical_value).collect())
+        }
+        value => value,
+    }
 }

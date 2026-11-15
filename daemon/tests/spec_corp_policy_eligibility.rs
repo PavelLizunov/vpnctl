@@ -1,17 +1,19 @@
 // Independent fixtures and assertions derived only from corp-policy-eligibility.md.
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod spec {
-    use std::sync::Arc;
+    use std::{collections::HashMap, sync::Arc};
 
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
     use tempfile::TempDir;
     use tokio::task::JoinHandle;
-    use vpnctl_core::{KernelId, ProtocolId, Server, ServerId, User, UserId};
+    use vpnctl_core::{KernelId, Protocol, ProtocolId, RenderCtx, Server, ServerId, User, UserId};
     use vpnctl_inventory::{ServerRole, SqliteInventory};
     use vpnctld::{
         AppState, app,
-        corp_portal::eligibility::{CorpEligibleServer, EligibilityError, eligible_servers},
+        corp_portal::eligibility::{
+            CorpEligibleServer, EligibilityError, eligible_servers, probe_plan,
+        },
     };
 
     struct Fixture {
@@ -777,5 +779,602 @@ mod spec {
             fixture.choices().await[0].configuration_fingerprint,
             changed_port
         );
+    }
+
+    async fn plan(
+        fixture: &Fixture,
+        id: &ServerId,
+    ) -> vpnctld::corp_portal::eligibility::CorpProbePlan {
+        let plan = probe_plan(&fixture.state, &user("bound").id, id)
+            .await
+            .unwrap()
+            .unwrap();
+        let safe = fixture.choices().await;
+        assert_eq!(
+            &plan.server,
+            safe.iter().find(|row| &row.server_id == id).unwrap()
+        );
+        assert_eq!(plan.outbounds.len(), plan.server.hosts.len());
+        for (outbound, host) in plan.outbounds.iter().zip(&plan.server.hosts) {
+            assert!(outbound.is_object());
+            assert_eq!(outbound["type"], "vless");
+            assert!(!outbound["uuid"].as_str().unwrap().is_empty());
+            assert!(outbound.get("detour").is_none());
+            assert!((1..=65535).contains(&outbound["server_port"].as_u64().unwrap()));
+            let actual = outbound["server"]
+                .as_str()
+                .unwrap()
+                .trim_matches(['[', ']'])
+                .to_ascii_lowercase();
+            let actual = actual
+                .parse::<std::net::IpAddr>()
+                .map_or(actual.clone(), |ip| ip.to_string());
+            assert_eq!(&actual, host);
+        }
+        plan
+    }
+
+    #[tokio::test]
+    async fn probe_plan_covers_every_selected_host_with_exact_renderer_json_and_per_server_uuid() {
+        let fixture = Fixture::new().await;
+        let node = server(
+            "node",
+            "Exit.Example",
+            &["vless+reality", "vless-ws", "vless+xhttp"],
+        );
+        fixture.add(&node, true).await;
+        fixture.reality(&node.id).await;
+        fixture.ws(&node.id, "EDGE.Example.NET").await;
+        fixture
+            .state
+            .inv
+            .set_server_secret(&node.id, "vlessxhttp.path", "xroute123")
+            .await
+            .unwrap();
+        let override_uuid = "33333333-3333-4333-8333-333333333333";
+        fixture
+            .state
+            .inv
+            .set_grant_client_uuid(&user("bound").id, &node.id, override_uuid)
+            .await
+            .unwrap();
+        let before_audit = fixture.state.inv.recent_audit(100).await.unwrap().len();
+        let selected = plan(&fixture, &node.id).await;
+        assert_eq!(selected.server.hosts, ["exit.example", "edge.example.net"]);
+        let mut secrets = HashMap::from([
+            (
+                "vless.public_key".to_owned(),
+                URL_SAFE_NO_PAD.encode([7_u8; 32]),
+            ),
+            ("vless.short_id".to_owned(), "12345678".to_owned()),
+            ("vless.sni".to_owned(), "www.example.com".to_owned()),
+            ("vlessws.domain".to_owned(), "EDGE.Example.NET".to_owned()),
+            ("vlessws.path".to_owned(), "route123".to_owned()),
+            ("vlessxhttp.path".to_owned(), "xroute123".to_owned()),
+        ]);
+        let mut subscriber = user("bound");
+        subscriber.uuid = override_uuid.to_owned();
+        let context = RenderCtx::new(&node, &secrets);
+        // Whole-value equality catches loss of tags, TLS/uTLS/Reality, flow and WS Host/path.
+        assert_eq!(
+            selected.outbounds,
+            vec![
+                vpnctl_protocols::VlessReality::new()
+                    .client_config(&context, &subscriber)
+                    .unwrap(),
+                vpnctl_protocols::VlessWs::new()
+                    .client_config(&context, &subscriber)
+                    .unwrap(),
+            ]
+        );
+        assert_eq!(
+            fixture.state.inv.recent_audit(100).await.unwrap().len(),
+            before_audit
+        );
+        assert!(fixture.state.inv.corp_record().await.unwrap().is_none());
+        assert!(
+            fixture
+                .state
+                .inv
+                .corp_verified_egress()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // Same-host XHTTP is omitted until Reality stops winning that host.
+        fixture
+            .state
+            .inv
+            .set_server_protocol_hidden(&node.id, &ProtocolId("vless+reality".to_owned()), true)
+            .await
+            .unwrap();
+        fixture
+            .state
+            .inv
+            .set_server_secret(&node.id, "vlessxhttp.mode", "stream-up")
+            .await
+            .unwrap();
+        secrets.insert("vlessxhttp.mode".to_owned(), "stream-up".to_owned());
+        let xhttp = plan(&fixture, &node.id).await;
+        assert_eq!(xhttp.server.hosts, ["edge.example.net", "exit.example"]);
+        let context = RenderCtx::new(&node, &secrets);
+        assert_eq!(
+            xhttp.outbounds,
+            vec![
+                vpnctl_protocols::VlessWs::new()
+                    .client_config(&context, &subscriber)
+                    .unwrap(),
+                vpnctl_protocols::VlessXhttp::new()
+                    .client_config(&context, &subscriber)
+                    .unwrap(),
+            ]
+        );
+        assert_ne!(
+            xhttp.server.configuration_fingerprint,
+            selected.server.configuration_fingerprint
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_plan_first_wins_is_global_protocol_major_and_omits_losing_servers() {
+        let fixture = Fixture::new().await;
+        let ws = server("a-ws", "192.0.2.10", &["vless-ws"]);
+        let first = server(
+            "b-first",
+            "SHARED.Example",
+            &["vless+reality", "vless-ws", "vless+xhttp"],
+        );
+        let last = server("z-last", "shared.example", &["vless+reality"]);
+        for node in [&ws, &first, &last] {
+            fixture.add(node, true).await;
+        }
+        fixture.ws(&ws.id, "shared.example").await;
+        fixture.reality(&first.id).await;
+        fixture.reality(&last.id).await;
+        fixture.ws(&first.id, "shared.example").await;
+        fixture
+            .state
+            .inv
+            .set_server_secret(&first.id, "vlessxhttp.path", "xroute123")
+            .await
+            .unwrap();
+        let selected = plan(&fixture, &first.id).await;
+        assert_eq!(selected.outbounds.len(), 1);
+        assert_eq!(selected.outbounds[0]["uuid"], user("bound").uuid);
+        for id in [&ws.id, &last.id] {
+            assert!(
+                probe_plan(&fixture.state, &user("bound").id, id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_plan_is_none_for_every_ineligibility_and_never_adds_non_vless_siblings() {
+        let fixture = Fixture::new().await;
+        let node = server("node", "192.0.2.10", &["vless+reality", "trojan"]);
+        fixture.add(&node, false).await;
+        assert!(
+            probe_plan(&fixture.state, &user("bound").id, &node.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        fixture
+            .state
+            .inv
+            .grant(&user("bound").id, &node.id)
+            .await
+            .unwrap();
+        assert!(
+            probe_plan(&fixture.state, &user("bound").id, &node.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        fixture.reality(&node.id).await;
+        assert_eq!(plan(&fixture, &node.id).await.outbounds.len(), 1);
+        assert!(
+            probe_plan(&fixture.state, &UserId("missing".to_owned()), &node.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            probe_plan(
+                &fixture.state,
+                &user("bound").id,
+                &ServerId("missing".to_owned())
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        let protocol = ProtocolId("vless+reality".to_owned());
+        fixture
+            .state
+            .inv
+            .set_server_protocol_hidden(&node.id, &protocol, true)
+            .await
+            .unwrap();
+        assert!(
+            probe_plan(&fixture.state, &user("bound").id, &node.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        fixture
+            .state
+            .inv
+            .set_server_protocol_hidden(&node.id, &protocol, false)
+            .await
+            .unwrap();
+        fixture
+            .state
+            .inv
+            .set_grant_protocol_override(&user("bound").id, &node.id, &protocol, true)
+            .await
+            .unwrap();
+        assert!(
+            probe_plan(&fixture.state, &user("bound").id, &node.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        fixture
+            .state
+            .inv
+            .set_grant_protocol_override(&user("bound").id, &node.id, &protocol, false)
+            .await
+            .unwrap();
+        fixture
+            .state
+            .inv
+            .set_server_auto_suppress(&node.id, true)
+            .await
+            .unwrap();
+        fixture
+            .state
+            .inv
+            .set_server_suppressed(&node.id, true)
+            .await
+            .unwrap();
+        assert!(
+            probe_plan(&fixture.state, &user("bound").id, &node.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        fixture
+            .state
+            .inv
+            .set_server_suppressed(&node.id, false)
+            .await
+            .unwrap();
+        assert_eq!(plan(&fixture, &node.id).await.outbounds.len(), 1);
+        fixture
+            .state
+            .inv
+            .set_user_disabled(&user("bound").id, true)
+            .await
+            .unwrap();
+        assert!(
+            probe_plan(&fixture.state, &user("bound").id, &node.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        fixture
+            .state
+            .inv
+            .set_user_disabled(&user("bound").id, false)
+            .await
+            .unwrap();
+        let detour = server("detour", "192.0.2.11", &["vless+reality"]);
+        fixture.add(&detour, true).await;
+        fixture.reality(&detour.id).await;
+        fixture
+            .state
+            .inv
+            .set_client_detour_via_as("spec", &node.id, Some(&detour.id))
+            .await
+            .unwrap();
+        assert!(
+            probe_plan(&fixture.state, &user("bound").id, &node.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        fixture
+            .state
+            .inv
+            .remove_user(&user("bound").id)
+            .await
+            .unwrap();
+        assert!(
+            probe_plan(&fixture.state, &user("bound").id, &detour.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_plan_fingerprint_binds_uuid_settings_and_tracks_safe_label_stability() {
+        let fixture = Fixture::new().await;
+        let node = server("node", "192.0.2.10", &["vless-ws"]);
+        fixture.add(&node, true).await;
+        fixture.ws(&node.id, "edge.example.net").await;
+        let before = plan(&fixture, &node.id).await;
+        fixture
+            .state
+            .inv
+            .set_server_display_name(&node.id, Some("  Office  "))
+            .await
+            .unwrap();
+        let renamed = plan(&fixture, &node.id).await;
+        assert_eq!(renamed.server.label, "Office");
+        assert_eq!(
+            renamed.server.configuration_fingerprint,
+            before.server.configuration_fingerprint
+        );
+        assert_eq!(renamed.outbounds, before.outbounds);
+        fixture
+            .state
+            .inv
+            .set_grant_client_uuid(
+                &user("bound").id,
+                &node.id,
+                "44444444-4444-4444-8444-444444444444",
+            )
+            .await
+            .unwrap();
+        let changed = plan(&fixture, &node.id).await;
+        assert_eq!(
+            changed.outbounds[0]["uuid"],
+            "44444444-4444-4444-8444-444444444444"
+        );
+        assert_ne!(
+            changed.server.configuration_fingerprint,
+            before.server.configuration_fingerprint
+        );
+        fixture
+            .state
+            .inv
+            .set_server_secret(&node.id, "vlessws.path", "updatedpath")
+            .await
+            .unwrap();
+        let path = plan(&fixture, &node.id).await;
+        assert_ne!(path.outbounds, changed.outbounds);
+        assert_ne!(
+            path.server.configuration_fingerprint,
+            changed.server.configuration_fingerprint
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_plan_accepts_normalized_ipv6_authority_without_rewriting_renderer_json() {
+        let fixture = Fixture::new().await;
+        let node = server(
+            "node",
+            "2001:0db8:0000:0000:0000:0000:0000:0010",
+            &["vless+reality"],
+        );
+        fixture.add(&node, true).await;
+        fixture.reality(&node.id).await;
+        let selected = plan(&fixture, &node.id).await;
+        assert_eq!(selected.server.hosts, ["2001:db8::10"]);
+        assert_eq!(selected.outbounds[0]["server"], node.address);
+    }
+
+    #[tokio::test]
+    async fn probe_plan_errors_are_sanitized_and_inventory_failure_has_no_stale_fallback() {
+        let fixture = Fixture::new().await;
+        let node = server("node", "192.0.2.10", &["vless+reality"]);
+        fixture.add(&node, true).await;
+        fixture.reality(&node.id).await;
+        assert_eq!(plan(&fixture, &node.id).await.outbounds.len(), 1);
+        let sensitive = "SENSITIVE_INVALID_REALITY_KEY";
+        fixture
+            .state
+            .inv
+            .set_server_secret(&node.id, "vless.public_key", sensitive)
+            .await
+            .unwrap();
+        let result = probe_plan(&fixture.state, &user("bound").id, &node.id).await;
+        // Do not require Debug on the credential-bearing success type.
+        assert!(matches!(
+            result,
+            Err(EligibilityError::InvalidConfiguration)
+        ));
+        if let Err(error) = result {
+            for secret in [sensitive, &user("bound").uuid, "vless://"] {
+                assert!(!format!("{error:?} {error}").contains(secret));
+            }
+        }
+        let path = fixture._dir.path().join("inventory.db");
+        let mut connection =
+            SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+                .await
+                .unwrap();
+        sqlx::query("ALTER TABLE users RENAME TO spec_unavailable_users")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        drop(connection);
+        let result = probe_plan(&fixture.state, &user("bound").id, &node.id).await;
+        assert!(matches!(
+            result,
+            Err(EligibilityError::InventoryUnavailable)
+        ));
+        if let Err(error) = result {
+            for private in ["sqlite", "inventory.db", sensitive, &user("bound").uuid] {
+                assert!(!format!("{error:?} {error}").contains(private));
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    enum SelectedRealityRenderer {
+        Outbound(serde_json::Value),
+        Failure,
+    }
+
+    impl Protocol for SelectedRealityRenderer {
+        fn id(&self) -> ProtocolId {
+            ProtocolId("vless+reality".to_owned())
+        }
+
+        fn server_inbound(
+            &self,
+            _ctx: &RenderCtx<'_>,
+            _users: &[User],
+        ) -> vpnctl_core::Result<serde_json::Value> {
+            Err(vpnctl_core::CoreError::Render(
+                "unused spec inbound".to_owned(),
+            ))
+        }
+
+        fn client_config(
+            &self,
+            _ctx: &RenderCtx<'_>,
+            _user: &User,
+        ) -> vpnctl_core::Result<serde_json::Value> {
+            match self {
+                Self::Outbound(value) => Ok(value.clone()),
+                Self::Failure => Err(vpnctl_core::CoreError::Render(
+                    "SENSITIVE_RENDER_FAILURE_vless://synthetic".to_owned(),
+                )),
+            }
+        }
+
+        fn share_link(&self, ctx: &RenderCtx<'_>, user: &User) -> vpnctl_core::Result<String> {
+            vpnctl_protocols::VlessReality::new().share_link(ctx, user)
+        }
+    }
+
+    fn install_selected_renderer(fixture: &mut Fixture, renderer: SelectedRealityRenderer) {
+        let mut registry = vpnctl_core::Registry::new();
+        registry.register_protocol(Box::new(renderer)).unwrap();
+        fixture.state.registry = Arc::new(registry);
+    }
+
+    #[tokio::test]
+    async fn renderer_only_changes_bind_full_json_preserve_object_order_stability_and_array_order()
+    {
+        let mut fixture = Fixture::new().await;
+        let node = server("node", "192.0.2.10", &["vless+reality"]);
+        fixture.add(&node, true).await;
+        fixture.reality(&node.id).await;
+        let baseline = plan(&fixture, &node.id).await;
+        let mut outbound = baseline.outbounds[0].clone();
+        outbound["spec_renderer_extension"] =
+            serde_json::from_str(r#"{"outer":{"z":2,"a":1},"ordered":["first","second"]}"#)
+                .unwrap();
+        install_selected_renderer(
+            &mut fixture,
+            SelectedRealityRenderer::Outbound(outbound.clone()),
+        );
+        let extended = plan(&fixture, &node.id).await;
+        assert_eq!(extended.outbounds, [outbound.clone()]);
+        assert_ne!(
+            extended.server.configuration_fingerprint,
+            baseline.server.configuration_fingerprint
+        );
+        // The share link, selected host, inventory and secrets have not changed.
+        outbound["spec_renderer_extension"] =
+            serde_json::from_str(r#"{"ordered":["first","second"],"outer":{"a":1,"z":2}}"#)
+                .unwrap();
+        install_selected_renderer(
+            &mut fixture,
+            SelectedRealityRenderer::Outbound(outbound.clone()),
+        );
+        let reordered_keys = plan(&fixture, &node.id).await;
+        assert_eq!(
+            reordered_keys.server.configuration_fingerprint,
+            extended.server.configuration_fingerprint
+        );
+        outbound["spec_renderer_extension"]["ordered"] = serde_json::json!(["second", "first"]);
+        install_selected_renderer(
+            &mut fixture,
+            SelectedRealityRenderer::Outbound(outbound.clone()),
+        );
+        let reordered_array = plan(&fixture, &node.id).await;
+        assert_eq!(reordered_array.outbounds, [outbound]);
+        assert_ne!(
+            reordered_array.server.configuration_fingerprint,
+            extended.server.configuration_fingerprint
+        );
+    }
+
+    async fn assert_plan_configuration_failure(fixture: &Fixture, id: &ServerId) {
+        let result = probe_plan(&fixture.state, &user("bound").id, id).await;
+        assert!(matches!(
+            result,
+            Err(EligibilityError::InvalidConfiguration)
+        ));
+        if let Err(error) = result {
+            let text = format!("{error:?} {error}");
+            for private in [
+                "SENSITIVE_RENDER_FAILURE",
+                "vless://",
+                "SENSITIVE_OUTBOUND_UUID",
+                "unrelated.example",
+                &user("bound").uuid,
+            ] {
+                assert!(!text.contains(private));
+            }
+        }
+        assert_eq!(
+            eligible_servers(&fixture.state, &user("bound").id)
+                .await
+                .unwrap_err(),
+            EligibilityError::InvalidConfiguration
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_or_failed_selected_renderer_is_sanitized_without_stale_or_repaired_plan() {
+        let mut fixture = Fixture::new().await;
+        let node = server("node", "192.0.2.10", &["vless+reality"]);
+        fixture.add(&node, true).await;
+        fixture.reality(&node.id).await;
+        let baseline = plan(&fixture, &node.id).await;
+        let outbound = baseline.outbounds[0].clone();
+        let mut malformed = vec![serde_json::Value::Null, serde_json::json!([])];
+        for (key, value) in [
+            ("type", serde_json::json!("direct")),
+            ("uuid", serde_json::json!("")),
+            ("uuid", serde_json::Value::Null),
+            ("server_port", serde_json::json!(0)),
+            ("server_port", serde_json::json!(65536)),
+            ("server_port", serde_json::json!(443.5)),
+            ("server", serde_json::json!("unrelated.example")),
+            ("detour", serde_json::json!("SENSITIVE_DETOUR")),
+        ] {
+            let mut value_outbound = outbound.clone();
+            value_outbound["uuid"] = serde_json::json!("SENSITIVE_OUTBOUND_UUID");
+            value_outbound[key] = value;
+            malformed.push(value_outbound);
+        }
+        for malformed in malformed {
+            install_selected_renderer(&mut fixture, SelectedRealityRenderer::Outbound(malformed));
+            assert_plan_configuration_failure(&fixture, &node.id).await;
+        }
+        install_selected_renderer(&mut fixture, SelectedRealityRenderer::Failure);
+        assert_plan_configuration_failure(&fixture, &node.id).await;
+        // A selected share-link choice without its trusted renderer is an error.
+        fixture.state.registry = Arc::new(vpnctl_core::Registry::new());
+        assert_plan_configuration_failure(&fixture, &node.id).await;
+        // Recovering the renderer must return the original current plan, never cached errors.
+        install_selected_renderer(&mut fixture, SelectedRealityRenderer::Outbound(outbound));
+        let recovered = plan(&fixture, &node.id).await;
+        assert_eq!(
+            recovered.server.configuration_fingerprint,
+            baseline.server.configuration_fingerprint
+        );
+        assert_eq!(recovered.outbounds, baseline.outbounds);
     }
 }

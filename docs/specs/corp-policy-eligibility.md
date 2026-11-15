@@ -7,6 +7,9 @@ bound inventory user. This is candidate selection, not proof of an exit IP.
 Never derive an allowed IP from DNS, inventory addresses or access-log flags.
 The caller must separately require a fresh verified exit observation whose
 configuration fingerprint equals the current candidate's fingerprint.
+The exact secret-bearing probe plan and timestamp renewal are specified in
+[egress preparation](corp-policy-egress-preparation.md); preparation alone
+cannot admit any exit.
 
 ## Public interface
 
@@ -70,8 +73,9 @@ error details. No builds, processes, DNS resolution or remote access occur.
 
 ## Fingerprint contract
 
-The fingerprint is exactly 64 lowercase hex SHA-256 characters over a versioned
-canonical representation. Its inputs are the bound user ID, server identity and
+The fingerprint is exactly 64 lowercase hex SHA-256 characters over the
+`vpnrouter-business-portal-tcp-v2` canonical representation, including each exact
+selected renderer outbound. Its other inputs are the bound user ID, server identity and
 address, SSH port/user/trusted host key and resolved pinned jump route, sorted
 kernel IDs, and the selected endpoint configurations. Endpoint inputs include
 their protocol, parsed hostname and share link without its display fragment,
