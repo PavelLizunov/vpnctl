@@ -22,3 +22,13 @@ verify recovery snapshot, deploy through scripts/deploy.sh and check the live
 health build, operator/Corp ingress and authenticated probe behavior. No local
 builds. Preserve previous binaries/configuration and use an inventory backup
 for migration recovery; do not lower a published policy revision during rollback.
+
+The integrated live-base candidate workflow additionally builds a single archive
+from the exact head with baseline x86-64 compiler flags and an AVX-less QEMU
+entry-point check. At64ac0b0, compilation and isolated daemon health provenance
+passed; packaging exposed an outdated frontend-only asset allowlist. Permit only
+the five exact tracked public Corp dataset paths in addition to frontend types;
+all other config/JSON/keys and symlinks remain rejected. A local guard-only check
+accepts the tracked file set and rejects five unexpected paths and a symlink.
+No local artifact packaging or compilation was run. The corrected full candidate
+workflow and normal CI still need to pass at the publication SHA.
