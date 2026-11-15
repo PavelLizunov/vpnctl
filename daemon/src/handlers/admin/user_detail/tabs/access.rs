@@ -180,7 +180,7 @@ pub(crate) fn render_access_tab(
                                           crate::i18n::Locale::Ru => format!("Открыть /admin/servers/{} в новой вкладке", s.id.0),
                                       })
                                       style="color: var(--ink); text-decoration: none; border-bottom: 1px dotted var(--ink);" {
-                                        b { (s.id.0) }
+                                        b { (crate::handlers::admin::helpers::named_server(&s.id, names)) }
                                     }
                                     " (" span.ed-mono { (s.address) ":" (s.ssh_port) } ", "
                                     (s.kernels.iter().map(|k| k.0.clone()).collect::<Vec<_>>().join("+"))

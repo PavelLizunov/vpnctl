@@ -99,6 +99,63 @@ async fn custom_server_name_and_technical_id_appear_on_all_operator_surfaces() {
 }
 
 #[tokio::test]
+async fn presence_pending_notice_and_lower_access_list_use_escaped_names_and_ids() {
+    let directory = TempDir::new().unwrap();
+    let st = state(&directory).await;
+    seed(&st.inv, 2, 1, &[(0, 0)]).await;
+    for id in ["s0", "s1"] {
+        let sid = ServerId(id.into());
+        st.inv
+            .set_server_display_name(&sid, Some("Twin <&> Node"))
+            .await
+            .unwrap();
+        let mut connection = pr_user_conn("198.51.100.12", "40000");
+        connection.metadata.user = Some("u0".into());
+        st.snapshot_cache.store(
+            sid,
+            vpnctld::clash_api::Snapshot {
+                upload_total: connection.upload,
+                download_total: connection.download,
+                connections: vec![connection],
+            },
+        );
+    }
+    st.inv
+        .audit("admin", "user.grant", Some("u0"), None)
+        .await
+        .unwrap();
+    for route in [
+        "/admin/users/u0",
+        "/admin/users/u0/access",
+        "/admin/users/u0/delivery",
+    ] {
+        let html = fetch_html(vpnctld::router(st.clone()), route).await;
+        let heading = html.split("class=\"ed-headrow__actions\"").next().unwrap();
+        assert!(heading.contains("2 conns across"));
+        for id in ["s0", "s1"] {
+            assert_identity(heading, id, "Twin &lt;&amp;&gt; Node");
+        }
+        let notice = html
+            .split_once("Config not yet deployed to:")
+            .unwrap()
+            .1
+            .split("data-sse-url=")
+            .next()
+            .unwrap();
+        assert_identity(notice, "s0", "Twin &lt;&amp;&gt; Node");
+        assert!(notice.contains("href=\"/admin/servers/s0#deploy-button\""));
+        if route.ends_with("/access") {
+            let lower_list = html.split_once("id=\"server-access\"").unwrap().1;
+            for id in ["s0", "s1"] {
+                assert_identity(lower_list, id, "Twin &lt;&amp;&gt; Node");
+            }
+            assert!(lower_list.contains("action=\"/admin/users/u0/grants/s0/revoke\""));
+            assert!(lower_list.contains("action=\"/admin/users/u0/grants/s1\""));
+        }
+    }
+}
+
+#[tokio::test]
 async fn duplicate_escaped_names_keep_visible_ids_and_technical_grant_paths() {
     let directory = TempDir::new().unwrap();
     let st = state(&directory).await;

@@ -225,13 +225,19 @@ pub(crate) async fn user_detail_render(
             .server_display_name(target)
             .await
             .map_err(|e| internal_error(anyhow::Error::new(e)))?
-            .unwrap_or_else(|| target.0.clone());
+            .map(|custom| {
+                crate::handlers::vpn_router::server_display_label(&target.0, Some(&custom))
+            })
+            .unwrap_or_else(|| crate::handlers::vpn_router::server_display_label(&target.0, None));
         let entry_name = state
             .inv
             .server_display_name(entry)
             .await
             .map_err(|e| internal_error(anyhow::Error::new(e)))?
-            .unwrap_or_else(|| entry.0.clone());
+            .map(|custom| {
+                crate::handlers::vpn_router::server_display_label(&entry.0, Some(&custom))
+            })
+            .unwrap_or_else(|| crate::handlers::vpn_router::server_display_label(&entry.0, None));
         chain_route_labels.push(format!("{target_name} via {entry_name}"));
     }
     let chain_route_summary = chain_route_labels.join(", ");
@@ -421,8 +427,15 @@ pub(crate) async fn user_detail_render(
         })
         .or(access_aggregates.last_seen);
 
-    let online_badge =
-        user_online_badge(&state, &uid, &presence_server_ids, true_last_seen, lang).await;
+    let online_badge = user_online_badge(
+        &state,
+        &uid,
+        &presence_server_ids,
+        true_last_seen,
+        &names,
+        lang,
+    )
+    .await;
 
     const LOG_PAGE_SIZE: i64 = 25;
     let log_page = query.log_page();
@@ -513,7 +526,7 @@ pub(crate) async fn user_detail_render(
                             @if i > 0 { ", " }
                             a href=(format!("/admin/servers/{}#deploy-button", path_segment_encode(&sid.0)))
                               style="color: var(--acc); font-family: var(--mono); font-weight: 600;" {
-                                (sid.0)
+                                (crate::handlers::admin::helpers::named_server(sid, &names))
                             }
                         }
                     }
