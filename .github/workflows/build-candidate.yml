@@ -235,7 +235,10 @@ jobs:
           # Only tracked frontend asset types are permitted; reject symlinks,
           # configuration, inventory, environment and key files from this tree.
           test -z "$(find "$staging/assets" -mindepth 1 ! -type d ! -type f -print -quit)"
-          test -z "$(find "$staging/assets" -type f ! \( -name '*.css' -o -name '*.js' -o -name '*.svg' -o -name '*.woff2' -o -name '*LICENSE.txt' \) -print -quit)"
+          test -z "$(find "$staging/assets" -type f ! \( -name '*.css' -o -name '*.js' -o -name '*.svg' -o -name '*.woff2' -o -name '*LICENSE.txt' \
+            -o -path "$staging/assets/corp-policy/business-rules.json" -o -path "$staging/assets/corp-policy/domains.json" \
+            -o -path "$staging/assets/corp-policy/v1.json" -o -path "$staging/assets/corp-policy/public_suffix_list.dat" \
+            -o -path "$staging/assets/corp-policy/public_suffix_list.source.txt" \) -print -quit)"
           printf '%s\n' "$VPNCTL_BUILD_SHA" > "$staging/SOURCE_SHA"
           (
             cd "$staging"
