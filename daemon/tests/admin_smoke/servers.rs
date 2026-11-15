@@ -775,16 +775,29 @@ async fn admin_server_delete_client_entry_returns_conflict_with_targets() {
 async fn admin_server_delete_cascades_grants_and_audits() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    seed(&s.inv, 2, 2, &[(0, 0), (1, 0)]).await;
+    seed(&s.inv, 1, 2, &[]).await;
+    // Deploy locks are process-wide, so this deletion needs its own server ID.
+    let mut target = s
+        .inv
+        .get_server(&ServerId("s0".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    target.id = ServerId("delete-cascade-target".into());
+    target.address = "192.0.2.91".into();
+    s.inv.add_server(&target).await.unwrap();
+    for user in ["u0", "u1"] {
+        s.inv.grant(&UserId(user.into()), &target.id).await.unwrap();
+    }
     let resp = router(s.clone())
         .oneshot(
             add_same_origin(
                 Request::builder()
                     .method("POST")
-                    .uri("/admin/servers/s0/delete")
+                    .uri("/admin/servers/delete-cascade-target/delete")
                     .header("content-type", "application/x-www-form-urlencoded"),
             )
-            .body(Body::from("confirm=s0"))
+            .body(Body::from("confirm=delete-cascade-target"))
             .unwrap(),
         )
         .await
@@ -793,7 +806,7 @@ async fn admin_server_delete_cascades_grants_and_audits() {
 
     assert!(
         s.inv
-            .get_server(&ServerId("s0".into()))
+            .get_server(&ServerId("delete-cascade-target".into()))
             .await
             .unwrap()
             .is_none(),
@@ -801,7 +814,7 @@ async fn admin_server_delete_cascades_grants_and_audits() {
     );
     assert_eq!(
         s.inv
-            .users_for_server(&ServerId("s0".into()))
+            .users_for_server(&ServerId("delete-cascade-target".into()))
             .await
             .unwrap()
             .len(),
@@ -810,7 +823,7 @@ async fn admin_server_delete_cascades_grants_and_audits() {
     );
     assert!(
         s.inv
-            .get_server(&ServerId("s1".into()))
+            .get_server(&ServerId("s0".into()))
             .await
             .unwrap()
             .is_some(),
@@ -822,12 +835,14 @@ async fn admin_server_delete_cascades_grants_and_audits() {
             .await
             .unwrap()
             .is_some(),
-        "user must survive — only its grant to s0 is removed"
+        "user must survive — only its grant to the target is removed"
     );
     let audit = s.inv.recent_audit(20).await.unwrap();
     let row = audit
         .iter()
-        .find(|e| e.action == "server.remove" && e.target.as_deref() == Some("s0"))
+        .find(|e| {
+            e.action == "server.remove" && e.target.as_deref() == Some("delete-cascade-target")
+        })
         .expect("server.remove audit row must land");
     let payload = row
         .payload

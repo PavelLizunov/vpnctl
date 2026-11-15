@@ -25,6 +25,9 @@ vpnctl-host-fingerprint = { path = "../crates/host-fingerprint" }
 vpnctl-boosty-bridge = { path = "../crates/boosty-bridge" }
 vpnctl-ssh = { path = "../crates/ssh", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+httparse = "1"
 async-trait = "0.1"
 thiserror = { workspace = true }
 
@@ -32,7 +35,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 hyper = { version = "1", default-features = false, features = ["http1", "server"] }
 hyper-util = { version = "0.1", default-features = false, features = ["http1", "server-graceful", "service", "tokio"] }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
-tower = { version = "0.5", default-features = false }
+tower = { version = "0.5", default-features = false, features = ["util"] }
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 tower-http = { version = "0.6", default-features = false, features = ["trace", "limit", "timeout", "fs", "set-header"] }
 maud = { version = "0.27", features = ["axum"] }
@@ -42,10 +45,15 @@ ipnet = "2"
 subtle = "2"
 hmac = { version = "0.12", default-features = false }
 sha2 = { version = "0.10", default-features = false }
+p256 = { version = "0.14", features = ["ecdsa", "pkcs8"] }
+idna = "1.1"
+url = "2"
+getrandom = "0.3"
+zeroize = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 anyhow = "1"
-nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
+nix = { version = "0.31", default-features = false, features = ["signal", "process", "user"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde-saphyr = { workspace = true, features = ["serialize"] }
@@ -63,10 +71,11 @@ default = ["geoip"]
 geoip = ["dep:maxminddb"]
 
 [dev-dependencies]
+sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio-rustls"] }
 tower = { version = "0.5", features = ["util"] }
 serde-saphyr = { workspace = true, features = ["deserialize"] }
 http-body-util = "0.1"
-tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread", "test-util"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 vpnctl-ssh = { path = "../crates/ssh" }
 testcontainers = { version = "0.25", default-features = false }

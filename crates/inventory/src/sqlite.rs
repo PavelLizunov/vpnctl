@@ -4,6 +4,7 @@ mod assurance;
 mod audit;
 mod base;
 mod boosty;
+mod corp;
 mod health;
 mod models;
 mod servers;
@@ -17,6 +18,7 @@ mod users;
 mod tests;
 
 pub use base::*;
+pub use corp::*;
 pub use health::sum_nic_deltas;
 pub use models::*;
 pub use servers::{advance_date_by_cycle, convert_minor, monthly_equivalent, validate_due_date};

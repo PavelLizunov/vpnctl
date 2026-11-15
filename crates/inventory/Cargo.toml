@@ -14,6 +14,8 @@ vpnctl-host-fingerprint = { path = "../host-fingerprint" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+base64 = "0.22"
+sha2 = { version = "0.10", default-features = false }
 
 sqlx = { version = "0.8", default-features = false, features = [
     "sqlite",
