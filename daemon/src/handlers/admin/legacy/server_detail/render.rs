@@ -19,9 +19,7 @@ use crate::handlers::admin::legacy::dashboard::{
     humanize_age, kernel_floor_rollup, server_detail_assurance_section,
     server_detail_kernel_inventory_section, server_detail_quality_section,
 };
-use crate::handlers::admin::legacy::user_sections::{
-    fit_vpn_sparkline_window, pick_vpn_sparkline_window,
-};
+use crate::handlers::admin::legacy::user_sections::pick_vpn_sparkline_window;
 use crate::handlers::admin::servers::fp_short;
 use crate::http_util::path_segment_encode;
 
@@ -168,6 +166,25 @@ pub(super) async fn server_detail_render(
             vpnctl_inventory::ServerLiveActivity::default()
         });
 
+    let traffic_month = crate::server_traffic::ServerTraffic::load(
+        &state.inv,
+        &sid,
+        chrono::Utc::now().timestamp(),
+    )
+    .await
+    .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let now = chrono::Utc::now().timestamp();
+    let nic_day = state
+        .inv
+        .node_nic_usage(
+            &sid,
+            now - 86_400,
+            now,
+            crate::server_traffic::max_gap_seconds(),
+        )
+        .await
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+
     let traffic = state
         .inv
         .server_traffic_breakdown(&sid, 24)
@@ -184,6 +201,20 @@ pub(super) async fn server_detail_render(
                 nic_iface: None,
             }
         });
+
+    // Keep the legacy attribution reader's contract, but display NIC/GAP from
+    // the same validated window used by the daily and monthly activity cards.
+    let traffic = vpnctl_inventory::TrafficBreakdown {
+        nic_total_bytes: nic_day.as_ref().map_or(0, |u| u.total_bytes),
+        nic_rx_bytes: nic_day.as_ref().map_or(0, |u| u.rx_bytes),
+        nic_tx_bytes: nic_day.as_ref().map_or(0, |u| u.tx_bytes),
+        attributed_bytes: traffic.attributed_bytes,
+        gap_bytes: nic_day.as_ref().map_or(0, |u| {
+            u.total_bytes.saturating_sub(traffic.attributed_bytes)
+        }),
+        nic_samples: nic_day.as_ref().map_or(0, |u| u.samples),
+        nic_iface: traffic.nic_iface,
+    };
 
     let last_server_snap = state.snapshot_cache.get_live(&sid);
     let dns_ptr_map = if let Some(s) = last_server_snap.as_ref() {
@@ -306,26 +337,14 @@ pub(super) async fn server_detail_render(
         });
 
     let traffic_window = pick_vpn_sparkline_window(query.vpn_window.as_deref());
-    let traffic_since_hours = if traffic_window.slug == "all" {
-        u32::MAX
-    } else {
-        traffic_window.cells * traffic_window.bucket_hours
-    };
-    let traffic_rows: Vec<vpnctl_inventory::VpnStatsRow> = state
-        .inv
-        .recent_vpn_stats_fleet(traffic_since_hours, traffic_window.bucket_hours)
-        .await
-        .map(|rows| {
-            rows.into_iter()
-                .filter(|row| row.server_id == sid)
-                .collect()
-        })
-        .unwrap_or_else(|e| {
-            tracing::warn!(target = "vpnctld::admin", server = %sid, error = %e, "server traffic rollup query failed");
-            Vec::new()
-        });
-
-    let traffic_window = fit_vpn_sparkline_window(traffic_window, &traffic_rows);
+    let traffic_chart = crate::handlers::admin::nic_traffic::NicWindow::load(
+        &state.inv,
+        std::slice::from_ref(&server),
+        now,
+        crate::handlers::admin::nic_traffic::hours(traffic_window.slug),
+    )
+    .await
+    .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
     let server_audit = state
         .inv
@@ -414,6 +433,10 @@ pub(super) async fn server_detail_render(
                 }
             }
             div.ed-headrow__actions {
+                a.ed-abtn.ed-abtn--secondary.ed-abtn--sm
+                    href=(format!("/admin/servers/{}/cheburcheck", path_segment_encode(&server.id.0))) {
+                    "Cheburcheck"
+                }
                 button type="button"
                        data-sse-url=(format!("/admin/servers/{}/update-kernels/sse", path_segment_encode(&server.id.0)))
                        data-log="update-kernels-log"
@@ -621,10 +644,11 @@ pub(super) async fn server_detail_render(
                 }
             }
             (server_detail_audit_section(&server_audit, lang))
-            (server_detail_live_activity_section(&live_activity, lang))
+            (server_detail_live_activity_section(&live_activity, nic_day.as_ref(), lang))
             (server_detail_gap_section(&traffic, lang))
+            (crate::handlers::admin::traffic::server_section(&sid, &traffic_month, lang))
             (server_detail_live_connections_section(last_server_snap.as_deref(), &source_user_map, &dns_ptr_map, lang))
-            (server_detail_traffic_section(&traffic_rows, traffic_window, &server.id, lang))
+            (server_detail_traffic_section(&traffic_chart, traffic_window, &server.id, live_activity.active_now, lang))
             (server_detail_top_users_section(&top_users, lang))
             (server_detail_network_split_section(last_server_snap.as_deref(), lang))
         }

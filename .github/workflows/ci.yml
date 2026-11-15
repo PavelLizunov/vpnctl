@@ -147,6 +147,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools cmake
       - name: canonical release build
+        env:
+          VPNCTL_BUILD_SHA: ${{ github.sha }}
         run: just build-release
       - name: verify daemon and CLI have no dynamic interpreter
         run: |
@@ -159,6 +161,21 @@ jobs:
               exit 1
             fi
           done
+      - name: stage exact-source daemon delivery
+        run: |
+          delivery="$RUNNER_TEMP/vpnctl-daemon-delivery"
+          mkdir -p "$delivery"
+          cp target/x86_64-unknown-linux-musl/release/vpnctld target/x86_64-unknown-linux-musl/release/vpnctl "$delivery/"
+          cp -a daemon/assets "$delivery/assets"
+          printf '%s\n' "$GITHUB_SHA" > "$delivery/source-sha.txt"
+          cd "$delivery"
+          find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vpnctl-daemon-${{ github.sha }}
+          path: ${{ runner.temp }}/vpnctl-daemon-delivery
+          if-no-files-found: error
+          retention-days: 7
 
   managed-node-artifacts:
     name: managed sing-box accounting artifacts
@@ -193,6 +210,20 @@ jobs:
         env:
           VPNCTL_CORP_TEST_SING_BOX: /tmp/sing-box
         run: cargo test -p vpnctld --test spec_corp_probe_runtime managed_ -- --ignored
+      - name: stage exact-source node delivery
+        run: |
+          delivery="$RUNNER_TEMP/vpnctl-node-delivery"
+          mkdir -p "$delivery"
+          cp /tmp/sing-box /tmp/singbox-stats-helper "$delivery/"
+          printf '%s\n' "$GITHUB_SHA" > "$delivery/source-sha.txt"
+          cd "$delivery"
+          sha256sum sing-box singbox-stats-helper source-sha.txt > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vpnctl-node-${{ github.sha }}
+          path: ${{ runner.temp }}/vpnctl-node-delivery
+          if-no-files-found: error
+          retention-days: 7
 
 
   gitleaks:

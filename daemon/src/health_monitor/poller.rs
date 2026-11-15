@@ -349,6 +349,15 @@ pub(super) async fn scan_once_inner(
             }
         }
     }
+    if let Err(e) = super::server_traffic::check_server_traffic_limits(
+        inv,
+        &servers,
+        chrono::Utc::now().timestamp(),
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "server traffic limit check failed");
+    }
     if let Err(e) = check_user_traffic_limits(inv).await {
         tracing::warn!(
             target = "vpnctld::health_monitor",

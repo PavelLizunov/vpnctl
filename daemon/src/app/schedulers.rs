@@ -90,6 +90,8 @@ pub(crate) fn spawn_retention_purger(inv: SqliteInventory) -> tokio::task::JoinH
     use tokio::time::{MissedTickBehavior, interval};
 
     const RETENTION_DAYS: u32 = 30;
+    // A full hoster billing month, including short-month reset clamping.
+    const NIC_RETENTION_DAYS: u32 = 40;
     const TICK_INTERVAL: Duration = Duration::from_secs(3600);
 
     tokio::spawn(async move {
@@ -145,15 +147,15 @@ pub(crate) fn spawn_retention_purger(inv: SqliteInventory) -> tokio::task::JoinH
                     "vpn_connection_stats purge failed; will retry next tick"
                 ),
             }
-            match crate::node_probe_poller::purge_old(&inv, RETENTION_DAYS).await {
+            match crate::node_probe_poller::purge_old(&inv, NIC_RETENTION_DAYS).await {
                 Ok(0) => tracing::debug!(
                     target = "vpnctld::retention",
-                    days = RETENTION_DAYS,
+                    days = NIC_RETENTION_DAYS,
                     "node_health purge tick: nothing to remove"
                 ),
                 Ok(n) => tracing::info!(
                     target = "vpnctld::retention",
-                    days = RETENTION_DAYS,
+                    days = NIC_RETENTION_DAYS,
                     removed = n,
                     "purged old node_health rows"
                 ),

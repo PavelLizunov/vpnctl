@@ -254,16 +254,16 @@ pub(crate) async fn servers(
                    class="ed-abtn ed-abtn--primary ed-abtn--sm"
                    title=(crate::i18n::tr(
                        lang,
-                       "Registers the server with default kernels=sing-box + every sing-box-supported protocol enabled. Tweak everything on the detail page right after.",
-                       "Регистрирует сервер с ядром sing-box и всеми поддерживаемыми им протоколами. Настройки правь на странице сервера сразу после.",
+                       "Registers the server with sing-box and only VLESS+REALITY enabled by default, unless SSH uses TCP 443. Enable other protocols on the server page.",
+                       "Регистрирует сервер с sing-box и только VLESS+REALITY по умолчанию, если SSH не занимает TCP 443. Остальные протоколы включаются на странице сервера.",
                    )) {
                 (icon("plus")) (crate::i18n::tr(lang, "register", "зарегистрировать"))
             }
             span.ed-tip
                 title=(crate::i18n::tr(
                     lang,
-                    "→ default kernels=sing-box, all kernel-supported protocols enabled. Tweak on the detail page.",
-                    "→ ядро sing-box по умолчанию, включены все поддерживаемые им протоколы. Тонкая настройка — на странице сервера.",
+                    "→ sing-box + VLESS+REALITY by default; SSH on TCP 443 leaves protocols off.",
+                    "→ по умолчанию sing-box + VLESS+REALITY; при SSH на TCP 443 протоколы выключены.",
                 )) { (icon("info")) }
             a.ed-grid__open href="/admin/servers/new" style="margin-left: auto;" {
                 (icon("rocket")) (crate::i18n::tr(lang, "wizard", "мастер")) " " (icon("arrow-right")) " "
