@@ -345,7 +345,11 @@ impl EgressController {
         if !valid_time(completed) || completed < wall_start {
             return Err(ProbeError::Failed);
         }
-        let previous = app.inv.corp_verified_egress().await.map_err(store_error)?;
+        let previous = app
+            .inv
+            .corp_verified_egress()
+            .await
+            .map_err(|error| store_error(&error))?;
         // Recheck the generation immediately before the durable storage CAS.
         binding(app, record.status.config_version).await?;
         let mut rows: Vec<_> = previous
@@ -368,12 +372,12 @@ impl EgressController {
                     "corp.egress",
                 )
                 .await
-                .map_err(store_error)?;
+                .map_err(|error| store_error(&error))?;
         } else {
             app.inv
                 .replace_corp_egress(record.status.config_version, &rows, "corp.egress")
                 .await
-                .map_err(store_error)?;
+                .map_err(|error| store_error(&error))?;
         }
         Ok(())
     }
@@ -389,7 +393,11 @@ impl EgressController {
         let eligible = eligible_servers(app, &record.status.user_id)
             .await
             .map_err(|_| ProbeError::Unavailable)?;
-        let rows = app.inv.corp_verified_egress().await.map_err(store_error)?;
+        let rows = app
+            .inv
+            .corp_verified_egress()
+            .await
+            .map_err(|error| store_error(&error))?;
         let now = (self.clock)();
         if !valid_time(now) {
             return Err(ProbeError::Failed);
@@ -414,7 +422,7 @@ impl EgressController {
             .inv
             .corp_record()
             .await
-            .map_err(store_error)?
+            .map_err(|error| store_error(&error))?
             .ok_or(ProbeError::NotFound)?;
         let servers = eligible_servers(&app, &record.status.user_id)
             .await
@@ -428,7 +436,11 @@ impl EgressController {
             self.cursor
                 .store((index + 1) % servers.len(), Ordering::SeqCst);
             let server = &servers[index];
-            let rows = app.inv.corp_verified_egress().await.map_err(store_error)?;
+            let rows = app
+                .inv
+                .corp_verified_egress()
+                .await
+                .map_err(|error| store_error(&error))?;
             let now = (self.clock)();
             if !valid_time(now) {
                 return Err(ProbeError::Failed);
@@ -447,7 +459,7 @@ impl EgressController {
                 .inv
                 .corp_record()
                 .await
-                .map_err(store_error)?
+                .map_err(|error| store_error(&error))?
                 .ok_or(ProbeError::NotFound)?;
             match self
                 .queue_probe(
@@ -493,7 +505,7 @@ fn identities(rows: &[CorpVerifiedEgress]) -> BTreeSet<(String, IpAddr, String)>
         })
         .collect()
 }
-fn store_error(error: CorpStoreError) -> ProbeError {
+fn store_error(error: &CorpStoreError) -> ProbeError {
     match error {
         CorpStoreError::Conflict => ProbeError::Conflict,
         _ => ProbeError::Unavailable,
@@ -504,7 +516,7 @@ async fn binding(app: &AppState, version: u64) -> Result<CorpRecord, ProbeError>
         .inv
         .corp_record()
         .await
-        .map_err(store_error)?
+        .map_err(|error| store_error(&error))?
         .ok_or(ProbeError::NotFound)?;
     if record.status.config_version != version {
         return Err(ProbeError::Conflict);
