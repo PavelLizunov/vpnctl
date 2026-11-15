@@ -81,11 +81,24 @@ pub(crate) fn isolate(legacy: Router, app: AppState) -> Router {
 }
 
 pub(crate) fn secure(mut response: Response) -> Response {
+    // Native same-origin forms need Origin; external destinations receive no referrer.
+    let referrer_policy = if !response.status().is_redirection()
+        && !response.headers().contains_key(header::CONTENT_DISPOSITION)
+        && response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/html"))
+    {
+        "same-origin"
+    } else {
+        "no-referrer"
+    };
     for (name, value) in [
         ("cache-control", "no-store"),
         ("x-content-type-options", "nosniff"),
         ("x-frame-options", "DENY"),
-        ("referrer-policy", "no-referrer"),
+        ("referrer-policy", referrer_policy),
         ("x-robots-tag", "noindex, nofollow"),
         (
             "content-security-policy",

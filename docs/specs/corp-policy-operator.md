@@ -48,7 +48,10 @@ activation, preserving existing policy/history and credentials.
   integers in canonical decimal form (no leading zeros except `0`). No secrets, tokens, IDs selecting another binding, redirect targets,
   IPs, URLs, command arguments or private keys arrive through query parameters.
   Preserve the legacy 8192-byte body cap and timeout; harden even error replies.
-- Every response is no-store, no-referrer, nosniff, DENY framing and noindex;
+- Every response is no-store, nosniff, DENY framing and noindex. HTML responses
+  use Referrer-Policy: same-origin so ordinary same-origin form POSTs retain
+  their Origin header and external referrers remain suppressed. Non-HTML
+  responses retain no-referrer. Missing/null/wrong Origin still fails closed;
   restrictive self-only scripts/styles/forms/connect, no inline script or remote
   resources. Escape dynamic markup. Responses and tracing never contain raw
   headers, forms, secret values, stored credential structs or inventory errors.
@@ -300,3 +303,22 @@ hypothesis against storage's atomic newest-100 retention contract. Source-only
 formatting, workflow and JS syntax checks passed. No local compilation, runtime
 or browser execution occurred; exact-head CI and new screenshot inspection are
 pending. No production configuration or access was changed.
+
+CI follow-up at `8462654` (run `43703472561`): all 39 operator and 34
+portal HTTP tests passed, and Cargo check/Clippy/static musl succeeded. Native
+browser form submission failed because HTML's `no-referrer` policy serializes
+the form Origin as `null`; full tests and `just ci` also failed the old
+eight-item navigation assertion. Both findings were recorded before correction.
+HTML now preserves same-origin form Origin without sending external referrers;
+downloads, redirects and API responses retain `no-referrer`. Login browser
+verification submits the actual password form. Independent spec tests now total
+40 operator and 35 portal cases and explicitly reject `Origin: null`. Corp uses
+the shared navigation renderer and decorative icon; the nine-item regression
+still verifies every previous link, icon and localized label.
+
+Independent final diff review returned no findings. Local formatting, JS syntax,
+actionlint, generated CSS/map, whitespace and secret checks passed. Runtime and
+browser checks remain CI-only and are pending for this
+correction. Client portal transport at VPNRouter `098b7d34` is green (13
+successful jobs, three expected manual-delivery skips); that is source/CI
+evidence, not a deployed portal or actual-egress proof.

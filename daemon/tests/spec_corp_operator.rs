@@ -73,7 +73,6 @@ impl Reply {
     fn hardened(&self) {
         for (name, value) in [
             ("cache-control", "no-store"),
-            ("referrer-policy", "no-referrer"),
             ("x-content-type-options", "nosniff"),
             ("x-frame-options", "DENY"),
             ("x-robots-tag", "noindex"),
@@ -88,6 +87,19 @@ impl Reply {
                 "{name}"
             );
         }
+        let html = self
+            .headers
+            .get("content-type")
+            .is_some_and(|value| value.to_str().unwrap().starts_with("text/html"));
+        let expected_referrer = if html
+            && !self.status.is_redirection()
+            && !self.headers.contains_key("content-disposition")
+        {
+            "same-origin"
+        } else {
+            "no-referrer"
+        };
+        assert_eq!(self.headers["referrer-policy"], expected_referrer);
         let csp = self
             .headers
             .get("content-security-policy")
@@ -1980,4 +1992,39 @@ async fn emergency_disable_exception_does_not_authorize_credential_writes_or_ena
         assert_eq!(f.audits().await, audits);
         assert_credentials_unchanged(&f.record().await.credentials, &before.credentials);
     }
+}
+
+#[tokio::test]
+async fn operator_html_preserves_same_origin_form_navigation_but_downloads_and_redirects_do_not() {
+    let f = Fixture::new().await;
+    let setup_page = f.page().await;
+    assert_eq!(setup_page.status, StatusCode::OK);
+    assert_eq!(setup_page.headers["referrer-policy"], "same-origin");
+    assert!(
+        setup_page.headers["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/html")
+    );
+    let reveal = f
+        .post("/setup", "user_id=synthetic-user&confirm_binding=true")
+        .await;
+    assert_eq!(reveal.status, StatusCode::OK);
+    assert_eq!(reveal.headers["referrer-policy"], "same-origin");
+    let status = f.page().await;
+    assert_eq!(status.headers["referrer-policy"], "same-origin");
+    let reader = f.record().await.credentials.reader_tokens[0].id.clone();
+    let download = f
+        .post(
+            "/export",
+            &format!("expected_config_version=1&reader_id={reader}"),
+        )
+        .await;
+    assert_eq!(download.status, StatusCode::OK);
+    assert_eq!(download.headers["referrer-policy"], "no-referrer");
+    let redirect = f
+        .post("/sessions/revoke", "expected_config_version=1&confirm=true")
+        .await;
+    assert_eq!(redirect.status, StatusCode::SEE_OTHER);
+    assert_eq!(redirect.headers["referrer-policy"], "no-referrer");
 }

@@ -155,7 +155,7 @@ async fn admin_nav_icons_keep_visible_localized_labels_in_every_theme() {
                 .skip(1)
                 .map(|part| part.split_once("</a>").unwrap().0)
                 .collect();
-            assert_eq!(anchors.len(), 8, "all main navigation items remain");
+            assert_eq!(anchors.len(), 9, "all main navigation items remain");
             for (path, icon, en, ru) in [
                 ("/admin/", "layout-dashboard", "Dashboard", "Дашборд"),
                 ("/admin/monitoring", "activity", "Monitoring", "Мониторинг"),
@@ -165,6 +165,7 @@ async fn admin_nav_icons_keep_visible_localized_labels_in_every_theme() {
                 ("/admin/alerts", "bell", "Alerts", "Алерты"),
                 ("/admin/settings", "settings-2", "Settings", "Настройки"),
                 ("/admin/boosty", "link", "Boosty", "Boosty"),
+                ("/admin/corp", "shield", "Corp", "Corp"),
             ] {
                 let anchor = anchors
                     .iter()

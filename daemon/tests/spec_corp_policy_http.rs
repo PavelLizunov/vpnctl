@@ -356,7 +356,19 @@ mod spec {
         );
         assert_eq!(response.headers["x-content-type-options"], "nosniff");
         assert_eq!(response.headers["x-frame-options"], "DENY");
-        assert_eq!(response.headers["referrer-policy"], "no-referrer");
+        let html = response
+            .headers
+            .get("content-type")
+            .is_some_and(|value| value.to_str().unwrap().starts_with("text/html"));
+        let expected_referrer = if html
+            && !response.status.is_redirection()
+            && !response.headers.contains_key("content-disposition")
+        {
+            "same-origin"
+        } else {
+            "no-referrer"
+        };
+        assert_eq!(response.headers["referrer-policy"], expected_referrer);
         let robots = response.headers["x-robots-tag"].to_str().unwrap();
         assert!(robots.contains("noindex") && robots.contains("nofollow"));
         let csp = response.headers["content-security-policy"]
@@ -890,6 +902,7 @@ mod spec {
         let fixture = Fixture::new(true, true).await;
         for origin in [
             None,
+            Some("null"),
             Some("http://admin.corp.ninitux.com"),
             Some("https://evil.example"),
             Some("https://admin.corp.ninitux.com/"),
@@ -2019,5 +2032,63 @@ mod spec {
                 std::fs::write(directory.join("assets").join(name), asset.bytes).unwrap();
             }
         }
+    }
+
+    #[tokio::test]
+    async fn login_and_editor_html_keep_same_origin_policy_while_redirect_api_and_reader_do_not() {
+        let fixture = Fixture::new(true, true).await;
+        let login_page = fixture
+            .call(browser_request("GET", "/", Body::empty(), None, None))
+            .await;
+        assert_eq!(login_page.status, StatusCode::OK);
+        assert!(
+            login_page.headers["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/html")
+        );
+        assert_eq!(login_page.headers["referrer-policy"], "same-origin");
+        security_headers(&login_page);
+        let login = fixture
+            .call(login_request(&format!("password={PASSWORD}")))
+            .await;
+        assert_eq!(login.status, StatusCode::SEE_OTHER);
+        assert_eq!(login.headers["referrer-policy"], "no-referrer");
+        security_headers(&login);
+        let cookie = login.headers["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let editor = fixture
+            .call(browser_request(
+                "GET",
+                "/",
+                Body::empty(),
+                Some(cookie),
+                None,
+            ))
+            .await;
+        assert_eq!(editor.status, StatusCode::OK);
+        assert_eq!(editor.headers["referrer-policy"], "same-origin");
+        security_headers(&editor);
+        let state = fixture
+            .call(browser_request(
+                "GET",
+                "/api/corp/state",
+                Body::empty(),
+                Some(cookie),
+                None,
+            ))
+            .await;
+        assert_eq!(state.status, StatusCode::OK);
+        assert_eq!(state.headers["referrer-policy"], "no-referrer");
+        security_headers(&state);
+        fixture.publish_direct(vec![], "next_connection").await;
+        let reader = fixture.call(reader_request(Some(HOST), Some(READER))).await;
+        assert_eq!(reader.status, StatusCode::OK);
+        assert_eq!(reader.headers["referrer-policy"], "no-referrer");
+        security_headers(&reader);
     }
 }

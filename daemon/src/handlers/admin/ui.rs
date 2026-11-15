@@ -52,6 +52,10 @@ const NAV: &[NavItem] = &[
         key: "boosty",
         label_key: crate::i18n::K::NavBoosty,
     },
+    NavItem {
+        key: "corp",
+        label_key: crate::i18n::K::NavCorp,
+    },
 ];
 
 pub(crate) fn nav_href(key: &str) -> String {
@@ -91,6 +95,7 @@ pub(crate) fn topbar(active: &str, lang: crate::i18n::Locale, alerts_unacked: u6
                                 "audit" => "history",
                                 "alerts" => "bell",
                                 "settings" => "settings-2",
+                                "corp" => "shield",
                                 _ => "link",
                             }))
                             " " (t(lang, it.label_key))
@@ -106,6 +111,7 @@ pub(crate) fn topbar(active: &str, lang: crate::i18n::Locale, alerts_unacked: u6
                                 "audit" => "history",
                                 "alerts" => "bell",
                                 "settings" => "settings-2",
+                                "corp" => "shield",
                                 _ => "link",
                             }))
                             " " (t(lang, it.label_key))
@@ -113,7 +119,6 @@ pub(crate) fn topbar(active: &str, lang: crate::i18n::Locale, alerts_unacked: u6
                         }
                     }
                 }
-                a href="/admin/corp" { "Corp" }
             }
             span.ed-tb__r {
                 form method="get" action="/admin/search" style="display: flex; margin: 0;" {

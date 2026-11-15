@@ -64,6 +64,7 @@ async function harness(pageName, width) {
   });
   const page = await context.newPage();
   const state = {
+    authenticated: pageName === "editor",
     revision: 7, rules: structuredClone(initialRules), failure: null,
     snapshots: new Map([[6, structuredClone(historicalRules)], [7, structuredClone(initialRules)]]),
     timings: new Map([[6, "next_connection"], [7, "next_connection"]]),
@@ -82,14 +83,25 @@ async function harness(pageName, width) {
       assert.equal(url.search, "", "Unexpected request query");
       const endpoint = url.pathname;
       if (endpoint === "/" && request.method() === "GET") {
-        await route.fulfill(pages[pageName]);
+        await route.fulfill(pages[state.authenticated ? "editor" : pageName]);
         return;
       }
       if (assets[endpoint] && request.method() === "GET") {
         await route.fulfill({ status: 200, ...assets[endpoint] });
         return;
       }
-      assert.equal(pageName, "editor", "Access page attempted an API call");
+      if (pageName === "login" && endpoint === "/login" && request.method() === "POST") {
+        assert.equal(request.headers().origin, origin, "Native login form must retain its exact Origin");
+        const form = new URLSearchParams(request.postData());
+        assert.deepEqual([...form], [["password", "synthetic-browser-password"]]);
+        calls.push({ endpoint });
+        state.authenticated = true;
+        await route.fulfill({
+          status: 303, headers: { location: "/", "cache-control": "no-store", "referrer-policy": "no-referrer" }, body: "",
+        });
+        return;
+      }
+      assert.ok(state.authenticated, "Access page attempted an API call");
       assert.ok(["/api/corp/state", "/api/corp/normalize", "/api/corp/rules", "/api/corp/history", "/api/corp/restore"].includes(endpoint), `Unexpected path: ${endpoint}`);
       const post = ["/api/corp/normalize", "/api/corp/rules", "/api/corp/restore"].includes(endpoint);
       assert.equal(request.method(), post ? "POST" : "GET");
@@ -385,6 +397,14 @@ try {
         if (name === "login") await expect(h.page.locator("form")).toHaveAttribute("action", `${origin}/login`);
         else await expect(h.page.getByRole("link")).toHaveAttribute("href", "/");
         await shot(h.page, name, width);
+        if (name === "login") {
+          await h.page.getByLabel("Пароль", { exact: true }).fill("synthetic-browser-password");
+          await h.page.getByRole("button", { name: "Войти", exact: true }).click();
+          await idle(h.page);
+          await expect(h.page.locator("#draft-status")).toContainText("Версия 7.");
+          assert.equal(h.calls.filter(({ endpoint }) => endpoint === "/login").length, 1);
+          await shot(h.page, "login-submitted", width);
+        }
       } finally { await h.close(); }
       completed.push(`${width}/${name}`);
     }

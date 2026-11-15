@@ -120,9 +120,14 @@ Storage/wire API contracts and the eligibility contract own fixture setup.
   host, including while disabled/denied, so instructional pages render. No
   user-controlled filesystem path or operator assets are served.
 - All Corp responses, including error/fallback/body-limit responses, carry
-  no-store, nosniff, DENY framing, no-referrer, noindex/nofollow and a restrictive
+  no-store, nosniff, DENY framing, noindex/nofollow and a restrictive
   CSP: scripts/styles/connect/form-action self, no inline scripts, objects,
-  frames or external fonts. HTTPS ingress is a deployment prerequisite; cookies
+  frames or external fonts. HTML responses use Referrer-Policy: same-origin:
+  same-origin form navigation must retain its Origin header, while external
+  destinations receive no referrer. Non-HTML/API/download/redirect responses
+  retain no-referrer. Login and mutation gates still reject missing/null/wrong
+  Origin; browser tests must submit the real login form without injected headers.
+  HTTPS ingress is a deployment prerequisite; cookies
   are always Secure and password form action uses the canonical HTTPS origin.
 
 ## Russian UI and verification
