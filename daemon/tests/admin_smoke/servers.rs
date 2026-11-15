@@ -1301,3 +1301,73 @@ async fn billing_missing_rates_mark_totals_incomplete_and_hide_profit_and_covera
         assert!(complete.contains("cost coverage:"));
     }
 }
+
+#[tokio::test]
+async fn current_path_is_scoped_to_tcp_and_persistent_incident_visible() {
+    use chrono::{Duration, Utc};
+    use vpnctl_inventory::ServiceQualitySample;
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 0, &[]).await;
+    let base = Utc::now() - Duration::minutes(11);
+    let mut sample = ServiceQualitySample {
+        ts: base,
+        server_id: ServerId("s0".into()),
+        vantage: "test network".into(),
+        target_count: 1,
+        available_targets: 1,
+        attempts: 3,
+        successes: 3,
+        tcp_rtt_ms: vec![10],
+        control_attempts: 3,
+        control_successes: 3,
+        control_rtt_ms: vec![10],
+        icmp_attempts: None,
+        icmp_successes: None,
+        icmp_rtt_ms: None,
+    };
+    s.inv
+        .record_service_path(&sample, "fixture-path", 630)
+        .await
+        .unwrap();
+    sample.successes = 0;
+    sample.available_targets = 0;
+    sample.ts = base + Duration::minutes(5);
+    s.inv
+        .record_service_path(&sample, "fixture-path", 630)
+        .await
+        .unwrap();
+    sample.ts = base + Duration::minutes(10);
+    s.inv
+        .record_service_path(&sample, "fixture-path", 630)
+        .await
+        .unwrap();
+    let app = router(s.clone());
+    let list = fetch_html(app.clone(), "/admin/servers").await;
+    assert!(list.contains("TCP unreachable"));
+    assert!(list.contains("test network"));
+    let detail = fetch_html(app.clone(), "/admin/servers/s0").await;
+    assert!(detail.contains("current-path-availability"));
+    assert!(detail.contains("confirmed outage, recovery not confirmed"));
+    assert!(detail.contains("does not verify a new VPN login"));
+    assert!(detail.contains("First deterioration:"));
+
+    let stale_dir = TempDir::new().unwrap();
+    let stale_state = state(&stale_dir).await;
+    seed(&stale_state.inv, 1, 0, &[]).await;
+    sample.ts = Utc::now() - Duration::hours(1);
+    stale_state
+        .inv
+        .record_service_path(&sample, "stale-path", 630)
+        .await
+        .unwrap();
+    sample.ts += Duration::minutes(5);
+    stale_state
+        .inv
+        .record_service_path(&sample, "stale-path", 630)
+        .await
+        .unwrap();
+    let detail = fetch_html(router(stale_state), "/admin/servers/s0").await;
+    assert!(detail.contains("Unknown / stale"));
+    assert!(detail.contains("confirmed outage, recovery not confirmed"));
+}

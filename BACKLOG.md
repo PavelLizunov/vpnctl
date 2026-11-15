@@ -2,6 +2,18 @@
 
 Deferred work items with enough context to pick up cold. Newest first.
 
+## Protocol-aware availability from multiple client networks
+
+Current path detection uses existing aggregated TCP quality rounds and preserves
+incident evidence; it does not establish successful VPN authentication, UDP
+availability or a filtering cause. Extend Protocol Assurance with separate
+network/endpoint identities, independent tests when SSH telemetry is stale,
+probe-identity validity checks and control-target health. Replace duplicate
+probes within a bounded handshake budget rather than increasing load. Add a
+rate-limited web check action when full-path checks share that budget. Invalid
+probe profiles must become Unknown without granting access to extra users.
+See `docs/specs/current-path-availability.md`.
+
 ## Boosty: independent authorization and stale lapse decisions
 
 Quick Connect copies a browser session. The bridge can preserve and reuse its

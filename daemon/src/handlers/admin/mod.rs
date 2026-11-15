@@ -9,6 +9,7 @@ pub(crate) mod helpers;
 pub(crate) mod icons;
 pub(crate) mod legacy;
 pub(crate) mod monitoring;
+mod path_availability;
 pub(crate) mod search;
 pub(crate) mod server_actions;
 pub(crate) mod servers;

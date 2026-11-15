@@ -5,6 +5,8 @@ pub mod jump_resolver;
 pub mod migrate;
 pub mod operation_lock;
 pub mod quality;
+pub mod reachability;
+pub use reachability::{ServicePathIncident, ServicePathState, ServicePathStatus};
 pub mod sqlite;
 
 pub use jump_resolver::{JumpResolverError, resolve_jump_host};

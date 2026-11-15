@@ -19,6 +19,8 @@ const SHIPPED_KINDS: &[(&str, &str)] = &[
     ("server.singbox.restarted", "warning"),
     ("server.fingerprint.drift", "warning"),
     ("server.quality.degraded", "warning"),
+    ("server.path.unavailable.1", "warning"),
+    ("server.path.recovered.1", "info"),
     ("user.traffic_limit", "warning"),
     ("server.attribution.stalled", "warning"),
     ("user.sub_no_traffic", "warning"),

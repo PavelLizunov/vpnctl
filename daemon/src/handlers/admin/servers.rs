@@ -29,6 +29,7 @@ fn server_row(
         bool,
     >,
     health: Option<&vpnctl_inventory::NodeHealthRow>,
+    path: Option<&vpnctl_inventory::ServicePathState>,
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
@@ -96,6 +97,7 @@ fn server_row(
                 span.ed-grid__mut { (s.ssh_user) "@" }
                 (s.address) ":" (s.ssh_port)
             }
+            td { (super::path_availability::status_badge(path, lang)) }
             td.ed-grid__mut { (s.hoster) }
             td.num { b { (user_count) } " " (tr(lang, "users", "польз.")) }
             td.ed-grid__sm {
@@ -140,6 +142,26 @@ pub(crate) async fn servers(
     )
     .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
+    let mut paths = std::collections::HashMap::new();
+    for server in &server_list {
+        match state
+            .inv
+            .current_service_path(
+                &server.id,
+                chrono::Utc::now(),
+                crate::quality_poller::path_max_age_secs(),
+            )
+            .await
+        {
+            Ok(Some(path)) => {
+                paths.insert(server.id.clone(), path);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(target = "vpnctld::admin", server = %server.id, %error, "current path query failed")
+            }
+        }
+    }
     let body = html! {
         div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageServers)) }
 
@@ -296,6 +318,7 @@ pub(crate) async fn servers(
                             th style="width: 34px;" { "№" }
                             th { (crate::i18n::tr(lang, "server", "сервер")) }
                             th { (crate::i18n::tr(lang, "endpoint", "адрес")) }
+                            th { (crate::i18n::tr(lang, "TCP path now", "TCP сейчас")) }
                             th { (crate::i18n::tr(lang, "hoster", "хостер")) }
                             th.num { (crate::i18n::tr(lang, "grants", "гранты")) }
                             th { (crate::i18n::tr(lang, "protocols", "протоколы")) }
@@ -312,6 +335,7 @@ pub(crate) async fn servers(
                                 user_counts.get(&s.id).copied().unwrap_or(0),
                                 &hidden_matrix,
                                 latest_health.get(&s.id),
+                                paths.get(&s.id),
                                 lang,
                             ))
                         }
