@@ -110,3 +110,6 @@ history entries for signer retirement. Lead rejected that candidate against
 at 101 publications. The new operator code therefore reads all retained history.
 The other reviewer confirmed the deleted-user setup ordering issue above; root
 corrects that ordering without changing the independent expected result.
+
+| CORP-LIVE-TEST-CLIPPY | P2 | Exact-head CI51f5f57, run43721629192: the new independent upgrade fixture uses chunks_exact(2), rejected by Rust1.100 Clippy chunks_exact_to_as_chunks under the existing warnings-as-errors gate. Use the equivalent fixed-array iterator without changing fixture bytes or assertions. | Fixed iterator; formatting passed; exact-head CI pending |
+| CORP-LIVE-VENDOR-DOC | P2 | The same CI run's vendor provenance regression detects README.vpnctl.md imported from live inside the byte-pinned upstream package. Accepted main already documents provenance/security/removal in vendor/README.md. Remove the duplicate inner document, retaining the exact upstream-file set and both exact SQLite dependency pins; keep the regression unchanged. | Removed duplicate; unchanged targeted provenance regression passed; exact-head CI pending |
