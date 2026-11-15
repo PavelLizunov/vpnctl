@@ -190,10 +190,10 @@ fn failure_reason(message: &str) -> SshAccessFailure {
         SshAccessFailure::Timeout
     } else if message.contains("permission denied") || message.contains("authentication failed") {
         SshAccessFailure::Authentication
-    } else if message.contains("host key")
+    } else if message.contains("host key verification failed")
         || message.contains("host identification")
-        || message.contains("pinned host key")
-        || message.contains("inventory-pinned")
+        || message.contains("did not present its pinned host key")
+        || message.contains("did not present its inventory-pinned host key")
     {
         SshAccessFailure::HostKey
     } else {
@@ -282,5 +282,23 @@ mod tests {
         ] {
             assert_eq!(failure_reason(error), expected);
         }
+    }
+
+    #[test]
+    fn keyscan_connection_failures_do_not_imply_a_host_key_mismatch() {
+        for error in [
+            "ssh pinned host keyscan exit=Some(1) stderr=",
+            "ssh-keyscan for pinned host returned no keys",
+        ] {
+            assert_eq!(failure_reason(error), SshAccessFailure::Connection);
+        }
+        assert_eq!(
+            failure_reason("Host key verification failed."),
+            SshAccessFailure::HostKey
+        );
+        assert_eq!(
+            failure_reason("ssh pinned host keyscan timed out after 12s"),
+            SshAccessFailure::Timeout
+        );
     }
 }
