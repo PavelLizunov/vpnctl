@@ -61,6 +61,13 @@ pub(super) async fn server_detail_render(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
+    let ssh_access = state
+        .inv
+        .ssh_access_for_server(&sid, chrono::Utc::now(), crate::ssh_access::max_age_secs())
+        .await
+        .ok();
+    let ssh_checking = crate::ssh_access::is_checking(&state.inv, &sid);
+
     let pending_deploy = state.inv.server_pending_deploy(&sid).await.ok();
     let operation_status = crate::wizard_bootstrap::autodeploy_status(&state.inv, &sid.0);
     let last_deploy_failure = state
@@ -602,6 +609,7 @@ pub(super) async fn server_detail_render(
         ], lang))
 
         @if tab == ServerTab::Status {
+            (crate::handlers::admin::ssh_access::detail_section(&server, ssh_access.as_ref(), ssh_checking, lang))
             (crate::handlers::admin::path_availability::detail_section(path_current.as_ref().ok().and_then(|s| s.as_ref()), path_incidents.as_deref().ok(), lang))
             div.ed-detail-grid {
                 div {

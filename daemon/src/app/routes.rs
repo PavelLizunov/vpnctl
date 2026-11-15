@@ -234,6 +234,10 @@ pub(crate) fn admin_router(state: AppState) -> Router {
         )
         .route("/admin/servers/{id}/setup", get(admin::server_detail_setup))
         .route(
+            "/admin/servers/{id}/ssh-check",
+            post(admin::ssh_access::recheck),
+        )
+        .route(
             "/admin/servers/{id}/set-fingerprint",
             post(admin::server_set_fingerprint),
         )

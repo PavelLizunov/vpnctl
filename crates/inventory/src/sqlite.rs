@@ -11,6 +11,7 @@ mod reachability;
 mod servers;
 mod sessions;
 mod settings;
+mod ssh_access;
 mod stats;
 mod subscription;
 mod users;

@@ -31,6 +31,7 @@ mod server_traffic;
 pub mod sharing_score;
 mod singbox_stats;
 pub mod snapshot_cache;
+mod ssh_access;
 pub mod ssh_subprocess;
 pub mod ua;
 pub mod wg_stats_poller;
