@@ -141,3 +141,21 @@ context is unavailable. Independent diff review and actionlint 1.7.12 confirmed
 the error. The follow-up initializes paths in a step through `RUNNER_TEMP` and
 `GITHUB_ENV`; no runtime tests are claimed for the rejected candidate. The
 correction is limited to CI setup and requires fresh exact-head results.
+
+At `e6679eb1da6aa9fb402a64e8dea16602a303f43b`, all 12 CI jobs started.
+Cargo check and the static musl build passed. Clippy stopped both its standalone
+job and `just ci` on seven oversized internal response error variants and two
+unnecessary ownership parameters. The HTTP suite passed 30 of 32 tests: one
+CSRF rejection had the wrong status, and a suppression fixture omitted the
+existing inventory opt-in. The full suite then reported 539 admin tests passed,
+one failed and one ignored: Corp dispatch preempted legacy malformed-host
+sanitization. Browser rendering did not run because its HTTP prerequisite failed.
+All findings were recorded before correction. The follow-up keeps the original
+denial and compatibility assertions, fixes error representation and host/CSRF
+dispatch, and independently corrects the suppression fixture with an opt-out
+boundary assertion. No local compilation or runtime tests were performed.
+Two additional independent HTTP tests pin malformed-host legacy compatibility
+and continued rejection of malformed Corp authorities. Independent diff-only
+review of the full correction returned no findings. Formatting, actionlint,
+generated-file, whitespace and secret checks passed locally; fresh exact-head
+CI remains the runtime authority.

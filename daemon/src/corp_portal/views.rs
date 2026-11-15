@@ -5,7 +5,7 @@ use maud::{DOCTYPE, Markup, html};
 pub(super) const CSS: &str = include_str!("../../assets/corp-portal/corp.css");
 pub(super) const JS: &str = include_str!("../../assets/corp-portal/corp.js");
 
-fn page(title: &str, body: Markup) -> String {
+fn page(title: &str, body: &Markup) -> String {
     html! {
         (DOCTYPE)
         html lang="ru" {
@@ -26,7 +26,7 @@ fn page(title: &str, body: Markup) -> String {
 pub(super) fn login(error: Option<&str>) -> String {
     page(
         "Вход",
-        html! {
+        &html! {
             main.access-page {
                 p.brand { "Corp" }
                 section.card aria-labelledby="page-title" {
@@ -52,7 +52,7 @@ pub(super) fn login(error: Option<&str>) -> String {
 pub(super) fn vpn_required(ip: Option<IpAddr>) -> String {
     page(
         "Подключите VPN",
-        html! {
+        &html! {
             main.access-page {
                 p.brand { "Corp" }
                 section.card aria-labelledby="page-title" {
@@ -78,7 +78,7 @@ pub(super) fn vpn_required(ip: Option<IpAddr>) -> String {
 pub(super) fn unavailable() -> String {
     page(
         "Страница недоступна",
-        html! {
+        &html! {
             main.access-page {
                 p.brand { "Corp" }
                 section.card aria-labelledby="page-title" {
@@ -95,7 +95,7 @@ pub(super) fn unavailable() -> String {
 pub(super) fn editor() -> String {
     page(
         "Корпоративные правила",
-        html! {
+        &html! {
             main.editor id="corp-editor" aria-busy="true" {
                 header.page-header {
                     div {

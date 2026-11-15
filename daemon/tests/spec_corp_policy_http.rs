@@ -572,6 +572,65 @@ mod spec {
     }
 
     #[tokio::test]
+    async fn unrelated_malformed_host_preserves_legacy_health_but_cannot_reach_corp_reader() {
+        let fixture = Fixture::new(false, false).await;
+        let host = "evil.com/bad#";
+        assert_eq!(
+            fixture
+                .call(request("GET", "/api/v1/health", Some(host), Body::empty()))
+                .await
+                .status,
+            StatusCode::OK
+        );
+        assert_eq!(
+            fixture
+                .call(reader_request(Some(host), Some(READER)))
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
+        for host in [host, "other.example"] {
+            assert!(
+                fixture
+                    .call(request(
+                        "GET",
+                        "https://operator.example/api/v1/health",
+                        Some(host),
+                        Body::empty(),
+                    ))
+                    .await
+                    .status
+                    .is_client_error(),
+                "conflicting authority with Host {host}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_corp_host_forms_cannot_reach_legacy_health_or_operator_routes() {
+        let fixture = Fixture::new(false, false).await;
+        for host in [
+            "user@admin.corp.ninitux.com",
+            "admin.corp.ninitux.com@evil.com",
+            "evil.com/admin.corp.ninitux.com",
+            "admin.corp.ninitux.com/bad#",
+            "evil.com admin.corp.ninitux.com",
+            "evil.com,admin.corp.ninitux.com",
+        ] {
+            for path in ["/api/v1/health", "/admin/"] {
+                let response = fixture
+                    .call(request("GET", path, Some(host), Body::empty()))
+                    .await;
+                assert!(
+                    response.status.is_client_error(),
+                    "Host {host} at {path}: {}",
+                    response.status
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn fixed_assets_render_while_unconfigured_and_do_not_expose_operator_assets() {
         let fixture = Fixture::new(false, false).await;
         for path in ["/assets/corp.css", "/assets/corp.js"] {
@@ -1165,6 +1224,12 @@ mod spec {
                     .await
                     .unwrap(),
                 "suppressed" => {
+                    fixture
+                        .state
+                        .inv
+                        .set_server_auto_suppress(&server().id, true)
+                        .await
+                        .unwrap();
                     fixture
                         .state
                         .inv

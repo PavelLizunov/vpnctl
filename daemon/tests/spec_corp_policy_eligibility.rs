@@ -242,6 +242,13 @@ mod spec {
             .set_server_suppressed(&node.id, true)
             .await
             .unwrap();
+        assert_eq!(fixture.choices().await.len(), 1);
+        fixture
+            .state
+            .inv
+            .set_server_auto_suppress(&node.id, true)
+            .await
+            .unwrap();
         assert!(fixture.choices().await.is_empty());
         fixture
             .state

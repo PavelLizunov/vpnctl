@@ -25,6 +25,8 @@ use crate::corp_policy::{
     verify_envelope,
 };
 
+type PortalResult<T> = Result<T, Box<Response>>;
+
 pub(super) fn error(status: StatusCode, message: &str) -> Response {
     (status, Json(json!({"message": message}))).into_response()
 }
@@ -62,7 +64,7 @@ fn api_gate_error(response: Response) -> Response {
     }
 }
 
-fn store_error(error_value: CorpStoreError) -> Response {
+fn store_error(error_value: &CorpStoreError) -> Response {
     match error_value {
         CorpStoreError::Conflict => conflict(),
         CorpStoreError::InvalidInput(_) => invalid(),
@@ -113,7 +115,7 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
     if path == "/" && method == Method::GET {
         let record = match browser_access(&state.app, &headers, peer).await {
             Ok((record, _)) => record,
-            Err(response) => return response,
+            Err(response) => return *response,
         };
         return if session(&state.app, &headers, &record).await.is_ok() {
             Html(views::editor()).into_response()
@@ -126,7 +128,7 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
     }
     let context = match authorized(&state.app, &headers, peer).await {
         Ok(context) => context,
-        Err(response) => return api_gate_error(response),
+        Err(response) => return api_gate_error(*response),
     };
     if method == Method::POST {
         if !security::same_origin(&headers)
@@ -146,7 +148,7 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
                     .revoke_corp_session(&context.session_hash, "corp.browser")
                     .await
                 {
-                    return store_error(error_value);
+                    return store_error(&error_value);
                 }
                 return redirect(&format!(
                     "{COOKIE}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict"
@@ -155,7 +157,7 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
             "/api/corp/normalize" => {
                 let input: Normalize = match parse_json(request).await {
                     Ok(input) => input,
-                    Err(response) => return response,
+                    Err(response) => return *response,
                 };
                 let domain = match normalize_site(&input.site) {
                     Ok(domain) => domain,
@@ -175,23 +177,23 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
             "/api/corp/rules" => {
                 let input: Publish = match parse_json(request).await {
                     Ok(input) => input,
-                    Err(response) => return response,
+                    Err(response) => return *response,
                 };
                 return publish(&state.app, &headers, peer, context.record, input).await;
             }
             "/api/corp/restore" => {
                 let input: Restore = match parse_json(request).await {
                     Ok(input) => input,
-                    Err(response) => return response,
+                    Err(response) => return *response,
                 };
                 let prior = match state.app.inv.corp_revision(input.revision).await {
                     Ok(Some(prior)) => prior,
                     Ok(None) => return error(StatusCode::NOT_FOUND, "Эта версия уже недоступна."),
-                    Err(error_value) => return store_error(error_value),
+                    Err(error_value) => return store_error(&error_value),
                 };
                 let payload = match stored_payload(&prior, &context.record) {
                     Ok(payload) => payload,
-                    Err(response) => return response,
+                    Err(response) => return *response,
                 };
                 return publish(
                     &state.app,
@@ -214,20 +216,20 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
             "/api/corp/state" => {
                 let (revision, rules) = match current_rules(&state.app, &context.record).await {
                     Ok(value) => value,
-                    Err(response) => return response,
+                    Err(response) => return *response,
                 };
                 return Json(json!({"revision": revision, "rules": rules, "csrf": context.session.csrf_token})).into_response();
             }
             "/api/corp/history" => {
                 let rows = match state.app.inv.corp_history(100).await {
                     Ok(rows) => rows,
-                    Err(error_value) => return store_error(error_value),
+                    Err(error_value) => return store_error(&error_value),
                 };
                 let mut history = Vec::with_capacity(rows.len());
                 for row in rows {
                     let payload = match stored_payload(&row, &context.record) {
                         Ok(payload) => payload,
-                        Err(response) => return response,
+                        Err(response) => return *response,
                     };
                     history.push(json!({"revision": row.revision, "published_at": row.published_at, "apply": payload.apply, "rule_count": payload.rules.len()}));
                 }
@@ -242,12 +244,12 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
     )
 }
 
-async fn active_record(app: &AppState) -> Result<CorpRecord, Response> {
+async fn active_record(app: &AppState) -> PortalResult<CorpRecord> {
     let record = app
         .inv
         .corp_record()
         .await
-        .map_err(store_error)?
+        .map_err(|error_value| store_error(&error_value))?
         .ok_or_else(|| {
             (StatusCode::SERVICE_UNAVAILABLE, Html(views::unavailable())).into_response()
         })?;
@@ -259,7 +261,9 @@ async fn active_record(app: &AppState) -> Result<CorpRecord, Response> {
             .map_err(|_| unavailable())?
             .is_none_or(|user| user.disabled)
     {
-        return Err((StatusCode::SERVICE_UNAVAILABLE, Html(views::unavailable())).into_response());
+        return Err(Box::new(
+            (StatusCode::SERVICE_UNAVAILABLE, Html(views::unavailable())).into_response(),
+        ));
     }
     Ok(record)
 }
@@ -268,7 +272,7 @@ async fn browser_access(
     app: &AppState,
     headers: &HeaderMap,
     peer: Option<IpAddr>,
-) -> Result<(CorpRecord, IpAddr), Response> {
+) -> PortalResult<(CorpRecord, IpAddr)> {
     let record = active_record(app).await?;
     let trusted =
         peer.is_some_and(|ip| crate::real_ip::is_trusted_proxy(security::canonical_ip(ip)));
@@ -278,7 +282,11 @@ async fn browser_access(
     let eligible = eligible_servers(app, &record.status.user_id)
         .await
         .map_err(|_| unavailable())?;
-    let exits = app.inv.corp_verified_egress().await.map_err(store_error)?;
+    let exits = app
+        .inv
+        .corp_verified_egress()
+        .await
+        .map_err(|error_value| store_error(&error_value))?;
     let current_time = now();
     if !exits.iter().any(|exit| {
         exit.ip == ip
@@ -289,7 +297,7 @@ async fn browser_access(
                     && server.configuration_fingerprint == exit.configuration_fingerprint
             })
     }) {
-        return Err(denied());
+        return Err(Box::new(denied()));
     }
     Ok((record, ip))
 }
@@ -298,18 +306,18 @@ async fn session(
     app: &AppState,
     headers: &HeaderMap,
     record: &CorpRecord,
-) -> Result<(String, CorpSession), Response> {
+) -> PortalResult<(String, CorpSession)> {
     let hash = security::session_hash(headers).ok_or_else(unauthorized)?;
     let session = app
         .inv
         .corp_session(&hash, now())
         .await
-        .map_err(store_error)?
+        .map_err(|error_value| store_error(&error_value))?
         .ok_or_else(unauthorized)?;
     if session.auth_generation != record.status.auth_generation
         || session.config_version != record.status.config_version
     {
-        return Err(unauthorized());
+        return Err(Box::new(unauthorized()));
     }
     Ok((hash, session))
 }
@@ -324,7 +332,7 @@ async fn authorized(
     app: &AppState,
     headers: &HeaderMap,
     peer: Option<IpAddr>,
-) -> Result<BrowserContext, Response> {
+) -> PortalResult<BrowserContext> {
     let (record, _) = browser_access(app, headers, peer).await?;
     let (session_hash, session) = session(app, headers, &record).await?;
     Ok(BrowserContext {
@@ -338,7 +346,7 @@ async fn login(state: &PortalState, request: Request, peer: Option<IpAddr>) -> R
     let headers = request.headers().clone();
     let (record, ip) = match browser_access(&state.app, &headers, peer).await {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if !security::same_origin(&headers) {
         return error(StatusCode::FORBIDDEN, "Откройте страницу входа заново.");
@@ -379,7 +387,7 @@ async fn login(state: &PortalState, request: Request, peer: Option<IpAddr>) -> R
     }
     let (fresh, _) = match browser_access(&state.app, &headers, peer).await {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if fresh.status.auth_generation != record.status.auth_generation {
         return unauthorized();
@@ -404,7 +412,7 @@ async fn login(state: &PortalState, request: Request, peer: Option<IpAddr>) -> R
         )
         .await
     {
-        return store_error(error_value);
+        return store_error(&error_value);
     }
     state.logins.clear(Some(ip));
     redirect(&format!(
@@ -434,9 +442,9 @@ fn content_type(headers: &HeaderMap, expected: &str) -> bool {
     })
 }
 
-async fn parse_json<T: DeserializeOwned>(request: Request) -> Result<T, Response> {
+async fn parse_json<T: DeserializeOwned>(request: Request) -> PortalResult<T> {
     if !content_type(request.headers(), "application/json") {
-        return Err(invalid());
+        return Err(Box::new(invalid()));
     }
     let bytes = to_bytes(request.into_body(), MAX_BODY).await.map_err(|_| {
         error(
@@ -444,7 +452,7 @@ async fn parse_json<T: DeserializeOwned>(request: Request) -> Result<T, Response
             "Слишком большой список правил.",
         )
     })?;
-    serde_json::from_slice(&bytes).map_err(|_| invalid())
+    serde_json::from_slice(&bytes).map_err(|_| Box::new(invalid()))
 }
 
 #[derive(Deserialize)]
@@ -472,16 +480,16 @@ struct Restore {
 async fn current_rules(
     app: &AppState,
     record: &CorpRecord,
-) -> Result<(u64, Vec<PolicyRule>), Response> {
+) -> PortalResult<(u64, Vec<PolicyRule>)> {
     let current = app
         .inv
         .corp_current_policy(record.status.config_version)
         .await
-        .map_err(store_error)?;
+        .map_err(|error_value| store_error(&error_value))?;
     let Some(current) = current else {
         return seed_rules()
             .map(|rules| (0, rules))
-            .map_err(|_| unavailable());
+            .map_err(|_| Box::new(unavailable()));
     };
     let keys = record
         .credentials
@@ -495,12 +503,12 @@ async fn current_rules(
         || signed.payload_sha256.to_ascii_lowercase() != current.payload_sha256
         || signed.payload.revision != current.revision
     {
-        return Err(unavailable());
+        return Err(Box::new(unavailable()));
     }
     Ok((signed.payload.revision, signed.payload.rules))
 }
 
-fn stored_payload(revision: &CorpRevision, record: &CorpRecord) -> Result<PolicyPayload, Response> {
+fn stored_payload(revision: &CorpRevision, record: &CorpRecord) -> PortalResult<PolicyPayload> {
     let payload: PolicyPayload =
         serde_json::from_slice(&revision.payload).map_err(|_| unavailable())?;
     if payload.schema != 1
@@ -512,7 +520,7 @@ fn stored_payload(revision: &CorpRevision, record: &CorpRecord) -> Result<Policy
         || format!("{:x}", Sha256::digest(&revision.payload)) != revision.payload_sha256
         || validate_rules(&payload.rules).is_err()
     {
-        return Err(unavailable());
+        return Err(Box::new(unavailable()));
     }
     Ok(payload)
 }
@@ -573,7 +581,7 @@ async fn publish(
     };
     let fresh = match authorized(app, headers, peer).await {
         Ok(fresh) => fresh,
-        Err(response) => return api_gate_error(response),
+        Err(response) => return api_gate_error(*response),
     };
     if fresh.record.status.config_version != record.status.config_version {
         return conflict();
@@ -596,14 +604,14 @@ async fn publish(
             Json(json!({"revision":revision.revision,"published_at":revision.published_at}))
                 .into_response()
         }
-        Err(error_value) => store_error(error_value),
+        Err(error_value) => store_error(&error_value),
     }
 }
 
 async fn reader(app: &AppState, headers: &HeaderMap) -> Response {
     let record = match active_record(app).await {
         Ok(record) => record,
-        Err(response) => return api_gate_error(response),
+        Err(response) => return api_gate_error(*response),
     };
     let Some(token) = single_header(headers, "authorization")
         .filter(|value| value.len() <= 1024)
@@ -632,6 +640,6 @@ async fn reader(app: &AppState, headers: &HeaderMap) -> Response {
         )
             .into_response(),
         Ok(None) => error(StatusCode::NOT_FOUND, "Правила ещё не опубликованы."),
-        Err(error_value) => store_error(error_value),
+        Err(error_value) => store_error(&error_value),
     }
 }

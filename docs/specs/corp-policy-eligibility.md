@@ -42,6 +42,11 @@ error details. No builds, processes, DNS resolution or remote access occur.
 - Reuse the existing subscription inputs and share-link collectors without
   changing their behavior. Only granted `vpn-exit` nodes, visible protocols,
   unsuppressed nodes and direct connections are eligible. Ignore browser UA.
+  Effective suppression follows the existing inventory opt-in: both
+  `set_server_auto_suppress(&ServerId, true) -> Result<()>` and
+  `set_server_suppressed(&ServerId, true) -> Result<bool>` are needed in a test
+  fixture. The latter changes the observation timestamp only; a timestamp with
+  auto-suppression disabled does not remove the endpoint from the subscription.
 - Enumerate all direct `vless+reality` links in subscription server order, then
   `vless-ws`, then `vless+xhttp`. The fixed shipped Business runtime supports
   XHTTP. A collector that cannot render a variant contributes no endpoint.

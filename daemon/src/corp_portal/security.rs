@@ -55,15 +55,22 @@ pub(super) fn corp_host(request: &Request) -> Result<bool, ()> {
         return Err(());
     }
     let raw = raw.to_str().map_err(|_| ())?;
-    let authority: Authority = raw.parse().map_err(|_| ())?;
-    if raw.contains('@') || raw.contains([' ', '\t', ',', '/', '\\']) {
-        return Err(());
-    }
     if let Some(uri_authority) = request.uri().authority()
         && !uri_authority.as_str().eq_ignore_ascii_case(raw)
     {
         return Err(());
     }
+    let authority = raw
+        .parse::<Authority>()
+        .ok()
+        .filter(|_| !raw.contains('@') && !raw.contains([' ', '\t', ',', '/', '\\']));
+    let Some(authority) = authority else {
+        return if raw.to_ascii_lowercase().contains(HOST) {
+            Err(())
+        } else {
+            Ok(false)
+        };
+    };
     if !authority
         .host()
         .trim_end_matches('.')
@@ -78,15 +85,9 @@ pub(super) fn corp_host(request: &Request) -> Result<bool, ()> {
 }
 
 pub(super) fn ambiguous_headers(headers: &HeaderMap) -> bool {
-    [
-        "origin",
-        "authorization",
-        "content-type",
-        "x-corp-csrf",
-        "x-real-ip",
-    ]
-    .iter()
-    .any(|name| headers.get_all(*name).iter().count() > 1)
+    ["origin", "authorization", "content-type", "x-real-ip"]
+        .iter()
+        .any(|name| headers.get_all(*name).iter().count() > 1)
 }
 
 pub(super) fn same_origin(headers: &HeaderMap) -> bool {

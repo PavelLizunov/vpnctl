@@ -18,8 +18,11 @@ Storage/wire API contracts and the eligibility contract own fixture setup.
 
 - Dispatch Corp before legacy paths. Exactly one Host equal case-insensitively to
   `admin.corp.ninitux.com` or that name with port `443` enters the Corp router.
-  A URI authority, when present with Host, must agree. Reject ambiguous/invalid
-  authorities, duplicate Host fields and Corp trailing-dot/non-443-port forms.
+  A URI authority, when present with Host, must agree. Reject duplicate Host
+  fields and malformed Corp authorities, including trailing-dot/non-443-port
+  forms or the Corp name embedded in malformed userinfo/path/space/comma forms.
+  Preserve legacy sanitization for unrelated malformed Host values, such as
+  `evil.com/bad#`; this is not a Corp route and cannot reach the Corp reader.
   A missing Host remains compatible for existing legacy routes but cannot reach
   Corp through an absolute URI. A Corp request never reaches operator/public
   subscription routes, even when disabled or for unknown paths. Unknown Corp
