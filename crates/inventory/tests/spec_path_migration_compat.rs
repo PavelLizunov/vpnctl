@@ -179,6 +179,7 @@ async fn retained_contents(pool: &SqlitePool) -> Vec<(String, Vec<Vec<String>>)>
             || table.starts_with("sqlite_")
             || table.starts_with("corp_policy_")
             || table.starts_with("service_path_")
+            || table == "ssh_access_checks"
         {
             continue;
         }
@@ -208,10 +209,12 @@ async fn assert_current_migrations(pool: &SqlitePool) {
         "server_traffic_limits",
         "service_path_states",
         "service_path_incidents",
+        "ssh_access_checks",
     ] {
         assert!(tables.iter().any(|name| name == table), "missing {table}");
     }
     assert_eq!(reindex_count(pool).await, 0);
+    assert!(table_contents(pool, "ssh_access_checks").await.is_empty());
 }
 
 impl Fixture {
@@ -381,7 +384,8 @@ async fn current_main_71_upgrades_path_history_preserving_both_published_migrati
     sqlx::raw_sql(
         "DROP TABLE service_path_states;
          DROP TABLE service_path_incidents;
-         DELETE FROM _sqlx_migrations WHERE version = 72;",
+         DROP TABLE ssh_access_checks;
+         DELETE FROM _sqlx_migrations WHERE version >= 72;",
     )
     .execute(&pool)
     .await
