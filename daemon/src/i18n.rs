@@ -65,6 +65,7 @@ pub enum K {
     NavAlerts,
     NavSettings,
     NavBoosty,
+    NavCorp,
     NavOperator,
     FootStack,
 
@@ -181,6 +182,7 @@ pub fn t(loc: Locale, k: K) -> &'static str {
         (En, NavSettings) => "Settings",
         (Ru, NavSettings) => "Настройки",
         (En, NavBoosty) | (Ru, NavBoosty) => "Boosty",
+        (En, NavCorp) | (Ru, NavCorp) => "Corp",
         (En, NavOperator) => "operator",
         (Ru, NavOperator) => "оператор",
         (En, FootStack) => "· axum + maud",

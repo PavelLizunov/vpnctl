@@ -393,7 +393,102 @@
     }
   }
 
+  function refreshCheckPanel(panel, url, errorSelector, apply) {
+    var controller = new AbortController();
+    var timeout = setTimeout(function () { controller.abort(); }, 15000);
+    fetch(url, { credentials: "same-origin", cache: "no-store", signal: controller.signal })
+      .then(function (response) {
+        if (!response.ok) throw new Error("refresh failed");
+        return response.text();
+      })
+      .then(function (text) {
+        var next = new DOMParser().parseFromString(text, "text/html").getElementById(panel.id);
+        if (!next) throw new Error("missing check state");
+        apply(next);
+      })
+      .catch(function () {
+        var error = panel.querySelector(errorSelector);
+        panel.setAttribute("aria-busy", "false");
+        if (error) error.hidden = false;
+      })
+      .finally(function () { clearTimeout(timeout); });
+  }
+
+  // The ordinary POST/redirect remains the source of truth. Poll only this
+  // read-only fragment while a sweep is running; never replay a POST.
+  function watchPrivateChecks() {
+    var panel = document.getElementById("private-checks");
+    if (!panel || panel.dataset.running !== "true") return;
+    setTimeout(function () {
+      refreshCheckPanel(panel, window.location.pathname, ".pc-poll-error", function (next) {
+        // Avoid replacing focused controls or open details on each poll.
+        if (next.dataset.running === "true") { watchPrivateChecks(); return; }
+        var active = document.activeElement;
+        var href = active && active.getAttribute("href");
+        var summaries = Array.from(panel.querySelectorAll("summary"));
+        var summaryIndex = summaries.indexOf(active);
+        var focused = panel.contains(active);
+        var openDetails = Array.from(panel.querySelectorAll("details")).map(function (d) { return d.open; });
+        panel.replaceWith(next);
+        next.querySelectorAll("details").forEach(function (d, i) { d.open = !!openDetails[i]; });
+        if (focused) {
+          var replacement = href ? Array.from(next.querySelectorAll("a")).find(function (a) { return a.getAttribute("href") === href; }) : null;
+          if (summaryIndex >= 0) replacement = next.querySelectorAll("summary")[summaryIndex];
+          if (!replacement) { replacement = next.querySelector("h1"); replacement.tabIndex = -1; }
+          replacement.focus({ preventScroll: true });
+        }
+      });
+    }, 1500);
+  }
+
+  // Refresh stored observations only. Starting a check always uses the ordinary
+  // form, so a failed refresh can never replay a POST or create another run.
+  function watchCheburcheckChecks() {
+    var panel = document.getElementById("cheburcheck-checks");
+    if (!panel || panel.dataset.refresh !== "true") return;
+    setTimeout(function () {
+      if (!panel.isConnected || panel.querySelector("form[data-submitting]")) return;
+      refreshCheckPanel(panel, window.location.pathname + window.location.search, ".cc-poll-error", function (next) {
+        if (!panel.isConnected || panel.querySelector("form[data-submitting]")) return;
+        var active = document.activeElement;
+        var focused = panel.contains(active);
+        var activeId = focused && active.id;
+        var href = focused && active.getAttribute("href");
+        var detailKey = focused && active.tagName === "SUMMARY"
+          ? active.parentElement.getAttribute("data-detail-key") : null;
+        var details = {};
+        panel.querySelectorAll("details[data-detail-key]").forEach(function (detail) {
+          details[detail.getAttribute("data-detail-key")] = detail.open;
+        });
+        next.querySelectorAll("details[data-detail-key]").forEach(function (detail) {
+          var key = detail.getAttribute("data-detail-key");
+          if (Object.prototype.hasOwnProperty.call(details, key)) detail.open = details[key];
+        });
+        panel.replaceWith(next);
+        if (focused) {
+          var replacement = activeId ? Array.from(next.querySelectorAll("[id]")).find(function (item) {
+            return item.id === activeId;
+          }) : null;
+          if (!replacement && href) replacement = Array.from(next.querySelectorAll("a")).find(function (item) {
+            return item.getAttribute("href") === href;
+          });
+          if (!replacement && detailKey) {
+            var detail = Array.from(next.querySelectorAll("details[data-detail-key]")).find(function (item) {
+              return item.getAttribute("data-detail-key") === detailKey;
+            });
+            replacement = detail && detail.querySelector("summary");
+          }
+          if (!replacement || replacement.disabled) replacement = next.querySelector("h1");
+          if (replacement) replacement.focus({ preventScroll: true });
+        }
+        watchCheburcheckChecks();
+      });
+    }, 2000);
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
+    watchPrivateChecks();
+    watchCheburcheckChecks();
     wireSearchHotkey();
     wireSelectOnClick();
     wireLowercaseId();

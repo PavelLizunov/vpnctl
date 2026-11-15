@@ -1,3 +1,4 @@
+use super::migration_compat::adopt_legacy_traffic_migration;
 use super::*;
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
@@ -23,6 +24,7 @@ pub(crate) async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     .fetch_one(&mut *tx)
     .await?;
     if tables == 2 {
+        adopt_legacy_traffic_migration(&mut tx).await?;
         let applied: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 13 AND success = 1",
         )

@@ -18,6 +18,19 @@ use crate::handlers::auth::BasicAuth;
 use super::state::AppState;
 
 pub fn router(state: AppState) -> Router {
+    let config = crate::corp_operator::OperatorConfig::from_parts(
+        std::env::var("VPNCTLD_ADMIN_USER").ok(),
+        std::env::var("VPNCTLD_ADMIN_PASSWORD").ok(),
+        std::env::var("VPNCTLD_CORP_OPERATOR_ORIGIN").ok(),
+        &state.admin_session_secret,
+    );
+    router_with_corp_operator(state, config)
+}
+
+pub fn router_with_corp_operator(
+    state: AppState,
+    config: crate::corp_operator::OperatorConfig,
+) -> Router {
     let trace_layer = TraceLayer::new_for_http().make_span_with(|req: &Request<_>| {
         let matched = req
             .extensions()
@@ -29,6 +42,30 @@ pub fn router(state: AppState) -> Router {
     let admin_router = admin_router(state.clone());
 
     let public_router = Router::new()
+        .route(
+            "/api/v1/app/node-status/device/{*tail}",
+            get(handlers::client_nodes::get_device_nodes),
+        )
+        .route(
+            "/api/v1/app/node-status/subscription/{*tail}",
+            get(handlers::client_nodes::get_subscription_nodes),
+        )
+        .route(
+            "/api/v1/app/node-status/device",
+            get(handlers::client_nodes::unauthorized_nodes),
+        )
+        .route(
+            "/api/v1/app/node-status/device/",
+            get(handlers::client_nodes::unauthorized_nodes),
+        )
+        .route(
+            "/api/v1/app/node-status/subscription",
+            get(handlers::client_nodes::unauthorized_nodes),
+        )
+        .route(
+            "/api/v1/app/node-status/subscription/",
+            get(handlers::client_nodes::unauthorized_nodes),
+        )
         .route("/api/v1/health", get(handlers::health::get))
         .route("/sub/{token}", get(handlers::sub::get))
         .route("/api/v1/sub/{token}", get(handlers::sub::get_mihomo))
@@ -78,15 +115,17 @@ pub fn router(state: AppState) -> Router {
             ),
         );
 
-    public_router
-        .with_state(state)
+    let legacy = public_router
+        .with_state(state.clone())
         .merge(admin_router)
+        .layer(RequestBodyLimitLayer::new(8 * 1024))
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(15),
-        ))
-        .layer(RequestBodyLimitLayer::new(8 * 1024))
-        .layer(trace_layer)
+        ));
+
+    let operator = crate::corp_operator::isolate(legacy, state.clone(), config);
+    crate::corp_portal::isolate(operator, state).layer(trace_layer)
 }
 
 pub(crate) fn admin_assets_dir() -> PathBuf {
@@ -143,8 +182,20 @@ pub(crate) fn admin_router(state: AppState) -> Router {
         .route("/admin/monitoring", get(admin::monitoring))
         .route("/admin/monitoring/", get(admin::monitoring))
         .route(
+            "/admin/monitoring/cheburcheck",
+            get(admin::cheburcheck_overview),
+        )
+        .route(
+            "/admin/servers/{id}/cheburcheck",
+            get(admin::cheburcheck_page).post(admin::cheburcheck_run),
+        )
+        .route(
             "/admin/monitoring/probe-all",
             post(admin::monitoring_probe_all),
+        )
+        .route(
+            "/admin/monitoring/private-checks",
+            get(admin::private_checks_page).post(admin::private_checks_run),
         )
         .route("/admin/servers", get(admin::servers))
         .route("/admin/servers/", get(admin::servers))
@@ -439,6 +490,10 @@ pub(crate) fn admin_router(state: AppState) -> Router {
         .route("/admin/backup/download/{name}", get(admin::backup_download))
         .route("/admin/backup/self-test", post(admin::backup_self_test))
         .route("/admin/tweak/{kind}", post(admin::set_tweak))
+        .route(
+            "/admin/servers/{id}/traffic-limit",
+            post(admin::server_set_traffic_limit),
+        )
         .route("/admin/logout", post(admin::logout))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),

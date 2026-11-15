@@ -20,6 +20,7 @@ use super::schedulers::{
 
 #[derive(Clone)]
 pub struct AppState {
+    pub corp_egress: Arc<crate::corp_egress::EgressController>,
     pub inv: SqliteInventory,
     pub(crate) admin_session_secret: Arc<String>,
     pub registry: Arc<Registry>,
@@ -28,6 +29,8 @@ pub struct AppState {
     pub wizard: Arc<WizardStore>,
     pub snapshot_cache: crate::snapshot_cache::SnapshotCache,
     pub geo: crate::geoip::GeoLookup,
+    pub(crate) private_checks: Arc<crate::handlers::admin::private_checks::PrivateChecks>,
+    pub(crate) cheburcheck: Arc<crate::handlers::admin::cheburcheck_checks::ExternalChecks>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -153,7 +156,21 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<(Router, tokio::task:
     }
 
     let geo = crate::geoip::GeoLookup::from_env();
+    let corp_egress = match crate::corp_probe_runtime::SingBoxRunner::production() {
+        Ok(runner) => crate::corp_egress::EgressController::new(
+            Arc::new(runner),
+            Arc::new(|| chrono::Utc::now().timestamp()),
+        ),
+        Err(_) => {
+            tracing::warn!(
+                target = "vpnctld::corp",
+                "corporate exit verification runtime is unavailable"
+            );
+            crate::corp_egress::EgressController::disabled()
+        }
+    };
     let state = AppState {
+        corp_egress: Arc::new(corp_egress),
         inv,
         admin_session_secret,
         registry,
@@ -162,7 +179,10 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<(Router, tokio::task:
         wizard,
         snapshot_cache,
         geo,
+        private_checks: Arc::default(),
+        cheburcheck: Arc::default(),
     };
+    drop(crate::corp_egress::spawn_refresh(state.clone()));
     Ok((router(state), writer_handle))
 }
 
@@ -181,6 +201,7 @@ pub fn make_app_state_with_rate_limiter(
     let (access_log_tx, handle) = access_log::spawn_writer(inv.clone());
     (
         AppState {
+            corp_egress: Arc::new(crate::corp_egress::EgressController::disabled()),
             inv,
             admin_session_secret: Arc::new("test-only-session-secret".into()),
             registry,
@@ -189,6 +210,8 @@ pub fn make_app_state_with_rate_limiter(
             wizard: Arc::new(WizardStore::new()),
             snapshot_cache: crate::snapshot_cache::SnapshotCache::new(),
             geo: crate::geoip::GeoLookup::disabled(),
+            private_checks: Arc::default(),
+            cheburcheck: Arc::default(),
         },
         handle,
     )

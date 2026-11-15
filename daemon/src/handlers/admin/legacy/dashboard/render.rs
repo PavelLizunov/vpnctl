@@ -8,17 +8,15 @@ use maud::{Markup, html};
 
 use super::abuse::{dashboard_abuse_summary, load_likely_shared, sharing_review};
 use super::fleet::{
-    dashboard_fleet_table, dashboard_fleet_traffic_totals, dashboard_fleet_uptime,
-    dashboard_health_feed, dashboard_quality_ranking, kernel_floor_rollup,
+    dashboard_fleet_table, dashboard_fleet_uptime, dashboard_health_feed,
+    dashboard_quality_ranking, kernel_floor_rollup,
 };
-use super::telemetry::{
-    dashboard_heavy_users, dashboard_live_activity_from_rows, dashboard_vpn_activity,
-};
+use super::telemetry::dashboard_heavy_users;
 use crate::AppState;
 use crate::handlers::admin::helpers::{internal_error, render_page, theme_accent_lang};
 use crate::handlers::admin::legacy::server_detail::detail_tabs;
 use crate::handlers::admin::legacy::user_sections::{
-    fit_vpn_sparkline_window, pick_vpn_sparkline_window, vpn_traffic_chart, window_picker_section,
+    pick_vpn_sparkline_window, window_picker_section,
 };
 
 struct DashboardStats {
@@ -167,16 +165,6 @@ async fn dashboard_render(
     } else {
         window.cells * window.bucket_hours
     };
-    let fleet_rows = state
-        .inv
-        .recent_vpn_stats_fleet(since_hours.saturating_mul(2), window.bucket_hours)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(target = "vpnctld::admin", error = %e, "recent_vpn_stats_fleet failed");
-            Vec::new()
-        });
-
-    let window = fit_vpn_sparkline_window(window, &fleet_rows);
     let stats = collect_dashboard_data(&state)
         .await
         .map_err(internal_error)?;
@@ -336,13 +324,6 @@ async fn dashboard_render(
             (s.id.clone(), n)
         })
         .collect();
-    let live_activity = dashboard_live_activity_from_rows(
-        &server_list_fleet,
-        &active_conns_now,
-        &fleet_rows,
-        window,
-    );
-
     let recent_alerts = state.inv.recent_alerts(5, false).await.unwrap_or_else(|e| {
         tracing::warn!(target = "vpnctld::admin", error = %e, "recent_alerts failed");
         Vec::new()
@@ -354,28 +335,35 @@ async fn dashboard_render(
 
     let likely_shared = load_likely_shared(&state.inv).await;
 
-    let coeffs: std::collections::HashMap<vpnctl_core::ServerId, f64> = server_list_fleet
-        .iter()
-        .map(|s| (s.id.clone(), s.usage_coefficient))
-        .collect();
-
-    let traffic_24h: std::collections::HashMap<vpnctl_core::ServerId, u64> = state
-        .inv
-        .weighted_vpn_traffic_by_server(24)
+    let traffic_now = chrono::Utc::now().timestamp();
+    let nic_day = crate::handlers::admin::nic_traffic::NicWindow::load(
+        &state.inv,
+        &server_list_fleet,
+        traffic_now,
+        24,
+    )
+    .await
+    .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let selected_hours = crate::handlers::admin::nic_traffic::hours(window.slug);
+    let nic_selected = if selected_hours == 24 {
+        nic_day.clone()
+    } else {
+        crate::handlers::admin::nic_traffic::NicWindow::load(
+            &state.inv,
+            &server_list_fleet,
+            traffic_now,
+            selected_hours,
+        )
         .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(target = "vpnctld::admin", error = %e, "weighted_vpn_traffic_by_server failed");
-            Vec::new()
-        })
-        .into_iter()
-        .collect();
+        .map_err(|e| internal_error(anyhow::Error::new(e)))?
+    };
 
     let conns_now: usize = active_conns_now.iter().filter_map(|(_, c)| *c).sum();
 
     let body = html! {
         div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageDashboard)) }
         (dashboard_summary_bar(&stats, conns_now, lang))
-        (dashboard_fleet_table(&server_list_fleet, &latest_health_per_server, &active_conns_now, &traffic_24h, &kernel_versions, lang))
+        (dashboard_fleet_table(&server_list_fleet, &latest_health_per_server, &active_conns_now, &nic_day, &kernel_versions, lang))
         (detail_tabs(
             "/admin",
             tab.slug(),
@@ -409,18 +397,8 @@ async fn dashboard_render(
         @if tab == DashboardTab::Activity {
             (window_picker_section("/admin/activity", window.slug, lang))
             (dashboard_fleet_uptime(&fleet_uptime, lang))
-            (dashboard_vpn_activity(&live_activity, window, lang))
-            div id="vpn-traffic" style="margin-top: 24px;" {
-                div.ed-art-eyebrow {
-                    (crate::i18n::tr(lang, "Fleet traffic", "Трафик флота"))
-                    " · "
-                    (match lang {
-                        crate::i18n::Locale::En => window.label_en,
-                        crate::i18n::Locale::Ru => window.label_ru,
-                    })
-                }
-                (vpn_traffic_chart(&fleet_rows, window, lang))
-                (dashboard_fleet_traffic_totals(&fleet_rows, &coeffs, window, lang))
+            div id="vpn-traffic" style="margin-top:24px;" {
+                (crate::handlers::admin::nic_traffic::panel(&nic_selected, &active_conns_now, lang))
             }
             (kernel_floor_rollup(&kernel_versions, lang))
             (dashboard_heavy_users(&heavy_users, window, lang))

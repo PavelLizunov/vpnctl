@@ -4,7 +4,7 @@ pub mod schedulers;
 pub mod state;
 
 pub(crate) use registry::build_registry;
-pub use routes::router;
+pub use routes::{router, router_with_corp_operator};
 pub(crate) use schedulers::{spawn_backup_scheduler_with, spawn_retention_purger};
 pub use state::{
     AppState, DEFAULT_BACKUP_DIR, DEFAULT_DEPLOY_KEY_PATH, build, deploy_key_path,

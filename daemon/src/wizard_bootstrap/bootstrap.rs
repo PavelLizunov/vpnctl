@@ -182,9 +182,8 @@ async fn bootstrap_pipeline(
         .kernel(&kernel_id)
         .map(|k| k.supported_protocols())
         .unwrap_or_default();
-    let default_protocols =
-        wizard_protocols(&plan.address, plan.ssh_port, supported.clone(), &registry);
-    for pid in &supported {
+    let default_protocols = default_server_protocols(plan.ssh_port, supported.clone(), &registry);
+    for pid in supported.iter().filter(|pid| pid.0 == "vless+reality") {
         if !default_protocols.contains(pid)
             && registry.protocol(pid).is_some_and(|p| {
                 p.effective_listen_ports(&std::collections::HashMap::new())
@@ -198,12 +197,6 @@ async fn bootstrap_pipeline(
                 plan.ssh_port
             );
         }
-    }
-    if plan.address.parse::<std::net::IpAddr>().is_err() {
-        send_step!(
-            "register",
-            "note: AWG2/AWG3 were skipped because they require a literal server IP."
-        );
     }
     let server = Server {
         id: ServerId(plan.server_id.clone()),
@@ -255,10 +248,7 @@ async fn bootstrap_pipeline(
         None => fail!("register", "another deploy started for this server; retry"),
     };
 
-    send_step!(
-        "secrets",
-        "minting per-protocol secrets (VLESS REALITY, WireGuard, hy2)…"
-    );
+    send_step!("secrets", "minting secrets for enabled protocols…");
     match bootstrap_server_secrets(&inv, &server, &registry).await {
         Ok((_, minted)) => {
             for label in minted {
@@ -435,17 +425,15 @@ async fn bootstrap_pipeline(
         .await;
 }
 
-pub(super) fn wizard_protocols(
-    address: &str,
+pub(crate) fn default_server_protocols(
     ssh_port: u16,
     supported: Vec<ProtocolId>,
     registry: &Registry,
 ) -> Vec<ProtocolId> {
-    let literal_ip = address.parse::<std::net::IpAddr>().is_ok();
     let secrets = std::collections::HashMap::new();
     supported
         .into_iter()
-        .filter(|pid| literal_ip || !matches!(pid.0.as_str(), "amneziawg2" | "amneziawg3"))
+        .filter(|pid| pid.0 == "vless+reality")
         .filter(|pid| {
             registry.protocol(pid).is_none_or(|p| {
                 !p.effective_listen_ports(&secrets)

@@ -22,6 +22,8 @@ const SHIPPED_KINDS: &[(&str, &str)] = &[
     ("server.path.unavailable.1", "warning"),
     ("server.path.recovered.1", "info"),
     ("user.traffic_limit", "warning"),
+    ("server.traffic_limit", "warning"),
+    ("server.traffic_exhausted", "critical"),
     ("server.attribution.stalled", "warning"),
     ("user.sub_no_traffic", "warning"),
     ("sub_access.suspicious_local_ip", "warning"),

@@ -298,6 +298,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn server_creation_defaults_to_only_reality_and_preserves_explicit_protocols() {
+        for base in [
+            vec![
+                "vpnctl",
+                "server",
+                "add",
+                "fixture",
+                "--address",
+                "198.51.100.42",
+            ],
+            vec![
+                "vpnctl",
+                "bootstrap",
+                "fixture",
+                "--address",
+                "198.51.100.42",
+                "--root-password",
+                "fixture-password",
+            ],
+        ] {
+            for override_protocols in [false, true] {
+                let mut args = base.clone();
+                if override_protocols {
+                    args.extend(["--protocols", "hysteria2,tuic-v5"]);
+                }
+                let cli = Cli::try_parse_from(args).unwrap();
+                let protocols = match cli.cmd {
+                    Cmd::Server {
+                        cmd: cmd::server::ServerCmd::Add { protocols, .. },
+                    } => protocols,
+                    Cmd::Bootstrap(args) => args.protocols,
+                    other => panic!("unexpected command: {other:?}"),
+                };
+                let expected = if override_protocols {
+                    vec!["hysteria2", "tuic-v5"]
+                } else {
+                    vec!["vless+reality"]
+                };
+                assert_eq!(protocols, expected);
+            }
+        }
+    }
+
+    #[test]
     fn new_operator_parity_commands_parse() {
         for args in [
             vec!["vpnctl", "user", "disable", "alice"],

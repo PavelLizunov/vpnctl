@@ -26,6 +26,23 @@ pub(crate) fn row_to_audit_entry(r: sqlx::sqlite::SqliteRow) -> Result<AuditEntr
 }
 
 impl SqliteInventory {
+    pub async fn latest_audit_for_target_action(
+        &self,
+        target: &str,
+        action: &str,
+    ) -> Result<Option<AuditEntry>> {
+        sqlx::query(
+            "SELECT id, ts, actor, action, target, payload FROM audit_log
+             WHERE target = ?1 AND action = ?2 ORDER BY id DESC LIMIT 1",
+        )
+        .bind(target)
+        .bind(action)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(row_to_audit_entry)
+        .transpose()
+    }
+
     pub async fn audit(
         &self,
         actor: &str,
