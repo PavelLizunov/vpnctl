@@ -1377,4 +1377,28 @@ mod spec {
         );
         assert_eq!(recovered.outbounds, baseline.outbounds);
     }
+
+    #[test]
+    fn probe_plan_debug_redacts_every_field_in_ordinary_and_pretty_output() {
+        let plan = vpnctld::corp_portal::eligibility::CorpProbePlan {
+            server: CorpEligibleServer {
+                server_id: ServerId("SENSITIVE_SERVER_ID".to_owned()),
+                label: "SENSITIVE_SERVER_LABEL".to_owned(),
+                hosts: vec!["sensitive-host.example".to_owned()],
+                configuration_fingerprint: "SENSITIVE_FINGERPRINT".to_owned(),
+            },
+            outbounds: vec![serde_json::json!({
+                "type": "vless",
+                "tag": "SENSITIVE_OUTBOUND_TAG",
+                "server": "sensitive-outbound.example",
+                "server_port": 443,
+                "uuid": "SENSITIVE_OUTBOUND_UUID",
+                "tls": {"reality": {"public_key": "SENSITIVE_REALITY_KEY"}},
+                "transport": {"path": "/SENSITIVE_TRANSPORT_PATH"}
+            })],
+        };
+        for debug in [format!("{plan:?}"), format!("{plan:#?}")] {
+            assert_eq!(debug, "CorpProbePlan { .. }");
+        }
+    }
 }

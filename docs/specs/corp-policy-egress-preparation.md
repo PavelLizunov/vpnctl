@@ -69,9 +69,11 @@ pub async fn probe_plan(
 ) -> Result<Option<CorpProbePlan>, EligibilityError>;
 ```
 
-Plan has no Debug/Serialize implementation: outbound values contain credentials
-and remain private to trusted daemon code. No endpoint/HTTP serialization or
-logging. Keep existing sanitized `EligibilityError` variants/messages.
+Plan has no Serialize implementation. Its explicit Debug must expose no fields:
+outbound values contain credentials and remain private to trusted daemon code.
+Both ordinary and pretty Debug are exactly `CorpProbePlan { .. }`; never derive
+Debug. No endpoint/HTTP serialization or logging. Keep existing sanitized
+`EligibilityError` variants/messages.
 
 Use one common inventory collection and grouping path for safe eligibility and
 probe plans. Preserve all current direct-only, grant/disabled/visibility/
@@ -143,3 +145,10 @@ regressions, also returned no findings. Local formatting, workflow/JS syntax,
 generated map/CSS, whitespace and secret checks passed. Runtime checks remain
 CI-only, with fresh exact-head results required. Existing
 readers, portal routes, enable/probe blocking and production state are unchanged.
+
+At `e9df92b`, Cargo check compiled the candidate, but Clippy/just ci rejected
+the absent Debug implementation under the workspace's public-type lint. The
+correction uses an explicit field-free Debug formatter and one additional
+independent regression for ordinary/pretty formatting. No lint is suppressed
+and no credential-bearing field becomes printable. Independent correction
+diff review returned no findings; current-head runtime evidence remains pending.
