@@ -7,6 +7,8 @@ mod common;
 mod alerts_health;
 #[path = "admin_smoke/dashboard.rs"]
 mod dashboard;
+#[path = "admin_smoke/dashboard_path.rs"]
+mod dashboard_path;
 #[path = "admin_smoke/deploy_actions.rs"]
 mod deploy_actions;
 #[path = "admin_smoke/grants.rs"]

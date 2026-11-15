@@ -205,6 +205,10 @@ pub(in crate::handlers::admin::legacy) fn dashboard_fleet_table(
     active_conns: &[(vpnctl_core::ServerId, Option<usize>)],
     traffic_24h: &crate::handlers::admin::nic_traffic::NicWindow,
     kernel_versions: &[(vpnctl_core::ServerId, Option<String>)],
+    current_paths: &std::collections::HashMap<
+        vpnctl_core::ServerId,
+        vpnctl_inventory::ServicePathState,
+    >,
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
@@ -236,6 +240,7 @@ pub(in crate::handlers::admin::legacy) fn dashboard_fleet_table(
                         tr {
                             th { (tr(lang, "server", "сервер")) }
                             th { (tr(lang, "state", "состояние")) }
+                            th { (tr(lang, "TCP now", "TCP сейчас")) }
                             th.num { (tr(lang, "disk", "диск")) }
                             th.num { (tr(lang, "mem", "память")) }
                             th.num { (tr(lang, "conns", "подкл.")) }
@@ -271,6 +276,11 @@ pub(in crate::handlers::admin::legacy) fn dashboard_fleet_table(
                                         Some(true) => span.ed-stat.ed-stat--active { (icon("circle")) (tr(lang, "up", "работает")) },
                                         Some(false) => span.ed-stat.ed-stat--failed { (icon("circle-x")) (tr(lang, "down", "не работает")) },
                                         None => span.ed-grid__mut { (dash) },
+                                    }
+                                }
+                                td.ed-grid__sm {
+                                    a href=(format!("/admin/servers/{}/status#current-path-availability", path_segment_encode(&s.id.0))) {
+                                        (crate::handlers::admin::path_availability::status_badge(current_paths.get(&s.id), lang))
                                     }
                                 }
                                 td class=(if disk_pct.is_some_and(|p| p > 70) { "num warn" } else { "num" }) {
