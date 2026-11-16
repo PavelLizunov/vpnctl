@@ -2,6 +2,14 @@
 
 Deferred work items with enough context to pick up cold. Newest first.
 
+## Readable Corp diagnostics and action hierarchy
+
+P3 confirmed owner-requested gap, recorded before correction at f4575087:
+the detail view displays evidence/provenance inline and suggested steps near
+the bottom. Prioritize the plain owner answer and supported action, preserve
+technical detail behind native disclosures and tighten analyzer instructions.
+See `docs/specs/corp-diagnostics-readable.md`. No result schema change is needed.
+
 ## Corp route distinction in the rules editor
 
 P3 confirmed owner-reported usability gap, recorded before correction: at

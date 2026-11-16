@@ -120,8 +120,15 @@ export async function verifyDiagnostics(browser, expect, shot) {
           const id = url.pathname.slice("/api/corp/reports/".length);
           assert.ok([first, second, third].includes(id));
           await route.fulfill({status: 200, json: {
-            schema: 1, report: summary(id, id === first ? state.firstState : id === third ? "running" : "received"),
-            analysis: id === first ? analysis : null, provenance: id === first ? provenance : null,
+            schema: 1, report: {
+              ...summary(id, id === first ? state.firstState : id === third ? "running" : "received"),
+              ...(state.mode === "solution" && id === first ? {verdict: "problem_found", summary_ru: "Выбран другой маршрут"} : {}),
+            },
+            analysis: id === first ? (state.mode === "solution" ? {
+              ...analysis,
+              owner_explanation: "Для этой попытки выбран другой маршрут. Подтверждённое решение — выбрать нужный маршрут в приложении.",
+              next_steps_ru: ["Выберите указанный администратором маршрут в приложении.", "Проверьте открытие нужного сайта."],
+            } : analysis) : null, provenance: id === first ? provenance : null,
           }});
         }
       } catch (error) {
@@ -148,7 +155,7 @@ export async function verifyDiagnostics(browser, expect, shot) {
     };
   }
 
-  for (const width of [320, 420]) {
+  for (const width of [320, 420, 1280]) {
     const h = await harness(width, "loading");
     const {page} = h;
     try {
@@ -175,6 +182,24 @@ export async function verifyDiagnostics(browser, expect, shot) {
       await page.keyboard.press("Enter");
       await expect(page.locator("#diagnostics-detail")).toBeFocused();
       const body = page.locator("#diagnostics-detail-body");
+      await expect(body.locator(".diagnosis-answer")).toBeVisible();
+      await expect(body.locator(".diagnosis-action")).toBeVisible();
+      await expect(body.locator(".diagnosis-action")).toContainText("Отправьте свежую диагностику");
+      for (const name of ["diagnosis-reasons", "diagnosis-technical"]) {
+        await expect(body.locator(`.${name}`)).not.toHaveAttribute("open");
+      }
+      await expect(body.locator(".provenance")).toBeHidden();
+      const order = await body.evaluate((element) => [
+        ...element.querySelectorAll(".diagnosis-answer, .diagnosis-action, .diagnosis-reasons, .diagnosis-technical"),
+      ].map((item) => item.className));
+      assert.deepEqual(order, ["diagnosis-answer", "diagnosis-action", "diagnosis-reasons", "diagnosis-technical"]);
+      await shot(page, "diagnostics-short-answer-action", width);
+      await body.locator(".diagnosis-reasons summary").focus();
+      await page.keyboard.press("Enter");
+      await expect(body.locator(".diagnosis-reasons")).toHaveAttribute("open", "");
+      await body.locator(".diagnosis-technical summary").focus();
+      await page.keyboard.press("Space");
+      await expect(body.locator(".diagnosis-technical")).toHaveAttribute("open", "");
       await expect(body).toContainText("Недостаточно данных");
       await expect(body).toContainText("Исторические данные");
       await expect(body).toContainText("app-01.txt, строка 12");
@@ -196,6 +221,8 @@ export async function verifyDiagnostics(browser, expect, shot) {
       await expect(body).toContainText("Проверенного заключения пока нет");
       await shot(page, "diagnostics-running-no-retry", width);
       await page.locator(".report-select").nth(1).click();
+      await expect(body.locator(".diagnosis-technical")).not.toHaveAttribute("open");
+      await body.locator(".diagnosis-technical summary").click();
       await expect(body).toContainText("Сведения о выполнении пока недоступны");
       await expect(body).toContainText("Проверенного заключения пока нет");
       await shot(page, "diagnostics-received-no-analysis", width);
@@ -210,11 +237,35 @@ export async function verifyDiagnostics(browser, expect, shot) {
       assert.equal(h.posts().length, 1, "Pending retry must not automatically resubmit");
       h.releaseRetry();
       await expect(body).toContainText("Ожидает анализа");
+      await expect(body).toContainText("Ниже — предыдущий результат");
+      await expect(body.locator(".diagnosis-action")).toContainText("Отправьте свежую диагностику");
+      await body.locator(".diagnosis-reasons summary").click();
       await expect(body).toContainText("Старая запись не подтверждает текущее состояние");
       await expect(page.getByRole("button", {name: "Повторить анализ", exact: true})).toHaveCount(0);
       await shot(page, "diagnostics-retry-pending-retains-result", width);
+      h.state.firstState = "unavailable";
+      await page.locator("#diagnostics-refresh").click();
+      await expect(body).toContainText("Последняя попытка не дала нового заключения");
+      await expect(body).not.toContainText("Новый анализ ещё не завершён");
+      await expect(body.locator(".diagnosis-action")).toContainText("Отправьте свежую диагностику");
     } finally { await h.close(); }
     completed.push(`${width}/diagnostics-list-detail-keyboard-retry`);
+
+    const solution = await harness(width, "solution");
+    try {
+      await expect(solution.page.locator(".report-select")).toHaveCount(2);
+      await solution.page.locator(".report-select").first().click();
+      const answer = solution.page.locator(".diagnosis-answer");
+      const action = solution.page.locator(".diagnosis-action");
+      await expect(answer).toContainText("Подтверждённое решение");
+      await expect(action.locator("li")).toHaveText([
+        "Выберите указанный администратором маршрут в приложении.", "Проверьте открытие нужного сайта.",
+      ]);
+      assert.equal(solution.posts().length, 0, "Advice must not execute any repair or retry");
+      await expect(solution.page.locator(".diagnosis-technical")).not.toHaveAttribute("open");
+      await shot(solution.page, "diagnostics-available-solution", width);
+    } finally { await solution.close(); }
+    completed.push(`${width}/diagnostics-supported-solution-advice-only`);
 
     for (const mode of ["empty", "error"]) {
       const h = await harness(width, mode);

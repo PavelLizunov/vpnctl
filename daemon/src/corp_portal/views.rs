@@ -249,7 +249,7 @@ pub(super) fn diagnostics(csrf: &str) -> String {
             main.editor id="corp-diagnostics" data-csrf=(csrf) {
                 header.page-header {
                     div { h1 { "Диагностика" }
-                        p.muted { "Отчёты приложения и результаты анализа. Выводы требуют проверки по приведённым свидетельствам." }
+                        p.muted { "Выберите отчёт: сначала покажем вывод и что сделать, подробности можно раскрыть ниже." }
                     }
                     button id="diagnostics-logout" type="button" { "Выйти" }
                 }
@@ -265,13 +265,13 @@ pub(super) fn diagnostics(csrf: &str) -> String {
                 div.diagnostics-layout {
                     section.card aria-labelledby="reports-title" {
                         h2 id="reports-title" { "Полученные отчёты" }
-                        p.muted.small { "Имя устройства сообщает приложение; оно не подтверждает личность отправителя." }
+                        p.muted.small { "Названия устройств берём из приложения." }
                         ul.report-list id="diagnostics-list" {}
                         button id="diagnostics-more" type="button" hidden { "Ещё отчёты" }
                     }
                     section.card id="diagnostics-detail" aria-labelledby="diagnostics-detail-title" tabindex="-1" {
                         h2 id="diagnostics-detail-title" { "Выберите отчёт" }
-                        div id="diagnostics-detail-body" { p.muted { "Здесь появятся выводы, свидетельства и сведения о модели." } }
+                        div id="diagnostics-detail-body" { p.muted { "Здесь появится короткий ответ и следующий шаг." } }
                     }
                 }
             }
