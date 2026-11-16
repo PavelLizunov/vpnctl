@@ -167,6 +167,13 @@ dialog > * + * { margin-top: 1rem; }
 .report-list li + li { margin-top: .75rem; }
 .report-select { width: 100%; display: grid; text-align: left; justify-content: stretch; gap: .4rem; font-weight: 400; }
 .report-select span { display: block; }
+.report-device { overflow: hidden; display: -webkit-box !important; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.diagnosis-action { border-left: 3px solid var(--acc); padding: .25rem 0 .25rem 1rem; }
+.diagnosis-action ol { padding-left: 1.25rem; }
+.diagnosis-action li + li { margin-top: .6rem; }
+.diagnosis-reasons, .diagnosis-technical { padding-top: .8rem; border-top: 1px solid var(--rule); }
+.diagnosis-reasons > * + *, .diagnosis-technical > * + * { margin-top: .8rem; }
+.diagnosis-reasons > summary, .diagnosis-technical > summary { min-height: 44px; padding: .65rem 0; }
 #diagnostics-detail-body { overflow-wrap: anywhere; }
 #diagnostics-detail-body > * { margin-top: .8rem; }
 #diagnostics-detail-body h3 { margin-top: 1.5rem; font-size: 1rem; }

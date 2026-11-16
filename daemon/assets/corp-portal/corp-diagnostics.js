@@ -20,10 +20,11 @@
     if (className) result.className = className;
     return result;
   }
-  function timestamp(value) {
+  function timestamp(value, exact = false) {
     if (!value) return "не указано";
     const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? value : `${date.toLocaleString("ru-RU")} (${value})`;
+    return Number.isNaN(date.getTime()) ? value
+      : exact ? `${date.toLocaleString("ru-RU")} (${value})` : date.toLocaleString("ru-RU");
   }
   function showError(message) {
     el("error").textContent = message;
@@ -70,21 +71,43 @@
       parent.append(block);
     }
   }
+  function disclosure(title, className) {
+    const details = node("details", undefined, className);
+    details.append(node("summary", title));
+    return details;
+  }
   function renderDetail(data) {
     const report = data.report;
     const body = el("detail-body");
     body.replaceChildren();
     el("detail-title").textContent = "Отчёт приложения";
     body.append(node("p", `Получен: ${timestamp(report.received_utc)}`));
-    body.append(node("p", `Устройство (сообщено приложением): ${report.device_label || "не указано"}`));
     body.append(node("p", `Состояние: ${states[report.analysis_state] || "Неизвестно"}`));
-    if (report.verdict) body.append(node("p", verdicts[report.verdict] || "Недостаточно данных", "diagnosis-verdict"));
-    if (report.summary_ru) body.append(node("p", report.summary_ru));
-    body.append(node("p", `Обновлён: ${timestamp(report.updated_utc)}`, "muted small"));
-    body.append(node("p", `Номер отчёта: ${report.report_id}`, "muted small"));
     const analysis = data.analysis;
+    if (analysis && report.analysis_state !== "ready") {
+      body.append(node("p", ["received", "pending", "running"].includes(report.analysis_state)
+        ? "Ниже — предыдущий результат. Новый анализ ещё не завершён."
+        : "Ниже — предыдущий результат. Последняя попытка не дала нового заключения.", "notice"));
+    }
+    const answer = node("section", undefined, "diagnosis-answer");
+    answer.append(node("h3", "Коротко"));
+    if (report.verdict) answer.append(node("p", verdicts[report.verdict] || "Недостаточно данных", "diagnosis-verdict"));
+    if (analysis) answer.append(node("p", analysis.owner_explanation));
+    else if (report.summary_ru) answer.append(node("p", report.summary_ru));
+    body.append(answer);
     if (analysis) {
-      body.append(node("h3", "Объяснение"), node("p", analysis.owner_explanation));
+      const action = node("section", undefined, "diagnosis-action");
+      action.append(node("h3", "Что сделать сейчас"));
+      if (analysis.next_steps_ru?.length) {
+        const steps = node("ol");
+        for (const step of analysis.next_steps_ru) steps.append(node("li", step));
+        action.append(steps);
+      } else {
+        action.append(node("p", "В этом отчёте нет подтверждённого решения. Отправьте свежую диагностику сразу после повторения проблемы."));
+      }
+      action.append(node("p", "Это рекомендации. Действия не выполняются автоматически.", "muted small"));
+      body.append(action);
+      const reasons = disclosure("Почему такой вывод", "diagnosis-reasons");
       for (const item of analysis.assessments || []) {
         const block = node("div", undefined, "finding");
         block.append(node("h3", scopes[item.scope] || item.scope));
@@ -92,32 +115,33 @@
         block.append(node("p", `${times[item.time_scope] || "Время неизвестно"}; уверенность: ${confidence[item.confidence] || "не указана"}`, "muted small"));
         block.append(node("p", item.explanation_ru));
         evidence(block, item.evidence);
-        body.append(block);
+        reasons.append(block);
       }
-      findings(body, "Подтверждённые наблюдения", analysis.confirmed);
-      findings(body, "Вероятные объяснения", analysis.probable);
-      findings(body, "Что остаётся неизвестным", analysis.unknown);
-      findings(body, "Хронология", analysis.chronology);
-      if (analysis.next_steps_ru?.length) {
-        body.append(node("h3", "Следующий шаг"));
-        const steps = node("ol");
-        for (const step of analysis.next_steps_ru) steps.append(node("li", step));
-        body.append(steps);
-      }
-      body.append(node("p", "Анализ носит рекомендательный характер. Приложение не выполняет предложенные действия автоматически.", "muted small"));
+      findings(reasons, "Подтверждённые наблюдения", analysis.confirmed);
+      findings(reasons, "Вероятные объяснения", analysis.probable);
+      findings(reasons, "Что остаётся неизвестным", analysis.unknown);
+      body.append(reasons);
     } else {
       body.append(node("p", "Проверенного заключения пока нет. Это не подтверждает исправность подключения.", "notice"));
     }
+    const technical = disclosure("Технический отчёт", "diagnosis-technical");
+    technical.append(node("p", `Устройство (сообщено приложением): ${report.device_label || "не указано"}`));
+    technical.append(node("p", "Название устройства не подтверждает личность отправителя.", "muted small"));
+    technical.append(node("p", `Получен: ${timestamp(report.received_utc, true)}`));
+    technical.append(node("p", `Обновлён: ${timestamp(report.updated_utc, true)}`));
+    technical.append(node("p", `Номер отчёта: ${report.report_id}`, "muted small"));
+    if (analysis) findings(technical, "Хронология", analysis.chronology);
     const provenance = data.provenance;
-    body.append(node("h3", "Сведения об анализе"));
+    technical.append(node("h3", "Сведения об анализе"));
     const labels = {requested_model: "Запрошенная модель", returned_model: "Ответившая модель", status: "Состояние выполнения", run_id: "Номер запуска", started_utc: "Начат", completed_utc: "Завершён", prompt_version: "Версия инструкции", prompt_sha256: "Отпечаток инструкции", input_sha256: "Отпечаток входных данных"};
     if (provenance) {
       const list = node("dl", undefined, "provenance");
       for (const [key, label] of Object.entries(labels)) {
-        if (provenance[key]) list.append(node("dt", label), node("dd", key.endsWith("_utc") ? timestamp(provenance[key]) : provenance[key]));
+        if (provenance[key]) list.append(node("dt", label), node("dd", key.endsWith("_utc") ? timestamp(provenance[key], true) : provenance[key]));
       }
-      body.append(list);
-    } else body.append(node("p", report.model ? `Модель: ${report.model}. Другие сведения пока недоступны.` : "Сведения о выполнении пока недоступны.", "muted"));
+      technical.append(list);
+    } else technical.append(node("p", report.model ? `Модель: ${report.model}. Другие сведения пока недоступны.` : "Сведения о выполнении пока недоступны.", "muted"));
+    body.append(technical);
     const refresh = node("button", "Обновить отчёт");
     refresh.type = "button";
     refresh.addEventListener("click", () => loadDetail(report.report_id));
@@ -175,7 +199,7 @@
         const item = node("li");
         const button = node("button", undefined, "report-select");
         button.type = "button";
-        button.append(node("strong", timestamp(report.received_utc)), node("span", `Устройство (сообщено приложением): ${report.device_label || "не указано"}`), node("span", states[report.analysis_state] || "Неизвестно", "muted small"));
+        button.append(node("strong", timestamp(report.received_utc)), node("span", `Устройство: ${report.device_label || "не указано"}`, "report-device"), node("span", states[report.analysis_state] || "Неизвестно", "muted small"));
         if (report.summary_ru) button.append(node("span", report.summary_ru));
         button.addEventListener("click", () => loadDetail(report.report_id, true));
         item.append(button);
