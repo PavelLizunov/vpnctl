@@ -52,13 +52,30 @@ opening a build-triggering PR under this explicit no-build instruction.
 
 ## Outcome
 
-Independent diff review found that moving phone history outside its editor
-requires its controls to join the same busy/ready/stale disabling scope.
-Confirmed before correction; keep reload available for stale recovery.
-Rendered verification and static activation remain in progress.
+Delivered static source e44f9087888c1eb765bf9d26580deea3c0dab9aa. All four
+public asset hashes match that source; Caddy reloaded with the same PID and
+vpnctld and compiled binaries were unchanged. Full previous edge configuration,
+service capability and assets were permanently archived before each activation.
 
-Rendered filter labels exposed inherited label margins on the original HTML
-wrappers; remove the duplicate spacing and give pagination a stable minimum
-height so both rule tables start consistently. Recorded before the final polish.
-The existing editor child margin also overrides native dialog centering; give
-editor-owned dialogs their normal auto margin. Recorded before correction.
+Sites, Telephony and Diagnostics were inspected at 1280, 800, 390 and 320 CSS
+pixels with no horizontal overflow. Their navigation and typography match;
+desktop rule filter labels align. The first desktop site rule moved from about
+876px to 503px. Search, pagination, independent drafts, discard, explicit
+interruption consent and diagnostics deletion cancellation were exercised without
+publishing rules or deleting reports. Main and phone revisions remain 7, with
+33 sites and 5 phone rules; both original reports remain visible.
+
+Independent UX/source and mechanical assessments completed. The Impeccable
+layout scan returned no findings; this is not a substitute for rendered review.
+Independent diff review found the extracted phone history control scope issue;
+it was recorded, fixed and verified with a browser-local simulated read conflict.
+History disables while stale and reload remains usable. Rendered label/pagination
+alignment and native dialog centering findings were recorded before correction;
+the deployed native dialog is centered in the viewport.
+
+All three JavaScript syntax checks and scoped secret scanning passed. No Cargo,
+application build, packaging, model analysis or full test run was performed.
+The reviewed source branch is published but not merged into main; the blanket
+build-triggering PR workflow was not started under the owner's no-build scope.
+Private receipts and screenshots are retained outside Git under
+corp-interface-consistency-20261117.
