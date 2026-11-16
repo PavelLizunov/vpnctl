@@ -81,6 +81,7 @@
     catch { throw new Error("Нет ответа от сервера. Проверьте подключение и попробуйте снова."); }
     if (response.status === 401) {
       locked = true;
+      for (const action of root.querySelectorAll(".diagnostics-detail-actions button")) action.disabled = true;
       el("login").hidden = false;
       throw new Error("Срок входа истёк. Войдите снова.");
     }
@@ -202,6 +203,7 @@
     body.append(technical);
     const refresh = node("button", "Обновить отчёт");
     refresh.type = "button";
+    refresh.disabled = locked;
     refresh.addEventListener("click", () => loadDetail(report.report_id));
     const actions = node("div", undefined, "diagnostics-detail-actions");
     actions.append(refresh);
@@ -210,6 +212,7 @@
       retry.type = "button";
       retry.disabled = locked;
       retry.addEventListener("click", async () => {
+        if (locked) return;
         retry.disabled = true;
         showError("");
         try {
@@ -224,6 +227,7 @@
     remove.type = "button";
     remove.disabled = locked;
     remove.addEventListener("click", () => {
+      if (locked) return;
       deleteTarget = report.report_id;
       deleteDialog.showModal();
       el("delete-cancel").focus();
@@ -313,7 +317,7 @@
       showError(error.message);
     } finally {
       deleting = false;
-      el("delete-confirm").disabled = false;
+      el("delete-confirm").disabled = locked;
       el("delete-cancel").disabled = false;
     }
   });
