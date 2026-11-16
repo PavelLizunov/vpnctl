@@ -624,8 +624,10 @@
 
   el("search").addEventListener("input", () => { rulePage = 0; renderRules(); });
   narrowLayout.addEventListener("change", () => {
-    pageSize = narrowLayout.matches ? 5 : 10;
-    rulePage = 0;
+    const nextSize = narrowLayout.matches ? 5 : 10;
+    if (nextSize === pageSize) return;
+    rulePage = Math.floor(rulePage * pageSize / nextSize);
+    pageSize = nextSize;
     if (initialized) renderRules();
   });
   el("route-filter").addEventListener("change", () => { rulePage = 0; renderRules(); });

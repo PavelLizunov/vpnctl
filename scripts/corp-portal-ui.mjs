@@ -466,6 +466,13 @@ async function paginationFlow(width) {
     await expect(page.locator("#rules tr")).toHaveCount(pageSize);
     assert.ok(!(await readRules(page)).some((rule) => rule.domain === original.domain));
     await shot(page, "rules-second-page-draft", width);
+    await expect(numbers.getByRole("button", {name: `Страница 2 из ${pageCount}`, exact: true})).toHaveAttribute("aria-current", "page");
+    if (width > 740) {
+      await page.setViewportSize({width: 420, height: 900});
+      await expect(numbers.getByRole("button", {name: "Страница 3 из 5", exact: true})).toHaveAttribute("aria-current", "page");
+      await page.setViewportSize({width, height: 900});
+      await expect(numbers.getByRole("button", {name: `Страница 2 из ${pageCount}`, exact: true})).toHaveAttribute("aria-current", "page");
+    }
     await page.locator("#rules-previous").click();
     await expect(page.getByRole("textbox", {name: `Комментарий к ${original.domain}`, exact: true})).toHaveValue(edited.comment);
     for (let index = 1; index < Math.ceil(rules.length / pageSize); index++) await page.locator("#rules-next").click();
