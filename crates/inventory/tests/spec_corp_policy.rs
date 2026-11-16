@@ -2393,7 +2393,7 @@ mod spec {
     }
 
     // Additive telephony cases reuse the established isolated inventory fixture.
-    fn phone_publication(status: &CorpStatus, revision: u64, rules: Value) -> CorpPublication {
+    fn phone_publication(status: &CorpStatus, revision: u64, rules: &Value) -> CorpPublication {
         let mut value = publication(status);
         value.expected_revision = revision;
         value.payload = serde_json::to_vec(&json!({
@@ -2423,7 +2423,7 @@ mod spec {
                 .unwrap()
                 .is_none()
         );
-        let phone = phone_publication(&status, 0, json!([]));
+        let phone = phone_publication(&status, 0, &json!([]));
         let stored = state
             .inv
             .publish_corp_phone_policy(&phone, ACTOR)
@@ -2465,7 +2465,7 @@ mod spec {
     #[tokio::test]
     async fn phone_cas_writers_audit_failure_and_rotation_preserve_both_floors() {
         let (state, status) = enabled_state().await;
-        let input = phone_publication(&status, 0, json!([]));
+        let input = phone_publication(&status, 0, &json!([]));
         fail_audit(&state).await;
         assert!(
             state
@@ -2485,7 +2485,7 @@ mod spec {
             matches!(left, Err(CorpStoreError::Conflict))
                 || matches!(right, Err(CorpStoreError::Conflict))
         );
-        let stale = phone_publication(&status, 1, json!([]));
+        let stale = phone_publication(&status, 1, &json!([]));
         let mut rotated = credentials();
         rotated.reader_tokens[0].token.push('x');
         let updated = state
@@ -2529,7 +2529,7 @@ mod spec {
     #[tokio::test]
     async fn phone_history_pruning_lookup_bounds_and_envelope_binding_are_independent() {
         let (state, status) = enabled_state().await;
-        let mut invalid = phone_publication(&status, 0, json!([]));
+        let mut invalid = phone_publication(&status, 0, &json!([]));
         invalid.envelope[0] ^= 1;
         assert!(
             state
@@ -2538,7 +2538,7 @@ mod spec {
                 .await
                 .is_err()
         );
-        let mut wrong_kind = phone_publication(&status, 0, json!([]));
+        let mut wrong_kind = phone_publication(&status, 0, &json!([]));
         let mut payload: Value = serde_json::from_slice(&wrong_kind.payload).unwrap();
         payload["kind"] = json!("sites");
         wrong_kind.payload = serde_json::to_vec(&payload).unwrap();
@@ -2553,7 +2553,7 @@ mod spec {
         for revision in 0..101 {
             state
                 .inv
-                .publish_corp_phone_policy(&phone_publication(&status, revision, json!([])), ACTOR)
+                .publish_corp_phone_policy(&phone_publication(&status, revision, &json!([])), ACTOR)
                 .await
                 .unwrap();
         }

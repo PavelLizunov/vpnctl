@@ -614,10 +614,10 @@ async fn publish_feed(
     record: CorpRecord,
     input: FeedPublish,
 ) -> Response {
-    if let PublicationRules::Phone(rules) = &input.rules {
-        if let Err(response) = telephony::runtime_routes(rules) {
-            return *response;
-        }
+    if let PublicationRules::Phone(rules) = &input.rules
+        && let Err(response) = telephony::runtime_routes(rules)
+    {
+        return *response;
     }
     let valid_rules = match &input.rules {
         PublicationRules::Sites(rules) => validate_rules(rules),
