@@ -19,6 +19,8 @@
   let candidate = null;
   let confirmation = null;
   let historyLoaded = false;
+  const pageSize = 10;
+  let rulePage = 0;
 
   const node = (tag, text, className) => {
     const result = document.createElement(tag);
@@ -27,10 +29,66 @@
     return result;
   };
 
+  function prepareWorkspace() {
+    editor.querySelector(".page-header .muted").textContent = "Настройте, какие сайты открывать без VPN, а какие — через корпоративный сервер.";
+    editor.querySelector('[aria-labelledby="add-title"] > .muted').textContent = "Вставьте домен или ссылку. Правило будет действовать и для поддоменов.";
+    el("new-action").querySelector('[value="direct"]').textContent = "Напрямую — без VPN";
+    const preview = el("site-preview");
+    preview.querySelector(":scope > .muted")?.remove();
+    preview.append(el("new-route-hint"));
+
+    const card = editor.querySelector(".rules-card");
+    const help = node("details", undefined, "route-help");
+    help.append(node("summary", "Как работают маршруты"), card.querySelector(".route-guide"));
+    const note = card.querySelector(".route-note");
+    note.textContent = "Corp VPN оставьте включённым. Маршрут определяет только путь выбранного сайта.";
+    help.append(note);
+    const filters = node("div", undefined, "rules-filters");
+    const searchField = node("div", undefined, "field");
+    searchField.append(card.querySelector('label[for="search"]'), el("search"));
+    const routeField = node("div", undefined, "field");
+    const label = node("label", "Маршрут");
+    label.htmlFor = "route-filter";
+    const select = node("select", undefined, "editor-control");
+    select.id = "route-filter";
+    for (const [value, title] of [["all", "Все сайты"], ["direct", "Без VPN"], ["proxy", "Через VPN"]]) {
+      const option = node("option", title);
+      option.value = value;
+      select.append(option);
+    }
+    routeField.append(label, select);
+    filters.append(searchField, routeField);
+    card.insertBefore(help, card.querySelector("table"));
+    card.insertBefore(filters, card.querySelector("table"));
+
+    const pagination = node("nav", undefined, "list-pagination");
+    pagination.id = "rules-pagination";
+    pagination.hidden = true;
+    pagination.setAttribute("aria-label", "Страницы списка сайтов");
+    const status = node("p", "", "muted small");
+    status.id = "rules-page-status";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    const actions = node("div", undefined, "actions");
+    for (const [id, title] of [["rules-previous", "Назад"], ["rules-next", "Далее"]]) {
+      const button = node("button", title, "editor-control");
+      button.id = id;
+      button.type = "button";
+      actions.append(button);
+    }
+    pagination.append(status, actions);
+    card.insertBefore(pagination, card.querySelector(".save-bar"));
+    card.querySelector(".save-title").id = "save-summary";
+    card.querySelector(".save-bar .muted").textContent = "Сохраняется весь список. Правила применятся при следующем подключении VPN.";
+    el("save-now").textContent = "Сохранить и применить сейчас…";
+  }
+
+  prepareWorkspace();
+
   function updateControls() {
     editor.setAttribute("aria-busy", String(busy));
     for (const control of editor.querySelectorAll(".editor-control")) {
-      control.disabled = busy || !initialized || sessionLost;
+      control.disabled = busy || !initialized || sessionLost || control.dataset.pageBoundary === "true";
     }
     el("reload").disabled = busy || sessionLost;
     const cannotSave = busy || !initialized || sessionLost || reloadRequired || (!dirty && revision !== 0);
@@ -49,6 +107,7 @@
       : revision === 0
         ? "Начальный список ещё не сохранён. Проверьте его и сохраните правила."
         : `Версия ${revision}. Несохранённых изменений нет.`;
+    el("save-summary").textContent = dirty ? "Есть изменения в списке" : revision === 0 ? "Сохраните начальный список" : "Все изменения сохранены";
     updateControls();
   }
 
@@ -173,7 +232,7 @@
     hint.id = `route-hint-${rule.domain}`;
     select.setAttribute("aria-label", `Как открывать ${rule.domain}`);
     select.setAttribute("aria-describedby", hint.id);
-    for (const [value, label] of [["direct", "Напрямую"], ["proxy", "Через VPN"]]) {
+    for (const [value, label] of [["direct", "Напрямую — без VPN"], ["proxy", "Через VPN"]]) {
       const option = node("option", label);
       option.value = value;
       select.append(option);
@@ -184,6 +243,10 @@
       rule.action = select.value;
       describeRoute(select, hint);
       updateDraft();
+      if (el("route-filter").value !== "all") {
+        renderRules();
+        el("route-filter").focus();
+      }
     });
     routeCell.append(routeLabel, select, hint);
     const commentCell = node("td");
@@ -217,15 +280,23 @@
 
   function renderRules() {
     const query = el("search").value.trim().toLocaleLowerCase("ru");
-    const shown = rules.filter((rule) => `${rule.domain} ${rule.comment}`.toLocaleLowerCase("ru").includes(query));
+    const route = el("route-filter").value;
+    const shown = rules.filter((rule) => (route === "all" || rule.action === route) && `${rule.domain} ${rule.comment}`.toLocaleLowerCase("ru").includes(query));
+    const pages = Math.max(1, Math.ceil(shown.length / pageSize));
+    rulePage = Math.min(rulePage, pages - 1);
+    const start = rulePage * pageSize;
     const fragment = document.createDocumentFragment();
-    for (const rule of shown) fragment.append(ruleRow(rule));
+    for (const rule of shown.slice(start, start + pageSize)) fragment.append(ruleRow(rule));
     el("rules").replaceChildren(fragment);
-    el("rule-count").textContent = query ? `Найдено: ${shown.length} из ${rules.length}` : `Всего сайтов: ${rules.length}`;
+    el("rule-count").textContent = query || route !== "all" ? `Найдено: ${shown.length} из ${rules.length}` : `Всего сайтов: ${rules.length}`;
+    el("rules-pagination").hidden = shown.length <= pageSize;
+    el("rules-page-status").textContent = shown.length ? `${start + 1}–${Math.min(start + pageSize, shown.length)} из ${shown.length} · Страница ${rulePage + 1} из ${pages}` : "";
+    el("rules-previous").dataset.pageBoundary = String(rulePage === 0);
+    el("rules-next").dataset.pageBoundary = String(rulePage + 1 === pages);
     el("empty-list").hidden = shown.length !== 0;
     el("empty-list").textContent = rules.length === 0
       ? "Список пуст. Добавьте сайт выше или сохраните пустой список, чтобы убрать все прежние правила."
-      : "Ничего не найдено. Измените запрос или очистите поле поиска.";
+      : "Ничего не найдено. Измените поиск или выберите другой маршрут.";
     updateControls();
   }
 
@@ -242,6 +313,7 @@
     sessionLost = false;
     reloadRequired = false;
     candidate = null;
+    rulePage = 0;
     el("site-preview").hidden = true;
     el("reload-notice").hidden = true;
     el("session-link").hidden = true;
@@ -421,13 +493,18 @@
     el("new-action").value = "direct";
     describeRoute(el("new-action"), el("new-route-hint"));
     el("search").value = "";
+    el("route-filter").value = "all";
+    rulePage = 0;
     el("site-preview").hidden = true;
     renderRules();
     updateDraft();
     el("site").focus();
   });
 
-  el("search").addEventListener("input", renderRules);
+  el("search").addEventListener("input", () => { rulePage = 0; renderRules(); });
+  el("route-filter").addEventListener("change", () => { rulePage = 0; renderRules(); });
+  el("rules-previous").addEventListener("click", () => { rulePage = Math.max(0, rulePage - 1); renderRules(); });
+  el("rules-next").addEventListener("click", () => { rulePage += 1; renderRules(); });
   el("save").addEventListener("click", () => run("Сохраняем правила…", () => publish("next_connection", false)));
   el("save-now").addEventListener("click", () => openConfirmation({ kind: "save" }));
   el("reload").addEventListener("click", () => {

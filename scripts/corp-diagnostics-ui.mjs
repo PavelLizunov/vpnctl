@@ -61,11 +61,14 @@ export async function verifyDiagnostics(browser, expect, shot) {
     });
     const errors = [];
     const calls = [];
-    const state = {mode, firstState: "ready", retryStatus: 202, holdRetry: false};
+    const state = {mode, firstState: "ready", retryStatus: 202, holdRetry: false,
+      deleted: new Set(), deleteStatus: 200, holdDetail: false};
     let releaseList;
     let releaseRetry;
+    let releaseDetail;
     const listGate = new Promise((resolve) => { releaseList = resolve; });
     const retryGate = new Promise((resolve) => { releaseRetry = resolve; });
+    const detailGate = new Promise((resolve) => { releaseDetail = resolve; });
     await context.routeWebSocket("**/*", (socket) => {
       errors.push(`Unexpected diagnostics WebSocket: ${socket.url()}`);
       socket.close({code: 1008, reason: "Synthetic verification blocks sockets"});
@@ -87,8 +90,23 @@ export async function verifyDiagnostics(browser, expect, shot) {
         }
         assert.ok(url.pathname.startsWith("/api/corp/reports"), `Unexpected diagnostics path: ${url.pathname}`);
         const post = request.method() === "POST";
-        assert.ok(post || request.method() === "GET");
+        const deleting = request.method() === "DELETE";
+        assert.ok(post || deleting || request.method() === "GET");
         calls.push({path: url.pathname, query: url.search, method: request.method()});
+        if (deleting) {
+          const id = url.pathname.slice("/api/corp/reports/".length);
+          assert.ok([first, second, third].includes(id));
+          assert.equal(url.search, "");
+          assert.equal(request.headers().origin, origin, "Delete must retain same Origin");
+          assert.equal(request.headers()["x-corp-csrf"], csrf, "Delete must use session CSRF");
+          assert.match(request.headers()["content-type"], /^application\/json/);
+          assert.deepEqual(request.postDataJSON(), {}, "Delete accepts no destination or credential input");
+          if (state.deleteStatus === 200) state.deleted.add(id);
+          await route.fulfill({status: state.deleteStatus, json: state.deleteStatus === 200
+            ? {schema: 1, state: "deleted", freed_bytes: 1234}
+            : {message: "UNTRUSTED_DELETE_ERROR_MUST_NOT_BE_DISPLAYED"}});
+          return;
+        }
         if (post) {
           assert.equal(url.pathname, `/api/corp/reports/${first}/retry`);
           assert.equal(url.search, "");
@@ -111,15 +129,15 @@ export async function verifyDiagnostics(browser, expect, shot) {
             await route.fulfill({status: 200, json: {schema: 1, reports: [], next_cursor: null}});
           } else if (url.searchParams.has("cursor")) {
             assert.equal(url.searchParams.get("cursor"), second);
-            await route.fulfill({status: 200, json: {schema: 1, reports: [summary(third, "running")], next_cursor: null}});
+            await route.fulfill({status: 200, json: {schema: 1, reports: [summary(third, "running")].filter((report) => !state.deleted.has(report.report_id)), next_cursor: null}});
           } else {
-            await route.fulfill({status: 200, json: {schema: 1, reports: [summary(first, state.firstState), summary(second, "received")], next_cursor: second}});
+            await route.fulfill({status: 200, json: {schema: 1, reports: [summary(first, state.firstState), summary(second, "received")].filter((report) => !state.deleted.has(report.report_id)), next_cursor: second}});
           }
         } else {
           assert.equal(url.search, "");
           const id = url.pathname.slice("/api/corp/reports/".length);
           assert.ok([first, second, third].includes(id));
-          await route.fulfill({status: 200, json: {
+          const detail = {
             schema: 1, report: {
               ...summary(id, id === first ? state.firstState : id === third ? "running" : "received"),
               ...(state.mode === "solution" && id === first ? {verdict: "problem_found", summary_ru: "Выбран другой маршрут"} : {}),
@@ -129,7 +147,9 @@ export async function verifyDiagnostics(browser, expect, shot) {
               owner_explanation: "Для этой попытки выбран другой маршрут. Подтверждённое решение — выбрать нужный маршрут в приложении.",
               next_steps_ru: ["Выберите указанный администратором маршрут в приложении.", "Проверьте открытие нужного сайта."],
             } : analysis) : null, provenance: id === first ? provenance : null,
-          }});
+          };
+          if (state.holdDetail && id === first) await detailGate;
+          await route.fulfill({status: 200, json: detail});
         }
       } catch (error) {
         errors.push(error.stack);
@@ -145,10 +165,11 @@ export async function verifyDiagnostics(browser, expect, shot) {
     await page.goto(`${origin}/diagnostics`);
     await page.evaluate(() => document.fonts.ready);
     return {
-      page, calls, state, releaseList, releaseRetry,
+      page, calls, state, releaseList, releaseRetry, releaseDetail,
       posts: () => calls.filter((call) => call.method === "POST"),
+      deletes: () => calls.filter((call) => call.method === "DELETE"),
       async close() {
-        releaseList(); releaseRetry();
+        releaseList(); releaseRetry(); releaseDetail();
         await context.close();
         assert.deepEqual(errors, [], "Diagnostics browser/routing errors");
       },
@@ -168,6 +189,15 @@ export async function verifyDiagnostics(browser, expect, shot) {
       await expect(page.locator(".report-select").first()).toContainText(hostile);
       await expect(page.locator(".report-select img, .report-select script")).toHaveCount(0);
       assert.equal(h.posts().length, 0, "Reading inbox must not retry automatically");
+      for (const row of await page.locator(".report-select").all()) {
+        await expect(row).not.toContainText(summary(first).summary_ru);
+      }
+      await page.locator("#diagnostics-search").fill("Синтетическое устройство");
+      await expect(page.locator(".report-select")).toHaveCount(1);
+      await expect(page.locator(".report-select")).not.toContainText(hostile);
+      await shot(page, "diagnostics-search", width);
+      await page.locator("#diagnostics-search").fill("");
+      await expect(page.locator(".report-select")).toHaveCount(2);
       await shot(page, "diagnostics-list-hostile-text", width);
       const rules = page.getByRole("link", {name: "Правила", exact: true});
       await expect(rules).toHaveAttribute("href", "/");
@@ -175,13 +205,15 @@ export async function verifyDiagnostics(browser, expect, shot) {
       await page.keyboard.press("Tab");
       await expect(page.getByRole("link", {name: "Диагностика", exact: true})).toBeFocused();
       await expect(page.getByRole("link", {name: "Диагностика", exact: true})).toHaveAttribute("aria-current", "page");
-      await page.keyboard.press("Tab");
-      await expect(page.locator("#diagnostics-refresh")).toBeFocused();
-      await page.keyboard.press("Tab");
+      await page.locator("#diagnostics-search").focus();
+      await expect(page.locator("#diagnostics-search")).toBeFocused();
+      await page.locator(".report-select").first().focus();
       await expect(page.locator(".report-select").first()).toBeFocused();
       await page.keyboard.press("Enter");
       await expect(page.locator("#diagnostics-detail")).toBeFocused();
       const body = page.locator("#diagnostics-detail-body");
+      await expect(page.locator(".report-select").first()).toHaveAttribute("aria-pressed", "true");
+      await expect(page.locator(".report-select").nth(1)).toHaveAttribute("aria-pressed", "false");
       await expect(body.locator(".diagnosis-answer")).toBeVisible();
       await expect(body.locator(".diagnosis-action")).toBeVisible();
       await expect(body.locator(".diagnosis-action")).toContainText("Отправьте свежую диагностику");
@@ -215,6 +247,10 @@ export async function verifyDiagnostics(browser, expect, shot) {
       await page.locator("#diagnostics-more").click();
       await expect(page.locator(".report-select")).toHaveCount(3);
       await expect(page.locator("#diagnostics-more")).toBeHidden();
+      await page.locator("#diagnostics-search").fill(third);
+      await expect(page.locator(".report-select")).toHaveCount(1);
+      await page.locator("#diagnostics-search").fill("");
+      await expect(page.locator(".report-select")).toHaveCount(3);
       await page.locator(".report-select").nth(2).click();
       await expect(body).toContainText("Анализ выполняется");
       await expect(page.getByRole("button", {name: "Повторить анализ", exact: true})).toHaveCount(0);
@@ -311,6 +347,107 @@ export async function verifyDiagnostics(browser, expect, shot) {
       } finally { await h.close(); }
       completed.push(`${width}/diagnostics-retry-${status}`);
     }
+
+    const deletion = await harness(width);
+    try {
+      const {page} = deletion;
+      await expect(page.locator(".report-select")).toHaveCount(2);
+      await page.locator(".report-select").first().click();
+      const body = page.locator("#diagnostics-detail-body");
+      await expect(body.locator(".diagnosis-answer")).toBeVisible();
+      const remove = page.getByRole("button", {name: "Удалить отчёт…", exact: true});
+      await remove.click();
+      const dialog = page.locator("#diagnostics-delete-dialog");
+      await expect(dialog).toBeVisible();
+      await expect(dialog).toContainText(/отч[её]т/i);
+      await expect(dialog).toContainText(/архив/i);
+      await shot(page, "diagnostics-delete-confirmation", width);
+      await page.locator("#diagnostics-delete-cancel").click();
+      await expect(dialog).toBeHidden();
+      assert.equal(deletion.deletes().length, 0, "Cancel must not delete a report");
+      assert.equal(deletion.posts().length, 0, "Cancel must not issue other writes");
+      await expect(page.locator(".report-select")).toHaveCount(2);
+      await expect(body.locator(".diagnosis-answer")).toBeVisible();
+      const listReads = deletion.calls.filter((call) => call.path === "/api/corp/reports").length;
+      await remove.click();
+      await page.locator("#diagnostics-delete-confirm").click();
+      await expect(dialog).toBeHidden();
+      await expect(page.locator(".report-select")).toHaveCount(1);
+      await expect(page.locator(".report-select")).not.toContainText(hostile);
+      await expect(body.locator(".diagnosis-answer")).toHaveCount(0);
+      await expect(page.getByRole("button", {name: "Удалить отчёт…", exact: true})).toHaveCount(0);
+      await expect(page.locator("#diagnostics-status")).toContainText(/удал[её]н/i);
+      assert.equal(deletion.deletes().length, 1);
+      assert.ok(deletion.calls.filter((call) => call.path === "/api/corp/reports").length > listReads, "Success must reload the report list");
+      await shot(page, "diagnostics-delete-success", width);
+    } finally { await deletion.close(); }
+    completed.push(`${width}/diagnostics-delete-confirm-cancel-success`);
+
+    for (const status of [503, 401]) {
+      const failure = await harness(width);
+      try {
+        const {page} = failure;
+        await expect(page.locator(".report-select")).toHaveCount(2);
+        await page.locator(".report-select").first().click();
+        await expect(page.locator(".diagnosis-answer")).toBeVisible();
+        failure.state.deleteStatus = status;
+        await page.getByRole("button", {name: "Удалить отчёт…", exact: true}).click();
+        await page.locator("#diagnostics-delete-confirm").click();
+        const error = page.locator("#diagnostics-error");
+        await expect(error).toBeVisible();
+        await expect(error).not.toContainText("UNTRUSTED_DELETE_ERROR");
+        if (status === 503) {
+          await expect(error).toContainText(/повтор|попроб|обнов/i);
+          await expect(page.locator(".report-select")).toHaveCount(2);
+          await expect(page.locator(".report-select").first()).toHaveAttribute("aria-pressed", "true");
+          await expect(page.locator(".diagnosis-answer")).toBeVisible();
+        } else {
+          await expect(error).toContainText("Срок входа истёк");
+          await expect(page.locator("#diagnostics-login")).toBeVisible();
+          const count = failure.calls.length;
+          await page.locator("#diagnostics-refresh").click();
+          assert.equal(failure.calls.length, count, "Expired session must block further API calls");
+          const remove = page.getByRole("button", {name: "Удалить отчёт…", exact: true});
+          if (await remove.count()) await expect(remove).toBeDisabled();
+        }
+        await page.clock.runFor(60_000);
+        assert.equal(failure.deletes().length, 1, "A failed delete must not resubmit automatically");
+        await shot(page, `diagnostics-delete-${status}`, width);
+      } finally { await failure.close(); }
+      completed.push(`${width}/diagnostics-delete-${status}`);
+    }
+
+    const late = await harness(width);
+    try {
+      const {page} = late;
+      await expect(page.locator(".report-select")).toHaveCount(2);
+      late.state.holdDetail = true;
+      await page.locator(".report-select").first().click();
+      await expect.poll(() => late.calls.filter((call) => call.path === `/api/corp/reports/${first}`).length).toBe(1);
+      await page.locator(".report-select").nth(1).click();
+      await expect(page.locator("#diagnostics-detail-body")).toContainText("Проверенного заключения пока нет");
+      await expect(page.locator(".report-select").nth(1)).toHaveAttribute("aria-pressed", "true");
+      await page.getByRole("button", {name: "Удалить отчёт…", exact: true}).click();
+      await page.locator("#diagnostics-delete-confirm").click();
+      await expect(page.locator(".report-select")).toHaveCount(1);
+      assert.equal(late.deletes().length, 1);
+      assert.equal(late.deletes()[0].path, `/api/corp/reports/${second}`);
+      const staleResponse = page.waitForResponse((response) =>
+        new URL(response.url()).pathname === `/api/corp/reports/${first}`
+        && response.request().method() === "GET");
+      late.releaseDetail();
+      await (await staleResponse).finished();
+      await page.clock.runFor(1000);
+      await expect(page.locator(".diagnosis-answer")).toHaveCount(0);
+      await expect(page.getByRole("button", {name: "Удалить отчёт…", exact: true})).toHaveCount(0);
+      await expect(page.locator('.report-select[aria-pressed="true"]')).toHaveCount(0);
+      await expect(page.locator(".report-select")).toHaveCount(1);
+      await expect(page.locator(".report-select")).toContainText(hostile);
+      assert.ok(late.state.deleted.has(second), "The deleted report must remain absent after stale detail arrives");
+      await shot(page, "diagnostics-delete-discards-late-detail", width);
+    } finally { await late.close(); }
+    completed.push(`${width}/diagnostics-delete-discards-late-detail`);
+
     console.log(`Passed ${width}/diagnostics browser scenarios`);
   }
   return completed;

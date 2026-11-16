@@ -168,3 +168,10 @@ wire-traffic billing or prove every production node has the required build.
 
 See [the traffic accounting contract](docs/specs/traffic-accounting-v2.md) for
 restart handling, failure behavior, retention and verification requirements.
+
+# Corp portal findings (2026-11-16)
+
+- P2: Corp editor renders all 33 rules, creating a 4711px page at 1280px; no route filter or pagination. Preserve full-draft semantics while bounding the visible list.
+- P2: Add preview aligns fields at their bottoms; the route hint offsets labels/controls relative to the comment and submit button. Align control rows, with hints outside them.
+- P2: Diagnostics has list/detail/retry but no delete capability, so the owner cannot remove a report and reclaim its live archive storage. Add scoped authenticated deletion with explicit confirmation and late-worker protection.
+- P2 historical exposure: docs/MIGRATION_PLAN_NINITUX_AND_NK01.md:47 at 28bade9f contains a real-looking SQLCipher key for a historical parallel Python subscription manager. It is absent current main but remains in 145 PR heads. Full value/source archived privately and verified; current validity against that manager is unverified. No key rotation or history rewrite performed by the 2026-11-16 audit. This is not evidence of current vpnctld database credentials being exposed.

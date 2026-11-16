@@ -53,7 +53,7 @@ function writes(harness) {
   return harness.calls.filter(({ endpoint }) => ["/api/corp/rules", "/api/corp/restore"].includes(endpoint));
 }
 
-async function harness(pageName, width) {
+async function harness(pageName, width, rules = initialRules) {
   const context = await browser.newContext({
     offline: true,
     viewport: { width, height: 900 }, deviceScaleFactor: 1,
@@ -68,8 +68,8 @@ async function harness(pageName, width) {
   const page = await context.newPage();
   const state = {
     authenticated: pageName === "editor",
-    revision: 7, rules: structuredClone(initialRules), failure: null,
-    snapshots: new Map([[6, structuredClone(historicalRules)], [7, structuredClone(initialRules)]]),
+    revision: 7, rules: structuredClone(rules), failure: null,
+    snapshots: new Map([[6, structuredClone(historicalRules)], [7, structuredClone(rules)]]),
     timings: new Map([[6, "next_connection"], [7, "next_connection"]]),
   };
   page.on("pageerror", (error) => errors.push(error.message));
@@ -178,6 +178,7 @@ async function shot(page, name, width) {
       viewport: innerWidth,
       document: document.documentElement.scrollWidth,
       body: document.body.scrollWidth,
+      dialogId: dialog?.id,
       dialog: box && { left: box.left, right: box.right, scroll: dialog.scrollWidth, width: dialog.clientWidth },
     };
   });
@@ -185,8 +186,9 @@ async function shot(page, name, width) {
   assert.ok(layout.document <= layout.viewport && layout.body <= layout.viewport, `${name}: horizontal page overflow ${JSON.stringify(layout)}`);
   if (layout.dialog) {
     assert.ok(layout.dialog.left >= 0 && layout.dialog.right <= layout.viewport && layout.dialog.scroll <= layout.dialog.width, `${name}: horizontal dialog overflow`);
-    await expect(page.locator("#accept-confirm")).toBeInViewport();
-    await expect(page.locator("#cancel-confirm")).toBeInViewport();
+    const deletion = layout.dialogId === "diagnostics-delete-dialog";
+    await expect(page.locator(deletion ? "#diagnostics-delete-confirm" : "#accept-confirm")).toBeInViewport();
+    await expect(page.locator(deletion ? "#diagnostics-delete-cancel" : "#cancel-confirm")).toBeInViewport();
   }
 }
 
@@ -246,9 +248,15 @@ async function routeClarity(page) {
   const proxy = page.getByRole("combobox", { name: "Как открывать remove.example.com", exact: true });
   await checkRouteDescription(direct, "direct");
   await checkRouteDescription(proxy, "proxy");
+  const guide = page.locator("details.route-help");
+  await expect(guide).not.toHaveAttribute("open");
+  await guide.locator("summary").click();
+  await expect(page.locator(".route-guide")).toBeVisible();
   await expect(page.locator(".route-guide")).toContainText("Напрямую — без VPN");
   await expect(page.locator(".route-note")).toContainText("Corp VPN оставьте включённым");
   await routeContrast(page);
+  await guide.locator("summary").click();
+  await expect(guide).not.toHaveAttribute("open");
   await direct.focus();
   await direct.press("ArrowDown");
   await checkRouteDescription(direct, "proxy");
@@ -303,10 +311,23 @@ async function editorFlow(width) {
     await expect(page.locator("#normalized-site")).toHaveText("portal.example.com");
     await idle(page);
     assert.equal((await readRules(page)).length, 2, "Normalization alone must not add a rule");
+    await expect(page.locator("#new-action option[value=direct]")).toHaveText("Напрямую — без VPN");
     await checkRouteDescription(page.locator("#new-action"), "direct");
     await page.locator("#new-action").selectOption("proxy");
     await checkRouteDescription(page.locator("#new-action"), "proxy");
     await page.locator("#new-comment").fill("Корпоративный портал");
+    if (width >= 1280) {
+      const controls = await page.locator("#new-action, #new-comment, #add-site").evaluateAll((elements) =>
+        elements.map((element) => { const box = element.getBoundingClientRect(); return {bottom: box.bottom, height: box.height}; }));
+      assert.equal(controls.length, 3);
+      for (const dimension of ["bottom", "height"]) {
+        const values = controls.map((box) => box[dimension]);
+        assert.ok(Math.max(...values) - Math.min(...values) <= 3, `Add controls ${dimension} must align: ${JSON.stringify(controls)}`);
+      }
+      const hintId = await page.locator("#new-action").getAttribute("aria-describedby");
+      const hint = await page.locator(`[id="${hintId}"]`).boundingBox();
+      assert.ok(hint.y >= Math.max(...controls.map((box) => box.bottom)), "Preview hint belongs below the entire controls row");
+    }
     await shot(page, "normalized-preview", width);
     await page.locator("#add-site").click();
     await checkRouteDescription(page.getByRole("combobox", { name: "Как открывать portal.example.com", exact: true }), "proxy");
@@ -332,6 +353,7 @@ async function editorFlow(width) {
     });
     await expect(page.locator("#status")).toHaveText("Правила сохранены. Приложения применят их при следующем подключении VPN.");
     await draft(page, "Применить при текущем подключении");
+    await expect(page.locator("#save-now")).toHaveText("Сохранить и применить сейчас…");
     await page.locator("#save-now").click();
     await expect(page.locator("#accept-confirm")).toBeDisabled();
     await expect(page.locator("#interrupt-warning")).toContainText("Остановленный VPN останется выключенным");
@@ -369,6 +391,65 @@ async function editorFlow(width) {
     assert.deepEqual(writes(h)[3].body.rules, [], "Deleting all rules must publish an empty complete list");
     await expect(page.locator("#empty-list")).toContainText("Список пуст");
     await shot(page, "empty-list", width);
+  } finally { await h.close(); }
+}
+
+async function paginationFlow(width) {
+  const rules = Array.from({length: 23}, (_, index) => ({
+    domain: `site${String(index).padStart(2, "0")}.example.com`,
+    action: index % 2 ? "proxy" : "direct", comment: `Комментарий ${index}`,
+  }));
+  const h = await harness("editor", width, rules);
+  const {page} = h;
+  try {
+    await expect(page.locator("#rules tr")).toHaveCount(10);
+    assert.deepEqual(await page.locator("#route-filter option").evaluateAll((options) => options.map((option) => option.value)), ["all", "direct", "proxy"]);
+    await expect(page.locator("#rules-previous")).toBeDisabled();
+    await expect(page.locator("#rules-next")).toBeEnabled();
+    await expect(page.locator("#rules-page-status")).toContainText("1");
+    const original = (await readRules(page))[0];
+    const edited = { ...original, comment: "Черновик сохранён между страницами" };
+    await page.getByRole("textbox", {name: `Комментарий к ${original.domain}`, exact: true}).fill(edited.comment);
+    await page.locator("#rules-next").click();
+    await expect(page.locator("#rules tr")).toHaveCount(10);
+    assert.ok(!(await readRules(page)).some((rule) => rule.domain === original.domain));
+    await shot(page, "rules-second-page-draft", width);
+    await page.locator("#rules-previous").click();
+    await expect(page.getByRole("textbox", {name: `Комментарий к ${original.domain}`, exact: true})).toHaveValue(edited.comment);
+    await page.locator("#rules-next").click();
+    await page.locator("#rules-next").click();
+    await expect(page.locator("#rules tr")).toHaveCount(3);
+    await expect(page.locator("#rules-next")).toBeDisabled();
+    await expect(page.locator("#rules-page-status")).toContainText("3");
+    await page.locator("#search").fill(edited.comment);
+    await expect(page.locator("#rules tr")).toHaveCount(1);
+    assert.deepEqual(await readRules(page), [edited], "Search must include edited rows outside the visible page");
+    await page.locator("#search").fill("site22.example.com");
+    await expect(page.locator("#rules tr")).toHaveCount(1);
+    assert.equal((await readRules(page))[0].domain, "site22.example.com");
+    await page.locator("#search").fill("");
+    for (const action of ["direct", "proxy"]) {
+      await page.locator("#route-filter").selectOption(action);
+      await expect(page.locator("#rules tr")).toHaveCount(10);
+      assert.ok((await readRules(page)).every((rule) => rule.action === action));
+      await page.locator("#rules-next").click();
+      await expect(page.locator("#rules tr")).toHaveCount(action === "direct" ? 2 : 1);
+      assert.ok((await readRules(page)).every((rule) => rule.action === action));
+    }
+    await shot(page, "rules-filtered-last-page", width);
+    await page.locator("#route-filter").selectOption("all");
+    await page.locator("#search").fill(edited.comment);
+    assert.deepEqual(await readRules(page), [edited]);
+    await page.locator("#save").click();
+    await idle(page);
+    assert.equal(writes(h).length, 1);
+    const expected = rules.map((rule) => rule.domain === edited.domain ? edited : rule);
+    const byDomain = (items) => [...items].sort((a, b) => a.domain.localeCompare(b.domain));
+    assert.deepEqual(byDomain(writes(h)[0].body.rules), byDomain(expected), "Saving from a filtered page must publish all 23 draft rows");
+    await page.locator("#search").fill("");
+    await expect(page.locator("#rules tr")).toHaveCount(10);
+    await expect(page.locator("#rules-previous")).toBeDisabled();
+    await shot(page, "rules-first-page-saved", width);
   } finally { await h.close(); }
 }
 
@@ -462,6 +543,10 @@ async function timeoutFlow(width, operation, committed) {
 try {
   await editorFlow(1280);
   completed.push("1280/editor");
+  for (const width of [320, 420, 1280]) {
+    await paginationFlow(width);
+    completed.push(`${width}/pagination-filter-draft-full-publication`);
+  }
   for (const width of [320, 420]) {
     for (const [name, title] of [["login", "Вход"], ["denied", "Подключите корпоративный VPN"], ["unavailable", "Страница пока недоступна"]]) {
       const h = await harness(name, width);
