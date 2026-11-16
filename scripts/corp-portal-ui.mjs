@@ -192,7 +192,15 @@ async function shot(page, name, width) {
   }
 }
 
+async function enableRuleNotes(page) {
+  const guide = page.locator("details.route-help");
+  if (!await guide.evaluate((element) => element.open)) await guide.locator("summary").click();
+  await page.locator("#show-rule-notes").check();
+  await guide.locator("summary").click();
+}
+
 async function draft(page, comment = "Несохранённый рабочий черновик") {
+  await enableRuleNotes(page);
   await page.getByRole("textbox", { name: "Комментарий к office.example.com", exact: true }).fill(comment);
   await expect(page.locator("#draft-status")).toContainText("Есть несохранённые изменения");
 }
@@ -306,6 +314,9 @@ async function editorFlow(width) {
     await routeClarity(page);
     assert.equal(writes(h).length, 0, "Route selection alone must not publish");
     await shot(page, "editor", width);
+    await expect(page.locator("#add-site-panel")).not.toHaveAttribute("open");
+    await page.locator("#open-add-site").click();
+    await expect(page.locator("#add-site-panel")).toHaveAttribute("open", "");
     await page.locator("#site").fill("https://PORTAL.Example.com/documents?view=all");
     await page.locator("#normalize").click();
     await expect(page.locator("#normalized-site")).toHaveText("portal.example.com");
@@ -408,6 +419,22 @@ async function paginationFlow(width) {
     await expect(page.locator("#rules-previous")).toBeDisabled();
     await expect(page.locator("#rules-next")).toBeEnabled();
     await expect(page.locator("#rules-page-status")).toContainText("1");
+    const pageCount = Math.ceil(rules.length / pageSize);
+    const numbers = page.locator("#rules-page-numbers");
+    await expect(page.locator("#rules-page-overview")).toBeVisible();
+    await expect(page.locator("#rules-page-overview")).toContainText("23");
+    await expect(numbers.getByRole("button")).toHaveCount(pageCount);
+    for (let number = 1; number <= pageCount; number++) {
+      await expect(numbers.getByRole("button", {name: `Страница ${number} из ${pageCount}`, exact: true})).toBeVisible();
+    }
+    await expect(numbers.getByRole("button", {name: `Страница 1 из ${pageCount}`, exact: true})).toHaveAttribute("aria-current", "page");
+    for (const note of await page.locator('#rules input[aria-label^="Комментарий к"]').all()) await expect(note).toBeHidden();
+    await numbers.getByRole("button", {name: `Страница ${pageCount} из ${pageCount}`, exact: true}).click();
+    await expect(page.locator("#rules tr")).toHaveCount(3);
+    await expect(numbers.getByRole("button", {name: `Страница ${pageCount} из ${pageCount}`, exact: true})).toHaveAttribute("aria-current", "page");
+    await numbers.getByRole("button", {name: `Страница 1 из ${pageCount}`, exact: true}).click();
+    await expect(page.locator("#rules tr")).toHaveCount(pageSize);
+    await enableRuleNotes(page);
     const original = (await readRules(page))[0];
     const edited = { ...original, comment: "Черновик сохранён между страницами" };
     await page.getByRole("textbox", {name: `Комментарий к ${original.domain}`, exact: true}).fill(edited.comment);
@@ -437,6 +464,30 @@ async function paginationFlow(width) {
       await expect(page.locator("#rules tr")).toHaveCount(action === "direct" ? 2 : 1);
       assert.ok((await readRules(page)).every((rule) => rule.action === action));
     }
+    const retainedPage = await page.locator("#rules-page-status").textContent();
+    const retainedRows = await readRules(page);
+    const countBeforeVoice = writes(h).length;
+    await page.locator("#show-voice-rules").click();
+    const voice = page.locator("#voice-rules-panel");
+    await expect(voice).toBeVisible();
+    await expect(page.locator("#site-rules-panel")).toBeHidden();
+    await expect(page.locator("details.route-help")).toBeHidden();
+    await expect(page.locator("#add-site-panel")).toBeHidden();
+    await expect(page.locator("#history-panel")).toBeHidden();
+    for (const entry of ["uiscom.ru", "uiscom.co", "comagic.ru", "callbackhunter.com", "195.211.120.35/32"]) {
+      await expect(voice.getByText(entry, {exact: true})).toHaveCount(1);
+    }
+    for (const control of await voice.locator("input, select, textarea").all()) {
+      assert.ok(await control.isDisabled() || await control.getAttribute("readonly") !== null, "Protected VoIP defaults must be read-only");
+    }
+    assert.equal(writes(h).length, countBeforeVoice, "Opening VoIP must not publish editable policy");
+    await shot(page, "voice-protected-defaults", width);
+    await page.locator("#show-site-rules").click();
+    await expect(voice).toBeHidden();
+    await expect(page.locator("#site-rules-panel")).toBeVisible();
+    await expect(page.locator("#route-filter")).toHaveValue("proxy");
+    await expect(page.locator("#rules-page-status")).toHaveText(retainedPage);
+    assert.deepEqual(await readRules(page), retainedRows, "Switching views must retain filter/page and draft");
     await shot(page, "rules-filtered-last-page", width);
     await page.locator("#route-filter").selectOption("all");
     await page.locator("#search").fill(edited.comment);
@@ -531,6 +582,7 @@ async function timeoutFlow(width, operation, committed) {
     assert.deepEqual(await readRules(page), expectedRules, "Reload must reconcile committed and uncommitted timeouts");
     assert.equal(writes(h).length, 1, "Reload must not resubmit a publication");
     await expect(page.locator('[data-restore="6"]')).toBeEnabled();
+    await enableRuleNotes(page);
     await page.getByRole("textbox", { name: `Комментарий к ${expectedRules[0].domain}`, exact: true }).fill("После загрузки актуального списка");
     await expect(page.locator("#save")).toBeEnabled();
     await page.locator("#save").click();

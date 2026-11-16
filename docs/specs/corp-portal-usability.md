@@ -59,3 +59,20 @@ and redacted generic findings in GitHub history and current public assets.
 No builds or full Cargo suites. Use syntax/format/secret checks, focused Python
 storage/edge tests and the actual changed browser controls. Synthetic browser
 scenarios are maintained for CI; do not invoke the Rust fixture exporter here.
+
+## Rule discoverability follow-up
+
+The owner could not discover later pages or locate VoIP. Put the editable list
+before the collapsed add form. Show page numbers, total/remaining row counts and
+direct page selection both above and below results. Visible instructions explain
+find/add, route choice and save/application timing; all filters search the entire
+draft and publication still includes every rule.
+
+Add a distinct Telephony (VoIP) view with read-only protected defaults verified
+against VPNRouter BusinessPolicyDomains, BusinessDefaults and business-rules.json:
+uiscom.ru, uiscom.co, comagic.ru, callbackhunter.com and195.211.120.35/32 direct.
+These are built-in configuration rules, not a live client health acknowledgement
+or complete media endpoint inventory. Do not add them to editable signed policy,
+unlock protected suffixes or advertise unimplemented website editing of SIP/RTP.
+The view must explain why the rules are separate and how to investigate a call
+problem. No model, receiver, policy, credentials or compiled binary changes.

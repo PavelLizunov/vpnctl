@@ -32,6 +32,31 @@
 
   function prepareWorkspace() {
     editor.querySelector(".page-header .muted").textContent = "Настройте, какие сайты открывать без VPN, а какие — через корпоративный сервер.";
+    const portalNav = editor.querySelector(".portal-nav");
+    const sitesLink = portalNav.querySelector('a[href="/"]');
+    const sitesButton = node("button", "Правила сайтов");
+    sitesButton.id = "show-site-rules";
+    sitesButton.type = "button";
+    sitesButton.setAttribute("aria-pressed", "true");
+    const voiceButton = node("button", "Телефония (VoIP)");
+    voiceButton.id = "show-voice-rules";
+    voiceButton.type = "button";
+    voiceButton.setAttribute("aria-pressed", "false");
+    sitesLink.replaceWith(sitesButton, voiceButton);
+    const guide = node("section", undefined, "workspace-guide");
+    guide.setAttribute("aria-label", "Как изменить правила");
+    const steps = node("ol");
+    for (const [title, description] of [
+      ["Найдите сайт", "Или нажмите «Добавить сайт», если его ещё нет."],
+      ["Выберите маршрут", "«Без VPN» — ваш интернет. «Через VPN» — корпоративный сервер."],
+      ["Сохраните изменения", "Они начнут действовать при следующем подключении VPN."],
+    ]) {
+      const item = node("li");
+      item.append(node("strong", title), node("p", description, "muted small"));
+      steps.append(item);
+    }
+    guide.append(steps);
+    portalNav.after(guide);
     editor.querySelector('[aria-labelledby="add-title"] > .muted').textContent = "Вставьте домен или ссылку. Правило будет действовать и для поддоменов.";
     el("new-action").querySelector('[value="direct"]').textContent = "Напрямую — без VPN";
     const preview = el("site-preview");
@@ -39,6 +64,61 @@
     preview.append(el("new-route-hint"));
 
     const card = editor.querySelector(".rules-card");
+    card.id = "site-rules-panel";
+    sitesButton.setAttribute("aria-controls", card.id);
+    const addSection = editor.querySelector('[aria-labelledby="add-title"]');
+    const addPanel = node("details", undefined, "card add-site-panel");
+    addPanel.id = "add-site-panel";
+    addSection.before(addPanel);
+    addPanel.append(node("summary", "Добавить новый сайт"), addSection);
+    addSection.classList.remove("card");
+    addSection.classList.add("add-site-body");
+    addSection.querySelector("h2").classList.add("sr-only");
+    card.after(addPanel);
+    const addButton = node("button", "Добавить сайт", "editor-control");
+    addButton.id = "open-add-site";
+    addButton.type = "button";
+    addButton.addEventListener("click", () => {
+      card.before(addPanel);
+      addPanel.open = true;
+      addPanel.scrollIntoView({block: "start"});
+      el("site").focus({preventScroll: true});
+    });
+    card.querySelector(".section-heading").append(addButton);
+    const voice = node("section", undefined, "card voice-rules");
+    voice.id = "voice-rules-panel";
+    voice.hidden = true;
+    voiceButton.setAttribute("aria-controls", voice.id);
+    voice.append(node("h2", "Телефония (VoIP) — UIS / CoMagic"));
+    voice.append(node("p", "Эти исключения встроены в Corp-приложение и направляют указанные адреса без VPN. Они не входят в список сайтов, который вы редактируете здесь."));
+    const fixedRules = node("dl", undefined, "voice-rule-list");
+    for (const [address, purpose] of [
+      ["uiscom.ru", "UIS: основной домен и поддомены"],
+      ["uiscom.co", "UIS: дополнительный домен и поддомены"],
+      ["comagic.ru", "CoMagic: домен и поддомены"],
+      ["callbackhunter.com", "CallbackHunter: домен и поддомены"],
+      ["195.211.120.35/32", "Отдельный SIP-сервер UIS"],
+    ]) {
+      const item = node("div");
+      item.append(node("dt", address), node("dd", `${purpose}. Напрямую — без VPN.`));
+      fixedRules.append(item);
+    }
+    voice.append(fixedRules, node("h3", "Как изменить телефонию"));
+    voice.append(node("p", "На сайте эти встроенные исключения не редактируются. Для другого SIP-сервера или адресов передачи звука нужно отдельно обновить настройки приложения."));
+    voice.append(node("h3", "Если звонок не работает"), node("p", "Отправьте диагностику из приложения сразу после проблемного звонка, затем откройте раздел «Диагностика». Сам список исключений не подтверждает исправность звонков."));
+    card.after(voice);
+    function showRules(kind) {
+      const telephony = kind === "voice";
+      card.hidden = telephony;
+      addPanel.hidden = telephony;
+      guide.hidden = telephony;
+      el("history-panel").hidden = telephony;
+      voice.hidden = !telephony;
+      sitesButton.setAttribute("aria-pressed", String(!telephony));
+      voiceButton.setAttribute("aria-pressed", String(telephony));
+    }
+    sitesButton.addEventListener("click", () => showRules("sites"));
+    voiceButton.addEventListener("click", () => showRules("voice"));
     const help = node("details", undefined, "route-help");
     help.append(node("summary", "Как работают маршруты"), card.querySelector(".route-guide"));
     const note = card.querySelector(".route-note");
@@ -59,6 +139,15 @@
     }
     routeField.append(label, select);
     filters.append(searchField, routeField);
+    const notesLabel = node("label", undefined, "notes-toggle");
+    const notes = node("input");
+    notes.type = "checkbox";
+    notes.id = "show-rule-notes";
+    notes.addEventListener("change", () => card.querySelector("table").classList.toggle("show-notes", notes.checked));
+    notesLabel.append(notes, node("span", "Показать заметки к сайтам"));
+    help.append(notesLabel);
+    card.querySelector("th:nth-child(3)").textContent = "Заметка (необязательно)";
+    searchField.querySelector("label").textContent = "Найти сайт среди всех правил";
     card.insertBefore(help, card.querySelector("table"));
     card.insertBefore(filters, card.querySelector("table"));
 
@@ -79,6 +168,15 @@
     }
     pagination.append(status, actions);
     card.insertBefore(pagination, card.querySelector(".save-bar"));
+    const topPages = node("nav", undefined, "rules-page-picker");
+    topPages.setAttribute("aria-label", "Все страницы правил");
+    const topStatus = node("p", "Загружаем список…");
+    topStatus.id = "rules-page-overview";
+    topStatus.setAttribute("role", "status");
+    const pageButtons = node("div", undefined, "page-number-buttons");
+    pageButtons.id = "rules-page-numbers";
+    topPages.append(topStatus, pageButtons);
+    card.insertBefore(topPages, card.querySelector("table"));
     card.querySelector(".save-title").id = "save-summary";
     card.querySelector(".save-bar .muted").textContent = "Сохраняется весь список. Правила применятся при следующем подключении VPN.";
     el("save-now").textContent = "Сохранить и применить сейчас…";
@@ -286,12 +384,42 @@
     const pages = Math.max(1, Math.ceil(shown.length / pageSize));
     rulePage = Math.min(rulePage, pages - 1);
     const start = rulePage * pageSize;
+    const remaining = Math.max(0, shown.length - Math.min(start + pageSize, shown.length));
     const fragment = document.createDocumentFragment();
     for (const rule of shown.slice(start, start + pageSize)) fragment.append(ruleRow(rule));
     el("rules").replaceChildren(fragment);
     el("rule-count").textContent = query || route !== "all" ? `Найдено: ${shown.length} из ${rules.length}` : `Всего сайтов: ${rules.length}`;
     el("rules-pagination").hidden = shown.length <= pageSize;
     el("rules-page-status").textContent = shown.length ? `${start + 1}–${Math.min(start + pageSize, shown.length)} из ${shown.length} · Страница ${rulePage + 1} из ${pages}` : "";
+    el("rules-page-overview").textContent = shown.length
+      ? `Показаны сайты ${start + 1}–${Math.min(start + pageSize, shown.length)} из ${shown.length}. ${remaining ? `Дальше ещё ${remaining} — выберите страницу ниже.` : rulePage > 0 ? "Это последняя страница." : "Весь выбранный список на этой странице."}`
+      : "По этому запросу сайтов нет.";
+    const pageButtons = el("rules-page-numbers");
+    pageButtons.replaceChildren();
+    if (pages > 1) {
+      const indices = pages <= 8 ? Array.from({length: pages}, (_, index) => index)
+        : [...new Set([0, rulePage - 1, rulePage, rulePage + 1, pages - 1].filter((i) => i >= 0 && i < pages))].sort((a, b) => a - b);
+      let prior = -1;
+      for (const index of indices) {
+        if (index > prior + 1) pageButtons.append(node("span", "…"));
+        const button = node("button", String(index + 1), "editor-control");
+        button.type = "button";
+        button.setAttribute("aria-label", `Страница ${index + 1} из ${pages}`);
+        if (index === rulePage) button.setAttribute("aria-current", "page");
+        button.addEventListener("click", () => {
+          rulePage = index;
+          renderRules();
+          el("rules-page-numbers").querySelector('[aria-current="page"]')?.focus();
+        });
+        pageButtons.append(button);
+        prior = index;
+      }
+    }
+    el("show-site-rules").textContent = `Правила сайтов (${rules.length})`;
+    const routeOptions = el("route-filter").options;
+    routeOptions[0].textContent = `Все сайты (${rules.length})`;
+    routeOptions[1].textContent = `Без VPN (${rules.filter((r) => r.action === "direct").length})`;
+    routeOptions[2].textContent = `Через VPN (${rules.filter((r) => r.action === "proxy").length})`;
     el("rules-previous").dataset.pageBoundary = String(rulePage === 0);
     el("rules-next").dataset.pageBoundary = String(rulePage + 1 === pages);
     el("empty-list").hidden = shown.length !== 0;
