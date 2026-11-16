@@ -66,7 +66,8 @@ The owner could not discover later pages or locate VoIP. Put the editable list
 before the collapsed add form. Show page numbers, total/remaining row counts and
 direct page selection both above and below results. Visible instructions explain
 find/add, route choice and save/application timing; all filters search the entire
-draft and publication still includes every rule.
+draft and publication still includes every rule. The primary save action is
+beside Add site above results; immediate application remains separately labeled.
 
 Add a distinct Telephony (VoIP) view with read-only protected defaults verified
 against VPNRouter BusinessPolicyDomains, BusinessDefaults and business-rules.json:

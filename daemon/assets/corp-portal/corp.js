@@ -84,7 +84,10 @@
       addPanel.scrollIntoView({block: "start"});
       el("site").focus({preventScroll: true});
     });
-    card.querySelector(".section-heading").append(addButton);
+    const primaryActions = node("div", undefined, "actions rules-heading-actions");
+    el("save").textContent = "Сохранить изменения";
+    primaryActions.append(addButton, el("save"));
+    card.querySelector(".section-heading").append(primaryActions);
     const voice = node("section", undefined, "card voice-rules");
     voice.id = "voice-rules-panel";
     voice.hidden = true;
