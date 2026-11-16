@@ -2,6 +2,23 @@
 
 Deferred work items with enough context to pick up cold. Newest first.
 
+## Corp route distinction in the rules editor
+
+P3 confirmed owner-reported usability gap, recorded before correction: at
+c9835eb0, direct/proxy selects share the same presentation and no per-row
+explanation links "Без VPN" to ordinary internet. The owner requests clearer
+distinction in the rule list, preserving the palette. Scope and verification:
+`docs/specs/corp-route-clarity.md`. Implementation and acceptance pending.
+
+Additional owner steering confirmed the isolated Corp green theme and missing
+vpnctl identity obscure its relationship with the server UI. Reuse the shared
+theme and masthead identity; record this before replacing the standalone style.
+
+Source-confirmed CI duplication, recorded before correction: the check job runs
+the aggregate just ci recipe after cargo check, repeating fmt/clippy/test/deny
+already assigned separate jobs. Keep all five Cargo gates and both generated
+file checks, but execute each in its existing dedicated job. Local just ci stays.
+
 ## Protocol-aware availability from multiple client networks
 
 Current path detection uses existing aggregated TCP quality rounds and preserves

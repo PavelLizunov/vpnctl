@@ -155,22 +155,37 @@
     }
   }
 
+  function describeRoute(select, hint) {
+    select.dataset.action = select.value;
+    hint.textContent = select.value === "direct"
+      ? "Без VPN, через ваш интернет"
+      : "Через корпоративный VPN-сервер";
+  }
+
   function ruleRow(rule) {
     const row = node("tr");
     const domainCell = node("td");
     domainCell.append(node("span", "Сайт", "mobile-label"), node("span", rule.domain, "site-name"));
     const routeCell = node("td");
-    const routeLabel = node("span", "Маршрут", "mobile-label");
-    const select = node("select", undefined, "editor-control");
-    select.setAttribute("aria-label", `Маршрут для ${rule.domain}`);
-    for (const [value, label] of [["direct", "Без VPN"], ["proxy", "Через VPN"]]) {
+    const routeLabel = node("span", "Как открывать", "mobile-label");
+    const select = node("select", undefined, "editor-control route-choice");
+    const hint = node("p", undefined, "route-hint");
+    hint.id = `route-hint-${rule.domain}`;
+    select.setAttribute("aria-label", `Как открывать ${rule.domain}`);
+    select.setAttribute("aria-describedby", hint.id);
+    for (const [value, label] of [["direct", "Напрямую"], ["proxy", "Через VPN"]]) {
       const option = node("option", label);
       option.value = value;
       select.append(option);
     }
     select.value = rule.action;
-    select.addEventListener("change", () => { rule.action = select.value; updateDraft(); });
-    routeCell.append(routeLabel, select);
+    describeRoute(select, hint);
+    select.addEventListener("change", () => {
+      rule.action = select.value;
+      describeRoute(select, hint);
+      updateDraft();
+    });
+    routeCell.append(routeLabel, select, hint);
     const commentCell = node("td");
     const input = node("input", undefined, "editor-control");
     input.type = "text";
@@ -195,6 +210,10 @@
     row.append(domainCell, routeCell, commentCell, actionCell);
     return row;
   }
+
+  el("new-action").addEventListener("change", () => {
+    describeRoute(el("new-action"), el("new-route-hint"));
+  });
 
   function renderRules() {
     const query = el("search").value.trim().toLocaleLowerCase("ru");
@@ -400,6 +419,7 @@
     el("site").value = "";
     el("new-comment").value = "";
     el("new-action").value = "direct";
+    describeRoute(el("new-action"), el("new-route-hint"));
     el("search").value = "";
     el("site-preview").hidden = true;
     renderRules();

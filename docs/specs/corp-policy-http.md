@@ -134,7 +134,7 @@ Storage/wire API contracts and the eligibility contract own fixture setup.
 
 Simple responsive pages: VPN instruction -> password -> searchable site list.
 Editor title `Корпоративные правила`, columns `Сайт`, `Маршрут`, `Комментарий`;
-directions `Без VPN` / `Через VPN`. A pasted site or URL is normalized on the
+directions `Напрямую` (with `Без VPN` explanation) / `Через VPN`. A pasted site or URL is normalized on the
 server and shown before the user confirms adding it. Users can change direction,
 edit comments, remove sites, save the complete list, view history and restore.
 Primary save defaults to next connection. Applying now warns about a brief

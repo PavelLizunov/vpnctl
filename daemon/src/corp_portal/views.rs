@@ -2,7 +2,10 @@ use std::net::IpAddr;
 
 use maud::{DOCTYPE, Markup, html};
 
-pub(super) const CSS: &str = include_str!("../../assets/corp-portal/corp.css");
+pub(super) const CSS: &str = concat!(
+    include_str!("../../assets/css/theme.css"),
+    include_str!("../../assets/corp-portal/corp.css")
+);
 pub(super) const DIAGNOSTICS_JS: &str =
     include_str!("../../assets/corp-portal/corp-diagnostics.js");
 pub(super) const JS: &str = include_str!("../../assets/corp-portal/corp.js");
@@ -15,11 +18,19 @@ fn page(title: &str, body: &Markup) -> String {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 meta name="robots" content="noindex, nofollow";
-                title { (title) " · Corp" }
+                title { (title) " · Corp · vpnctl" }
                 link rel="stylesheet" href="/assets/corp.css";
                 script src="/assets/corp.js" defer {}
             }
-            body { (body) }
+            body {
+                header.corp-masthead {
+                    div.corp-identity {
+                        span.corp-product { "vpnctl" }
+                        span { "Corp · корпоративный доступ" }
+                    }
+                }
+                (body)
+            }
         }
     }
     .into_string()
@@ -30,7 +41,6 @@ pub(super) fn login(error: Option<&str>) -> String {
         "Вход",
         &html! {
             main.access-page {
-                p.brand { "Corp" }
                 section.card aria-labelledby="page-title" {
                     p.eyebrow { "Корпоративные правила" }
                     h1 id="page-title" { "Вход" }
@@ -56,7 +66,6 @@ pub(super) fn vpn_required(ip: Option<IpAddr>) -> String {
         "Подключите VPN",
         &html! {
             main.access-page {
-                p.brand { "Corp" }
                 section.card aria-labelledby="page-title" {
                     p.eyebrow { "Корпоративные правила" }
                     h1 id="page-title" { "Подключите корпоративный VPN" }
@@ -82,7 +91,6 @@ pub(super) fn unavailable() -> String {
         "Страница недоступна",
         &html! {
             main.access-page {
-                p.brand { "Corp" }
                 section.card aria-labelledby="page-title" {
                     p.eyebrow { "Корпоративные правила" }
                     h1 id="page-title" { "Страница пока недоступна" }
@@ -101,7 +109,6 @@ pub(super) fn editor() -> String {
             main.editor id="corp-editor" aria-busy="true" {
                 header.page-header {
                     div {
-                        p.brand { "Corp" }
                         h1 { "Корпоративные правила" }
                         p.muted { "Выберите, как открывать сайты: напрямую или через VPN." }
                     }
@@ -142,11 +149,13 @@ pub(super) fn editor() -> String {
                         p.muted.small { "Правило действует и для его поддоменов." }
                         div.preview-fields {
                             div.field {
-                                label for="new-action" { "Маршрут" }
-                                select.editor-control id="new-action" disabled {
-                                    option value="direct" { "Без VPN" }
+                                label for="new-action" { "Как открывать" }
+                                select.editor-control.route-choice id="new-action" data-action="direct"
+                                    aria-describedby="new-route-hint" disabled {
+                                    option value="direct" { "Напрямую" }
                                     option value="proxy" { "Через VPN" }
                                 }
+                                p.route-hint id="new-route-hint" { "Без VPN, через ваш интернет" }
                             }
                             div.field {
                                 label for="new-comment" { "Комментарий" }
@@ -161,6 +170,17 @@ pub(super) fn editor() -> String {
                         h2 id="rules-title" { "Список сайтов" }
                         p.muted.small id="rule-count" {}
                     }
+                    dl.route-guide {
+                        div {
+                            dt { "Напрямую — без VPN" }
+                            dd { "Сайт открывается через ваш обычный интернет." }
+                        }
+                        div {
+                            dt { "Через VPN" }
+                            dd { "Сайт открывается через корпоративный VPN-сервер." }
+                        }
+                    }
+                    p.muted.small.route-note { "Сам Corp VPN оставьте включённым: здесь вы выбираете путь только для сайта." }
                     label for="search" { "Поиск по сайту или комментарию" }
                     input.editor-control id="search" type="search" placeholder="Найти сайт…" autocomplete="off" disabled;
                     table.rules-table {
@@ -168,7 +188,7 @@ pub(super) fn editor() -> String {
                         thead {
                             tr {
                                 th scope="col" { "Сайт" }
-                                th scope="col" { "Маршрут" }
+                                th scope="col" { "Как открывать" }
                                 th scope="col" { "Комментарий" }
                                 th scope="col" { span.sr-only { "Действия" } }
                             }
@@ -228,7 +248,7 @@ pub(super) fn diagnostics(csrf: &str) -> String {
             script src="/assets/corp-diagnostics.js" defer {}
             main.editor id="corp-diagnostics" data-csrf=(csrf) {
                 header.page-header {
-                    div { p.brand { "Corp" } h1 { "Диагностика" }
+                    div { h1 { "Диагностика" }
                         p.muted { "Отчёты приложения и результаты анализа. Выводы требуют проверки по приведённым свидетельствам." }
                     }
                     button id="diagnostics-logout" type="button" { "Выйти" }

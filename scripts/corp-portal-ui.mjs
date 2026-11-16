@@ -39,7 +39,8 @@ const pages = Object.fromEntries(await Promise.all(
   }),
 ));
 const assets = Object.fromEntries(await Promise.all(["css", "js"].map(async (extension) => {
-  const body = await readFile(path.join(root, "daemon/assets/corp-portal", `corp.${extension}`), "utf8");
+  let body = await readFile(path.join(root, "daemon/assets/corp-portal", `corp.${extension}`), "utf8");
+  if (extension === "css") body = await readFile(path.join(root, "daemon/assets/css/theme.css"), "utf8") + body;
   assert.equal(await readFile(path.join(fixtures, "assets", `corp.${extension}`), "utf8"), body,
     `Router-exported corp.${extension} must match the candidate source`);
   return [`/assets/corp.${extension}`, { body, contentType: extension === "css" ? "text/css" : "text/javascript" }];
@@ -202,6 +203,65 @@ async function readRules(page) {
   })));
 }
 
+async function checkRouteDescription(select, action) {
+  await expect(select).toHaveValue(action);
+  await expect(select).toHaveAttribute("data-action", action);
+  const id = await select.getAttribute("aria-describedby");
+  assert.ok(id, "Every route control must have an associated explanation");
+  const hint = select.page().locator(`[id="${id}"]`);
+  await expect(hint).toHaveText(action === "direct"
+    ? "Без VPN, через ваш интернет" : "Через корпоративный VPN-сервер");
+}
+
+async function routeContrast(page) {
+  const ratios = await page.locator(".route-choice, .route-hint, .route-guide dt, .route-guide dd, .route-note, .corp-identity span")
+    .evaluateAll((elements) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 1;
+      const context = canvas.getContext("2d");
+      const luminance = (color) => {
+        context.fillStyle = color;
+        context.fillRect(0, 0, 1, 1);
+        return Array.from(context.getImageData(0, 0, 1, 1).data).slice(0, 3)
+        .map((channel) => channel / 255)
+        .map((channel) => channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4)
+        .reduce((sum, channel, i) => sum + channel * [.2126, .7152, .0722][i], 0);
+      };
+      return elements.filter((element) => element.getClientRects().length).map((element) => {
+        let parent = element;
+        while (getComputedStyle(parent).backgroundColor === "rgba(0, 0, 0, 0)") parent = parent.parentElement;
+        const ink = luminance(getComputedStyle(element).color);
+        const paper = luminance(getComputedStyle(parent).backgroundColor);
+        return { text: element.textContent.trim(), ratio: (Math.max(ink, paper) + .05) / (Math.min(ink, paper) + .05) };
+      });
+    });
+  assert.ok(ratios.length >= 8, "Measure both route controls, explanations and guide");
+  for (const result of ratios) assert.ok(result.ratio >= 4.5, `Route text contrast: ${JSON.stringify(result)}`);
+}
+
+async function routeClarity(page) {
+  await expect(page.locator(".corp-product")).toHaveText("vpnctl");
+  await expect(page.locator(".corp-identity")).toContainText("Corp");
+  const direct = page.getByRole("combobox", { name: "Как открывать office.example.com", exact: true });
+  const proxy = page.getByRole("combobox", { name: "Как открывать remove.example.com", exact: true });
+  await checkRouteDescription(direct, "direct");
+  await checkRouteDescription(proxy, "proxy");
+  await expect(page.locator(".route-guide")).toContainText("Напрямую — без VPN");
+  await expect(page.locator(".route-note")).toContainText("Corp VPN оставьте включённым");
+  await routeContrast(page);
+  await direct.focus();
+  await direct.press("ArrowDown");
+  await checkRouteDescription(direct, "proxy");
+  await expect(direct).toBeFocused();
+  const focus = await direct.evaluate((element) => getComputedStyle(element).outlineWidth);
+  assert.ok(parseFloat(focus) >= 2, "Keyboard focus must remain visible");
+  await direct.press("ArrowUp");
+  await checkRouteDescription(direct, "direct");
+  await page.locator("#search").fill("office");
+  await page.locator("#search").fill("");
+  await checkRouteDescription(page.getByRole("combobox", { name: "Как открывать office.example.com", exact: true }), "direct");
+}
+
 async function openHistory(page) {
   await page.locator("#history-panel summary").click();
   await expect(page.locator("#history-panel")).toHaveAttribute("open", "");
@@ -235,17 +295,27 @@ async function editorFlow(width) {
   const h = await harness("editor", width);
   const { page } = h;
   try {
+    await routeClarity(page);
+    assert.equal(writes(h).length, 0, "Route selection alone must not publish");
     await shot(page, "editor", width);
     await page.locator("#site").fill("https://PORTAL.Example.com/documents?view=all");
     await page.locator("#normalize").click();
     await expect(page.locator("#normalized-site")).toHaveText("portal.example.com");
     await idle(page);
     assert.equal((await readRules(page)).length, 2, "Normalization alone must not add a rule");
+    await checkRouteDescription(page.locator("#new-action"), "direct");
     await page.locator("#new-action").selectOption("proxy");
+    await checkRouteDescription(page.locator("#new-action"), "proxy");
     await page.locator("#new-comment").fill("Корпоративный портал");
     await shot(page, "normalized-preview", width);
     await page.locator("#add-site").click();
-    await page.getByRole("combobox", { name: "Маршрут для office.example.com", exact: true }).selectOption("proxy");
+    await checkRouteDescription(page.getByRole("combobox", { name: "Как открывать portal.example.com", exact: true }), "proxy");
+    await page.locator("#site").fill("https://PORTAL.Example.com/documents?view=all");
+    await page.locator("#normalize").click();
+    await idle(page);
+    await checkRouteDescription(page.locator("#new-action"), "direct");
+    await page.locator("#site").fill("");
+    await page.getByRole("combobox", { name: "Как открывать office.example.com", exact: true }).selectOption("proxy");
     await draft(page, "Обновлённый комментарий");
     await page.getByRole("button", { name: "Удалить remove.example.com", exact: true }).click();
     await page.locator("#search").fill("корпоративный портал");
@@ -390,6 +460,8 @@ async function timeoutFlow(width, operation, committed) {
 }
 
 try {
+  await editorFlow(1280);
+  completed.push("1280/editor");
   for (const width of [320, 420]) {
     for (const [name, title] of [["login", "Вход"], ["denied", "Подключите корпоративный VPN"], ["unavailable", "Страница пока недоступна"]]) {
       const h = await harness(name, width);

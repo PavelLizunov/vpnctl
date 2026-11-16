@@ -51,8 +51,9 @@ work for validation without bypassing the host's resource safeguards:
 3. Commit and push the candidate branch, create a **draft PR**, and link it to
    the task. The draft's validation notes must identify the local checks that
    were deferred. An unavailable external worker is not a publication blocker.
-4. GitHub Actions must pass all five canonical Cargo commands, `just ci`, and
-   applicable target checks on the exact candidate. Keep the PR in draft until
+4. GitHub Actions must pass all five canonical Cargo commands, generated-file
+   checks and applicable target checks on the exact candidate. Dedicated jobs
+   cover the local `just ci` recipe without running it a second time. Keep the PR in draft until
    this succeeds. Any code change invalidates the earlier results.
 5. Fix red checks before adding unrelated commits. A pre-existing dependency
    failure is still a blocker to acceptance: investigate and remediate it,
@@ -75,6 +76,6 @@ wait.
 - [ ] review-agent ran on the diff; `critical` + `important` findings fixed
       (`minor` is opt-in).
 - [ ] Spec-tests written for new public APIs and run in-session.
-- [ ] `just ci` and the five canonical Cargo commands green with recorded exit
-      codes, locally or in GitHub Actions under the publication exception.
+- [ ] Local `just ci`, or its dedicated CI jobs under the publication exception,
+      plus the five canonical Cargo commands green with recorded exit codes.
 - [ ] After push, CI watched to completion; green before the next commit.
