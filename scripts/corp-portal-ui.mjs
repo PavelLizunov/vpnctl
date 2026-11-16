@@ -395,6 +395,7 @@ async function editorFlow(width) {
 }
 
 async function paginationFlow(width) {
+  const pageSize = width <= 740 ? 5 : 10;
   const rules = Array.from({length: 23}, (_, index) => ({
     domain: `site${String(index).padStart(2, "0")}.example.com`,
     action: index % 2 ? "proxy" : "direct", comment: `Комментарий ${index}`,
@@ -402,7 +403,7 @@ async function paginationFlow(width) {
   const h = await harness("editor", width, rules);
   const {page} = h;
   try {
-    await expect(page.locator("#rules tr")).toHaveCount(10);
+    await expect(page.locator("#rules tr")).toHaveCount(pageSize);
     assert.deepEqual(await page.locator("#route-filter option").evaluateAll((options) => options.map((option) => option.value)), ["all", "direct", "proxy"]);
     await expect(page.locator("#rules-previous")).toBeDisabled();
     await expect(page.locator("#rules-next")).toBeEnabled();
@@ -411,13 +412,12 @@ async function paginationFlow(width) {
     const edited = { ...original, comment: "Черновик сохранён между страницами" };
     await page.getByRole("textbox", {name: `Комментарий к ${original.domain}`, exact: true}).fill(edited.comment);
     await page.locator("#rules-next").click();
-    await expect(page.locator("#rules tr")).toHaveCount(10);
+    await expect(page.locator("#rules tr")).toHaveCount(pageSize);
     assert.ok(!(await readRules(page)).some((rule) => rule.domain === original.domain));
     await shot(page, "rules-second-page-draft", width);
     await page.locator("#rules-previous").click();
     await expect(page.getByRole("textbox", {name: `Комментарий к ${original.domain}`, exact: true})).toHaveValue(edited.comment);
-    await page.locator("#rules-next").click();
-    await page.locator("#rules-next").click();
+    for (let index = 1; index < Math.ceil(rules.length / pageSize); index++) await page.locator("#rules-next").click();
     await expect(page.locator("#rules tr")).toHaveCount(3);
     await expect(page.locator("#rules-next")).toBeDisabled();
     await expect(page.locator("#rules-page-status")).toContainText("3");
@@ -430,9 +430,10 @@ async function paginationFlow(width) {
     await page.locator("#search").fill("");
     for (const action of ["direct", "proxy"]) {
       await page.locator("#route-filter").selectOption(action);
-      await expect(page.locator("#rules tr")).toHaveCount(10);
+      await expect(page.locator("#rules tr")).toHaveCount(pageSize);
       assert.ok((await readRules(page)).every((rule) => rule.action === action));
-      await page.locator("#rules-next").click();
+      const count = rules.filter((rule) => rule.action === action).length;
+      for (let index = 1; index < Math.ceil(count / pageSize); index++) await page.locator("#rules-next").click();
       await expect(page.locator("#rules tr")).toHaveCount(action === "direct" ? 2 : 1);
       assert.ok((await readRules(page)).every((rule) => rule.action === action));
     }
@@ -447,7 +448,7 @@ async function paginationFlow(width) {
     const byDomain = (items) => [...items].sort((a, b) => a.domain.localeCompare(b.domain));
     assert.deepEqual(byDomain(writes(h)[0].body.rules), byDomain(expected), "Saving from a filtered page must publish all 23 draft rows");
     await page.locator("#search").fill("");
-    await expect(page.locator("#rules tr")).toHaveCount(10);
+    await expect(page.locator("#rules tr")).toHaveCount(pageSize);
     await expect(page.locator("#rules-previous")).toBeDisabled();
     await shot(page, "rules-first-page-saved", width);
   } finally { await h.close(); }

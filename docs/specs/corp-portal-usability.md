@@ -4,7 +4,8 @@
 
 Make the existing Corp site usable for a nontechnical owner. Retain the actual
 vpnctl theme, VPN-IP/password gates, CSRF protection and signed-policy behavior.
-Show ten rules per page, searchable by domain/comment and filterable by route.
+Show ten rules per desktop page and five on narrow screens, searchable by
+domain/comment and filterable by route. Mobile save actions must not overlap rows.
 Changing pages/filters must preserve every draft edit; saving publishes the full
 draft. Align form controls independently of hint height. Keep save actions nearby.
 Diagnostics must support real deletion, not a hidden row or local preference.

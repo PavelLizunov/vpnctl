@@ -171,6 +171,7 @@ restart handling, failure behavior, retention and verification requirements.
 
 # Corp portal findings (2026-11-16)
 
+- P2 mobile acceptance: at320px the two-column route/delete row clips the explicit direct label (155px control), and the261px sticky save bar overlaps the list. Record before correction: use full-width route controls, five-row mobile pages and a nonsticky mobile save section.
 - P2: Corp editor renders all 33 rules, creating a 4711px page at 1280px; no route filter or pagination. Preserve full-draft semantics while bounding the visible list.
 - P2: Add preview aligns fields at their bottoms; the route hint offsets labels/controls relative to the comment and submit button. Align control rows, with hints outside them.
 - P2: Diagnostics has list/detail/retry but no delete capability, so the owner cannot remove a report and reclaim its live archive storage. Add scoped authenticated deletion with explicit confirmation and late-worker protection.

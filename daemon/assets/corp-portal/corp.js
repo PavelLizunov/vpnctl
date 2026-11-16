@@ -19,7 +19,8 @@
   let candidate = null;
   let confirmation = null;
   let historyLoaded = false;
-  const pageSize = 10;
+  const narrowLayout = window.matchMedia("(max-width: 740px)");
+  let pageSize = narrowLayout.matches ? 5 : 10;
   let rulePage = 0;
 
   const node = (tag, text, className) => {
@@ -502,6 +503,11 @@
   });
 
   el("search").addEventListener("input", () => { rulePage = 0; renderRules(); });
+  narrowLayout.addEventListener("change", () => {
+    pageSize = narrowLayout.matches ? 5 : 10;
+    rulePage = 0;
+    if (initialized) renderRules();
+  });
   el("route-filter").addEventListener("change", () => { rulePage = 0; renderRules(); });
   el("rules-previous").addEventListener("click", () => { rulePage = Math.max(0, rulePage - 1); renderRules(); });
   el("rules-next").addEventListener("click", () => { rulePage += 1; renderRules(); });
