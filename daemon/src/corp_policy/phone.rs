@@ -23,10 +23,11 @@ pub fn normalize_phone_value(kind: &str, value: &str) -> Result<String, PolicyEr
         }
         "ip_cidr" => {
             let input = value.trim();
+            let address_text = input.split_once('/').map_or(input, |(address, _)| address);
+            let address: IpAddr = address_text.parse().map_err(|_| PolicyError)?;
             let network: IpNet = if input.contains('/') {
                 input.parse().map_err(|_| PolicyError)?
             } else {
-                let address: IpAddr = input.parse().map_err(|_| PolicyError)?;
                 IpNet::from(address)
             };
             if matches!(network.addr(), IpAddr::V6(ip) if ip.to_ipv4_mapped().is_some()) {
