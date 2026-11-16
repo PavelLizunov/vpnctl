@@ -56,3 +56,7 @@ Independent diff review found that moving phone history outside its editor
 requires its controls to join the same busy/ready/stale disabling scope.
 Confirmed before correction; keep reload available for stale recovery.
 Rendered verification and static activation remain in progress.
+
+Rendered filter labels exposed inherited label margins on the original HTML
+wrappers; remove the duplicate spacing and give pagination a stable minimum
+height so both rule tables start consistently. Recorded before the final polish.
