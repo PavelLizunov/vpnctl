@@ -60,3 +60,5 @@ Rendered verification and static activation remain in progress.
 Rendered filter labels exposed inherited label margins on the original HTML
 wrappers; remove the duplicate spacing and give pagination a stable minimum
 height so both rule tables start consistently. Recorded before the final polish.
+The existing editor child margin also overrides native dialog centering; give
+editor-owned dialogs their normal auto margin. Recorded before correction.
