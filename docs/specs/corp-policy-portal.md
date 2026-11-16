@@ -37,7 +37,8 @@ helper APIs and persistence behavior are specified in
 `corp-policy-wire.md` and `corp-policy-store.md` before their implementation.
 
 The browser flow is VPN instruction -> password -> searchable site list.
-Choices are "Без VPN" / "Через VPN". Adding a pasted URL first shows its
+Choices are "Напрямую" ("Без VPN") / "Через VPN", with the selected route
+explained beside the control; see `corp-route-clarity.md`. Adding a pasted URL first shows its
 normalized hostname. Invalid input cannot partially publish. A signed empty
 managed list is distinct from a failed or empty HTTP response.
 

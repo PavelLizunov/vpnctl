@@ -2,6 +2,14 @@
 
 Deferred work items with enough context to pick up cold. Newest first.
 
+## Corp route distinction in the rules editor
+
+P3 confirmed owner-reported usability gap, recorded before correction: at
+c9835eb0, direct/proxy selects share the same presentation and no per-row
+explanation links "Без VPN" to ordinary internet. The owner requests clearer
+distinction in the rule list, preserving the palette. Scope and verification:
+`docs/specs/corp-route-clarity.md`. Implementation and acceptance pending.
+
 ## Protocol-aware availability from multiple client networks
 
 Current path detection uses existing aggregated TCP quality rounds and preserves

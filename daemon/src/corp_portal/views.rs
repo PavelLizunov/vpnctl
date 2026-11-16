@@ -142,11 +142,13 @@ pub(super) fn editor() -> String {
                         p.muted.small { "Правило действует и для его поддоменов." }
                         div.preview-fields {
                             div.field {
-                                label for="new-action" { "Маршрут" }
-                                select.editor-control id="new-action" disabled {
-                                    option value="direct" { "Без VPN" }
+                                label for="new-action" { "Как открывать" }
+                                select.editor-control.route-choice id="new-action" data-action="direct"
+                                    aria-describedby="new-route-hint" disabled {
+                                    option value="direct" { "Напрямую" }
                                     option value="proxy" { "Через VPN" }
                                 }
+                                p.route-hint id="new-route-hint" { "Без VPN, через ваш интернет" }
                             }
                             div.field {
                                 label for="new-comment" { "Комментарий" }
@@ -161,6 +163,17 @@ pub(super) fn editor() -> String {
                         h2 id="rules-title" { "Список сайтов" }
                         p.muted.small id="rule-count" {}
                     }
+                    dl.route-guide {
+                        div {
+                            dt { "Напрямую — без VPN" }
+                            dd { "Сайт открывается через ваш обычный интернет." }
+                        }
+                        div {
+                            dt { "Через VPN" }
+                            dd { "Сайт открывается через корпоративный VPN-сервер." }
+                        }
+                    }
+                    p.muted.small.route-note { "Сам Corp VPN оставьте включённым: здесь вы выбираете путь только для сайта." }
                     label for="search" { "Поиск по сайту или комментарию" }
                     input.editor-control id="search" type="search" placeholder="Найти сайт…" autocomplete="off" disabled;
                     table.rules-table {
@@ -168,7 +181,7 @@ pub(super) fn editor() -> String {
                         thead {
                             tr {
                                 th scope="col" { "Сайт" }
-                                th scope="col" { "Маршрут" }
+                                th scope="col" { "Как открывать" }
                                 th scope="col" { "Комментарий" }
                                 th scope="col" { span.sr-only { "Действия" } }
                             }

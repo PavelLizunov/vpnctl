@@ -86,6 +86,13 @@ label { display: block; margin-bottom: .4rem; font-size: .9rem; font-weight: 600
 .preview > p { overflow-wrap: anywhere; }
 .preview-fields { display: grid; grid-template-columns: minmax(140px, .7fr) minmax(0, 1.4fr) auto; gap: .75rem; align-items: end; margin-top: .8rem; }
 .field { min-width: 0; }
+.route-choice { font-weight: 600; }
+.route-choice[data-action="proxy"] { border-color: var(--green); background: #edf5ef; }
+.route-hint { margin-top: .4rem; color: var(--muted); font-size: .8rem; overflow-wrap: anywhere; }
+.route-guide { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem 1.5rem; margin: 0; }
+.route-guide dt { font-weight: 600; }
+.route-guide dd { margin: .25rem 0 0; color: var(--muted); font-size: .875rem; }
+.route-note { margin: .75rem 0 1.25rem; }
 .section-heading { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: baseline; justify-content: space-between; margin-bottom: 1rem; }
 .rules-table { width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: 1rem; }
 .rules-table th { color: var(--muted); font-size: .8rem; font-weight: 600; text-align: left; }
@@ -126,6 +133,7 @@ dialog > * + * { margin-top: 1rem; }
   .editor { width: calc(100% - 2rem); margin-top: 1.5rem; }
   .card { padding: 1rem; }
   .preview-fields { grid-template-columns: 1fr; }
+  .route-guide { grid-template-columns: 1fr; }
   .rules-table, .rules-table tbody { display: block; }
   .rules-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
   .rules-table tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .75rem; border-bottom: 1px solid #dce5df; padding: 1rem 0; }
