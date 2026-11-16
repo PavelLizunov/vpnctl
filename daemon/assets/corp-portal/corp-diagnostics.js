@@ -32,7 +32,7 @@
     const search = node("input");
     search.id = "diagnostics-search";
     search.type = "search";
-    search.placeholder = "Устройство или дата";
+    search.placeholder = "Устройство, дата или номер отчёта";
     search.autocomplete = "off";
     field.append(label, search);
     toolbar.append(field);
@@ -118,7 +118,7 @@
   }
   function renderList() {
     const query = el("search").value.trim().toLocaleLowerCase("ru");
-    const matches = reports.filter((r) => `${r.device_label || ""} ${timestamp(r.received_utc)}`.toLocaleLowerCase("ru").includes(query));
+    const matches = reports.filter((r) => `${r.device_label || ""} ${timestamp(r.received_utc)} ${r.report_id}`.toLocaleLowerCase("ru").includes(query));
     el("list").replaceChildren();
     for (const report of matches) {
       const item = node("li");
