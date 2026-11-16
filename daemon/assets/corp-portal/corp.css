@@ -236,4 +236,5 @@ dialog > * + * { margin-top: 1rem; }
 .phone-rule-row strong { overflow-wrap: anywhere; }
 #corp-phone-editor > button { margin: 0.5rem 0.5rem 0.5rem 0; }
 #corp-phone-editor form { display: grid; gap: 0.75rem; margin-block: 1rem; }
+#corp-phone-editor .history-list button { max-width: 100%; flex-shrink: 1; }
 @media (max-width: 740px) { .phone-rule-row { grid-template-columns: 1fr; gap: 0.5rem; } }
