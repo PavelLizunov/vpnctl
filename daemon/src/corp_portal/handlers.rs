@@ -87,6 +87,13 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
                 )
                     .into_response();
             }
+            "/assets/corp-diagnostics.js" => {
+                return (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    views::DIAGNOSTICS_JS,
+                )
+                    .into_response();
+            }
             "/assets/corp.js" => {
                 return (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
@@ -98,16 +105,20 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
             _ => {}
         }
     }
-    if !matches!(
-        path.as_str(),
-        "/" | "/login"
-            | "/logout"
-            | "/api/corp/state"
-            | "/api/corp/normalize"
-            | "/api/corp/rules"
-            | "/api/corp/history"
-            | "/api/corp/restore"
-    ) {
+    let diagnostics_route = path == "/api/corp/reports" || path.starts_with("/api/corp/reports/");
+    if !diagnostics_route
+        && !matches!(
+            path.as_str(),
+            "/" | "/diagnostics"
+                | "/login"
+                | "/logout"
+                | "/api/corp/state"
+                | "/api/corp/normalize"
+                | "/api/corp/rules"
+                | "/api/corp/history"
+                | "/api/corp/restore"
+        )
+    {
         return error(StatusCode::NOT_FOUND, "Страница не найдена.");
     }
     let headers = request.headers().clone();
@@ -115,13 +126,18 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|peer| peer.0.ip());
-    if path == "/" && method == Method::GET {
+    if matches!(path.as_str(), "/" | "/diagnostics") && method == Method::GET {
         let record = match browser_access(&state.app, &headers, peer).await {
             Ok((record, _)) => record,
             Err(response) => return *response,
         };
-        return if session(&state.app, &headers, &record).await.is_ok() {
-            Html(views::editor()).into_response()
+        return if let Ok((_, current_session)) = session(&state.app, &headers, &record).await {
+            Html(if path == "/diagnostics" {
+                views::diagnostics(&current_session.csrf_token)
+            } else {
+                views::editor()
+            })
+            .into_response()
         } else {
             Html(views::login(None)).into_response()
         };
@@ -142,6 +158,9 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
                 StatusCode::FORBIDDEN,
                 "Не удалось проверить запрос. Обновите страницу.",
             );
+        }
+        if diagnostics_route {
+            return diagnostics_request(&state.app, request).await;
         }
         match path.as_str() {
             "/logout" => {
@@ -215,6 +234,9 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
             _ => {}
         }
     } else if method == Method::GET {
+        if diagnostics_route {
+            return diagnostics_request(&state.app, request).await;
+        }
         match path.as_str() {
             "/api/corp/state" => {
                 let (revision, rules) = match current_rules(&state.app, &context.record).await {
@@ -681,4 +703,91 @@ async fn observation(app: &AppState, request: Request) -> Response {
         return StatusCode::UNAUTHORIZED.into_response();
     };
     (StatusCode::NO_CONTENT, [("x-corp-probe", value)]).into_response()
+}
+
+async fn diagnostics_request(app: &AppState, request: Request) -> Response {
+    use super::diagnostics::{BridgeError, valid_id};
+    let bad_request = || error(StatusCode::BAD_REQUEST, "Некорректный запрос отчёта.");
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let tail = path.strip_prefix("/api/corp/reports").unwrap_or_default();
+    let result = if tail.is_empty() && method == Method::GET {
+        let mut query = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for (key, value) in
+            url::form_urlencoded::parse(request.uri().query().unwrap_or_default().as_bytes())
+        {
+            if !seen.insert(key.to_string()) {
+                return bad_request();
+            }
+            match key.as_ref() {
+                "limit" if value.parse::<u16>().is_ok_and(|v| (1..=100).contains(&v)) => {}
+                "cursor" if valid_id(&value) => {}
+                _ => return bad_request(),
+            }
+            query.push((key.into_owned(), value.into_owned()));
+        }
+        let Some(client) = &app.corp_diagnostics else {
+            return diagnostics_unavailable();
+        };
+        client
+            .list(&query)
+            .await
+            .map(|body| Json(body).into_response())
+    } else {
+        let parts = tail
+            .strip_prefix('/')
+            .unwrap_or_default()
+            .split('/')
+            .collect::<Vec<_>>();
+        if parts.is_empty() || !valid_id(parts[0]) || request.uri().query().is_some() {
+            return bad_request();
+        }
+        let id = parts[0];
+        if parts.len() == 1 && method == Method::GET {
+            let Some(client) = &app.corp_diagnostics else {
+                return diagnostics_unavailable();
+            };
+            client
+                .detail(id)
+                .await
+                .map(|body| Json(body).into_response())
+        } else if parts.len() == 2 && parts[1] == "retry" && method == Method::POST {
+            let body: serde_json::Value = match parse_json(request).await {
+                Ok(body) => body,
+                Err(response) => return *response,
+            };
+            if !body.as_object().is_some_and(|object| object.is_empty()) {
+                return bad_request();
+            }
+            let Some(client) = &app.corp_diagnostics else {
+                return diagnostics_unavailable();
+            };
+            client
+                .retry(id)
+                .await
+                .map(|body| (StatusCode::ACCEPTED, Json(body)).into_response())
+        } else {
+            return error(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "Этот способ запроса не поддерживается.",
+            );
+        }
+    };
+    match result {
+        Ok(response) => response,
+        Err(BridgeError::NotFound) => error(StatusCode::NOT_FOUND, "Отчёт недоступен."),
+        Err(BridgeError::Invalid) => bad_request(),
+        Err(BridgeError::Conflict) => error(
+            StatusCode::CONFLICT,
+            "Анализ уже выполняется. Обновите отчёт позже.",
+        ),
+        Err(BridgeError::Unavailable) => diagnostics_unavailable(),
+    }
+}
+fn diagnostics_unavailable() -> Response {
+    error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Диагностика сейчас недоступна. Попробуйте позже. Правила продолжают работать.",
+    )
 }

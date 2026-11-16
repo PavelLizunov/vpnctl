@@ -12,6 +12,7 @@ use tower::ServiceExt;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 
+pub mod diagnostics;
 pub mod eligibility;
 mod handlers;
 mod security;

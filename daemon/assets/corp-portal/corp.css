@@ -147,3 +147,25 @@ dialog > * + * { margin-top: 1rem; }
   .add-fields { grid-template-columns: 1fr; }
   .dialog-actions > button { flex: 1 1 120px; }
 }
+
+.portal-nav { display: flex; flex-wrap: wrap; gap: .5rem 1rem; }
+.portal-nav a { display: inline-flex; align-items: center; min-height: 44px; padding: .4rem .75rem; border-radius: 8px; }
+.portal-nav a[aria-current="page"] { background: #dfece2; font-weight: 700; }
+.diagnostics-layout { display: grid; grid-template-columns: minmax(230px, .8fr) minmax(0, 1.5fr); gap: 1rem; align-items: start; }
+.diagnostics-layout > * { min-width: 0; }
+.report-list { list-style: none; margin: 1rem 0; padding: 0; }
+.report-list li + li { margin-top: .75rem; }
+.report-select { width: 100%; display: grid; text-align: left; justify-content: stretch; gap: .4rem; font-weight: 400; }
+.report-select span { display: block; }
+#diagnostics-detail-body { overflow-wrap: anywhere; }
+#diagnostics-detail-body > * { margin-top: .8rem; }
+#diagnostics-detail-body h3 { margin-top: 1.5rem; font-size: 1rem; }
+#diagnostics-detail-body button { margin-right: .5rem; }
+.diagnosis-verdict { font-weight: 700; }
+.finding { border-left: 3px solid var(--border); padding-left: .75rem; }
+.finding p + p { margin-top: .4rem; }
+.evidence-list { font-size: .85rem; color: var(--muted); padding-left: 1.2rem; }
+.provenance { font-size: .875rem; }
+.provenance dt { color: var(--muted); margin-top: .6rem; }
+.provenance dd { margin-left: 0; }
+@media (max-width: 740px) { .diagnostics-layout { grid-template-columns: minmax(0, 1fr); } }
