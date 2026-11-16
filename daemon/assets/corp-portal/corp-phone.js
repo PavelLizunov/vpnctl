@@ -3,12 +3,7 @@
   const root = document.getElementById("corp-phone-editor");
   if (!root) return;
   const endpoint = "/api/v1/corp/portal/telephony";
-  const node = (tag, text, className) => {
-    const element = document.createElement(tag);
-    if (text !== undefined) element.textContent = text;
-    if (className) element.className = className;
-    return element;
-  };
+  const { node, field, routeOptions: routes, createPager, confirmAction } = window.corpPortal;
   const button = (text, action) => {
     const element = node("button", text);
     element.type = "button";
@@ -24,26 +19,66 @@
     }
     return element;
   };
-  const field = (title, input) => {
-    input.setAttribute("aria-label", title);
-    const label = node("label", title, "field");
-    label.append(input);
-    return label;
-  };
-  const routes = [["direct", "Напрямую — без VPN"], ["proxy", "Через VPN"]];
   let rules = [], revision = 0, csrf = "", saved = "[]", candidate = null;
-  let busy = false, ready = false, stale = false;
-  const status = node("p", "Загружаем телефонию…", "notice");
+  let busy = false, ready = false, stale = false, page = 0;
+  const pageSize = 10;
+  const status = node("p", "Загружаем телефонию…", "muted small");
   status.setAttribute("role", "status");
   status.setAttribute("aria-live", "polite");
   const error = node("p", "", "notice error");
   error.hidden = true;
   error.setAttribute("role", "alert");
-  const warning = node("p", "Для редактируемой телефонии нужна Corp-версия приложения 2.50.10 или новее. Старые версии сохраняют встроенные исключения. Сохранение на сервере не подтверждает получение правил приложением или исправность звонка.", "notice warning");
+  const help = node("details");
+  help.append(node("summary", "Как работают правила телефонии"), node("p", "Нужна Corp-версия приложения 2.50.10 или новее. Старые версии сохраняют встроенные исключения.", "muted small"), node("p", "Сохранение на сервере не подтверждает получение правил приложением или исправность звонка.", "muted small"));
   const summary = node("p", "", "muted small");
-  const list = node("div", undefined, "phone-rule-list");
+  const heading = node("div", undefined, "section-heading");
+  const title = node("div", undefined, "section-title");
+  const count = node("p", "", "muted small");
+  title.append(node("h2", "Адреса телефонии"), count);
   const addPanel = node("details", undefined, "add-site-panel");
-  addPanel.append(node("summary", "Добавить адрес телефонии"));
+  addPanel.id = "add-phone-panel";
+  addPanel.append(node("summary", "Добавить адрес"));
+  const openAdd = button("Добавить адрес", () => {
+    addPanel.open = !addPanel.open;
+    openAdd.setAttribute("aria-expanded", String(addPanel.open));
+    if (addPanel.open) address.focus();
+  });
+  openAdd.setAttribute("aria-controls", addPanel.id);
+  openAdd.setAttribute("aria-expanded", "false");
+  addPanel.addEventListener("toggle", () => openAdd.setAttribute("aria-expanded", String(addPanel.open)));
+  heading.append(title, openAdd);
+  const toolbar = node("div", undefined, "workspace-toolbar");
+  const search = node("input");
+  search.type = "search";
+  search.id = "phone-search";
+  search.placeholder = "Адрес или заметка…";
+  search.autocomplete = "off";
+  const routeFilter = select([["all", "Все маршруты"], ...routes]);
+  routeFilter.id = "phone-route-filter";
+  const showNotes = node("input");
+  showNotes.type = "checkbox";
+  showNotes.id = "phone-show-notes";
+  const notesText = node("span", "Заметки");
+  const notesToggle = node("label", undefined, "notes-toggle");
+  notesToggle.append(showNotes, notesText);
+  toolbar.append(field("Поиск", search), field("Как открывать", routeFilter), notesToggle);
+  const table = node("table", undefined, "rules-table");
+  table.setAttribute("aria-label", "Правила телефонии");
+  const thead = node("thead");
+  const columns = node("tr");
+  for (const title of ["Адрес", "Как открывать", "Заметка", "Действия"]) {
+    const th = node("th", title);
+    th.scope = "col";
+    if (title === "Действия") th.replaceChildren(node("span", title, "sr-only"));
+    columns.append(th);
+  }
+  thead.append(columns);
+  const list = node("tbody", undefined, "phone-rule-list");
+  table.append(thead, list);
+  const pager = createPager("phone-rules", (nextPage) => { page = nextPage; render(); });
+  for (const control of [search, routeFilter]) control.addEventListener("input", () => { page = 0; render(); });
+  showNotes.addEventListener("change", () => table.classList.toggle("show-notes", showNotes.checked));
+  const addBody = node("div", undefined, "add-site-body");
   const form = node("form");
   const kind = select([["domain_suffix", "Домен и поддомены"], ["ip_cidr", "IPv4-адрес или подсеть"]]);
   const address = node("input");
@@ -76,77 +111,135 @@
     preview.hidden = true;
     address.value = "";
     note.value = "";
+    search.value = "";
+    routeFilter.value = "all";
+    page = Math.floor((rules.length - 1) / pageSize);
     render();
     status.textContent = "Адрес добавлен в черновик телефонии. Сохраните телефонию.";
   });
-  preview.append(previewText, field("Маршрут", action), notes, add);
-  addPanel.append(form, preview);
-  const timing = select([["next_connection", "При следующем подключении VPN"], ["now", "Сейчас, с возможным перерывом VPN"]]);
-  const interrupt = node("input");
-  interrupt.type = "checkbox";
-  const interruptLabel = node("label", undefined, "check-label");
-  interruptLabel.append(interrupt, node("span", "Подтверждаю возможный перерыв связи у подключённых приложений"));
-  interruptLabel.hidden = true;
-  timing.addEventListener("change", () => { interrupt.checked = false; interruptLabel.hidden = timing.value !== "now"; update(); });
-  interrupt.addEventListener("change", update);
-  const save = button("Сохранить телефонию", () => run(async () => {
-    const result = await api("/rules", { expected_revision: revision, apply: timing.value, confirm_interrupt: interrupt.checked, rules });
-    checkRevision(result);
-    revision = result.revision;
-    saved = JSON.stringify(rules);
-    render();
-    published();
-    if (history.open) await loadHistory();
-  }));
+  const previewFields = node("div", undefined, "preview-fields");
+  previewFields.append(field("Как открывать", action), notes, add);
+  preview.append(previewText, previewFields);
+  addBody.append(form, preview);
+  addPanel.append(addBody);
+  const save = button("Сохранить изменения", () => savePolicy(false));
   save.className = "primary";
-  const reload = button("Загрузить актуальную телефонию", () => {
-    if (window.corpPhoneDirty && !window.confirm("Заменить несохранённый черновик телефонии списком с сервера?")) return;
-    run(load);
-  });
-  const history = node("details");
+  const applyNow = button("Применить сейчас…", () => savePolicy(true));
+  const reload = button("Отменить изменения", () => run(async () => {
+    if (window.corpPhoneDirty && !await confirmAction({ title: "Загрузить телефонию с сервера?", description: "Несохранённый черновик телефонии будет заменён. Правила сайтов сохранятся.", confirmText: "Загрузить" })) return;
+    await load();
+  }));
+  reload.className = "quiet";
+  const saveBar = node("div", undefined, "save-bar");
+  const saveMessage = node("div");
+  const saveTitle = node("p", "", "save-title");
+  saveMessage.append(saveTitle, node("p", "Обычное сохранение — при следующем подключении VPN.", "muted small"));
+  const saveActions = node("div", undefined, "actions");
+  saveActions.append(save, applyNow, reload);
+  saveBar.append(saveMessage, saveActions);
+  const history = node("details", undefined, "card");
   history.append(node("summary", "История телефонии"));
   const historyStatus = node("p", "Откройте историю телефонии, чтобы загрузить версии.", "muted small");
   const historyList = node("ol", undefined, "history-list");
   const refreshHistory = button("Обновить историю телефонии", () => run(loadHistory));
   history.append(historyStatus, refreshHistory, historyList);
   history.addEventListener("toggle", () => { if (history.open && ready && !busy) run(loadHistory); });
-  root.append(warning, status, error, summary, list, addPanel, field("Когда применить телефонию", timing), interruptLabel, save, reload, history);
+  const feedback = node("div", undefined, "section-feedback");
+  const statusLine = node("div", undefined, "status-panel");
+  statusLine.append(status, summary);
+  feedback.append(statusLine, error);
+  const panel = root.closest(".voice-rules");
+  panel.before(feedback);
+  help.className = "route-help";
+  panel.after(help, history);
+  function showSection() {
+    const inactive = location.hash !== "#telephony";
+    for (const element of [feedback, help, history]) element.hidden = inactive;
+  }
+  window.addEventListener("hashchange", showSection);
+  showSection();
+  root.append(heading, addPanel, toolbar, pager.element, table, saveBar);
 
   function validComment(value) {
     return new TextEncoder().encode(value).length <= 256 && !/[\u0000-\u001f\u007f-\u009f]/u.test(value);
   }
   function update() {
     window.corpPhoneDirty = JSON.stringify(rules) !== saved;
-    for (const control of root.querySelectorAll("input,select,button")) control.disabled = busy || !ready || stale;
+    root.setAttribute("aria-busy", String(busy));
+    for (const control of [...root.querySelectorAll("input,select,button"), ...history.querySelectorAll("button")]) control.disabled = busy || !ready || stale || control.dataset.pageBoundary === "true";
     reload.disabled = busy;
-    save.disabled ||= (!window.corpPhoneDirty && revision !== 0) || (timing.value === "now" && !interrupt.checked);
-    summary.textContent = `Телефония: ${rules.length} из 64 адресов · ${revision ? `версия ${revision}` : "ещё не опубликована, показаны исходные правила"}${window.corpPhoneDirty ? " · есть несохранённые изменения" : ""}`;
+    reload.hidden = !stale && !window.corpPhoneDirty;
+    reload.textContent = stale ? "Загрузить актуальный список" : "Отменить изменения";
+    save.disabled ||= !window.corpPhoneDirty && revision !== 0;
+    applyNow.disabled = save.disabled;
+    add.disabled ||= candidate === null;
+    count.textContent = `Всего адресов: ${rules.length}`;
+    const notesCount = rules.filter((rule) => rule.comment).length;
+    const notesLabel = notesCount ? `Заметки (${notesCount})` : "Заметки";
+    if (notesText.textContent !== notesLabel) notesText.textContent = notesLabel;
+    summary.textContent = revision ? `Версия ${revision}` : "Исходные правила · ещё не опубликованы";
+    saveTitle.textContent = window.corpPhoneDirty ? "Есть изменения в списке" : revision === 0 ? "Сохраните начальный список" : "Все изменения сохранены";
   }
   function render() {
     list.replaceChildren();
-    rules.forEach((rule, index) => {
-      const row = node("div", undefined, "phone-rule-row");
-      const heading = node("div");
-      heading.append(node("strong", rule.value), node("p", rule.type === "domain_suffix" ? "Домен и все его поддомены" : "IPv4-адрес или подсеть", "muted small"));
+    const query = search.value.trim().toLocaleLowerCase("ru");
+    const visible = rules.map((rule, index) => ({ rule, index })).filter(({ rule }) => (routeFilter.value === "all" || rule.action === routeFilter.value) && (!query || `${rule.value} ${rule.comment}`.toLocaleLowerCase("ru").includes(query)));
+    page = Math.max(0, Math.min(page, Math.ceil(visible.length / pageSize) - 1));
+    for (const { rule, index } of visible.slice(page * pageSize, (page + 1) * pageSize)) {
+      const row = node("tr");
+      const addressCell = node("td");
+      addressCell.append(node("strong", rule.value, "site-name"), node("p", rule.type === "domain_suffix" ? "Домен и поддомены" : "IPv4-адрес или подсеть", "muted small"));
       const route = select(routes);
       route.value = rule.action;
       route.dataset.action = rule.action;
       route.className = "route-choice";
-      route.addEventListener("change", () => { rule.action = route.value; route.dataset.action = route.value; update(); });
+      route.setAttribute("aria-label", `Как открывать ${rule.value}`);
+      route.addEventListener("change", () => {
+        rule.action = route.value;
+        route.dataset.action = route.value;
+        if (routeFilter.value === "all") update();
+        else { render(); routeFilter.focus(); }
+      });
+      const routeCell = node("td");
+      routeCell.append(node("span", "Как открывать", "mobile-label"), route);
       const comment = node("input");
       comment.type = "text";
       comment.value = rule.comment;
       comment.maxLength = 256;
+      comment.setAttribute("aria-label", `Заметка к ${rule.value}`);
       comment.addEventListener("input", () => { rule.comment = comment.value; update(); });
-      const details = node("details");
-      details.append(node("summary", "Заметка (необязательно)"), field("Заметка", comment));
-      const remove = button("Удалить адрес", () => { rules.splice(index, 1); render(); });
+      const noteCell = node("td");
+      noteCell.append(node("span", "Заметка (необязательно)", "mobile-label"), comment);
+      const remove = button("Удалить", () => { rules.splice(index, 1); render(); });
+      remove.className = "remove";
       remove.setAttribute("aria-label", `Удалить ${rule.value} из телефонии`);
-      row.append(heading, field("Маршрут", route), details, remove);
+      const removeCell = node("td");
+      removeCell.append(remove);
+      row.append(addressCell, routeCell, noteCell, removeCell);
       list.append(row);
-    });
-    if (!rules.length) list.append(node("p", "Телефония пуста. Сохраните пустой список, чтобы убрать прежние исключения телефонии."));
+    }
+    if (!visible.length) {
+      const row = node("tr");
+      const cell = node("td", rules.length ? "Адреса не найдены. Измените поиск или маршрут." : "Телефония пуста. Сохраните пустой список, чтобы убрать прежние исключения телефонии.");
+      cell.colSpan = 4;
+      row.append(cell);
+      list.append(row);
+    }
+    pager.update(visible.length, page, pageSize);
     update();
+  }
+  function savePolicy(now) {
+    run(async () => {
+      const timing = now ? await confirmAction({ title: "Применить телефонию сейчас?", description: "Обновлённые приложения смогут получить правила и переподключить VPN. Возможен перерыв связи.", confirmText: "Сохранить и применить", interrupt: true }) : { apply: "next_connection", confirm_interrupt: false };
+      if (!timing) return;
+      const result = await api("/rules", { expected_revision: revision, ...timing, rules });
+      checkRevision(result);
+      revision = result.revision;
+      saved = JSON.stringify(rules);
+      render();
+      published(timing.apply);
+      if (history.open) await loadHistory();
+    });
   }
   function fail(failure) {
     error.textContent = failure.message || "Не удалось выполнить действие. Проверьте подключение.";
@@ -188,14 +281,15 @@
     stale = false;
     candidate = null;
     preview.hidden = true;
+    page = 0;
     render();
     status.textContent = revision ? "Телефония загружена." : "Проверьте исходные пять адресов и явно сохраните телефонию. До этого отдельный список не опубликован.";
   }
   function checkRevision(result) {
     if (!result || !Number.isSafeInteger(result.revision) || result.revision <= revision) { stale = true; throw new Error("Не удалось подтвердить сохранение телефонии. Загрузите актуальную телефонию."); }
   }
-  function published() {
-    status.textContent = "Телефония сохранена на сервере. " + (timing.value === "now" ? "Обновлённые приложения смогут получить её и переподключить VPN; получение ещё не подтверждено." : "Обновлённые приложения смогут использовать её при следующем подключении VPN.");
+  function published(apply) {
+    status.textContent = "Телефония сохранена на сервере. " + (apply === "now" ? "Обновлённые приложения смогут получить её и переподключить VPN; получение ещё не подтверждено." : "Обновлённые приложения смогут использовать её при следующем подключении VPN.");
   }
   async function loadHistory() {
     const entries = await api("/history");
@@ -203,18 +297,16 @@
     historyList.replaceChildren();
     for (const entry of entries) {
       const item = node("li");
-      const restore = button("Восстановить телефонию…", () => {
-        if (timing.value === "now" && !interrupt.checked) { fail(new Error("Подтвердите возможный перерыв связи.")); return; }
-        if (!window.confirm(`Заменить весь список телефонии версией ${entry.revision}? Несохранённый черновик телефонии будет заменён. Правила сайтов сохранятся.`)) return;
-        run(async () => {
-          const result = await api("/restore", { expected_revision: revision, revision: entry.revision, apply: timing.value, confirm_interrupt: interrupt.checked });
-          checkRevision(result);
-          stale = true;
-          await load();
-          published();
-          await loadHistory();
-        });
-      });
+      const restore = button("Восстановить телефонию…", () => run(async () => {
+        const timing = await confirmAction({ title: `Восстановить версию ${entry.revision}?`, description: "Весь список телефонии и несохранённый черновик будут заменены. Правила сайтов сохранятся.", confirmText: "Восстановить телефонию", chooseTiming: true });
+        if (!timing) return;
+        const result = await api("/restore", { expected_revision: revision, revision: entry.revision, ...timing });
+        checkRevision(result);
+        stale = true;
+        await load();
+        published(timing.apply);
+        await loadHistory();
+      }));
       item.append(node("p", `Телефония: версия ${entry.revision} · ${new Date(entry.published_at * 1000).toLocaleString("ru")} · адресов: ${entry.rule_count}`), restore);
       historyList.append(item);
     }

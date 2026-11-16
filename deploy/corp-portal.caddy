@@ -1,13 +1,13 @@
 # Replace the four __CORP_*__ placeholders, then import this site exactly once
 # from the parent Caddyfile. Do not paste it inline or nest another import.
-# __CORP_ASSETS__ contains corp.css, corp.js and corp-diagnostics.js.
+# __CORP_ASSETS__ contains corp.css, corp.js, corp-phone.js and corp-diagnostics.js.
 # The private __CORP_SERVICE_HEADER__ file contains only:
 # header_up Authorization "Bearer <private service capability>"
 # Requires Caddy >= 2.11 (request_body set). Keep the header file private.
 admin.corp.ninitux.com {
 	@corpAssets {
 		method GET HEAD
-		path /assets/corp.css /assets/corp.js /assets/corp-diagnostics.js
+		path /assets/corp.css /assets/corp.js /assets/corp-phone.js /assets/corp-diagnostics.js
 	}
 	handle @corpAssets {
 		root * __CORP_ASSETS__

@@ -1,6 +1,154 @@
 (() => {
   "use strict";
 
+  const node = (tag, text, className) => {
+    const result = document.createElement(tag);
+    if (text !== undefined) result.textContent = text;
+    if (className) result.className = className;
+    return result;
+  };
+  const routeOptions = [["direct", "Напрямую — без VPN"], ["proxy", "Через VPN"]];
+  function field(title, input) {
+    const label = node("label", undefined, "field");
+    label.append(node("span", title, "control-label"), input);
+    input.setAttribute("aria-label", title);
+    return label;
+  }
+  function createPager(id, onPage) {
+    const element = node("nav", undefined, "list-pagination");
+    element.id = `${id}-pagination`;
+    element.setAttribute("aria-label", "Страницы списка");
+    const summary = node("p", "Загружаем список…", "list-summary");
+    summary.id = `${id}-page-status`;
+    summary.setAttribute("role", "status");
+    summary.setAttribute("aria-live", "polite");
+    const buttons = node("div", undefined, "page-number-buttons");
+    buttons.id = `${id}-page-numbers`;
+    element.append(summary, buttons);
+    return { element, update(total, page, size) {
+      const pages = Math.max(1, Math.ceil(total / size));
+      summary.textContent = total ? `${page * size + 1}–${Math.min((page + 1) * size, total)} из ${total}${pages > 1 ? ` · Страница ${page + 1} из ${pages}` : ""}` : "Ничего не найдено";
+      buttons.replaceChildren();
+      if (pages <= 1) return;
+      const indices = pages <= 6 ? Array.from({length: pages}, (_, i) => i)
+        : [...new Set([0, page - 1, page, page + 1, pages - 1].filter((i) => i >= 0 && i < pages))].sort((a, b) => a - b);
+      function add(label, target, name, boundary = false) {
+        const button = node("button", label, "editor-control");
+        button.type = "button";
+        button.setAttribute("aria-label", name);
+        button.dataset.pageBoundary = String(boundary);
+        button.disabled = boundary;
+        if (typeof label === "string" && /^\d+$/.test(label) && target === page) button.setAttribute("aria-current", "page");
+        button.addEventListener("click", () => {
+          if (boundary) return;
+          onPage(target);
+          buttons.querySelector('[aria-current="page"]')?.focus();
+        });
+        buttons.append(button);
+      }
+      add("Назад", page - 1, "Предыдущая страница", page === 0);
+      let prior = -1;
+      for (const index of indices) {
+        if (index > prior + 1) buttons.append(node("span", "…"));
+        add(String(index + 1), index, `Страница ${index + 1} из ${pages}`);
+        prior = index;
+      }
+      add("Далее", page + 1, "Следующая страница", page + 1 >= pages);
+    } };
+  }
+  function confirmAction({title, description, confirmText = "Подтвердить", interrupt = false, chooseTiming = false}) {
+    return new Promise((resolve) => {
+      const modal = node("dialog", undefined, "portal-dialog");
+      const heading = node("h2", title);
+      heading.id = "portal-confirm-title";
+      modal.setAttribute("aria-labelledby", heading.id);
+      const timing = node("select");
+      for (const [value, text] of [["next_connection", "При следующем подключении VPN"], ["now", "Применить сейчас"]]) {
+        const option = node("option", text);
+        option.value = value;
+        timing.append(option);
+      }
+      timing.value = interrupt ? "now" : "next_connection";
+      const checkbox = node("input");
+      checkbox.type = "checkbox";
+      const consent = node("label", undefined, "check-label");
+      consent.append(checkbox, node("span", "Подтверждаю возможный перерыв VPN у подключённых пользователей"));
+      const warning = node("div", undefined, "notice warning");
+      warning.append(node("p", "VPN может ненадолго переподключиться. Выключенный VPN останется выключенным."), consent);
+      const cancel = node("button", "Отмена");
+      const confirm = node("button", confirmText, "primary");
+      cancel.type = confirm.type = "button";
+      cancel.autofocus = true;
+      const actions = node("div", undefined, "dialog-actions");
+      actions.append(cancel, confirm);
+      modal.append(heading, node("p", description));
+      if (chooseTiming) modal.append(field("Когда применить", timing));
+      modal.append(warning, actions);
+      function update() {
+        warning.hidden = timing.value !== "now";
+        confirm.disabled = timing.value === "now" && !checkbox.checked;
+      }
+      timing.addEventListener("change", () => { checkbox.checked = false; update(); });
+      checkbox.addEventListener("change", update);
+      let result = null;
+      confirm.addEventListener("click", () => {
+        if (confirm.disabled) return;
+        result = {apply: timing.value, confirm_interrupt: timing.value === "now" && checkbox.checked};
+        modal.close();
+      });
+      cancel.addEventListener("click", () => modal.close());
+      modal.addEventListener("close", () => { modal.remove(); resolve(result); }, {once: true});
+      document.body.append(modal);
+      update();
+      modal.showModal();
+    });
+  }
+  window.corpPortal = Object.freeze({node, field, routeOptions, createPager, confirmAction});
+  const main = document.querySelector("main.editor");
+  const product = document.querySelector(".corp-product");
+  if (product) product.textContent = "VPNRouter";
+  const identity = document.querySelector(".corp-identity > :last-child");
+  if (identity && identity !== product) identity.textContent = "Corp · корпоративный VPN";
+  function sectionName() {
+    return main?.id === "corp-diagnostics" ? "diagnostics" : location.hash === "#telephony" ? "phone" : "sites";
+  }
+  function updateShell() {
+    if (!main) return;
+    const section = sectionName();
+    const headings = {sites: ["Сайты", "Выберите, какие сайты открывать напрямую, а какие — через VPN."], phone: ["Телефония (VoIP)", "Настройте маршруты доменов и IP-адресов телефонии."], diagnostics: ["Диагностика", "Отчёты из приложения: что произошло и как это исправить."]};
+    main.querySelector("h1").textContent = headings[section][0];
+    main.querySelector(".page-header .muted").textContent = headings[section][1];
+    document.title = `${headings[section][0]} · VPNRouter Corp`;
+    for (const link of main.querySelectorAll(".portal-nav a")) {
+      if (link.dataset.section === section) link.setAttribute("aria-current", "page");
+      else link.removeAttribute("aria-current");
+    }
+  }
+  if (main) {
+    main.querySelector(".page-header button")?.classList.add("quiet");
+    const nav = main.querySelector(".portal-nav");
+    nav.replaceChildren();
+    for (const [section, title, href, id] of [["sites", "Сайты", "/#sites", "show-site-rules"], ["phone", "Телефония (VoIP)", "/#telephony", "show-voice-rules"], ["diagnostics", "Диагностика", "/diagnostics", "show-diagnostics"]]) {
+      const link = node("a", title);
+      link.href = href;
+      link.id = id;
+      link.dataset.section = section;
+      nav.append(link);
+    }
+    main.id ||= "corp-main";
+    const skip = node("a", "К содержимому", "skip-link");
+    skip.href = `#${main.id}`;
+    skip.addEventListener("click", (event) => {
+      event.preventDefault();
+      main.tabIndex = -1;
+      main.focus();
+      main.scrollIntoView({block: "start"});
+    });
+    document.body.prepend(skip);
+    updateShell();
+    window.addEventListener("hashchange", updateShell);
+  }
+
   const editor = document.getElementById("corp-editor");
   if (!editor) return;
 
@@ -19,158 +167,110 @@
   let candidate = null;
   let confirmation = null;
   let historyLoaded = false;
-  const narrowLayout = window.matchMedia("(max-width: 740px)");
-  let pageSize = narrowLayout.matches ? 5 : 10;
+  const pageSize = 10;
   let rulePage = 0;
-
-  const node = (tag, text, className) => {
-    const result = document.createElement(tag);
-    if (text !== undefined) result.textContent = text;
-    if (className) result.className = className;
-    return result;
-  };
+  let rulePager;
 
   function prepareWorkspace() {
-    editor.querySelector(".page-header .muted").textContent = "Настройте, какие сайты открывать без VPN, а какие — через корпоративный сервер.";
-    const portalNav = editor.querySelector(".portal-nav");
-    const sitesLink = portalNav.querySelector('a[href="/"]');
-    const sitesButton = node("button", "Правила сайтов");
-    sitesButton.id = "show-site-rules";
-    sitesButton.type = "button";
-    sitesButton.setAttribute("aria-pressed", "true");
-    const voiceButton = node("button", "Телефония (VoIP)");
-    voiceButton.id = "show-voice-rules";
-    voiceButton.type = "button";
-    voiceButton.setAttribute("aria-pressed", "false");
-    sitesLink.replaceWith(sitesButton, voiceButton);
-    const guide = node("section", undefined, "workspace-guide");
-    guide.setAttribute("aria-label", "Как изменить правила");
-    const steps = node("ol");
-    for (const [title, description] of [
-      ["Найдите сайт", "Или нажмите «Добавить сайт», если его ещё нет."],
-      ["Выберите маршрут", "«Без VPN» — ваш интернет. «Через VPN» — корпоративный сервер."],
-      ["Сохраните изменения", "Они начнут действовать при следующем подключении VPN."],
-    ]) {
-      const item = node("li");
-      item.append(node("strong", title), node("p", description, "muted small"));
-      steps.append(item);
-    }
-    guide.append(steps);
-    portalNav.after(guide);
-    editor.querySelector('[aria-labelledby="add-title"] > .muted').textContent = "Вставьте домен или ссылку. Правило будет действовать и для поддоменов.";
-    el("new-action").querySelector('[value="direct"]').textContent = "Напрямую — без VPN";
-    const preview = el("site-preview");
-    preview.querySelector(":scope > .muted")?.remove();
-    preview.append(el("new-route-hint"));
-
     const card = editor.querySelector(".rules-card");
     card.id = "site-rules-panel";
-    sitesButton.setAttribute("aria-controls", card.id);
+    const table = card.querySelector("table");
+    const heading = card.querySelector(".section-heading");
+    const feedback = node("div", undefined, "section-feedback");
+    card.before(feedback);
+    feedback.append(editor.querySelector(".status-panel"), el("error"), el("reload-notice"), el("session-link"));
+    const title = node("div", undefined, "section-title");
+    title.append(card.querySelector("h2"), el("rule-count"));
+    title.querySelector("h2").textContent = "Список сайтов";
+    heading.replaceChildren(title);
+
     const addSection = editor.querySelector('[aria-labelledby="add-title"]');
-    const addPanel = node("details", undefined, "card add-site-panel");
+    const addPanel = node("details", undefined, "add-site-panel");
     addPanel.id = "add-site-panel";
-    addSection.before(addPanel);
-    addPanel.append(node("summary", "Добавить новый сайт"), addSection);
+    addPanel.append(node("summary", "Новый сайт"), addSection);
     addSection.classList.remove("card");
     addSection.classList.add("add-site-body");
     addSection.querySelector("h2").classList.add("sr-only");
-    card.after(addPanel);
+    addSection.querySelector(":scope > .muted").textContent = "Вставьте домен или ссылку. Правило будет действовать и для поддоменов.";
     const addButton = node("button", "Добавить сайт", "editor-control");
     addButton.id = "open-add-site";
     addButton.type = "button";
+    addButton.setAttribute("aria-controls", addPanel.id);
+    addButton.setAttribute("aria-expanded", "false");
     addButton.addEventListener("click", () => {
-      card.before(addPanel);
-      addPanel.open = true;
-      addPanel.scrollIntoView({block: "start"});
-      el("site").focus({preventScroll: true});
+      addPanel.open = !addPanel.open;
+      if (addPanel.open) el("site").focus({preventScroll: true});
     });
-    const primaryActions = node("div", undefined, "actions rules-heading-actions");
+    addPanel.addEventListener("toggle", () => addButton.setAttribute("aria-expanded", String(addPanel.open)));
+    heading.append(addButton);
+    heading.after(addPanel);
+    el("new-action").querySelector('[value="direct"]').textContent = "Напрямую — без VPN";
+    el("new-action").closest(".field").querySelector("label").textContent = "Как открывать";
+    const preview = el("site-preview");
+    preview.querySelector(":scope > .muted")?.remove();
+    const noteField = el("new-comment").closest(".field");
+    const noteDetails = node("details", undefined, "optional-note");
+    noteDetails.append(node("summary", "Добавить заметку"));
+    noteField.before(noteDetails);
+    noteDetails.append(noteField);
+
+    const filters = node("div", undefined, "workspace-toolbar rules-filters");
+    const searchField = node("div", undefined, "field");
+    const searchLabel = card.querySelector('label[for="search"]');
+    searchLabel.textContent = "Поиск";
+    el("search").placeholder = "Сайт или заметка…";
+    searchField.append(searchLabel, el("search"));
+    const select = node("select", undefined, "editor-control");
+    select.id = "route-filter";
+    for (const [value, text] of [["all", "Все маршруты"], ...routeOptions]) {
+      const option = node("option", text);
+      option.value = value;
+      select.append(option);
+    }
+    const notesLabel = node("label", undefined, "notes-toggle");
+    const notes = node("input", undefined, "editor-control");
+    notes.type = "checkbox";
+    notes.id = "show-rule-notes";
+    notes.addEventListener("change", () => table.classList.toggle("show-notes", notes.checked));
+    notesLabel.append(notes, node("span", "Заметки"));
+    filters.append(searchField, field("Как открывать", select), notesLabel);
+    table.before(filters);
+    rulePager = createPager("rules", (page) => { rulePage = page; renderRules(); });
+    table.before(rulePager.element);
+    card.querySelector("th:nth-child(3)").textContent = "Заметка";
+
+    const footer = card.querySelector(".save-bar");
+    footer.querySelector(".save-title").id = "save-summary";
+    footer.querySelector(".muted").textContent = "Обычное сохранение — при следующем подключении VPN.";
     el("save").textContent = "Сохранить изменения";
-    primaryActions.append(addButton, el("save"));
-    card.querySelector(".section-heading").append(primaryActions);
+    el("save-now").textContent = "Применить сейчас…";
+    footer.querySelector(".actions").append(el("save"), el("save-now"));
+    const discard = node("button", "Отменить изменения", "quiet editor-control");
+    discard.id = "discard-site-changes";
+    discard.type = "button";
+    discard.hidden = true;
+    discard.addEventListener("click", () => openConfirmation({kind: "reload"}));
+    footer.querySelector(".actions").append(discard);
+    const help = node("details", undefined, "route-help");
+    help.append(node("summary", "Как работают маршруты"), card.querySelector(".route-guide"), card.querySelector(".route-note"));
+    card.after(help);
+
     const voice = node("section", undefined, "card voice-rules");
     voice.id = "voice-rules-panel";
-    voice.hidden = true;
-    voiceButton.setAttribute("aria-controls", voice.id);
-    voice.append(node("h2", "Телефония (VoIP) — UIS / CoMagic"));
-    voice.append(node("p", "Управляйте доменами и IP-адресами телефонии отдельным списком. Изменения сохраняются отдельно от правил сайтов."));
     const phoneEditor = node("div");
     phoneEditor.id = "corp-phone-editor";
     voice.append(phoneEditor);
     card.after(voice);
-    function showRules(kind) {
-      const telephony = kind === "voice";
+    function showRules() {
+      const telephony = sectionName() === "phone";
       card.hidden = telephony;
-      addPanel.hidden = telephony;
-      guide.hidden = telephony;
+      help.hidden = telephony;
+      feedback.hidden = telephony;
       el("history-panel").hidden = telephony;
       voice.hidden = !telephony;
-      sitesButton.setAttribute("aria-pressed", String(!telephony));
-      voiceButton.setAttribute("aria-pressed", String(telephony));
     }
-    sitesButton.addEventListener("click", () => showRules("sites"));
-    voiceButton.addEventListener("click", () => showRules("voice"));
-    const help = node("details", undefined, "route-help");
-    help.append(node("summary", "Как работают маршруты"), card.querySelector(".route-guide"));
-    const note = card.querySelector(".route-note");
-    note.textContent = "Corp VPN оставьте включённым. Маршрут определяет только путь выбранного сайта.";
-    help.append(note);
-    const filters = node("div", undefined, "rules-filters");
-    const searchField = node("div", undefined, "field");
-    searchField.append(card.querySelector('label[for="search"]'), el("search"));
-    const routeField = node("div", undefined, "field");
-    const label = node("label", "Маршрут");
-    label.htmlFor = "route-filter";
-    const select = node("select", undefined, "editor-control");
-    select.id = "route-filter";
-    for (const [value, title] of [["all", "Все сайты"], ["direct", "Без VPN"], ["proxy", "Через VPN"]]) {
-      const option = node("option", title);
-      option.value = value;
-      select.append(option);
-    }
-    routeField.append(label, select);
-    filters.append(searchField, routeField);
-    const notesLabel = node("label", undefined, "notes-toggle");
-    const notes = node("input");
-    notes.type = "checkbox";
-    notes.id = "show-rule-notes";
-    notes.addEventListener("change", () => card.querySelector("table").classList.toggle("show-notes", notes.checked));
-    notesLabel.append(notes, node("span", "Показать заметки к сайтам"));
-    help.append(notesLabel);
-    card.querySelector("th:nth-child(3)").textContent = "Заметка (необязательно)";
-    searchField.querySelector("label").textContent = "Найти сайт среди всех правил";
-    card.insertBefore(help, card.querySelector("table"));
-    card.insertBefore(filters, card.querySelector("table"));
-
-    const pagination = node("nav", undefined, "list-pagination");
-    pagination.id = "rules-pagination";
-    pagination.hidden = true;
-    pagination.setAttribute("aria-label", "Страницы списка сайтов");
-    const status = node("p", "", "muted small");
-    status.id = "rules-page-status";
-    status.setAttribute("role", "status");
-    status.setAttribute("aria-live", "polite");
-    const actions = node("div", undefined, "actions");
-    for (const [id, title] of [["rules-previous", "Назад"], ["rules-next", "Далее"]]) {
-      const button = node("button", title, "editor-control");
-      button.id = id;
-      button.type = "button";
-      actions.append(button);
-    }
-    pagination.append(status, actions);
-    card.insertBefore(pagination, card.querySelector(".save-bar"));
-    const topPages = node("nav", undefined, "rules-page-picker");
-    topPages.setAttribute("aria-label", "Все страницы правил");
-    const topStatus = node("p", "Загружаем список…");
-    topStatus.id = "rules-page-overview";
-    topStatus.setAttribute("role", "status");
-    const pageButtons = node("div", undefined, "page-number-buttons");
-    pageButtons.id = "rules-page-numbers";
-    topPages.append(topStatus, pageButtons);
-    card.insertBefore(topPages, card.querySelector("table"));
-    card.querySelector(".save-title").id = "save-summary";
-    card.querySelector(".save-bar .muted").textContent = "Сохраняется весь список. Правила применятся при следующем подключении VPN.";
-    el("save-now").textContent = "Сохранить и применить сейчас…";
+    window.addEventListener("hashchange", showRules);
+    showRules();
   }
 
   prepareWorkspace();
@@ -178,12 +278,14 @@
   function updateControls() {
     editor.setAttribute("aria-busy", String(busy));
     for (const control of editor.querySelectorAll(".editor-control")) {
+      if (control.closest("#corp-phone-editor")) continue;
       control.disabled = busy || !initialized || sessionLost || control.dataset.pageBoundary === "true";
     }
     el("reload").disabled = busy || sessionLost;
     const cannotSave = busy || !initialized || sessionLost || reloadRequired || (!dirty && revision !== 0);
     el("save").disabled = cannotSave;
     el("save-now").disabled = cannotSave;
+    el("discard-site-changes").hidden = !dirty || reloadRequired;
     el("add-site").disabled = busy || !initialized || sessionLost || candidate === null;
     for (const button of editor.querySelectorAll("[data-restore]")) {
       button.disabled = busy || sessionLost || reloadRequired || Number(button.dataset.restore) === revision;
@@ -375,44 +477,15 @@
     const pages = Math.max(1, Math.ceil(shown.length / pageSize));
     rulePage = Math.min(rulePage, pages - 1);
     const start = rulePage * pageSize;
-    const remaining = Math.max(0, shown.length - Math.min(start + pageSize, shown.length));
     const fragment = document.createDocumentFragment();
     for (const rule of shown.slice(start, start + pageSize)) fragment.append(ruleRow(rule));
     el("rules").replaceChildren(fragment);
     el("rule-count").textContent = query || route !== "all" ? `Найдено: ${shown.length} из ${rules.length}` : `Всего сайтов: ${rules.length}`;
-    el("rules-pagination").hidden = shown.length <= pageSize;
-    el("rules-page-status").textContent = shown.length ? `${start + 1}–${Math.min(start + pageSize, shown.length)} из ${shown.length} · Страница ${rulePage + 1} из ${pages}` : "";
-    el("rules-page-overview").textContent = shown.length
-      ? `Показаны сайты ${start + 1}–${Math.min(start + pageSize, shown.length)} из ${shown.length}. ${remaining ? `Дальше ещё ${remaining} — выберите страницу ниже.` : rulePage > 0 ? "Это последняя страница." : "Весь выбранный список на этой странице."}`
-      : "По этому запросу сайтов нет.";
-    const pageButtons = el("rules-page-numbers");
-    pageButtons.replaceChildren();
-    if (pages > 1) {
-      const indices = pages <= 8 ? Array.from({length: pages}, (_, index) => index)
-        : [...new Set([0, rulePage - 1, rulePage, rulePage + 1, pages - 1].filter((i) => i >= 0 && i < pages))].sort((a, b) => a - b);
-      let prior = -1;
-      for (const index of indices) {
-        if (index > prior + 1) pageButtons.append(node("span", "…"));
-        const button = node("button", String(index + 1), "editor-control");
-        button.type = "button";
-        button.setAttribute("aria-label", `Страница ${index + 1} из ${pages}`);
-        if (index === rulePage) button.setAttribute("aria-current", "page");
-        button.addEventListener("click", () => {
-          rulePage = index;
-          renderRules();
-          el("rules-page-numbers").querySelector('[aria-current="page"]')?.focus();
-        });
-        pageButtons.append(button);
-        prior = index;
-      }
-    }
-    el("show-site-rules").textContent = `Правила сайтов (${rules.length})`;
+    rulePager.update(shown.length, rulePage, pageSize);
     const routeOptions = el("route-filter").options;
     routeOptions[0].textContent = `Все сайты (${rules.length})`;
-    routeOptions[1].textContent = `Без VPN (${rules.filter((r) => r.action === "direct").length})`;
+    routeOptions[1].textContent = `Напрямую — без VPN (${rules.filter((r) => r.action === "direct").length})`;
     routeOptions[2].textContent = `Через VPN (${rules.filter((r) => r.action === "proxy").length})`;
-    el("rules-previous").dataset.pageBoundary = String(rulePage === 0);
-    el("rules-next").dataset.pageBoundary = String(rulePage + 1 === pages);
     el("empty-list").hidden = shown.length !== 0;
     el("empty-list").textContent = rules.length === 0
       ? "Список пуст. Добавьте сайт выше или сохраните пустой список, чтобы убрать все прежние правила."
@@ -623,16 +696,7 @@
   });
 
   el("search").addEventListener("input", () => { rulePage = 0; renderRules(); });
-  narrowLayout.addEventListener("change", () => {
-    const nextSize = narrowLayout.matches ? 5 : 10;
-    if (nextSize === pageSize) return;
-    rulePage = Math.floor(rulePage * pageSize / nextSize);
-    pageSize = nextSize;
-    if (initialized) renderRules();
-  });
   el("route-filter").addEventListener("change", () => { rulePage = 0; renderRules(); });
-  el("rules-previous").addEventListener("click", () => { rulePage = Math.max(0, rulePage - 1); renderRules(); });
-  el("rules-next").addEventListener("click", () => { rulePage += 1; renderRules(); });
   el("save").addEventListener("click", () => run("Сохраняем правила…", () => publish("next_connection", false)));
   el("save-now").addEventListener("click", () => openConfirmation({ kind: "save" }));
   el("reload").addEventListener("click", () => {
