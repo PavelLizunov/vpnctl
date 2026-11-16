@@ -2,6 +2,29 @@
 
 Deferred work items with enough context to pick up cold. Newest first.
 
+## Editable Corp telephony
+
+P2 runtime limitation confirmed before portal guard: Corp currently forces
+IPv4 and has no IPv6 TUN address, so publishing IPv6 phone routes would falsely
+suggest usable routing. Keep canonical IPv6 in the signed wire contract, but
+reject IPv6 browser publications/restores and proxy IPv4 ranges intersecting
+mandatory physical local-network exclusions with an actionable explanation.
+
+
+P2 confirmed owner-requested gap, recorded before correction at c17cdcd1:
+the portal displays five embedded phone exceptions but cannot edit or publish
+telephony independently. Add a separately signed feed, durable revision/CAS/history,
+and browser editor without changing site-policy bytes, provisioning or credentials.
+Scope and verification: `docs/specs/corp-telephony.md`. Implementation in progress;
+local compilation and full tests prohibited; exact-SHA GitHub CI required.
+
+Source-confirmed signer retirement gap: operator removal inspected only site
+history, so a retained phone envelope could lose its trust key; a concurrent
+phone publication could race an earlier inspection. The correction adds phone
+history verification and an inventory transaction guard. This specific finding
+was recorded immediately after the correction; the feature intent above was
+recorded before implementation.
+
 ## Readable Corp diagnostics and action hierarchy
 
 P3 confirmed owner-requested gap, recorded before correction at f4575087:
@@ -182,3 +205,5 @@ restart handling, failure behavior, retention and verification requirements.
 - P2: Add preview aligns fields at their bottoms; the route hint offsets labels/controls relative to the comment and submit button. Align control rows, with hints outside them.
 - P2: Diagnostics has list/detail/retry but no delete capability, so the owner cannot remove a report and reclaim its live archive storage. Add scoped authenticated deletion with explicit confirmation and late-worker protection.
 - P2 historical exposure: docs/MIGRATION_PLAN_NINITUX_AND_NK01.md:47 at 28bade9f contains a real-looking SQLCipher key for a historical parallel Python subscription manager. It is absent current main but remains in 145 PR heads. Full value/source archived privately and verified; current validity against that manager is unverified. No key rotation or history rewrite performed by the 2026-11-16 audit. This is not evidence of current vpnctld database credentials being exposed.
+
+- P1 editable-telephony diff review: history/restore decoded a stored phone payload and checked its digest/metadata, but did not verify its retained signed envelope. An altered envelope could be restored and re-signed despite the state reader rejecting it. Source confirmed in handlers/telephony.rs::stored before correction; share full signature verification across phone state/history/restore.

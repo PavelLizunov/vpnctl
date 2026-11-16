@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use super::{PolicyError, PolicyPayload, SignedPolicy, validate_rules};
+use super::{
+    PhonePayload, PolicyError, PolicyPayload, SignedPhonePolicy, SignedPolicy,
+    validate_phone_rules, validate_rules,
+};
 
 const MAX_ENVELOPE: usize = 65536;
 const MAX_PAYLOAD: usize = 49152;
@@ -74,6 +77,30 @@ impl PolicySigningKey {
 
     pub fn sign(&self, payload: &PolicyPayload) -> Result<SignedPolicy, PolicyError> {
         validate_payload(payload)?;
+        let (payload_bytes, envelope, payload_sha256) = self.sign_bytes(payload)?;
+        Ok(SignedPolicy {
+            payload: payload.clone(),
+            payload_bytes,
+            envelope,
+            payload_sha256,
+        })
+    }
+
+    pub fn sign_phone(&self, payload: &PhonePayload) -> Result<SignedPhonePolicy, PolicyError> {
+        payload.validate()?;
+        let (payload_bytes, envelope, payload_sha256) = self.sign_bytes(payload)?;
+        Ok(SignedPhonePolicy {
+            payload: payload.clone(),
+            payload_bytes,
+            envelope,
+            payload_sha256,
+        })
+    }
+
+    fn sign_bytes(
+        &self,
+        payload: &impl Serialize,
+    ) -> Result<(Vec<u8>, Vec<u8>, String), PolicyError> {
         let payload_bytes = serde_json::to_vec(payload).map_err(|_| PolicyError)?;
         if payload_bytes.len() > MAX_PAYLOAD {
             return Err(PolicyError);
@@ -88,12 +115,7 @@ impl PolicySigningKey {
             return Err(PolicyError);
         }
         let payload_sha256 = digest(&payload_bytes);
-        Ok(SignedPolicy {
-            payload: payload.clone(),
-            payload_bytes,
-            envelope,
-            payload_sha256,
-        })
+        Ok((payload_bytes, envelope, payload_sha256))
     }
 }
 
@@ -106,6 +128,76 @@ pub fn verify_envelope(
     expected_policy_id: &str,
     keys: &BTreeMap<String, String>,
 ) -> Result<SignedPolicy, PolicyError> {
+    let (payload, payload_bytes, payload_sha256) =
+        verify_bytes(envelope, expected_policy_id, keys)?;
+    Ok(SignedPolicy {
+        payload,
+        payload_bytes,
+        envelope: envelope.to_vec(),
+        payload_sha256,
+    })
+}
+
+pub fn verify_phone_envelope(
+    envelope: &[u8],
+    expected_policy_id: &str,
+    keys: &BTreeMap<String, String>,
+) -> Result<SignedPhonePolicy, PolicyError> {
+    let (payload, payload_bytes, payload_sha256) =
+        verify_bytes(envelope, expected_policy_id, keys)?;
+    Ok(SignedPhonePolicy {
+        payload,
+        payload_bytes,
+        envelope: envelope.to_vec(),
+        payload_sha256,
+    })
+}
+
+trait WirePayload: DeserializeOwned {
+    fn validate(&self) -> Result<(), PolicyError>;
+    fn policy_id(&self) -> &str;
+    fn key_id(&self) -> &str;
+}
+
+impl WirePayload for PolicyPayload {
+    fn validate(&self) -> Result<(), PolicyError> {
+        validate_payload(self)
+    }
+    fn policy_id(&self) -> &str {
+        &self.policy_id
+    }
+    fn key_id(&self) -> &str {
+        &self.key_id
+    }
+}
+
+impl WirePayload for PhonePayload {
+    fn validate(&self) -> Result<(), PolicyError> {
+        if self.schema != 1
+            || self.kind != "telephony"
+            || !identifier(&self.policy_id)
+            || !identifier(&self.key_id)
+            || !(1..=MAX_REVISION).contains(&self.revision)
+            || !(1..=MAX_PUBLICATION).contains(&self.published_at)
+            || !matches!(self.apply.as_str(), "next_connection" | "now")
+        {
+            return Err(PolicyError);
+        }
+        validate_phone_rules(&self.rules)
+    }
+    fn policy_id(&self) -> &str {
+        &self.policy_id
+    }
+    fn key_id(&self) -> &str {
+        &self.key_id
+    }
+}
+
+fn verify_bytes<T: WirePayload>(
+    envelope: &[u8],
+    expected_policy_id: &str,
+    keys: &BTreeMap<String, String>,
+) -> Result<(T, Vec<u8>, String), PolicyError> {
     if envelope.is_empty() || envelope.len() > MAX_ENVELOPE || !identifier(expected_policy_id) {
         return Err(PolicyError);
     }
@@ -113,21 +205,16 @@ pub fn verify_envelope(
     let payload_bytes = decode_base64(&outer.payload, MAX_PAYLOAD)?;
     let signature_bytes = decode_base64(&outer.signature, 64)?;
     let signature = Signature::from_slice(&signature_bytes).map_err(|_| PolicyError)?;
-    let payload: PolicyPayload = parse_json(&payload_bytes)?;
-    validate_payload(&payload)?;
-    if payload.policy_id != expected_policy_id {
+    let payload: T = parse_json(&payload_bytes)?;
+    payload.validate()?;
+    if payload.policy_id() != expected_policy_id {
         return Err(PolicyError);
     }
-    let key = import_public_key(keys.get(&payload.key_id).ok_or(PolicyError)?)?;
+    let key = import_public_key(keys.get(payload.key_id()).ok_or(PolicyError)?)?;
     key.verify(&payload_bytes, &signature)
         .map_err(|_| PolicyError)?;
     let payload_sha256 = digest(&payload_bytes);
-    Ok(SignedPolicy {
-        payload,
-        payload_bytes,
-        envelope: envelope.to_vec(),
-        payload_sha256,
-    })
+    Ok((payload, payload_bytes, payload_sha256))
 }
 
 #[derive(Serialize, Deserialize)]

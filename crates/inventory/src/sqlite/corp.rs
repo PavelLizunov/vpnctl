@@ -136,17 +136,29 @@ fn revision_from_row(row: &sqlx::sqlite::SqliteRow) -> CorpResult<CorpRevision> 
 async fn revision_on(
     conn: &mut SqliteConnection,
     revision: u64,
+    phone: bool,
 ) -> CorpResult<Option<CorpRevision>> {
-    sqlx::query(
+    sqlx::query(if phone {
         "SELECT revision, key_id, published_at, payload_sha256, payload, envelope
-         FROM corp_policy_revisions WHERE revision = ?1",
-    )
+         FROM corp_policy_phone_revisions WHERE revision = ?1"
+    } else {
+        "SELECT revision, key_id, published_at, payload_sha256, payload, envelope
+         FROM corp_policy_revisions WHERE revision = ?1"
+    })
     .bind(revision as i64)
     .fetch_optional(conn)
     .await?
     .as_ref()
     .map(revision_from_row)
     .transpose()
+}
+
+async fn phone_floor(conn: &mut SqliteConnection) -> CorpResult<u64> {
+    unsigned(
+        sqlx::query_scalar("SELECT revision FROM corp_policy_phone_settings WHERE id = 1")
+            .fetch_one(conn)
+            .await?,
+    )
 }
 
 async fn egress_on(conn: &mut SqliteConnection) -> CorpResult<Vec<CorpVerifiedEgress>> {
@@ -234,6 +246,23 @@ impl SqliteInventory {
         if status.enabled == enabled && current.credentials == credentials {
             tx.commit().await?;
             return Ok(status);
+        }
+        for old_key in &current.credentials.signing_keys {
+            if !credentials
+                .signing_keys
+                .iter()
+                .any(|key| key.id == old_key.id && key.spki == old_key.spki)
+            {
+                let retained: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM corp_policy_phone_revisions WHERE key_id = ?1)",
+                )
+                .bind(&old_key.id)
+                .fetch_one(&mut *tx)
+                .await?;
+                if retained {
+                    return Err(CorpStoreError::Conflict);
+                }
+            }
         }
         advance_authority(&mut tx, &mut status).await?;
         status.enabled = enabled;
@@ -530,38 +559,71 @@ impl SqliteInventory {
         publication: &CorpPublication,
         actor: &str,
     ) -> CorpResult<CorpRevision> {
+        self.publish_corp_feed(publication, actor, false).await
+    }
+
+    pub async fn publish_corp_phone_policy(
+        &self,
+        publication: &CorpPublication,
+        actor: &str,
+    ) -> CorpResult<CorpRevision> {
+        self.publish_corp_feed(publication, actor, true).await
+    }
+
+    async fn publish_corp_feed(
+        &self,
+        publication: &CorpPublication,
+        actor: &str,
+        phone: bool,
+    ) -> CorpResult<CorpRevision> {
         validation::actor(actor)?;
         let mut conn = durable_connection(self).await?;
         let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
         let mut status = required_record(&mut tx).await?.status;
         require_active(&mut tx, &status).await?;
         require_version(&status, publication.expected_config_version)?;
+        if phone {
+            status.revision = phone_floor(&mut tx).await?;
+        }
         if status.revision != publication.expected_revision
             || status.active_key_id != publication.key_id
         {
             return Err(CorpStoreError::Conflict);
         }
-        let rule_count = validation::publication(publication, &status)?;
+        let rule_count = validation::publication(publication, &status, phone)?;
         status.revision = validation::next_counter(status.revision)?;
         sqlx::query(
-            "INSERT INTO corp_policy_revisions (revision, key_id, published_at, payload_sha256, payload, envelope)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            if phone { "INSERT INTO corp_policy_phone_revisions (revision, key_id, published_at, payload_sha256, payload, envelope)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)" } else { "INSERT INTO corp_policy_revisions (revision, key_id, published_at, payload_sha256, payload, envelope)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)" },
         )
         .bind(status.revision as i64).bind(&publication.key_id).bind(publication.published_at)
         .bind(&publication.payload_sha256).bind(&publication.payload).bind(&publication.envelope)
         .execute(&mut *tx).await?;
-        sqlx::query("UPDATE corp_policy_settings SET revision = ?1 WHERE id = 1")
-            .bind(status.revision as i64)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM corp_policy_revisions WHERE revision <= ?1")
-            .bind(status.revision.saturating_sub(100) as i64)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(if phone {
+            "UPDATE corp_policy_phone_settings SET revision = ?1 WHERE id = 1"
+        } else {
+            "UPDATE corp_policy_settings SET revision = ?1 WHERE id = 1"
+        })
+        .bind(status.revision as i64)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(if phone {
+            "DELETE FROM corp_policy_phone_revisions WHERE revision <= ?1"
+        } else {
+            "DELETE FROM corp_policy_revisions WHERE revision <= ?1"
+        })
+        .bind(status.revision.saturating_sub(100) as i64)
+        .execute(&mut *tx)
+        .await?;
         audit(
             &mut tx,
             actor,
-            "corp.policy.publish",
+            if phone {
+                "corp.telephony.publish"
+            } else {
+                "corp.policy.publish"
+            },
             &status,
             &serde_json::json!({
                 "revision": status.revision, "key_id": publication.key_id,
@@ -584,32 +646,75 @@ impl SqliteInventory {
         &self,
         expected_config_version: u64,
     ) -> CorpResult<Option<CorpRevision>> {
+        self.corp_current_feed(expected_config_version, false).await
+    }
+
+    pub async fn corp_current_phone_policy(
+        &self,
+        expected_config_version: u64,
+    ) -> CorpResult<Option<CorpRevision>> {
+        self.corp_current_feed(expected_config_version, true).await
+    }
+
+    async fn corp_current_feed(
+        &self,
+        expected_config_version: u64,
+        phone: bool,
+    ) -> CorpResult<Option<CorpRevision>> {
         // One read snapshot binds credential version and current publication.
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let status = required_record(&mut tx).await?.status;
         require_active(&mut tx, &status).await?;
         require_version(&status, expected_config_version)?;
-        let result = revision_on(&mut tx, status.revision).await?;
+        let revision = if phone {
+            phone_floor(&mut tx).await?
+        } else {
+            status.revision
+        };
+        let result = revision_on(&mut tx, revision, phone).await?;
         tx.commit().await?;
         Ok(result)
     }
 
     pub async fn corp_revision(&self, revision: u64) -> CorpResult<Option<CorpRevision>> {
+        self.corp_feed_revision(revision, false).await
+    }
+
+    pub async fn corp_phone_revision(&self, revision: u64) -> CorpResult<Option<CorpRevision>> {
+        self.corp_feed_revision(revision, true).await
+    }
+
+    async fn corp_feed_revision(
+        &self,
+        revision: u64,
+        phone: bool,
+    ) -> CorpResult<Option<CorpRevision>> {
         if !(1..=CORP_MAX_REVISION).contains(&revision) {
             return Err(CorpStoreError::InvalidInput("revision is out of range"));
         }
         let mut conn = self.pool.acquire().await?;
-        revision_on(&mut conn, revision).await
+        revision_on(&mut conn, revision, phone).await
     }
 
     pub async fn corp_history(&self, limit: usize) -> CorpResult<Vec<CorpRevision>> {
+        self.corp_feed_history(limit, false).await
+    }
+
+    pub async fn corp_phone_history(&self, limit: usize) -> CorpResult<Vec<CorpRevision>> {
+        self.corp_feed_history(limit, true).await
+    }
+
+    async fn corp_feed_history(&self, limit: usize, phone: bool) -> CorpResult<Vec<CorpRevision>> {
         if !(1..=100).contains(&limit) {
             return Err(CorpStoreError::InvalidInput("history limit must be 1-100"));
         }
-        let rows = sqlx::query(
+        let rows = sqlx::query(if phone {
             "SELECT revision, key_id, published_at, payload_sha256, payload, envelope
-             FROM corp_policy_revisions ORDER BY revision DESC LIMIT ?1",
-        )
+             FROM corp_policy_phone_revisions ORDER BY revision DESC LIMIT ?1"
+        } else {
+            "SELECT revision, key_id, published_at, payload_sha256, payload, envelope
+             FROM corp_policy_revisions ORDER BY revision DESC LIMIT ?1"
+        })
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;

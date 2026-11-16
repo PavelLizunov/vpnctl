@@ -2021,7 +2021,7 @@ mod spec {
                 )
                 .unwrap();
             }
-            for name in ["corp.css", "corp.js"] {
+            for name in ["corp.css", "corp.js", "corp-phone.js"] {
                 let asset = fixture
                     .call(request(
                         "GET",
@@ -2092,5 +2092,230 @@ mod spec {
         assert_eq!(reader.status, StatusCode::OK);
         assert_eq!(reader.headers["referrer-policy"], "no-referrer");
         security_headers(&reader);
+    }
+
+    const PHONE: &str = "/api/v1/corp/portal/telephony";
+
+    fn phone_reader(token: Option<&str>) -> Request<Body> {
+        let mut value = reader_request(Some(HOST), token);
+        *value.uri_mut() = "/api/v1/corp/policy/telephony".parse().unwrap();
+        value
+    }
+
+    async fn phone_post(
+        fixture: &Fixture,
+        path: &str,
+        body: Value,
+        cookie: &str,
+        csrf: &str,
+    ) -> Response {
+        fixture
+            .call(browser_request(
+                "POST",
+                &format!("{PHONE}/{path}"),
+                Body::from(body.to_string()),
+                Some(cookie),
+                Some(csrf),
+            ))
+            .await
+    }
+
+    #[tokio::test]
+    async fn telephony_explicit_publication_reader_history_and_restore_preserve_site_feed() {
+        let fixture = Fixture::new(true, true).await;
+        let site = fixture.publish_direct(vec![], "next_connection").await;
+        let (cookie, csrf) = fixture.login().await;
+        assert_eq!(
+            fixture.call(phone_reader(Some(READER))).await.status,
+            StatusCode::NOT_FOUND
+        );
+        let initial = fixture
+            .call(browser_request(
+                "GET",
+                PHONE,
+                Body::empty(),
+                Some(&cookie),
+                None,
+            ))
+            .await;
+        assert_eq!(initial.status, StatusCode::OK);
+        assert_eq!(initial.json()["revision"], 0);
+        assert_eq!(initial.json()["rules"].as_array().unwrap().len(), 5);
+        let normalized = phone_post(
+            &fixture,
+            "normalize",
+            json!({"type":"ip_cidr","value":"198.51.100.35/24"}),
+            &cookie,
+            &csrf,
+        )
+        .await;
+        assert_eq!(normalized.status, StatusCode::OK);
+        assert_eq!(normalized.json()["value"], "198.51.100.0/24");
+        let rules = json!([
+            {"type":"domain_suffix","value":"uiscom.ru","action":"proxy","comment":""},
+            {"type":"ip_cidr","value":"198.51.100.0/24","action":"direct","comment":""},
+        ]);
+        let saved = phone_post(&fixture, "rules", json!({"expected_revision":0,"apply":"next_connection","confirm_interrupt":false,"rules":rules}), &cookie, &csrf).await;
+        assert_eq!(saved.status, StatusCode::OK);
+        assert_eq!(saved.json()["revision"], 1);
+        let envelope = fixture.call(phone_reader(Some(READER))).await;
+        assert_eq!(envelope.status, StatusCode::OK);
+        let key = &fixture.credentials.signing_keys[0];
+        let signed = vpnctld::corp_policy::verify_phone_envelope(
+            &envelope.bytes,
+            "http-spec-policy",
+            &BTreeMap::from([(key.id.clone(), key.spki.clone())]),
+        )
+        .unwrap();
+        assert_eq!(serde_json::to_value(signed.payload.rules).unwrap(), rules);
+        let empty = phone_post(&fixture, "rules", json!({"expected_revision":1,"apply":"next_connection","confirm_interrupt":false,"rules":[]}), &cookie, &csrf).await;
+        assert_eq!(empty.status, StatusCode::OK);
+        let restored = phone_post(&fixture, "restore", json!({"expected_revision":2,"revision":1,"apply":"next_connection","confirm_interrupt":false}), &cookie, &csrf).await;
+        assert_eq!(restored.status, StatusCode::OK);
+        assert_eq!(restored.json()["revision"], 3);
+        let current = fixture
+            .call(browser_request(
+                "GET",
+                PHONE,
+                Body::empty(),
+                Some(&cookie),
+                None,
+            ))
+            .await;
+        assert_eq!(current.json()["rules"], rules);
+        let history = fixture
+            .call(browser_request(
+                "GET",
+                &format!("{PHONE}/history"),
+                Body::empty(),
+                Some(&cookie),
+                None,
+            ))
+            .await;
+        assert_eq!(history.json().as_array().unwrap().len(), 3);
+        assert_eq!(
+            fixture
+                .call(reader_request(Some(HOST), Some(READER)))
+                .await
+                .bytes,
+            site
+        );
+        assert_eq!(
+            fixture
+                .state
+                .inv
+                .corp_record()
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                .revision,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn telephony_browser_and_reader_authorities_csrf_origin_egress_cas_and_validation_fail_closed()
+     {
+        let fixture = Fixture::new(true, true).await;
+        let (cookie, csrf) = fixture.login().await;
+        let publication = json!({"expected_revision":0,"apply":"next_connection","confirm_interrupt":false,"rules":[]});
+        assert_eq!(
+            fixture.call(phone_reader(None)).await.status,
+            StatusCode::UNAUTHORIZED
+        );
+        let mut cookie_reader = phone_reader(None);
+        cookie_reader
+            .headers_mut()
+            .insert("cookie", cookie.parse().unwrap());
+        assert_eq!(
+            fixture.call(cookie_reader).await.status,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            fixture
+                .call(browser_request("GET", PHONE, Body::empty(), None, None))
+                .await
+                .status,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            phone_post(&fixture, "rules", publication.clone(), &cookie, "wrong")
+                .await
+                .status,
+            StatusCode::FORBIDDEN
+        );
+        let mut bad_origin = browser_request(
+            "POST",
+            &format!("{PHONE}/rules"),
+            Body::from(publication.to_string()),
+            Some(&cookie),
+            Some(&csrf),
+        );
+        bad_origin
+            .headers_mut()
+            .insert("origin", "https://example.com".parse().unwrap());
+        assert_eq!(fixture.call(bad_origin).await.status, StatusCode::FORBIDDEN);
+        let mut bad_egress = browser_request("GET", PHONE, Body::empty(), Some(&cookie), None);
+        bad_egress.extensions_mut().insert(ConnectInfo(
+            "203.0.113.77:12345".parse::<SocketAddr>().unwrap(),
+        ));
+        assert_eq!(fixture.call(bad_egress).await.status, StatusCode::FORBIDDEN);
+        for rule in [
+            json!({"type":"domain_suffix","value":"admin.corp.ninitux.com","action":"direct","comment":""}),
+            json!({"type":"ip_cidr","value":"198.51.100.35/24","action":"proxy","comment":""}),
+            json!({"type":"ip_cidr","value":"::ffff:192.0.2.1/128","action":"proxy","comment":""}),
+        ] {
+            let mut body = publication.clone();
+            body["rules"] = json!([rule]);
+            assert_eq!(
+                phone_post(&fixture, "rules", body, &cookie, &csrf)
+                    .await
+                    .status,
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+        }
+        for value in [
+            "2001:db8::/32",
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "169.254.0.0/16",
+            "127.0.0.0/8",
+            "0.0.0.0/0",
+        ] {
+            let mut body = publication.clone();
+            body["rules"] = json!([{"type":"ip_cidr","value":value,"action":"proxy","comment":""}]);
+            let rejected = phone_post(&fixture, "rules", body, &cookie, &csrf).await;
+            assert_eq!(rejected.status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert!(rejected.json()["message"].as_str().unwrap().contains(
+                if value.contains(':') {
+                    "IPv4"
+                } else {
+                    "локальной"
+                }
+            ));
+        }
+        let mut now = publication.clone();
+        now["apply"] = json!("now");
+        assert_eq!(
+            phone_post(&fixture, "rules", now, &cookie, &csrf)
+                .await
+                .status,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            phone_post(&fixture, "rules", publication.clone(), &cookie, &csrf)
+                .await
+                .status,
+            StatusCode::OK
+        );
+        assert_eq!(
+            phone_post(&fixture, "rules", publication, &cookie, &csrf)
+                .await
+                .status,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(phone_post(&fixture, "restore", json!({"expected_revision":1,"revision":99,"apply":"next_connection","confirm_interrupt":false}), &cookie, &csrf).await.status, StatusCode::NOT_FOUND);
     }
 }

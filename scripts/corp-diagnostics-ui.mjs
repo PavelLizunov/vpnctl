@@ -15,7 +15,7 @@ export async function verifyDiagnostics(browser, expect, shot) {
   assert.equal(metadata.headers["set-cookie"], undefined);
   const fixture = { ...metadata, body: await readFile(path.join(fixtures, "diagnostics.html"), "utf8") };
   const assets = {};
-  for (const name of ["corp.css", "corp.js", "corp-diagnostics.js"]) {
+  for (const name of ["corp.css", "corp.js", "corp-phone.js", "corp-diagnostics.js"]) {
     let body = await readFile(path.join(source, name), "utf8");
     if (name === "corp.css") body = await readFile(path.join(source, "../css/theme.css"), "utf8") + body;
     assert.equal(await readFile(path.join(fixtures, "assets", name), "utf8"), body,

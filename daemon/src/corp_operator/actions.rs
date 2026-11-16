@@ -267,6 +267,23 @@ pub(super) async fn perform(state: &OperatorState, path: &str, form: &Form) -> R
                     return Err(fail(StatusCode::CONFLICT));
                 }
             }
+            for revision in state
+                .app
+                .inv
+                .corp_phone_history(100)
+                .await
+                .map_err(|error| store(&error))?
+            {
+                let signed = crate::corp_policy::verify_phone_envelope(
+                    &revision.envelope,
+                    &record.status.policy_id,
+                    &keys,
+                )
+                .map_err(|_| unavailable())?;
+                if revision.key_id == id || signed.payload.key_id == id {
+                    return Err(fail(StatusCode::CONFLICT));
+                }
+            }
             record.credentials.signing_keys.retain(|key| key.id != id);
         }
         "sessions/revoke" => {

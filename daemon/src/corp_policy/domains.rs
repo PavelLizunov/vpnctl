@@ -110,7 +110,7 @@ fn protected(domain: &str) -> bool {
         .any(|protected| intersects(domain, protected))
 }
 
-fn intersects(left: &str, right: &str) -> bool {
+pub(super) fn intersects(left: &str, right: &str) -> bool {
     left == right || is_subdomain(left, right) || is_subdomain(right, left)
 }
 
@@ -120,7 +120,7 @@ fn is_subdomain(child: &str, parent: &str) -> bool {
         .is_some_and(|prefix| prefix.ends_with('.'))
 }
 
-fn normalize_dns(input: &str) -> Result<String, PolicyError> {
+pub(super) fn normalize_dns(input: &str) -> Result<String, PolicyError> {
     if input.is_empty()
         || input.encode_utf16().count() > 253
         || input.chars().any(|c| c.is_control() || c.is_whitespace())

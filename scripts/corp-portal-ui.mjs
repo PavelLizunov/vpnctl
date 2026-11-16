@@ -45,6 +45,9 @@ const assets = Object.fromEntries(await Promise.all(["css", "js"].map(async (ext
     `Router-exported corp.${extension} must match the candidate source`);
   return [`/assets/corp.${extension}`, { body, contentType: extension === "css" ? "text/css" : "text/javascript" }];
 })));
+assets["/assets/corp-phone.js"] = { body: await readFile(path.join(root, "daemon/assets/corp-portal/corp-phone.js"), "utf8"), contentType: "text/javascript" };
+assert.equal(await readFile(path.join(fixtures, "assets/corp-phone.js"), "utf8"), assets["/assets/corp-phone.js"].body);
+const phoneDefaults = ["uiscom.ru", "uiscom.co", "comagic.ru", "callbackhunter.com", "195.211.120.35/32"].map((value) => ({ type: value.includes("/") ? "ip_cidr" : "domain_suffix", value, action: "direct", comment: "" }));
 await mkdir(screenshots, { recursive: true });
 const browser = await chromium.launch();
 const completed = [];
@@ -71,6 +74,7 @@ async function harness(pageName, width, rules = initialRules) {
     revision: 7, rules: structuredClone(rules), failure: null,
     snapshots: new Map([[6, structuredClone(historicalRules)], [7, structuredClone(rules)]]),
     timings: new Map([[6, "next_connection"], [7, "next_connection"]]),
+    phoneRevision: 0, phoneRules: structuredClone(phoneDefaults), phoneSnapshots: new Map(),
   };
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => {
@@ -104,6 +108,26 @@ async function harness(pageName, width, rules = initialRules) {
         return;
       }
       assert.ok(state.authenticated, "Access page attempted an API call");
+      if (endpoint.startsWith("/api/v1/corp/portal/telephony")) {
+        const path = endpoint.slice("/api/v1/corp/portal/telephony".length);
+        const post = request.method() === "POST";
+        const body = post ? request.postDataJSON() : undefined;
+        calls.push({ endpoint, body });
+        if (post) {
+          assert.equal(request.headers()["x-corp-csrf"], csrf);
+          assert.equal(request.headers().origin, origin);
+        }
+        const respond = (json) => route.fulfill({status: 200, json});
+        if (!path) return respond({revision: state.phoneRevision, rules: state.phoneRules, csrf});
+        if (path === "/history") return respond([...state.phoneSnapshots].reverse().map(([revision, rules]) => ({revision, rule_count:rules.length, published_at:publishedAt + revision, apply:"next_connection"})));
+        if (path === "/normalize") return respond({type: body.type, value: body.type === "ip_cidr" ? "198.51.100.42/32" : "phone.example.com"});
+        assert.ok(["/rules", "/restore"].includes(path));
+        assert.equal(body.expected_revision, state.phoneRevision);
+        state.phoneRules = structuredClone(path === "/restore" ? state.phoneSnapshots.get(body.revision) : body.rules);
+        state.phoneRevision += 1;
+        state.phoneSnapshots.set(state.phoneRevision, structuredClone(state.phoneRules));
+        return respond({revision:state.phoneRevision,published_at:publishedAt + state.phoneRevision});
+      }
       assert.ok(["/api/corp/state", "/api/corp/normalize", "/api/corp/rules", "/api/corp/history", "/api/corp/restore"].includes(endpoint), `Unexpected path: ${endpoint}`);
       const post = ["/api/corp/normalize", "/api/corp/rules", "/api/corp/restore"].includes(endpoint);
       assert.equal(request.method(), post ? "POST" : "GET");
@@ -477,11 +501,42 @@ async function paginationFlow(width) {
     for (const entry of ["uiscom.ru", "uiscom.co", "comagic.ru", "callbackhunter.com", "195.211.120.35/32"]) {
       await expect(voice.getByText(entry, {exact: true})).toHaveCount(1);
     }
-    for (const control of await voice.locator("input, select, textarea").all()) {
-      assert.ok(await control.isDisabled() || await control.getAttribute("readonly") !== null, "Protected VoIP defaults must be read-only");
-    }
-    assert.equal(writes(h).length, countBeforeVoice, "Opening VoIP must not publish editable policy");
-    await shot(page, "voice-protected-defaults", width);
+    await expect(voice.getByText("Для редактируемой телефонии", {exact: false})).toContainText("2.50.10");
+    await expect(voice.locator(".phone-rule-row")).toHaveCount(5);
+    await expect(voice.locator(".phone-rule-row select").first()).toBeEnabled();
+    await voice.locator(".phone-rule-row select").first().selectOption("proxy");
+    assert.equal(writes(h).length, countBeforeVoice, "Editing phone draft must not publish site policy");
+    await voice.getByRole("button", {name:"Сохранить телефонию",exact:true}).click();
+    await expect(voice.getByRole("status")).toContainText("Телефония сохранена на сервере");
+    assert.equal(h.state.phoneRevision, 1);
+    assert.equal(h.state.phoneRules[0].action, "proxy");
+    assert.equal(writes(h).length, countBeforeVoice);
+    await voice.locator("summary").filter({hasText:"Добавить адрес телефонии"}).click();
+    await voice.getByLabel("Тип адреса",{exact:true}).selectOption("ip_cidr");
+    await voice.getByLabel("Адрес",{exact:true}).fill("198.51.100.42");
+    await voice.getByRole("button",{name:"Проверить адрес",exact:true}).click();
+    await expect(voice.getByText("198.51.100.42/32",{exact:true})).toBeVisible();
+    await voice.getByRole("button",{name:"Добавить в список телефонии",exact:true}).click();
+    await expect(voice.locator(".phone-rule-row")).toHaveCount(6);
+    await voice.getByRole("button",{name:"Сохранить телефонию",exact:true}).click();
+    await expect(voice.getByRole("status")).toContainText("Телефония сохранена на сервере");
+    assert.equal(h.state.phoneRules[5].value,"198.51.100.42/32");
+    await shot(page, "voice-editable-addresses", width);
+    for (let count = 6; count > 0; count--) await voice.locator(".phone-rule-row button").first().click();
+    await expect(voice.locator(".phone-rule-row")).toHaveCount(0);
+    await voice.getByRole("button",{name:"Сохранить телефонию",exact:true}).click();
+    await expect(voice.getByRole("status")).toContainText("Телефония сохранена на сервере");
+    assert.deepEqual(h.state.phoneRules, []);
+    await voice.locator("summary").filter({hasText:"История телефонии"}).click();
+    await expect(voice.locator(".history-list li")).toHaveCount(3);
+    page.once("dialog", (dialog) => dialog.accept());
+    await voice.locator(".history-list li").last().getByRole("button").click();
+    await expect(voice.locator(".phone-rule-row")).toHaveCount(5);
+    await expect(voice.locator(".history-list li")).toHaveCount(4);
+    assert.equal(h.state.phoneRevision, 4);
+    assert.equal(h.state.phoneRules[0].action, "proxy");
+    assert.equal(writes(h).length, countBeforeVoice);
+    await shot(page, "voice-history-restored", width);
     await page.locator("#show-site-rules").click();
     await expect(voice).toBeHidden();
     await expect(page.locator("#site-rules-panel")).toBeVisible();

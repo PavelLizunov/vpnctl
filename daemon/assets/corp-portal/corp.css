@@ -230,3 +230,10 @@ dialog > * + * { margin-top: 1rem; }
 .provenance dd { font-family: var(--mono); font-size: .8rem; }
 .provenance dd { margin-left: 0; }
 @media (max-width: 740px) { .diagnostics-layout { grid-template-columns: minmax(0, 1fr); } }
+
+.phone-rule-list { display: grid; gap: 0.75rem; margin-block: 1rem; }
+.phone-rule-row { display: grid; grid-template-columns: minmax(12rem, 1.2fr) minmax(12rem, 1fr) minmax(9rem, 1fr) auto; align-items: start; gap: 1rem; padding-block: 0.75rem; border-bottom: 1px solid var(--border); }
+.phone-rule-row strong { overflow-wrap: anywhere; }
+#corp-phone-editor > button { margin: 0.5rem 0.5rem 0.5rem 0; }
+#corp-phone-editor form { display: grid; gap: 0.75rem; margin-block: 1rem; }
+@media (max-width: 740px) { .phone-rule-row { grid-template-columns: 1fr; gap: 0.5rem; } }

@@ -93,22 +93,10 @@
     voice.hidden = true;
     voiceButton.setAttribute("aria-controls", voice.id);
     voice.append(node("h2", "Телефония (VoIP) — UIS / CoMagic"));
-    voice.append(node("p", "Эти исключения встроены в Corp-приложение и направляют указанные адреса без VPN. Они не входят в список сайтов, который вы редактируете здесь."));
-    const fixedRules = node("dl", undefined, "voice-rule-list");
-    for (const [address, purpose] of [
-      ["uiscom.ru", "UIS: основной домен и поддомены"],
-      ["uiscom.co", "UIS: дополнительный домен и поддомены"],
-      ["comagic.ru", "CoMagic: домен и поддомены"],
-      ["callbackhunter.com", "CallbackHunter: домен и поддомены"],
-      ["195.211.120.35/32", "Отдельный SIP-сервер UIS"],
-    ]) {
-      const item = node("div");
-      item.append(node("dt", address), node("dd", `${purpose}. Напрямую — без VPN.`));
-      fixedRules.append(item);
-    }
-    voice.append(fixedRules, node("h3", "Как изменить телефонию"));
-    voice.append(node("p", "На сайте эти встроенные исключения не редактируются. Для другого SIP-сервера или адресов передачи звука нужно отдельно обновить настройки приложения."));
-    voice.append(node("h3", "Если звонок не работает"), node("p", "Отправьте диагностику из приложения сразу после проблемного звонка, затем откройте раздел «Диагностика». Сам список исключений не подтверждает исправность звонков."));
+    voice.append(node("p", "Управляйте доменами и IP-адресами телефонии отдельным списком. Изменения сохраняются отдельно от правил сайтов."));
+    const phoneEditor = node("div");
+    phoneEditor.id = "corp-phone-editor";
+    voice.append(phoneEditor);
     card.after(voice);
     function showRules(kind) {
       const telephony = kind === "voice";
@@ -583,6 +571,7 @@
       throw error;
     }
     dirty = false;
+    window.corpPhoneDirty = false;
     window.location.assign("/");
   }
 
@@ -649,7 +638,7 @@
     else run("Загружаем актуальные правила…", async () => { await loadState(); await refreshOpenHistory(); });
   });
   el("logout").addEventListener("click", () => {
-    if (dirty) openConfirmation({ kind: "logout" });
+    if (dirty || window.corpPhoneDirty) openConfirmation({ kind: "logout" });
     else run("Выходим…", logout);
   });
   el("refresh-history").addEventListener("click", () => run("Загружаем историю…", async () => {

@@ -221,7 +221,11 @@ pub(super) fn session(value: &CorpSessionInput, now: i64) -> CorpResult<()> {
     Ok(())
 }
 
-pub(super) fn publication(value: &CorpPublication, status: &CorpStatus) -> CorpResult<usize> {
+pub(super) fn publication(
+    value: &CorpPublication,
+    status: &CorpStatus,
+    phone: bool,
+) -> CorpResult<usize> {
     if !identifier(&value.key_id)
         || !unix_time(value.published_at)
         || !hex_digest(&value.payload_sha256)
@@ -235,7 +239,8 @@ pub(super) fn publication(value: &CorpPublication, status: &CorpStatus) -> CorpR
         .as_object()
         .ok_or_else(|| invalid("payload must be an object"))?;
     let revision = next_counter(status.revision)?;
-    if object.len() != 7
+    if object.len() != (if phone { 8 } else { 7 })
+        || (phone && payload["kind"].as_str() != Some("telephony"))
         || payload["schema"].as_u64() != Some(1)
         || payload["policy_id"].as_str() != Some(status.policy_id.as_str())
         || payload["key_id"].as_str() != Some(value.key_id.as_str())
@@ -248,10 +253,12 @@ pub(super) fn publication(value: &CorpPublication, status: &CorpStatus) -> CorpR
     let rules = payload["rules"]
         .as_array()
         .ok_or_else(|| invalid("rules must be an array"))?;
-    if rules.len() > 512
+    if rules.len() > if phone { 64 } else { 512 }
         || rules.iter().any(|rule| {
-            rule.as_object().is_none_or(|o| o.len() != 3)
-                || rule["domain"]
+            rule.as_object()
+                .is_none_or(|o| o.len() != if phone { 4 } else { 3 })
+                || (phone && !matches!(rule["type"].as_str(), Some("domain_suffix" | "ip_cidr")))
+                || rule[if phone { "value" } else { "domain" }]
                     .as_str()
                     .is_none_or(|domain| domain.is_empty() || domain.len() > 253)
                 || !matches!(rule["action"].as_str(), Some("direct" | "proxy"))

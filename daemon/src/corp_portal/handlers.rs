@@ -1,3 +1,5 @@
+mod telephony;
+
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
@@ -43,7 +45,7 @@ fn unauthorized() -> Response {
 fn invalid() -> Response {
     error(
         StatusCode::UNPROCESSABLE_ENTITY,
-        "Проверьте адреса сайтов, маршруты и комментарии.",
+        "Проверьте адреса, маршруты и заметки.",
     )
 }
 fn conflict() -> Response {
@@ -94,6 +96,13 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
                 )
                     .into_response();
             }
+            "/assets/corp-phone.js" => {
+                return (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    views::PHONE_JS,
+                )
+                    .into_response();
+            }
             "/assets/corp.js" => {
                 return (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
@@ -101,12 +110,21 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
                 )
                     .into_response();
             }
-            "/api/v1/corp/policy" => return reader(&state.app, request.headers()).await,
+            "/api/v1/corp/policy" => return reader(&state.app, request.headers(), false).await,
+            "/api/v1/corp/policy/telephony" => {
+                if request.uri().query().is_some() {
+                    return invalid();
+                }
+                return reader(&state.app, request.headers(), true).await;
+            }
             _ => {}
         }
     }
     let diagnostics_route = path == "/api/corp/reports" || path.starts_with("/api/corp/reports/");
-    if !diagnostics_route
+    let phone_route = path == "/api/v1/corp/portal/telephony"
+        || path.starts_with("/api/v1/corp/portal/telephony/");
+    if !phone_route
+        && !diagnostics_route
         && !matches!(
             path.as_str(),
             "/" | "/diagnostics"
@@ -158,6 +176,9 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
                 StatusCode::FORBIDDEN,
                 "Не удалось проверить запрос. Обновите страницу.",
             );
+        }
+        if phone_route {
+            return telephony::handle(&state.app, request, peer, context).await;
         }
         if diagnostics_route {
             return diagnostics_request(&state.app, request).await;
@@ -234,6 +255,9 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
             _ => {}
         }
     } else if method == Method::GET {
+        if phone_route {
+            return telephony::handle(&state.app, request, peer, context).await;
+        }
         if diagnostics_route {
             return diagnostics_request(&state.app, request).await;
         }
@@ -557,14 +581,69 @@ async fn publish(
     record: CorpRecord,
     input: Publish,
 ) -> Response {
+    publish_feed(
+        app,
+        headers,
+        peer,
+        record,
+        FeedPublish {
+            expected_revision: input.expected_revision,
+            apply: input.apply,
+            confirm_interrupt: input.confirm_interrupt,
+            rules: PublicationRules::Sites(input.rules),
+        },
+    )
+    .await
+}
+
+enum PublicationRules {
+    Sites(Vec<PolicyRule>),
+    Phone(Vec<crate::corp_policy::PhoneRule>),
+}
+struct FeedPublish {
+    expected_revision: u64,
+    apply: String,
+    confirm_interrupt: bool,
+    rules: PublicationRules,
+}
+
+async fn publish_feed(
+    app: &AppState,
+    headers: &HeaderMap,
+    peer: Option<IpAddr>,
+    record: CorpRecord,
+    input: FeedPublish,
+) -> Response {
+    if let PublicationRules::Phone(rules) = &input.rules {
+        if let Err(response) = telephony::runtime_routes(rules) {
+            return *response;
+        }
+    }
+    let valid_rules = match &input.rules {
+        PublicationRules::Sites(rules) => validate_rules(rules),
+        PublicationRules::Phone(rules) => crate::corp_policy::validate_phone_rules(rules),
+    };
     if !matches!(input.apply.as_str(), "next_connection" | "now")
         || (input.apply == "now" && !input.confirm_interrupt)
-        || validate_rules(&input.rules).is_err()
+        || valid_rules.is_err()
     {
         return invalid();
     }
-    if input.expected_revision != record.status.revision
-        || record.status.revision >= vpnctl_inventory::CORP_MAX_REVISION
+    let phone = matches!(&input.rules, PublicationRules::Phone(_));
+    let current_revision = if phone {
+        match app
+            .inv
+            .corp_current_phone_policy(record.status.config_version)
+            .await
+        {
+            Ok(current) => current.map_or(0, |row| row.revision),
+            Err(error_value) => return store_error(&error_value),
+        }
+    } else {
+        record.status.revision
+    };
+    if input.expected_revision != current_revision
+        || current_revision >= vpnctl_inventory::CORP_MAX_REVISION
     {
         return conflict();
     }
@@ -591,16 +670,32 @@ async fn publish(
     let Ok(timestamp) = u64::try_from(published_at) else {
         return unavailable();
     };
-    let payload = PolicyPayload {
-        schema: 1,
-        policy_id: record.status.policy_id.clone(),
-        key_id: key.id.clone(),
-        revision: record.status.revision + 1,
-        published_at: timestamp,
-        apply: input.apply,
-        rules: input.rules,
+    let signed = match input.rules {
+        PublicationRules::Sites(rules) => signer
+            .sign(&PolicyPayload {
+                schema: 1,
+                policy_id: record.status.policy_id.clone(),
+                key_id: key.id.clone(),
+                revision: current_revision + 1,
+                published_at: timestamp,
+                apply: input.apply,
+                rules,
+            })
+            .map(|signed| (signed.payload_sha256, signed.payload_bytes, signed.envelope)),
+        PublicationRules::Phone(rules) => signer
+            .sign_phone(&crate::corp_policy::PhonePayload {
+                schema: 1,
+                kind: "telephony".into(),
+                policy_id: record.status.policy_id.clone(),
+                key_id: key.id.clone(),
+                revision: current_revision + 1,
+                published_at: timestamp,
+                apply: input.apply,
+                rules,
+            })
+            .map(|signed| (signed.payload_sha256, signed.payload_bytes, signed.envelope)),
     };
-    let signed = match signer.sign(&payload) {
+    let (payload_sha256, payload, envelope) = match signed {
         Ok(signed) => signed,
         Err(_) => return invalid(),
     };
@@ -612,19 +707,24 @@ async fn publish(
         return conflict();
     }
     let publication = CorpPublication {
-        expected_revision: record.status.revision,
+        expected_revision: current_revision,
         expected_config_version: record.status.config_version,
         key_id: key.id.clone(),
         published_at,
-        payload_sha256: signed.payload_sha256.to_ascii_lowercase(),
-        payload: signed.payload_bytes,
-        envelope: signed.envelope,
+        payload_sha256: payload_sha256.to_ascii_lowercase(),
+        payload,
+        envelope,
     };
-    match app
-        .inv
-        .publish_corp_policy(&publication, "corp.browser")
-        .await
-    {
+    let result = if phone {
+        app.inv
+            .publish_corp_phone_policy(&publication, "corp.browser")
+            .await
+    } else {
+        app.inv
+            .publish_corp_policy(&publication, "corp.browser")
+            .await
+    };
+    match result {
         Ok(revision) => {
             Json(json!({"revision":revision.revision,"published_at":revision.published_at}))
                 .into_response()
@@ -633,7 +733,7 @@ async fn publish(
     }
 }
 
-async fn reader(app: &AppState, headers: &HeaderMap) -> Response {
+async fn reader(app: &AppState, headers: &HeaderMap, phone: bool) -> Response {
     let record = match active_record(app).await {
         Ok(record) => record,
         Err(response) => return api_gate_error(*response),
@@ -654,11 +754,16 @@ async fn reader(app: &AppState, headers: &HeaderMap) -> Response {
     if !matches {
         return unauthorized();
     }
-    match app
-        .inv
-        .corp_current_policy(record.status.config_version)
-        .await
-    {
+    let current = if phone {
+        app.inv
+            .corp_current_phone_policy(record.status.config_version)
+            .await
+    } else {
+        app.inv
+            .corp_current_policy(record.status.config_version)
+            .await
+    };
+    match current {
         Ok(Some(revision)) => (
             [(header::CONTENT_TYPE, "application/json")],
             revision.envelope,

@@ -8,6 +8,7 @@ pub(super) const CSS: &str = concat!(
 );
 pub(super) const DIAGNOSTICS_JS: &str =
     include_str!("../../assets/corp-portal/corp-diagnostics.js");
+pub(super) const PHONE_JS: &str = include_str!("../../assets/corp-portal/corp-phone.js");
 pub(super) const JS: &str = include_str!("../../assets/corp-portal/corp.js");
 
 fn page(title: &str, body: &Markup) -> String {
@@ -21,6 +22,7 @@ fn page(title: &str, body: &Markup) -> String {
                 title { (title) " · Corp · vpnctl" }
                 link rel="stylesheet" href="/assets/corp.css";
                 script src="/assets/corp.js" defer {}
+                script src="/assets/corp-phone.js" defer {}
             }
             body {
                 header.corp-masthead {
