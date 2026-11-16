@@ -8,17 +8,24 @@ direct/proxy values, request shapes, ordering, publication, authentication and
 all stored policy, subscription and diagnostic data remain unchanged.
 
 Design read: a working rules editor for nontechnical corporate users, following
-the existing quiet green/neutral palette and system typography. ENERGY 1,
+vpnctl's shared paper/ink/accent palette and typography. ENERGY 1,
 RHYTHM 1, MOTION 1. The owner's requested distinction takes priority over generic
 visual style rules; apply anti-slop in DURING mode, then report measured gates.
 
 ## Interface contract
 
+- Owner steering after the first browser pass: Corp must inherit vpnctl's
+  interface so the relationship is visible. Reuse the actual shared theme
+  stylesheet and its paper/ink/accent/type tokens; show vpnctl and Corp in the
+  common masthead. This supersedes preserving the separate green Corp palette.
+  Keep a readable, mobile-sized portal rather than importing operator-only
+  navigation or controls. Theme/font stacks are shared; no font download or
+  theme-toggle capability is implied.
 - A brief explanation identifies "Напрямую" as ordinary internet without VPN
   and "Через VPN" as the corporate server. Clarify that Corp VPN stays enabled.
 - The add-rule preview and every existing rule show the same native route
   control plus a visible, associated explanation of its currently selected value.
-- Reuse the existing neutral styling for direct and existing green accent for
+- Reuse the shared neutral styling for direct and vpnctl accent for
   VPN. This aids scanning without adding colors; the text must carry the same
   distinction without color. No new animation, pills, icons or decorative panels.
 - Route descriptions and styling update immediately when the selection changes,
@@ -65,3 +72,21 @@ no authentication assertion changed. Compilation/full tests/browser execution
 are not run on the control-plane host and must pass at the PR's exact SHA.
 Deployment and final measured anti-slop gates are recorded in the PR acceptance
 receipt after CI; these source statements do not claim those checks already ran.
+
+First source 20830876 passed the real browser scenarios, including contrast,
+keyboard changes, preview reset and all three widths. The lead inspected the
+320/1280 screenshots. This is prior-source evidence: the owner's subsequent
+request for inherited vpnctl styling requires fresh review/browser acceptance.
+
+Theme integration review identified that the diagnostics browser fixture also
+pins the exact CSS payload. It must expect the same shared-theme-plus-portal
+composition as the editor fixture; record this before adapting that source
+assertion. Keep exact-byte matching rather than weakening it.
+
+Owner steering also asks for proportional checks. Source inspection found that
+the check job repeats fmt/clippy/test/deny through just ci while their dedicated
+jobs run concurrently. Remove only that aggregate repeat; retain cargo check,
+all four dedicated Cargo jobs, project-map and CSS-bundle generated-file checks,
+browser coverage and candidate construction. Local just ci remains available.
+No path filter or false-green substitute is introduced. Each canonical command
+still runs on the candidate; the aggregate is no longer a second requirement.

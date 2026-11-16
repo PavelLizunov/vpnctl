@@ -21,30 +21,16 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just,cargo-deny
       - name: project map is current
         run: python3 scripts/project-map.py --check
+      - name: bundled CSS is current
+        run: python3 scripts/bundle-css.py --check
       - name: cargo check
         run: |
           set +e
           cargo check --workspace --all-targets
           status=$?
           echo "cargo check --workspace --all-targets exit_code=$status"
-          exit "$status"
-      - name: canonical local gate
-        run: |
-          set +e
-          just ci
-          status=$?
-          echo "just ci exit_code=$status"
-          if [ "$status" -eq 0 ]; then
-            echo 'cargo fmt --all -- --check exit_code=0 (via just ci)'
-            echo 'cargo clippy --workspace --all-targets -- -D warnings exit_code=0 (via just ci)'
-            echo 'cargo test --workspace --all-targets exit_code=0 (via just ci)'
-            echo 'cargo deny check exit_code=0 (via just ci)'
-          fi
           exit "$status"
 
   fmt:
@@ -55,7 +41,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --all -- --check
+      - run: |
+          set +e
+          cargo fmt --all -- --check
+          status=$?
+          echo "cargo fmt --all -- --check exit_code=$status"
+          exit "$status"
 
   clippy:
     name: cargo clippy -D warnings
@@ -66,7 +57,12 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: |
+          set +e
+          cargo clippy --workspace --all-targets -- -D warnings
+          status=$?
+          echo "cargo clippy --workspace --all-targets -- -D warnings exit_code=$status"
+          exit "$status"
 
   test:
     name: cargo test
@@ -83,7 +79,12 @@ jobs:
           bash scripts/tests/test_vpnctl_backup.sh
       - name: script and docs regression tests
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
-      - run: cargo test --workspace --all-targets
+      - run: |
+          set +e
+          cargo test --workspace --all-targets
+          status=$?
+          echo "cargo test --workspace --all-targets exit_code=$status"
+          exit "$status"
 
   corp-portal-ui:
     name: Corp portal browser verification
@@ -127,6 +128,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2
+      - name: record successful deny gate
+        run: echo 'cargo deny check exit_code=0 (cargo-deny action)'
 
   static-musl:
     name: static musl release

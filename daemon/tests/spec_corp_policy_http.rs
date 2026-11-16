@@ -1005,6 +1005,8 @@ mod spec {
         assert_eq!(editor.status, StatusCode::OK);
         for text in [
             "Корпоративные правила",
+            "vpnctl",
+            "Corp · корпоративный доступ",
             "Сайт",
             "Как открывать",
             "Комментарий",

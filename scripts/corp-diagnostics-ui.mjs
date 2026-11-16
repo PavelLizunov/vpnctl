@@ -16,7 +16,8 @@ export async function verifyDiagnostics(browser, expect, shot) {
   const fixture = { ...metadata, body: await readFile(path.join(fixtures, "diagnostics.html"), "utf8") };
   const assets = {};
   for (const name of ["corp.css", "corp.js", "corp-diagnostics.js"]) {
-    const body = await readFile(path.join(source, name), "utf8");
+    let body = await readFile(path.join(source, name), "utf8");
+    if (name === "corp.css") body = await readFile(path.join(source, "../css/theme.css"), "utf8") + body;
     assert.equal(await readFile(path.join(fixtures, "assets", name), "utf8"), body,
       `Router-exported ${name} must match candidate source`);
     assets[`/assets/${name}`] = { status: 200, contentType: name.endsWith("css") ? "text/css" : "text/javascript", body };

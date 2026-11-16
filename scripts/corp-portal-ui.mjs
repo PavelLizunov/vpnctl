@@ -39,7 +39,8 @@ const pages = Object.fromEntries(await Promise.all(
   }),
 ));
 const assets = Object.fromEntries(await Promise.all(["css", "js"].map(async (extension) => {
-  const body = await readFile(path.join(root, "daemon/assets/corp-portal", `corp.${extension}`), "utf8");
+  let body = await readFile(path.join(root, "daemon/assets/corp-portal", `corp.${extension}`), "utf8");
+  if (extension === "css") body = await readFile(path.join(root, "daemon/assets/css/theme.css"), "utf8") + body;
   assert.equal(await readFile(path.join(fixtures, "assets", `corp.${extension}`), "utf8"), body,
     `Router-exported corp.${extension} must match the candidate source`);
   return [`/assets/corp.${extension}`, { body, contentType: extension === "css" ? "text/css" : "text/javascript" }];
@@ -213,12 +214,19 @@ async function checkRouteDescription(select, action) {
 }
 
 async function routeContrast(page) {
-  const ratios = await page.locator(".route-choice, .route-hint, .route-guide dt, .route-guide dd, .route-note")
+  const ratios = await page.locator(".route-choice, .route-hint, .route-guide dt, .route-guide dd, .route-note, .corp-identity span")
     .evaluateAll((elements) => {
-      const luminance = (color) => color.match(/[\d.]+/g).slice(0, 3)
-        .map((channel) => Number(channel) / 255)
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 1;
+      const context = canvas.getContext("2d");
+      const luminance = (color) => {
+        context.fillStyle = color;
+        context.fillRect(0, 0, 1, 1);
+        return Array.from(context.getImageData(0, 0, 1, 1).data).slice(0, 3)
+        .map((channel) => channel / 255)
         .map((channel) => channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4)
         .reduce((sum, channel, i) => sum + channel * [.2126, .7152, .0722][i], 0);
+      };
       return elements.filter((element) => element.getClientRects().length).map((element) => {
         let parent = element;
         while (getComputedStyle(parent).backgroundColor === "rgba(0, 0, 0, 0)") parent = parent.parentElement;
@@ -232,6 +240,8 @@ async function routeContrast(page) {
 }
 
 async function routeClarity(page) {
+  await expect(page.locator(".corp-product")).toHaveText("vpnctl");
+  await expect(page.locator(".corp-identity")).toContainText("Corp");
   const direct = page.getByRole("combobox", { name: "Как открывать office.example.com", exact: true });
   const proxy = page.getByRole("combobox", { name: "Как открывать remove.example.com", exact: true });
   await checkRouteDescription(direct, "direct");
