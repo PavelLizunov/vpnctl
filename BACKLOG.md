@@ -171,6 +171,8 @@ restart handling, failure behavior, retention and verification requirements.
 
 # Corp portal findings (2026-11-16)
 
+- P2 live desktop discovery: the existing bottom-sticky save toolbar covers the newly visible page picker in the initial1280x800 view. Remove sticky positioning on desktop as well; save actions remain after the bounded list. Recorded before correction.
+
 - P2 owner-reported annotation noise: every row exposes a comment input populated with inherited Direct sites/Proxy sites labels, duplicating route choice and clipping the route control. Hide the optional note column by default without changing stored comments, and give route controls enough width.
 - P2 owner-reported navigation gap: the only page controls appear below the table, so the owner cannot tell that more rules exist. Show remaining-row counts and direct page selection above and below results; preserve the full editable draft.
 - P2 confirmed missing rule scope: the site excludes protected UIS/CoMagic/callbackhunter domains and the fixed SIP IP from the editable API seed but offers no explanation or VoIP view. Show their source-verified built-in rules separately, read-only; do not imply live client acknowledgement or call health. Explain the normal find/change/save workflow and show the rule list before the add form.

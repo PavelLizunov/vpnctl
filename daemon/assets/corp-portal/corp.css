@@ -140,7 +140,7 @@ label { display: block; margin-bottom: .4rem; font-size: .9rem; font-weight: 600
 .list-pagination { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .75rem; padding-top: 1rem; }
 .mobile-label { display: none; }
 .empty { padding: 2rem 0; color: var(--muted); }
-.save-bar { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; justify-content: space-between; margin-top: 1.25rem; padding: 1rem 0; border-top: 1px solid var(--rule); background: var(--paper); position: sticky; bottom: 0; z-index: 2; }
+.save-bar { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; justify-content: space-between; margin-top: 1.25rem; padding: 1rem 0; border-top: 1px solid var(--rule); background: var(--paper); position: static; }
 .save-bar > div:first-child { max-width: 30rem; }
 .save-title { font-weight: 700; margin-bottom: .3rem; }
 .actions { display: flex; flex-wrap: wrap; gap: .65rem; }
