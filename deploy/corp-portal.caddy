@@ -1,4 +1,5 @@
-# Replace the four __CORP_*__ placeholders before importing this site.
+# Replace the four __CORP_*__ placeholders, then import this site exactly once
+# from the parent Caddyfile. Do not paste it inline or nest another import.
 # __CORP_ASSETS__ contains corp.css, corp.js and corp-diagnostics.js.
 # The private __CORP_SERVICE_HEADER__ file contains only:
 # header_up Authorization "Bearer <private service capability>"
@@ -27,9 +28,11 @@ admin.corp.ninitux.com {
 			# Reject unknown/chunked lengths and anything above 1024 bytes first.
 			@unboundedDeleteBody not header_regexp Content-Length ^([0-9]{1,3}|10[01][0-9]|102[0-4])$
 			respond @unboundedDeleteBody "A body of at most 1024 bytes with Content-Length is required." 413
+			# Import consumes one escape layer; request_body consumes the next.
+			# Both fixed JSON bodies below need two backslashes before each brace.
 			request_body {
 				max_size 1KB
-				set `\{"site":"example.com"\}`
+				set `\\{"site":"example.com"\\}`
 			}
 			reverse_proxy __CORP_BACKEND__ {
 				method POST
@@ -44,7 +47,7 @@ admin.corp.ninitux.com {
 				@authorized status 200
 				handle_response @authorized {
 					request_body {
-						set `\{\}`
+						set `\\{\\}`
 					}
 					reverse_proxy __CORP_RECEIVER__ {
 						method DELETE

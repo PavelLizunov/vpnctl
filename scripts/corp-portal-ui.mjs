@@ -420,7 +420,7 @@ async function paginationFlow(width) {
     for (let index = 1; index < Math.ceil(rules.length / pageSize); index++) await page.locator("#rules-next").click();
     await expect(page.locator("#rules tr")).toHaveCount(3);
     await expect(page.locator("#rules-next")).toBeDisabled();
-    await expect(page.locator("#rules-page-status")).toContainText("3");
+    await expect(page.locator("#rules-page-status")).toContainText(`Страница ${Math.ceil(rules.length / pageSize)} из ${Math.ceil(rules.length / pageSize)}`);
     await page.locator("#search").fill(edited.comment);
     await expect(page.locator("#rules tr")).toHaveCount(1);
     assert.deepEqual(await readRules(page), [edited], "Search must include edited rows outside the visible page");

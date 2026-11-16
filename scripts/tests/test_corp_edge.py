@@ -115,8 +115,12 @@ class CorpEdgeTests(unittest.TestCase):
             '__CORP_SERVICE_HEADER__': str(private_header),
         }.items():
             config = config.replace(placeholder, value)
+        # Match production's imported site file: import performs token
+        # replacement, which must preserve the escaped JSON body braces.
+        site_path = self.root / 'corp-portal.caddy'
+        site_path.write_text(config)
         config_path = self.root / 'Caddyfile'
-        config_path.write_text('{\n admin off\n auto_https off\n}\n' + config)
+        config_path.write_text('{\n admin off\n auto_https off\n}\nimport ' + str(site_path) + '\n')
         self.log = (self.root / 'caddy.log').open('w+b')
         self.addCleanup(self.log.close)
         env = dict(os.environ, XDG_DATA_HOME=str(self.root / 'data'),
@@ -200,6 +204,22 @@ class CorpEdgeTests(unittest.TestCase):
                      'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-browser-only'):
             self.assertNotIn(name, headers)
         self.assertNotIn(b'synthetic-service-capability', body)
+
+    def test_authorized_delete_rewrites_body_and_lengths_for_browser_empty_json(self):
+        for original in (b'{}', b'', b'ignored', b'x' * 22, b'x' * 1024):
+            with self.subTest(original_length=len(original)):
+                self.backend.calls.clear()
+                self.receiver.calls.clear()
+                code, _, body = self.request('DELETE', DELETE_PATH, body=original)
+                self.assertEqual(code, 200, body)
+                self.assertEqual(len(self.backend.calls), 1)
+                method, path, auth_body, auth_headers = self.backend.calls[0]
+                self.assertEqual((method, path, auth_body, auth_headers['content-length']),
+                                 ('POST', '/api/corp/normalize', b'{"site":"example.com"}', '22'))
+                self.assertEqual(len(self.receiver.calls), 1)
+                method, path, delete_body, headers = self.receiver.calls[0]
+                self.assertEqual((method, path, delete_body, headers['content-length']),
+                                 ('DELETE', '/internal/corp-diagnostics/reports/' + REPORT_ID, b'{}', '2'))
 
     def test_backend_denials_never_call_receiver(self):
         for override in ({'Origin': 'https://spoof.invalid'}, {'X-Corp-CSRF': 'bad'},
