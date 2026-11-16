@@ -132,7 +132,7 @@
       el("list").append(item);
     }
     el("found").textContent = query ? `Найдено в загруженных отчётах: ${matches.length}` : `Загружено отчётов: ${reports.length}`;
-    if (query && !matches.length) el("list").append(node("li", "Ничего не найдено. Измените поиск или загрузите ещё отчёты.", "muted"));
+    if (query && !matches.length) el("list").append(node("li", "Ничего не найдено. Измените поиск или очистите поле.", "muted"));
   }
   function renderDetail(data) {
     const report = data.report;
