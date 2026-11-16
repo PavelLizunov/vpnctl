@@ -2391,4 +2391,184 @@ mod spec {
             Err(CorpStoreError::InvalidInput(_))
         ));
     }
+
+    // Additive telephony cases reuse the established isolated inventory fixture.
+    fn phone_publication(status: &CorpStatus, revision: u64, rules: &Value) -> CorpPublication {
+        let mut value = publication(status);
+        value.expected_revision = revision;
+        value.payload = serde_json::to_vec(&json!({
+            "schema":1, "kind":"telephony", "policy_id":status.policy_id,
+            "key_id":status.active_key_id, "revision":revision + 1,
+            "published_at":NOW, "apply":"next_connection", "rules":rules,
+        }))
+        .unwrap();
+        bind_publication_bytes(&mut value);
+        value
+    }
+
+    #[tokio::test]
+    async fn phone_publication_preserves_site_bytes_and_reopens_authoritative_empty() {
+        let (state, status) = published_state().await;
+        let site = state
+            .inv
+            .corp_current_policy(status.config_version)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            state
+                .inv
+                .corp_current_phone_policy(status.config_version)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let phone = phone_publication(&status, 0, &json!([]));
+        let stored = state
+            .inv
+            .publish_corp_phone_policy(&phone, ACTOR)
+            .await
+            .unwrap();
+        assert_eq!(stored.envelope, phone.envelope);
+        assert_eq!(stored.payload, phone.payload);
+        let reopened = SqliteInventory::open(&state.path).await.unwrap();
+        let current = reopened
+            .corp_current_phone_policy(status.config_version)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.revision, 1);
+        assert_eq!(current.envelope, phone.envelope);
+        assert_eq!(
+            reopened
+                .corp_current_policy(status.config_version)
+                .await
+                .unwrap()
+                .unwrap()
+                .envelope,
+            site.envelope
+        );
+        assert_eq!(
+            reopened
+                .corp_record()
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                .revision,
+            status.revision
+        );
+        assert_eq!(reopened.corp_phone_history(100).await.unwrap().len(), 1);
+        assert_eq!(reopened.corp_history(100).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn phone_cas_writers_audit_failure_and_rotation_preserve_both_floors() {
+        let (state, status) = enabled_state().await;
+        let input = phone_publication(&status, 0, &json!([]));
+        fail_audit(&state).await;
+        assert!(
+            state
+                .inv
+                .publish_corp_phone_policy(&input, ACTOR)
+                .await
+                .is_err()
+        );
+        assert!(state.inv.corp_phone_history(100).await.unwrap().is_empty());
+        allow_audit(&state).await;
+        let (left, right) = tokio::join!(
+            state.inv.publish_corp_phone_policy(&input, ACTOR),
+            state.inv.publish_corp_phone_policy(&input, ACTOR),
+        );
+        assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
+        assert!(
+            matches!(left, Err(CorpStoreError::Conflict))
+                || matches!(right, Err(CorpStoreError::Conflict))
+        );
+        let stale = phone_publication(&status, 1, &json!([]));
+        let mut rotated = credentials();
+        rotated.reader_tokens[0].token.push('x');
+        let updated = state
+            .inv
+            .update_corp_security(status.config_version, true, &rotated, ACTOR)
+            .await
+            .unwrap();
+        assert!(matches!(
+            state.inv.publish_corp_phone_policy(&stale, ACTOR).await,
+            Err(CorpStoreError::Conflict)
+        ));
+        assert!(matches!(
+            state
+                .inv
+                .corp_current_phone_policy(status.config_version)
+                .await,
+            Err(CorpStoreError::Conflict)
+        ));
+        assert_eq!(
+            state
+                .inv
+                .corp_current_phone_policy(updated.config_version)
+                .await
+                .unwrap()
+                .unwrap()
+                .revision,
+            1
+        );
+        assert_eq!(updated.revision, 0);
+        let mut replacement = rotated.clone();
+        replacement.signing_keys[0].spki = "BQYHCA==".into();
+        assert!(matches!(
+            state
+                .inv
+                .update_corp_security(updated.config_version, true, &replacement, ACTOR)
+                .await,
+            Err(CorpStoreError::Conflict)
+        ));
+    }
+
+    #[tokio::test]
+    async fn phone_history_pruning_lookup_bounds_and_envelope_binding_are_independent() {
+        let (state, status) = enabled_state().await;
+        let mut invalid = phone_publication(&status, 0, &json!([]));
+        invalid.envelope[0] ^= 1;
+        assert!(
+            state
+                .inv
+                .publish_corp_phone_policy(&invalid, ACTOR)
+                .await
+                .is_err()
+        );
+        let mut wrong_kind = phone_publication(&status, 0, &json!([]));
+        let mut payload: Value = serde_json::from_slice(&wrong_kind.payload).unwrap();
+        payload["kind"] = json!("sites");
+        wrong_kind.payload = serde_json::to_vec(&payload).unwrap();
+        bind_publication_bytes(&mut wrong_kind);
+        assert!(matches!(
+            state
+                .inv
+                .publish_corp_phone_policy(&wrong_kind, ACTOR)
+                .await,
+            Err(CorpStoreError::InvalidInput(_))
+        ));
+        for revision in 0..101 {
+            state
+                .inv
+                .publish_corp_phone_policy(&phone_publication(&status, revision, &json!([])), ACTOR)
+                .await
+                .unwrap();
+        }
+        let history = state.inv.corp_phone_history(100).await.unwrap();
+        assert_eq!(history.len(), 100);
+        assert_eq!(history[0].revision, 101);
+        assert_eq!(history[99].revision, 2);
+        assert!(state.inv.corp_phone_revision(1).await.unwrap().is_none());
+        assert!(state.inv.corp_phone_revision(102).await.unwrap().is_none());
+        for revision in [0, CORP_MAX_REVISION + 1] {
+            assert!(state.inv.corp_phone_revision(revision).await.is_err());
+        }
+        for limit in [0, 101] {
+            assert!(state.inv.corp_phone_history(limit).await.is_err());
+        }
+        assert!(state.inv.corp_history(100).await.unwrap().is_empty());
+    }
 }

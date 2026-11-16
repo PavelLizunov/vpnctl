@@ -45,6 +45,9 @@ const assets = Object.fromEntries(await Promise.all(["css", "js"].map(async (ext
     `Router-exported corp.${extension} must match the candidate source`);
   return [`/assets/corp.${extension}`, { body, contentType: extension === "css" ? "text/css" : "text/javascript" }];
 })));
+assets["/assets/corp-phone.js"] = { body: await readFile(path.join(root, "daemon/assets/corp-portal/corp-phone.js"), "utf8"), contentType: "text/javascript" };
+assert.equal(await readFile(path.join(fixtures, "assets/corp-phone.js"), "utf8"), assets["/assets/corp-phone.js"].body);
+const phoneDefaults = ["uiscom.ru", "uiscom.co", "comagic.ru", "callbackhunter.com", "195.211.120.35/32"].map((value) => ({ type: value.includes("/") ? "ip_cidr" : "domain_suffix", value, action: "direct", comment: "" }));
 await mkdir(screenshots, { recursive: true });
 const browser = await chromium.launch();
 const completed = [];
@@ -53,7 +56,7 @@ function writes(harness) {
   return harness.calls.filter(({ endpoint }) => ["/api/corp/rules", "/api/corp/restore"].includes(endpoint));
 }
 
-async function harness(pageName, width) {
+async function harness(pageName, width, rules = initialRules) {
   const context = await browser.newContext({
     offline: true,
     viewport: { width, height: 900 }, deviceScaleFactor: 1,
@@ -68,9 +71,10 @@ async function harness(pageName, width) {
   const page = await context.newPage();
   const state = {
     authenticated: pageName === "editor",
-    revision: 7, rules: structuredClone(initialRules), failure: null,
-    snapshots: new Map([[6, structuredClone(historicalRules)], [7, structuredClone(initialRules)]]),
+    revision: 7, rules: structuredClone(rules), failure: null,
+    snapshots: new Map([[6, structuredClone(historicalRules)], [7, structuredClone(rules)]]),
     timings: new Map([[6, "next_connection"], [7, "next_connection"]]),
+    phoneRevision: 0, phoneRules: structuredClone(phoneDefaults), phoneSnapshots: new Map(),
   };
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => {
@@ -104,6 +108,26 @@ async function harness(pageName, width) {
         return;
       }
       assert.ok(state.authenticated, "Access page attempted an API call");
+      if (endpoint.startsWith("/api/v1/corp/portal/telephony")) {
+        const path = endpoint.slice("/api/v1/corp/portal/telephony".length);
+        const post = request.method() === "POST";
+        const body = post ? request.postDataJSON() : undefined;
+        calls.push({ endpoint, body });
+        if (post) {
+          assert.equal(request.headers()["x-corp-csrf"], csrf);
+          assert.equal(request.headers().origin, origin);
+        }
+        const respond = (json) => route.fulfill({status: 200, json});
+        if (!path) return respond({revision: state.phoneRevision, rules: state.phoneRules, csrf});
+        if (path === "/history") return respond([...state.phoneSnapshots].reverse().map(([revision, rules]) => ({revision, rule_count:rules.length, published_at:publishedAt + revision, apply:"next_connection"})));
+        if (path === "/normalize") return respond({type: body.type, value: body.type === "ip_cidr" ? "198.51.100.42/32" : "phone.example.com"});
+        assert.ok(["/rules", "/restore"].includes(path));
+        assert.equal(body.expected_revision, state.phoneRevision);
+        state.phoneRules = structuredClone(path === "/restore" ? state.phoneSnapshots.get(body.revision) : body.rules);
+        state.phoneRevision += 1;
+        state.phoneSnapshots.set(state.phoneRevision, structuredClone(state.phoneRules));
+        return respond({revision:state.phoneRevision,published_at:publishedAt + state.phoneRevision});
+      }
       assert.ok(["/api/corp/state", "/api/corp/normalize", "/api/corp/rules", "/api/corp/history", "/api/corp/restore"].includes(endpoint), `Unexpected path: ${endpoint}`);
       const post = ["/api/corp/normalize", "/api/corp/rules", "/api/corp/restore"].includes(endpoint);
       assert.equal(request.method(), post ? "POST" : "GET");
@@ -178,6 +202,7 @@ async function shot(page, name, width) {
       viewport: innerWidth,
       document: document.documentElement.scrollWidth,
       body: document.body.scrollWidth,
+      dialogId: dialog?.id,
       dialog: box && { left: box.left, right: box.right, scroll: dialog.scrollWidth, width: dialog.clientWidth },
     };
   });
@@ -185,12 +210,21 @@ async function shot(page, name, width) {
   assert.ok(layout.document <= layout.viewport && layout.body <= layout.viewport, `${name}: horizontal page overflow ${JSON.stringify(layout)}`);
   if (layout.dialog) {
     assert.ok(layout.dialog.left >= 0 && layout.dialog.right <= layout.viewport && layout.dialog.scroll <= layout.dialog.width, `${name}: horizontal dialog overflow`);
-    await expect(page.locator("#accept-confirm")).toBeInViewport();
-    await expect(page.locator("#cancel-confirm")).toBeInViewport();
+    const deletion = layout.dialogId === "diagnostics-delete-dialog";
+    await expect(page.locator(deletion ? "#diagnostics-delete-confirm" : "#accept-confirm")).toBeInViewport();
+    await expect(page.locator(deletion ? "#diagnostics-delete-cancel" : "#cancel-confirm")).toBeInViewport();
   }
 }
 
+async function enableRuleNotes(page) {
+  const guide = page.locator("details.route-help");
+  if (!await guide.evaluate((element) => element.open)) await guide.locator("summary").click();
+  await page.locator("#show-rule-notes").check();
+  await guide.locator("summary").click();
+}
+
 async function draft(page, comment = "Несохранённый рабочий черновик") {
+  await enableRuleNotes(page);
   await page.getByRole("textbox", { name: "Комментарий к office.example.com", exact: true }).fill(comment);
   await expect(page.locator("#draft-status")).toContainText("Есть несохранённые изменения");
 }
@@ -246,9 +280,15 @@ async function routeClarity(page) {
   const proxy = page.getByRole("combobox", { name: "Как открывать remove.example.com", exact: true });
   await checkRouteDescription(direct, "direct");
   await checkRouteDescription(proxy, "proxy");
+  const guide = page.locator("details.route-help");
+  await expect(guide).not.toHaveAttribute("open");
+  await guide.locator("summary").click();
+  await expect(page.locator(".route-guide")).toBeVisible();
   await expect(page.locator(".route-guide")).toContainText("Напрямую — без VPN");
   await expect(page.locator(".route-note")).toContainText("Corp VPN оставьте включённым");
   await routeContrast(page);
+  await guide.locator("summary").click();
+  await expect(guide).not.toHaveAttribute("open");
   await direct.focus();
   await direct.press("ArrowDown");
   await checkRouteDescription(direct, "proxy");
@@ -298,15 +338,31 @@ async function editorFlow(width) {
     await routeClarity(page);
     assert.equal(writes(h).length, 0, "Route selection alone must not publish");
     await shot(page, "editor", width);
+    await expect(page.locator("#add-site-panel")).not.toHaveAttribute("open");
+    await page.locator("#open-add-site").click();
+    await expect(page.locator("#add-site-panel")).toHaveAttribute("open", "");
     await page.locator("#site").fill("https://PORTAL.Example.com/documents?view=all");
     await page.locator("#normalize").click();
     await expect(page.locator("#normalized-site")).toHaveText("portal.example.com");
     await idle(page);
     assert.equal((await readRules(page)).length, 2, "Normalization alone must not add a rule");
+    await expect(page.locator("#new-action option[value=direct]")).toHaveText("Напрямую — без VPN");
     await checkRouteDescription(page.locator("#new-action"), "direct");
     await page.locator("#new-action").selectOption("proxy");
     await checkRouteDescription(page.locator("#new-action"), "proxy");
     await page.locator("#new-comment").fill("Корпоративный портал");
+    if (width >= 1280) {
+      const controls = await page.locator("#new-action, #new-comment, #add-site").evaluateAll((elements) =>
+        elements.map((element) => { const box = element.getBoundingClientRect(); return {bottom: box.bottom, height: box.height}; }));
+      assert.equal(controls.length, 3);
+      for (const dimension of ["bottom", "height"]) {
+        const values = controls.map((box) => box[dimension]);
+        assert.ok(Math.max(...values) - Math.min(...values) <= 3, `Add controls ${dimension} must align: ${JSON.stringify(controls)}`);
+      }
+      const hintId = await page.locator("#new-action").getAttribute("aria-describedby");
+      const hint = await page.locator(`[id="${hintId}"]`).boundingBox();
+      assert.ok(hint.y >= Math.max(...controls.map((box) => box.bottom)), "Preview hint belongs below the entire controls row");
+    }
     await shot(page, "normalized-preview", width);
     await page.locator("#add-site").click();
     await checkRouteDescription(page.getByRole("combobox", { name: "Как открывать portal.example.com", exact: true }), "proxy");
@@ -332,6 +388,7 @@ async function editorFlow(width) {
     });
     await expect(page.locator("#status")).toHaveText("Правила сохранены. Приложения применят их при следующем подключении VPN.");
     await draft(page, "Применить при текущем подключении");
+    await expect(page.locator("#save-now")).toHaveText("Сохранить и применить сейчас…");
     await page.locator("#save-now").click();
     await expect(page.locator("#accept-confirm")).toBeDisabled();
     await expect(page.locator("#interrupt-warning")).toContainText("Остановленный VPN останется выключенным");
@@ -369,6 +426,144 @@ async function editorFlow(width) {
     assert.deepEqual(writes(h)[3].body.rules, [], "Deleting all rules must publish an empty complete list");
     await expect(page.locator("#empty-list")).toContainText("Список пуст");
     await shot(page, "empty-list", width);
+  } finally { await h.close(); }
+}
+
+async function paginationFlow(width) {
+  const pageSize = width <= 740 ? 5 : 10;
+  const rules = Array.from({length: 23}, (_, index) => ({
+    domain: `site${String(index).padStart(2, "0")}.example.com`,
+    action: index % 2 ? "proxy" : "direct", comment: `Комментарий ${index}`,
+  }));
+  const h = await harness("editor", width, rules);
+  const {page} = h;
+  try {
+    await expect(page.locator("#rules tr")).toHaveCount(pageSize);
+    assert.deepEqual(await page.locator("#route-filter option").evaluateAll((options) => options.map((option) => option.value)), ["all", "direct", "proxy"]);
+    await expect(page.locator("#rules-previous")).toBeDisabled();
+    await expect(page.locator("#rules-next")).toBeEnabled();
+    await expect(page.locator("#rules-page-status")).toContainText("1");
+    const pageCount = Math.ceil(rules.length / pageSize);
+    const numbers = page.locator("#rules-page-numbers");
+    await expect(page.locator("#rules-page-overview")).toBeVisible();
+    await expect(page.locator("#rules-page-overview")).toContainText("23");
+    await expect(numbers.getByRole("button")).toHaveCount(pageCount);
+    for (let number = 1; number <= pageCount; number++) {
+      await expect(numbers.getByRole("button", {name: `Страница ${number} из ${pageCount}`, exact: true})).toBeVisible();
+    }
+    await expect(numbers.getByRole("button", {name: `Страница 1 из ${pageCount}`, exact: true})).toHaveAttribute("aria-current", "page");
+    for (const note of await page.locator('#rules input[aria-label^="Комментарий к"]').all()) await expect(note).toBeHidden();
+    await numbers.getByRole("button", {name: `Страница ${pageCount} из ${pageCount}`, exact: true}).click();
+    await expect(page.locator("#rules tr")).toHaveCount(3);
+    await expect(numbers.getByRole("button", {name: `Страница ${pageCount} из ${pageCount}`, exact: true})).toHaveAttribute("aria-current", "page");
+    await numbers.getByRole("button", {name: `Страница 1 из ${pageCount}`, exact: true}).click();
+    await expect(page.locator("#rules tr")).toHaveCount(pageSize);
+    await enableRuleNotes(page);
+    const original = (await readRules(page))[0];
+    const edited = { ...original, comment: "Черновик сохранён между страницами" };
+    await page.getByRole("textbox", {name: `Комментарий к ${original.domain}`, exact: true}).fill(edited.comment);
+    await page.locator("#rules-next").click();
+    await expect(page.locator("#rules tr")).toHaveCount(pageSize);
+    assert.ok(!(await readRules(page)).some((rule) => rule.domain === original.domain));
+    await shot(page, "rules-second-page-draft", width);
+    await expect(numbers.getByRole("button", {name: `Страница 2 из ${pageCount}`, exact: true})).toHaveAttribute("aria-current", "page");
+    if (width > 740) {
+      await page.setViewportSize({width: 420, height: 900});
+      await expect(numbers.getByRole("button", {name: "Страница 3 из 5", exact: true})).toHaveAttribute("aria-current", "page");
+      await page.setViewportSize({width, height: 900});
+      await expect(numbers.getByRole("button", {name: `Страница 2 из ${pageCount}`, exact: true})).toHaveAttribute("aria-current", "page");
+    }
+    await page.locator("#rules-previous").click();
+    await expect(page.getByRole("textbox", {name: `Комментарий к ${original.domain}`, exact: true})).toHaveValue(edited.comment);
+    for (let index = 1; index < Math.ceil(rules.length / pageSize); index++) await page.locator("#rules-next").click();
+    await expect(page.locator("#rules tr")).toHaveCount(3);
+    await expect(page.locator("#rules-next")).toBeDisabled();
+    await expect(page.locator("#rules-page-status")).toContainText(`Страница ${Math.ceil(rules.length / pageSize)} из ${Math.ceil(rules.length / pageSize)}`);
+    await page.locator("#search").fill(edited.comment);
+    await expect(page.locator("#rules tr")).toHaveCount(1);
+    assert.deepEqual(await readRules(page), [edited], "Search must include edited rows outside the visible page");
+    await page.locator("#search").fill("site22.example.com");
+    await expect(page.locator("#rules tr")).toHaveCount(1);
+    assert.equal((await readRules(page))[0].domain, "site22.example.com");
+    await page.locator("#search").fill("");
+    for (const action of ["direct", "proxy"]) {
+      await page.locator("#route-filter").selectOption(action);
+      await expect(page.locator("#rules tr")).toHaveCount(pageSize);
+      assert.ok((await readRules(page)).every((rule) => rule.action === action));
+      const count = rules.filter((rule) => rule.action === action).length;
+      for (let index = 1; index < Math.ceil(count / pageSize); index++) await page.locator("#rules-next").click();
+      await expect(page.locator("#rules tr")).toHaveCount(action === "direct" ? 2 : 1);
+      assert.ok((await readRules(page)).every((rule) => rule.action === action));
+    }
+    const retainedPage = await page.locator("#rules-page-status").textContent();
+    const retainedRows = await readRules(page);
+    const countBeforeVoice = writes(h).length;
+    await page.locator("#show-voice-rules").click();
+    const voice = page.locator("#voice-rules-panel");
+    await expect(voice).toBeVisible();
+    await expect(page.locator("#site-rules-panel")).toBeHidden();
+    await expect(page.locator("details.route-help")).toBeHidden();
+    await expect(page.locator("#add-site-panel")).toBeHidden();
+    await expect(page.locator("#history-panel")).toBeHidden();
+    for (const entry of ["uiscom.ru", "uiscom.co", "comagic.ru", "callbackhunter.com", "195.211.120.35/32"]) {
+      await expect(voice.getByText(entry, {exact: true})).toHaveCount(1);
+    }
+    await expect(voice.getByText("Для редактируемой телефонии", {exact: false})).toContainText("2.50.10");
+    await expect(voice.locator(".phone-rule-row")).toHaveCount(5);
+    await expect(voice.locator(".phone-rule-row select").first()).toBeEnabled();
+    await voice.locator(".phone-rule-row select").first().selectOption("proxy");
+    assert.equal(writes(h).length, countBeforeVoice, "Editing phone draft must not publish site policy");
+    await voice.getByRole("button", {name:"Сохранить телефонию",exact:true}).click();
+    await expect(voice.getByRole("status")).toContainText("Телефония сохранена на сервере");
+    assert.equal(h.state.phoneRevision, 1);
+    assert.equal(h.state.phoneRules[0].action, "proxy");
+    assert.equal(writes(h).length, countBeforeVoice);
+    await voice.locator("summary").filter({hasText:"Добавить адрес телефонии"}).click();
+    await voice.getByLabel("Тип адреса",{exact:true}).selectOption("ip_cidr");
+    await voice.getByLabel("Адрес",{exact:true}).fill("198.51.100.42");
+    await voice.getByRole("button",{name:"Проверить адрес",exact:true}).click();
+    await expect(voice.getByText("198.51.100.42/32",{exact:true})).toBeVisible();
+    await voice.getByRole("button",{name:"Добавить в список телефонии",exact:true}).click();
+    await expect(voice.locator(".phone-rule-row")).toHaveCount(6);
+    await voice.getByRole("button",{name:"Сохранить телефонию",exact:true}).click();
+    await expect(voice.getByRole("status")).toContainText("Телефония сохранена на сервере");
+    assert.equal(h.state.phoneRules[5].value,"198.51.100.42/32");
+    await shot(page, "voice-editable-addresses", width);
+    for (let count = 6; count > 0; count--) await voice.locator(".phone-rule-row button").first().click();
+    await expect(voice.locator(".phone-rule-row")).toHaveCount(0);
+    await voice.getByRole("button",{name:"Сохранить телефонию",exact:true}).click();
+    await expect(voice.getByRole("status")).toContainText("Телефония сохранена на сервере");
+    assert.deepEqual(h.state.phoneRules, []);
+    await voice.locator("summary").filter({hasText:"История телефонии"}).click();
+    await expect(voice.locator(".history-list li")).toHaveCount(3);
+    page.once("dialog", (dialog) => dialog.accept());
+    await voice.locator(".history-list li").last().getByRole("button").click();
+    await expect(voice.locator(".phone-rule-row")).toHaveCount(5);
+    await expect(voice.locator(".history-list li")).toHaveCount(4);
+    assert.equal(h.state.phoneRevision, 4);
+    assert.equal(h.state.phoneRules[0].action, "proxy");
+    assert.equal(writes(h).length, countBeforeVoice);
+    await shot(page, "voice-history-restored", width);
+    await page.locator("#show-site-rules").click();
+    await expect(voice).toBeHidden();
+    await expect(page.locator("#site-rules-panel")).toBeVisible();
+    await expect(page.locator("#route-filter")).toHaveValue("proxy");
+    await expect(page.locator("#rules-page-status")).toHaveText(retainedPage);
+    assert.deepEqual(await readRules(page), retainedRows, "Switching views must retain filter/page and draft");
+    await shot(page, "rules-filtered-last-page", width);
+    await page.locator("#route-filter").selectOption("all");
+    await page.locator("#search").fill(edited.comment);
+    assert.deepEqual(await readRules(page), [edited]);
+    await page.locator("#save").click();
+    await idle(page);
+    assert.equal(writes(h).length, 1);
+    const expected = rules.map((rule) => rule.domain === edited.domain ? edited : rule);
+    const byDomain = (items) => [...items].sort((a, b) => a.domain.localeCompare(b.domain));
+    assert.deepEqual(byDomain(writes(h)[0].body.rules), byDomain(expected), "Saving from a filtered page must publish all 23 draft rows");
+    await page.locator("#search").fill("");
+    await expect(page.locator("#rules tr")).toHaveCount(pageSize);
+    await expect(page.locator("#rules-previous")).toBeDisabled();
+    await shot(page, "rules-first-page-saved", width);
   } finally { await h.close(); }
 }
 
@@ -449,6 +644,7 @@ async function timeoutFlow(width, operation, committed) {
     assert.deepEqual(await readRules(page), expectedRules, "Reload must reconcile committed and uncommitted timeouts");
     assert.equal(writes(h).length, 1, "Reload must not resubmit a publication");
     await expect(page.locator('[data-restore="6"]')).toBeEnabled();
+    await enableRuleNotes(page);
     await page.getByRole("textbox", { name: `Комментарий к ${expectedRules[0].domain}`, exact: true }).fill("После загрузки актуального списка");
     await expect(page.locator("#save")).toBeEnabled();
     await page.locator("#save").click();
@@ -462,6 +658,10 @@ async function timeoutFlow(width, operation, committed) {
 try {
   await editorFlow(1280);
   completed.push("1280/editor");
+  for (const width of [320, 420, 1280]) {
+    await paginationFlow(width);
+    completed.push(`${width}/pagination-filter-draft-full-publication`);
+  }
   for (const width of [320, 420]) {
     for (const [name, title] of [["login", "Вход"], ["denied", "Подключите корпоративный VPN"], ["unavailable", "Страница пока недоступна"]]) {
       const h = await harness(name, width);

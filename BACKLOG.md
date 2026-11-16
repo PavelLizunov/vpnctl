@@ -2,6 +2,29 @@
 
 Deferred work items with enough context to pick up cold. Newest first.
 
+## Editable Corp telephony
+
+P2 runtime limitation confirmed before portal guard: Corp currently forces
+IPv4 and has no IPv6 TUN address, so publishing IPv6 phone routes would falsely
+suggest usable routing. Keep canonical IPv6 in the signed wire contract, but
+reject IPv6 browser publications/restores and proxy IPv4 ranges intersecting
+mandatory physical local-network exclusions with an actionable explanation.
+
+
+P2 confirmed owner-requested gap, recorded before correction at c17cdcd1:
+the portal displays five embedded phone exceptions but cannot edit or publish
+telephony independently. Add a separately signed feed, durable revision/CAS/history,
+and browser editor without changing site-policy bytes, provisioning or credentials.
+Scope and verification: `docs/specs/corp-telephony.md`. Implementation in progress;
+local compilation and full tests prohibited; exact-SHA GitHub CI required.
+
+Source-confirmed signer retirement gap: operator removal inspected only site
+history, so a retained phone envelope could lose its trust key; a concurrent
+phone publication could race an earlier inspection. The correction adds phone
+history verification and an inventory transaction guard. This specific finding
+was recorded immediately after the correction; the feature intent above was
+recorded before implementation.
+
 ## Readable Corp diagnostics and action hierarchy
 
 P3 confirmed owner-requested gap, recorded before correction at f4575087:
@@ -168,3 +191,34 @@ wire-traffic billing or prove every production node has the required build.
 
 See [the traffic accounting contract](docs/specs/traffic-accounting-v2.md) for
 restart handling, failure behavior, retention and verification requirements.
+
+# Corp portal findings (2026-11-16)
+
+- P2 live desktop discovery: the existing bottom-sticky save toolbar covers the newly visible page picker in the initial1280x800 view. Remove sticky positioning on desktop as well; save actions remain after the bounded list. Recorded before correction.
+
+- P2 owner-reported annotation noise: every row exposes a comment input populated with inherited Direct sites/Proxy sites labels, duplicating route choice and clipping the route control. Hide the optional note column by default without changing stored comments, and give route controls enough width.
+- P2 owner-reported navigation gap: the only page controls appear below the table, so the owner cannot tell that more rules exist. Show remaining-row counts and direct page selection above and below results; preserve the full editable draft.
+- P2 confirmed missing rule scope: the site excludes protected UIS/CoMagic/callbackhunter domains and the fixed SIP IP from the editable API seed but offers no explanation or VoIP view. Show their source-verified built-in rules separately, read-only; do not imply live client acknowledgement or call health. Explain the normal find/change/save workflow and show the rule list before the add form.
+- P2 confirmed edge import gap: Caddy's parent-file import consumes one brace-escape layer before request_body replacement, so the standalone-tested JSON became an empty authorization body and live DELETE returned422 without deletion. An imported-template regression reproduces all five positive body lengths failing. Recorded before correction. RESOLVED in source: both JSON literals retain protection through one parent import and runtime replacement; all seven imported-template integration tests pass with authorization/storage guards unchanged.
+- P2 mobile acceptance: at320px the two-column route/delete row clips the explicit direct label (155px control), and the261px sticky save bar overlaps the list. Record before correction: use full-width route controls, five-row mobile pages and a nonsticky mobile save section. RESOLVED at12a66414: live320px controls254px wide, five rows, static save section and no overflow.
+- P2: Corp editor renders all 33 rules, creating a 4711px page at 1280px; no route filter or pagination. Preserve full-draft semantics while bounding the visible list.
+- P2: Add preview aligns fields at their bottoms; the route hint offsets labels/controls relative to the comment and submit button. Align control rows, with hints outside them.
+- P2: Diagnostics has list/detail/retry but no delete capability, so the owner cannot remove a report and reclaim its live archive storage. Add scoped authenticated deletion with explicit confirmation and late-worker protection.
+- P2 historical exposure: docs/MIGRATION_PLAN_NINITUX_AND_NK01.md:47 at 28bade9f contains a real-looking SQLCipher key for a historical parallel Python subscription manager. It is absent current main but remains in 145 PR heads. Full value/source archived privately and verified; current validity against that manager is unverified. No key rotation or history rewrite performed by the 2026-11-16 audit. This is not evidence of current vpnctld database credentials being exposed.
+
+- P1 editable-telephony diff review: history/restore decoded a stored phone payload and checked its digest/metadata, but did not verify its retained signed envelope. An altered envelope could be restored and re-signed despite the state reader rejecting it. Source confirmed in handlers/telephony.rs::stored before correction; share full signature verification across phone state/history/restore.
+
+- P2 PR337/e7b5ca0 exact-head Clippy gate: new phone inventory fixture unnecessarily takes ownership of a JSON value, and the phone runtime validation uses a collapsible nested condition. Both warnings are fatal under the existing -D warnings contract. Recorded before behavior-preserving fixes; do not suppress lints or weaken validation.
+
+- P1 PR337/e7b5ca0 migration compatibility fixture creates today's schema, then removes post71 metadata to reconstruct schema71 but leaves the newly added phone tables. Reopening consequently tries migration74 against already-present tables. Product migration74 itself is additive; remove its tables only inside this isolated historical fixture before removing markers. Recorded before correction.
+- P2 PR337/e7b5ca0 browser acceptance cannot find the phone address-type control by its exact label. The dynamic wrapping label includes an embedded select's option text in the computed label. Give generated phone controls an explicit accessible label so assistive technology and the exact user-flow locator identify the intended field. Recorded before correction.
+
+- P2 PR337/7bd0c991 browser flow now completes phone edit/add/empty-save/history-restore, but320px history-restored screenshot has a321px scroll width. The retained CI screenshot confirms the restore buttons extend beyond the phone card: the generic history button is flex-shrink0 and wider than the available narrow content. Bound only phone history buttons to their container and permit shrinking; retain the strict no-horizontal-overflow assertion. Recorded before correction.
+
+- P2 PR337/275796ba desktop browser flow loses the current site page while capturing its second-page screenshot: pre-capture rows exclude the first site, but retained1280 screenshot shows page1 and disabled Back. Source media-query change handler unconditionally resets rulePage=0, including deferred notifications whose current effective page size is unchanged. Preserve the first visible row across actual responsive page-size changes and ignore same-size notifications. Add explicit resize/restoration and post-capture page assertions; do not retry clicks on a reset page. Recorded before correction; browser-event timing remains to be confirmed by CI.
+
+- P2 PR337/33beb208 browser verification passes rule pagination/resize and phone flows, then diagnostics search by exact report ID returns zero rows (corp-diagnostics-ui.mjs251). Existing UI filters only device/date although its maintained scenario expects ID lookup. Include report_id in the search text and disclose number lookup in placeholder; preserve all diagnostics actions/security and existing assertion. Recorded before correction.
+
+- P2 PR337/34e11a9b diagnostics browser delete401 scenario exposes a stale enabled Delete button after session expiry. request() locks further API calls, but existing detail action buttons are not updated and their delete click still opens a dialog. Disable current detail actions upon401 and guard stale mutation handlers; keep existing no-resubmission/session-lock assertions. Recorded before correction; backend authorization remains effective.
+
+- P1 PR337/a652a7c5 full suite reaches independent phone wire tests:13of14 pass; normalization wrongly accepts192.000.2.1/32 because ipnet CIDR parsing is more permissive than std::net::IpAddr and the client. Parse the literal address portion strictly before CIDR normalization, keeping host-bit masking for unambiguous input and preserving the independent rejection assertion. Recorded before correction. Exact-head browser verification now passes completely.

@@ -128,6 +128,7 @@ mod fixture {
             ("diagnostics.html", "/diagnostics"),
             ("assets/corp.css", "/assets/corp.css"),
             ("assets/corp.js", "/assets/corp.js"),
+            ("assets/corp-phone.js", "/assets/corp-phone.js"),
             ("assets/corp-diagnostics.js", "/assets/corp-diagnostics.js"),
         ] {
             let mut request = Request::builder()
