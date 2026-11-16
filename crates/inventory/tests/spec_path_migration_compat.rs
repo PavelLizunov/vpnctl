@@ -385,6 +385,8 @@ async fn current_main_71_upgrades_path_history_preserving_both_published_migrati
         "DROP TABLE service_path_states;
          DROP TABLE service_path_incidents;
          DROP TABLE ssh_access_checks;
+         DROP TABLE corp_policy_phone_revisions;
+         DROP TABLE corp_policy_phone_settings;
          DELETE FROM _sqlx_migrations WHERE version >= 72;",
     )
     .execute(&pool)

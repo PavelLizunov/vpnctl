@@ -25,6 +25,7 @@
     return element;
   };
   const field = (title, input) => {
+    input.setAttribute("aria-label", title);
     const label = node("label", title, "field");
     label.append(input);
     return label;
