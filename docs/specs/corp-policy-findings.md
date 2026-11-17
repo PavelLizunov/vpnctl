@@ -138,7 +138,8 @@ tracked in the VPNRouter Corp acceptance brief. No product code changes here.
 
 - P2 CORP-OPERATOR-LEGACY-ENTRY: real HTTP /admin/corp navigation fails400
   because it differs from the configured HTTPS operator authority. Preserve
-  security gates; repair the legacy entry with the scoped no-build redirect.
+  security gates. Fixed by the scoped no-build entry at49ae420c; actual browser
+  transition and authenticated200/unauthenticated401 verified.
 - P1 CORP-COMPANY-SINGLETON: settings/journals/session handling and portal
   selection support one binding. The owner requires one independent company
   per existing username. Do not create another company until scoped storage,

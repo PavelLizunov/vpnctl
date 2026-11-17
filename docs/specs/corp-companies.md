@@ -118,3 +118,19 @@ or roll back only one component after a new policy has been published.
 
 No company is created and no production credential or routing policy is changed
 by this preparation. Current production supports only the existing company.
+
+## Verified outcome
+
+The no-build legacy entry is live from49ae420c. Actual browser navigation from
+HTTP vpnctld/admin/corp arrives at the canonical HTTPS operator page; absent
+authentication remains401 and an authenticated read-only GET returns200 with
+current controls. Only the HTTP entry was added to Serve: existing HTTPS and
+other proxy handlers, daemon PIDs and credential files were preserved. No Corp
+form was submitted, no compiled build ran and no build-triggering PR was opened.
+The source branch is published; it is not merged into main.
+
+An independent Terra research pass confirmed the singleton/session/namespace
+findings and proposed migration boundaries. This was research, not an independent
+implementation review. Multiple-company implementation remains pending a specific
+server-build exception to the owner's existing no-rebuild instruction; no second
+company has been created or reported as ready.
