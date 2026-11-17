@@ -133,3 +133,14 @@ production moved to 0.9.0+23beb92: health 200, schema72, enabled/revision4/egres
 five current grants and original credential-state hash retained. These are
 snapshot receipts; final empty/stopped policy acceptance and restoration are
 tracked in the VPNRouter Corp acceptance brief. No product code changes here.
+
+## Company support follow-up,2026-11-17
+
+- P2 CORP-OPERATOR-LEGACY-ENTRY: real HTTP /admin/corp navigation fails400
+  because it differs from the configured HTTPS operator authority. Preserve
+  security gates; repair the legacy entry with the scoped no-build redirect.
+- P1 CORP-COMPANY-SINGLETON: settings/journals/session handling and portal
+  selection support one binding. The owner requires one independent company
+  per existing username. Do not create another company until scoped storage,
+  auth, reader/egress routing and receiver capabilities are implemented.
+  Concrete migration and acceptance contract:corp-companies.md.
