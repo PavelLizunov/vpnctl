@@ -65,6 +65,59 @@ admin.corp.ninitux.com {
 			}
 		}
 	}
+	@corpCategories {
+		method POST
+		path_regexp corpCategory ^/api/corp/categories/(state|save)$
+		expression `{http.request.uri.query} == ""`
+	}
+	handle @corpCategories {
+		route {
+			@invalidCategoryBody {
+				not header_regexp Content-Length ^[1-9][0-9]{0,5}$
+			}
+			respond @invalidCategoryBody "A bounded JSON body with Content-Length is required." 413
+			@chunkedCategoryBody header Transfer-Encoding *
+			respond @chunkedCategoryBody "Transfer-Encoding is not supported." 413
+			request_body {
+				max_size 256KB
+			}
+			vars corpMetadataLength {http.request.header.Content-Length}
+			vars corpMetadataPath {http.request.uri.path}
+			vars corpMetadataBody {http.request.body}
+			request_body {
+				set `\\{"site":"example.com"\\}`
+			}
+			reverse_proxy __CORP_BACKEND__ {
+				method POST
+				rewrite /api/corp/normalize
+				header_up Content-Type application/json
+				header_up Host admin.corp.ninitux.com
+				header_up X-Real-IP {http.request.remote.host}
+				header_up X-Forwarded-Proto https
+				header_up -Forwarded
+				header_up -X-Forwarded-For
+				header_up -X-Forwarded-Host
+				@categoryAuthorized status 200
+				handle_response @categoryAuthorized {
+					request_body {
+						set {http.vars.corpMetadataBody}
+					}
+					rewrite * {http.vars.corpMetadataPath}
+					uri replace /api/corp/categories/ /internal/corp-categories/
+					reverse_proxy __CORP_RECEIVER__ {
+						method POST
+						header_up -*
+						header_up Host {upstream_hostport}
+						header_up Content-Type application/json
+						header_up X-Corp-Expected-Length {http.vars.corpMetadataLength}
+						import __CORP_SERVICE_HEADER__
+						header_down Cache-Control no-store
+						header_down X-Content-Type-Options nosniff
+					}
+				}
+			}
+		}
+	}
 
 	# All HTML, other API routes and other methods retain the existing backend.
 	handle {
