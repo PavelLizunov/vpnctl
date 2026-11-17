@@ -10,6 +10,10 @@ use base64::engine::general_purpose::STANDARD as B64_STANDARD;
 use tempfile::TempDir;
 use vpnctl_core::{CoreError, PinnedJumpRoute, Result, SshTransport};
 
+mod ha_bridge;
+
+pub use ha_bridge::handle_ha_execute_request;
+
 const DEFAULT_KNOWN_HOSTS: &str = "/var/lib/vpnctl/.ssh/known_hosts";
 
 const DEFAULT_SSH_TIMEOUT_SECS: u64 = 300;
@@ -37,6 +41,13 @@ pub struct SubprocessSshTransport {
 
 impl SubprocessSshTransport {
     pub fn new(host: impl Into<String>, user: impl Into<String>, key_path: PathBuf) -> Self {
+        let known_hosts = if std::env::var_os("VPNCTLD_HA_EXECUTOR_SOCKET").is_some() {
+            std::env::var_os("VPNCTLD_HA_KNOWN_HOSTS")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(DEFAULT_KNOWN_HOSTS))
+        } else {
+            PathBuf::from(DEFAULT_KNOWN_HOSTS)
+        };
         Self {
             host: host.into(),
             user: user.into(),
@@ -44,7 +55,7 @@ impl SubprocessSshTransport {
             jump: None,
             target_fingerprint: None,
             key_path,
-            known_hosts: PathBuf::from(DEFAULT_KNOWN_HOSTS),
+            known_hosts,
             timeout: default_ssh_timeout(),
         }
     }
@@ -116,6 +127,17 @@ impl SubprocessSshTransport {
     }
 
     pub async fn exec_password(&self, password: &str, remote_cmd: &str) -> Result<String> {
+        if let Some(socket) = std::env::var_os("VPNCTLD_HA_EXECUTOR_SOCKET") {
+            let bytes =
+                ha_bridge::execute(self, Path::new(&socket), remote_cmd, None, Some(password))
+                    .await?;
+            return Ok(String::from_utf8_lossy(&bytes).into_owned());
+        }
+        let bytes = self.exec_password_local_bytes(password, remote_cmd).await?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    async fn exec_password_local_bytes(&self, password: &str, remote_cmd: &str) -> Result<Vec<u8>> {
         if self.jump.is_some() {
             return Err(CoreError::Transport(
                 "password authentication through a jump host is not supported".into(),
@@ -151,14 +173,21 @@ impl SubprocessSshTransport {
                     .arg(&remote_cmd);
             }
             let label = format!("{}@{}:{}", transport.user, transport.host, transport.port);
-            let bytes = run_child_with_timeout(cmd, None, transport.timeout, &label)?;
-            Ok(String::from_utf8_lossy(&bytes).into_owned())
+            run_child_with_timeout(cmd, None, transport.timeout, &label)
         })
         .await
         .map_err(|e| CoreError::Transport(format!("spawn_blocking JoinError: {e}")))?
     }
 
     async fn run(&self, remote_cmd: String, stdin_bytes: Option<Vec<u8>>) -> Result<Vec<u8>> {
+        if let Some(socket) = std::env::var_os("VPNCTLD_HA_EXECUTOR_SOCKET") {
+            return ha_bridge::execute(self, Path::new(&socket), &remote_cmd, stdin_bytes, None)
+                .await;
+        }
+        self.run_local(remote_cmd, stdin_bytes).await
+    }
+
+    async fn run_local(&self, remote_cmd: String, stdin_bytes: Option<Vec<u8>>) -> Result<Vec<u8>> {
         let transport = self.clone();
         let label = format!("{}@{}:{}", self.user, self.host, self.port);
         let handle = tokio::task::spawn_blocking(move || {
@@ -781,6 +810,15 @@ fn ensure_deploy_key_sync(path: &Path) -> std::io::Result<()> {
     if path.exists() {
         return validate_deploy_key_sync(path);
     }
+    if std::env::var_os("VPNCTLD_HA_EXECUTOR_SOCKET").is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "HA deploy key {} is missing; refusing to generate a new identity",
+                path.display()
+            ),
+        ));
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
         #[cfg(unix)]
@@ -874,6 +912,79 @@ pub fn read_public_key(private_path: &Path) -> std::io::Result<String> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ha_identity_defaults_are_isolated_and_missing_keys_fail_closed() {
+        if let Ok(case) = std::env::var("VPNCTL_TEST_HA_SSH_CASE") {
+            let dir = PathBuf::from(std::env::var_os("VPNCTL_TEST_HA_SSH_DIR").unwrap());
+            let transport = SubprocessSshTransport::new(
+                "203.0.113.17",
+                "root",
+                dir.join("missing-parent/deploy-key"),
+            );
+            if case == "broker_configured" {
+                let configured = dir.join("replicated-known-hosts");
+                assert_eq!(transport.known_hosts, configured);
+                std::fs::create_dir(&configured).unwrap();
+                let error = transport.exec_unprivileged("id").await.unwrap_err();
+                assert!(error.to_string().contains("reading known_hosts"));
+            } else {
+                assert_eq!(transport.known_hosts, PathBuf::from(DEFAULT_KNOWN_HOSTS));
+            }
+            let overridden = transport
+                .clone()
+                .known_hosts(dir.join("explicit-known-hosts"));
+            assert_eq!(overridden.known_hosts, dir.join("explicit-known-hosts"));
+            if case == "broker_missing_key" {
+                let error = ensure_deploy_key(&transport.key_path).await.unwrap_err();
+                assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+                assert!(
+                    error
+                        .to_string()
+                        .contains("refusing to generate a new identity")
+                );
+                assert!(!transport.key_path.exists());
+                assert!(!public_key_path(&transport.key_path).exists());
+                assert!(!dir.join("missing-parent").exists());
+            }
+            return;
+        }
+        for case in [
+            "standalone",
+            "broker_default",
+            "broker_configured",
+            "broker_missing_key",
+        ] {
+            let dir = TempDir::new().unwrap();
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "subprocess::tests::ha_identity_defaults_are_isolated_and_missing_keys_fail_closed",
+                    "--nocapture",
+                ])
+                .env("VPNCTL_TEST_HA_SSH_CASE", case)
+                .env("VPNCTL_TEST_HA_SSH_DIR", dir.path())
+                .env_remove("VPNCTLD_HA_EXECUTOR_SOCKET")
+                .env_remove("VPNCTLD_HA_KNOWN_HOSTS");
+            if case != "standalone" {
+                child.env("VPNCTLD_HA_EXECUTOR_SOCKET", dir.path().join("absent.sock"));
+            }
+            if matches!(case, "standalone" | "broker_configured") {
+                child.env(
+                    "VPNCTLD_HA_KNOWN_HOSTS",
+                    dir.path().join("replicated-known-hosts"),
+                );
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{case}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
 
     #[test]
     fn capped_reader_preserves_boundary_bytes_and_stops_at_overflow() {

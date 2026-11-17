@@ -1,0 +1,48 @@
+{
+  "node_id": "controller-a",
+  "role": "controller",
+  "witness": "witness",
+  "seed_node": "controller-a",
+  "state_dir": "/var/lib/vpnctl-ha",
+  "runtime_dir": "/run/vpnctl-ha",
+  "worker": "/opt/vpnctl/vpnctld",
+  "build": "REPLACE_WITH_HA_ARTIFACT_EXECUTABLE_SHA256",
+  "schema": 0,
+  "db": "/var/lib/vpnctl/inv.db",
+  "worker_addr": "127.0.0.1:18403",
+  "worker_user": "vpnctl",
+  "public_addr": "127.0.0.1:18402",
+  "public_origin": "https://controller-a.example.invalid",
+  "control_addr": "0.0.0.0:18404",
+  "admin_token_file": "/etc/vpnctl-ha/operator-token",
+  "tls": {
+    "ca": "/etc/vpnctl-ha/ca.crt",
+    "cert": "/etc/vpnctl-ha/controller-a.crt",
+    "key": "/etc/vpnctl-ha/controller-a.key"
+  },
+  "consul": {
+    "url": "https://consul.example.invalid:8501",
+    "prefix": "vpnctl/ha",
+    "token_file": "/etc/vpnctl-ha/consul-token",
+    "tls": {
+      "ca": "/etc/vpnctl-ha/consul-ca.crt",
+      "cert": "/etc/vpnctl-ha/consul-client.crt",
+      "key": "/etc/vpnctl-ha/consul-client.key"
+    }
+  },
+  "peers": {
+    "controller-a": "https://controller-a.example.invalid:18404",
+    "controller-b": "https://controller-b.example.invalid:18404",
+    "witness": "https://witness.example.invalid:18404"
+  },
+  "identities": {
+    "deploy_key": "/var/lib/vpnctl/.ssh/id_ed25519",
+    "deploy_public": "/var/lib/vpnctl/.ssh/id_ed25519.pub",
+    "known_hosts": "/var/lib/vpnctl/.ssh/known_hosts",
+    "worker_env": "/etc/vpnctl/vpnctld.env"
+  },
+  "stop_budget_ms": 2000,
+  "replication_interval_ms": 5000,
+  "max_replica_age_ms": 60000,
+  "trusted_proxies": ["127.0.0.1/32", "::1/128"]
+}

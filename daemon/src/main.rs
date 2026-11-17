@@ -23,6 +23,12 @@ mod server;
 #[derive(Parser, Debug)]
 #[command(name = "vpnctld", version, about = "vpnctl HTTP daemon")]
 struct Cli {
+    #[arg(long, hide = true, conflicts_with = "ha_artifact")]
+    ha_execute: bool,
+
+    #[arg(long, hide = true)]
+    ha_artifact: bool,
+
     /// Path to the SQLite inventory file (same one CLI uses).
     #[arg(long, env = "VPNCTL_DB")]
     db: Option<std::path::PathBuf>,
@@ -34,9 +40,34 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    if cli.ha_artifact {
+        use std::io::Write;
+
+        let mut stdout = std::io::stdout().lock();
+        serde_json::to_writer(&mut stdout, &ha_artifact()?)?;
+        stdout.write_all(b"\n")?;
+        stdout.flush()?;
+        return Ok(());
+    }
+    if cli.ha_execute {
+        use std::io::{Read, Write};
+
+        const MAX_FRAME: usize = 64 * 1024 * 1024;
+        let mut request = Vec::new();
+        std::io::stdin()
+            .take((MAX_FRAME + 1) as u64)
+            .read_to_end(&mut request)
+            .context("reading HA executor request")?;
+        let response = vpnctl_ssh::subprocess::handle_ha_execute_request(&request).await?;
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(&response)?;
+        stdout.write_all(b"\n")?;
+        stdout.flush()?;
+        return Ok(());
+    }
     init_tracing();
 
-    let cli = Cli::parse();
     let config = DaemonConfig::resolve(cli.db, cli.addr).await?;
     assert_auth_safe_for_addr(config.addr)?;
     info!(
@@ -55,6 +86,44 @@ async fn main() -> anyhow::Result<()> {
     server::serve(listener, app, shutdown_signal()).await;
     vpnctld::access_log::drain_writer(writer_handle).await;
     Ok(())
+}
+
+fn ha_artifact() -> anyhow::Result<serde_json::Value> {
+    use std::io::Read;
+
+    use sha2::{Digest, Sha256};
+
+    let mut executable = std::fs::File::open("/proc/self/exe")
+        .context("opening running executable for HA artifact verification")?;
+    let mut executable_hash = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = executable.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        executable_hash.update(&buffer[..count]);
+    }
+    let migrations = vpnctl_inventory::embedded_migration_checksums();
+    let mut migration_hash = Sha256::new();
+    let mut records = Vec::new();
+    for (version, checksum) in &migrations {
+        use std::fmt::Write;
+
+        let mut checksum_hex = String::with_capacity(checksum.len() * 2);
+        for byte in checksum {
+            write!(&mut checksum_hex, "{byte:02x}")?;
+        }
+        migration_hash.update(format!("{version}:{checksum_hex}\n").as_bytes());
+        records.push(serde_json::json!({ "version": version, "checksum_hex": checksum_hex }));
+    }
+    Ok(serde_json::json!({
+        "build_sha": option_env!("VPNCTL_BUILD_SHA").unwrap_or("unknown"),
+        "executable_sha256": format!("{:x}", executable_hash.finalize()),
+        "schema": migrations.last().map_or(0, |(version, _)| *version),
+        "migrations": records,
+        "migrations_sha256": format!("{:x}", migration_hash.finalize()),
+    }))
 }
 
 fn init_tracing() {

@@ -16,6 +16,7 @@ pub mod dns_resolver;
 pub mod exchange_rate_poller;
 pub mod geoip;
 pub mod geoip_update_runner;
+pub mod ha;
 pub mod handlers;
 pub mod health_monitor;
 pub mod http_util;

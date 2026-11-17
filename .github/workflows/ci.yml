@@ -311,3 +311,21 @@ jobs:
               sys.exit(1)
           print(f'ok: all {len(required)} assertion helpers present')
           "
+
+  controller-ha:
+    name: Controller HA fault tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Isolated adapter contracts
+        run: python3 -m unittest discover -s scripts/ha -p 'test_*.py'
+      - name: Fetch pinned official Consul fixture
+        run: |
+          curl -fsSLo /tmp/consul.zip https://releases.hashicorp.com/consul/2.1.0/consul_2.1.0_linux_amd64.zip
+          echo "a9c9cdf1ed93bd29a9671b02e5433131f3f777bab16c076fcef712a2820bfe33  /tmp/consul.zip" | sha256sum -c -
+          unzip /tmp/consul.zip consul -d /tmp/ha-consul
+          chmod +x /tmp/ha-consul/consul
+      - name: Real three-voter and cgroup faults
+        run: |
+          sudo env VPNCTL_HA_CONSUL_BINARY=/tmp/ha-consul/consul VPNCTL_HA_SYSTEMD_TESTS=1 \
+            python3 -m unittest discover -s scripts/ha -p test_isolated_cluster.py -v

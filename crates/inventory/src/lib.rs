@@ -8,6 +8,18 @@ pub mod quality;
 pub mod reachability;
 pub use reachability::{ServicePathIncident, ServicePathState, ServicePathStatus};
 pub mod sqlite;
+
+/// Return the embedded migration versions and complete SQLx checksum bytes in
+/// ascending version order, without opening or migrating an inventory.
+pub fn embedded_migration_checksums() -> Vec<(i64, Vec<u8>)> {
+    let mut migrations: Vec<_> = sqlite::migrator()
+        .iter()
+        .map(|migration| (migration.version, migration.checksum.to_vec()))
+        .collect();
+    migrations.sort_by_key(|(version, _)| *version);
+    migrations
+}
+
 mod ssh_access;
 pub use ssh_access::{
     SshAccessCheck, SshAccessFailure, SshAccessRoute, SshAccessState, SshAccessStatus,
