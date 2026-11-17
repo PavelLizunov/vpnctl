@@ -492,7 +492,10 @@ SnapshotStore.create = _fixture_stall
         url=self.configs["fixture-a"]["peers"]["fixture-witness"]
         result=eventually(lambda:request(url,"GET","/_ha/executor-status",context=self.contexts["fixture-a"]))
         self.assertFalse(result["ready"]);self.assertEqual(len(result["blocked_jobs"]),1)
-        pid=int(Path(self.configs["fixture-a"]["db"]).with_suffix(".pid").read_text());os.kill(pid,signal.SIGKILL)
+        from worker import Worker
+        previous = Worker(self.configs["fixture-a"])
+        previous.stop()
+        self.assertTrue(previous.stopped())
         eventually(lambda:self.status("fixture-b")["blocked_reason"].startswith("control request rejected"),timeout=45)
         self.assertFalse(self.status("fixture-b")["worker_admitted"])
         self.assertEqual(marker.read_bytes(),b"dispatched\n")
