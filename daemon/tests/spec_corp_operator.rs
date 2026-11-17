@@ -1572,15 +1572,20 @@ async fn deleted_user_cannot_be_rebound_and_disabled_binding_can_still_be_repair
 #[tokio::test]
 async fn disabled_user_cannot_be_selected_for_setup() {
     let f = Fixture::new().await;
+    let csrf = f.page().await.csrf();
     f.state
         .inv
         .set_user_disabled(&UserId("synthetic-user".into()), true)
         .await
         .unwrap();
     assert_eq!(
-        f.post("/setup", "user_id=synthetic-user&confirm_binding=true")
-            .await
-            .status,
+        f.post_token(
+            "/setup",
+            "user_id=synthetic-user&confirm_binding=true",
+            &csrf
+        )
+        .await
+        .status,
         StatusCode::SERVICE_UNAVAILABLE
     );
     assert!(f.state.inv.corp_record().await.unwrap().is_none());
