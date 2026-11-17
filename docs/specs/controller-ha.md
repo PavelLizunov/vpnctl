@@ -135,6 +135,8 @@ local admission, bounded from the renewal request's monotonic start, with a
 stop budget deducted. No response extends authority after that deadline.
 
 The supervisor starts the entire application as a dedicated systemd service,
+with its working directory set to the installed worker executable's directory
+so the matching adjacent `assets/` are available on every controller,
 with KillMode=control-group, SendSIGKILL=yes, bounded TimeoutStopSec and a
 fixed two-second systemd watchdog. A minimal guard is the cgroup main process,
 starts vpnctld without notification credentials, and accepts only its own epoch

@@ -35,20 +35,28 @@ USED_PORTS = set()
 
 
 def port():
-    while True:
-        with socket.socket() as stream:
-            stream.bind(("127.0.0.1", 0))
-            value = stream.getsockname()[1]
-            # Consul gossip binds TCP and UDP on the same port.  A free TCP
-            # ephemeral port can still collide with an unrelated UDP service.
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as datagram:
-                    datagram.bind(("127.0.0.1", value))
-            except OSError:
-                continue
-        if value not in USED_PORTS:
-            USED_PORTS.add(value)
-            return value
+    # A bind-to-zero reservation is released before subprocess startup. Avoid
+    # ephemeral ports so the fixture's own outgoing RPCs cannot steal listeners.
+    low, high = map(int, Path("/proc/sys/net/ipv4/ip_local_port_range").read_text().split())
+    below = max(0, low - 1024)
+    above = max(1024, high + 1)
+    count = below + max(0, 65536 - above)
+    if not count:
+        raise RuntimeError("fixture needs unprivileged ports outside the ephemeral range")
+    for _ in range(2048):
+        index = int.from_bytes(os.urandom(4), "big") % count
+        value = 1024 + index if index < below else above + index - below
+        if value in USED_PORTS:
+            continue
+        try:
+            with socket.socket() as stream, socket.socket(type=socket.SOCK_DGRAM) as datagram:
+                stream.bind(("127.0.0.1", value))
+                datagram.bind(("127.0.0.1", value))
+        except OSError:
+            continue
+        USED_PORTS.add(value)
+        return value
+    raise RuntimeError("fixture could not reserve available service ports")
 
 
 def eventually(action, timeout=40):
@@ -79,6 +87,7 @@ if "--ha-execute" in sys.argv:
  time.sleep(float(delay))
  if outcome=="crash": os._exit(3)
  print(json.dumps({"ok":True,"stdout_b64":base64.b64encode(b"completed").decode()}));sys.exit()
+ASSET=pathlib.Path("assets/admin.js").read_bytes()
 db=pathlib.Path(sys.argv[sys.argv.index("--db")+1]);addr=sys.argv[sys.argv.index("--addr")+1];host,p=addr.rsplit(":",1)
 db.with_suffix(".pid").write_text(str(os.getpid()))
 child=subprocess.Popen([sys.executable,"-c","import time;time.sleep(3600)"],start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
@@ -88,6 +97,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
  def do_GET(self):
   url=urllib.parse.urlsplit(self.path)
   if url.path=="/api/v1/health":body=b"ok"
+  elif url.path=="/admin/assets/admin.js":body=ASSET
   elif url.path=="/write":
    with contextlib.closing(sqlite3.connect(db)) as c,c:c.execute("update fixture set count=count+1");body=str(c.execute("select count from fixture").fetchone()[0]).encode()
   else:
@@ -169,6 +179,9 @@ class ClusterFaultTests(unittest.TestCase):
         eventually(lambda: self.consul.get("settings") is None and len(self.consul.call("GET", "operator/raft/configuration")["Servers"]) == 3)
         self.make_certificates()
         self.helper = self.root / "fixture-worker.py";self.helper.write_text(FIXTURE_WORKER);self.helper.chmod(0o755)
+        assets = self.root / "assets";assets.mkdir(mode=0o755);assets.chmod(0o755)
+        (assets / "admin.js").write_bytes(b"fixture-installed-admin-asset")
+        (assets / "admin.js").chmod(0o644)
         build = hashlib.sha256(self.helper.read_bytes()).hexdigest()
         self.configs = {}
         self.token = "fixture-management-token-not-live"
@@ -303,6 +316,8 @@ class ClusterFaultTests(unittest.TestCase):
         if hasattr(self,"temporary"):self.temporary.cleanup()
 
     def test_crash_sigstop_handover_and_byte_compatible_forwarding(self):
+        for node in ("fixture-a", "fixture-b"):
+            self.assertEqual(self.get(node, "/admin/assets/admin.js"), (200, b"fixture-installed-admin-asset"))
         # Application paths cannot become control RPCs at the private hop.
         self.assertEqual(self.get("fixture-b", "/_ha/status"), (200, b"fixture-subscription-byte-contract"))
         # Both frontend URLs handle GET mutations through the same writable worker.
@@ -311,6 +326,7 @@ class ClusterFaultTests(unittest.TestCase):
         eventually(lambda: self.status("fixture-b")["generation"] == self.status("fixture-a")["generation"])
         self.manage("fixture-a","handover")
         eventually(lambda:self.status("fixture-b")["worker_admitted"])
+        self.assertEqual(self.get("fixture-a", "/admin/assets/admin.js"), (200, b"fixture-installed-admin-asset"))
         self.assertEqual(self.get("fixture-a","/sub/fixture-token"),self.get("fixture-b","/sub/fixture-token"))
         age=self.status("fixture-b")["snapshot_age_ms"];self.assertGreaterEqual(age,0);self.assertLess(age,120000)
         print("verified snapshot age observed after planned handover: " + str(age) + "ms (fixture RPO upper bound)", flush=True)

@@ -76,6 +76,7 @@ class Worker:
         if remaining <= self.stop_budget:
             raise RuntimeError("insufficient authority remaining to start worker")
         args = ["systemd-run", "--quiet", "--collect", "--unit=" + self.unit,
+                "--property=WorkingDirectory=" + str(Path(self.config["worker"]).resolve().parent),
                 "--property=Type=notify", "--property=NotifyAccess=main", "--property=WatchdogSec=2",
                 "--property=WatchdogSignal=SIGKILL", "--property=TimeoutStartSec=3", "--property=Restart=no", "--property=KillMode=control-group",
                 "--property=SendSIGKILL=yes", "--property=NoNewPrivileges=yes",
