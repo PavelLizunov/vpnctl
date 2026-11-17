@@ -142,9 +142,18 @@ and boot ID in an atomically written monotonic-deadline file. It stops heartbeat
 and exits before deadline minus watchdog minus stop budget. Lease renewal may
 update that file only from a proven grant. A stopped guard cannot heartbeat;
 systemd remains outside the cgroup and kills every descendant.
-Before any activation the previous controller's authenticated control service
-persists an epoch fence, kills/stops the fixed worker unit and proves the cgroup
-is empty. Unreachable or suspended control service blocks promotion. This is
+The transient worker unit also enforces `Conflicts=sleep.target` and
+`Before=sleep.target`; both inspected dependency memberships are mandatory in
+the authenticated watchdog proof. Normal host sleep follows the systemd sleep
+transaction, which stops and empties the complete worker cgroup before sleep
+begins, including a SIGSTOPped guard. Userspace cannot resume an old armed
+check/start sequence after ordinary sleep. Forced VM freezes and external host
+power controls are outside this local sleep guarantee; executor, snapshot
+publication and HTTP responses remain independently epoch fenced.
+Before activation, durable witness lifecycle evidence bounds the last possibly
+running worker independently of candidate lease history. An authenticated
+empty-cgroup proof can accelerate that bound; an unreachable manager does not
+prevent promotion after independent expiry and the executor epoch barrier. This is
 controller-only fencing; it never power-cycles the host or unrelated VPN units.
 
 Every daemon subprocess SSH operation, including stdin, upload, reads, jump
@@ -230,8 +239,8 @@ forbidden). `timeout_ms` is 1..=3_600_000. Endpoints require nonempty valid
 host/user and a nonzero port. Unknown top-level fields, invalid base64,
 malformed requests and frames above 64 MiB are rejected. Binary fields use
 standard base64. Responses contain `ok` and `stdout_b64`, optional `error`, and
-successful changed `known_hosts_b64`. Dispatch failures return `ok:false` and
-empty stdout; they remain potentially uncertain remote outcomes. Changed
+successful changed `known_hosts_b64`. Failures return `ok:false` and empty stdout, with structured completion evidence
+distinguishing terminal failure from an uncertain remote outcome (see follow-up). Changed
 known_hosts is installed by the caller only after a valid successful response;
 concurrent append-only trust additions survive, and conflicting concurrent
 rewrites fail closed.
@@ -272,8 +281,9 @@ execute(identity, {epoch,session,build,transport})->transport response,
 barrier(identity,{epoch,session})->{previous,successor_epoch,external_actions_fenced},
 status()->{closed_through,blocked_jobs,ready}. Its root is exclusively locked for
 its lifetime. Helper invocation is `[helper,"--ha-execute"]`, one JSON request on
-stdin. Only helper success with valid JSON `ok:true,stdout_b64:<valid base64>`
-marks completion. Any malformed/error/timeout/crash is uncertain across restart;
+stdin. Helper success, structured completed remote failure or proven pre-dispatch
+rejection marks completion. Malformed evidence, timeout and helper crash remain
+uncertain across restart;
 authority failure dispatches nothing; barriers never erase uncertain jobs.
 `gateway.Server((host,port), app, control=False, context=None)` uses an app with
 config (`node_id`, `peers`, `trusted_proxies`, `admin_token_file`), upstream()->
@@ -283,7 +293,21 @@ Public app forwarding does not require management auth; `/admin/ha` requires
 Basic user `ha` and file token, POST additionally requires the page's CSRF field.
 Control forwarding requires a verified certificate CN in configured peers and
 never forwards onward (local worker only). `worker.Worker(config)` exposes
-start(monotonic_deadline,socket_path,epoch=1), extend(deadline), stop(), stopped()->bool;
+start(monotonic_deadline,socket_path,epoch=1,boottime_deadline=None),
+prepare(monotonic_deadline,socket_path,epoch=1,boottime_deadline=None),
+extend(monotonic_deadline,token="direct-lifecycle-fixture",boottime_deadline=None),
+stop(), stopped()->bool. Runtime callers always supply an absolute
+`CLOCK_BOOTTIME` deadline captured as `boottime_before_renew_request + 15s`,
+alongside the renewal's monotonic deadline. Admission, activation, watchdog
+publication and reaping must honor both bounds, including after every blocking
+authority/reservation/systemd call. The serialized boot deadline is that exact
+captured value; later clock sampling, suspend/resume and slow calls never
+reconstruct or extend it from monotonic remaining time. Optional omission is
+only for direct lifecycle fixtures and captures a bound at the API's entry;
+`prepare`/`start` carry that same bound through all subsequent calls.
+An active or staging epoch that reaches either prior admission deadline during
+renewal is fenced; even a successful delayed renewal cannot revive that epoch
+by replacing its expired local bounds.
 `systemd_user:true` is an isolated test/user-manager option, not a fake cgroup.
 
 PinnedJumpRoute JSON field names are `host`, `user`, `port`, `jump_fingerprint`,
@@ -293,3 +317,185 @@ Envelope/encoding, timeout and direct-endpoint validation errors reject the
 helper request before dispatch. Pinned-route transport preparation can instead
 return an `ok:false` error response without dispatch; both forms must leave the
 SSH invocation count at zero. Neither is permission to retry an uncertain job.
+
+## Production-size follow-up contract
+
+Snapshot transfer never puts an entire inventory into JSON/base64. The fixed
+snapshot size limit is 8 GiB (a disk bound, not a memory allocation); per-process
+SQLite cache and transfer working buffers are bounded. `SnapshotStore.describe(generation)`
+returns `{manifest,chunks}`, where chunks maps each fixed logical filename to an
+ordered list of `{size_bytes,sha256}` records of at most 1 MiB. The manifest
+remains the exact full-file/schema/identity attestation. `read_chunk(generation,
+name,index)` returns one verified raw chunk. `receive(description, reader,
+now_ms,max_age_ms)` obtains missing raw chunks via `reader(name,index,entry)`,
+reuses verified chunks from retained local generations, checks chunk and full
+hashes and SQLite/schema/identity validity, then publishes immutably. Malformed
+plans, names, indices, oversized chunks, corruption and interrupted reads never
+publish. Control RPCs carry at most one compressed chunk (bounded decompression)
+or a bounded description; mTLS peer identity and allocated generation authorize
+reads/publications. Fully verified publication is re-authorized after bulk I/O.
+Legacy whole-record export/import are restricted to small fixtures (8 MiB).
+
+`SnapshotStore(..., credential_root=None, reserve_bytes=2147483648,
+keep_generations=2)` uses the owner's default
+`~/.local/share/agent-credentials/vpnctl-ha/<store-id>/` when no credential root is
+supplied. Before a verified operational generation can be removed, retain all
+explicit identity file bytes plus a recoverable SQLite credential/config image.
+Exclude only the enumerated pure telemetry tables; retain unknown tables by
+default. Content-addressed immutable credential versions deduplicate unchanged
+values and retain changed and deleted credentials forever, with a durable index.
+`prune(latest_generation)` first verifies and archives, retains latest plus the
+newest recovery generation (at least two), and removes only older numeric
+operational generations. Interrupted prune cannot remove latest or credential
+versions. Capacity checks reserve space before backup/receive; insufficient space
+fails replication and never deletes the last advertised recovery state.
+
+Authority renewal and admission/stop deadlines run independently of snapshot
+creation, upload, download and installation. At most one bulk operation per
+controller runs at a time. Replication failure reports degraded replication but
+never revokes a healthy grant. A quorum loss still closes admission promptly
+while copy is stalled. Witness locks never cover snapshot bulk I/O.
+
+The independent witness records authenticated worker lifecycle evidence before
+any worker start, including node, epoch, session, boot identity, enforced cgroup
+watchdog properties, and a witness-clock bounded arm expiry. Only the same
+current grant may extend it, and only after successful local watchdog arming.
+The latest possibly running worker is independent of candidate lease history;
+failed candidates cannot replace it. Before arming a successor, its executor
+barrier closes every older epoch, proves no uncertain remote action, and waits
+until the predecessor's independent resource-access arm has expired or an
+authenticated empty-cgroup proof is recorded. Missing lifecycle evidence or
+unresolved intents blocks with the exact reason. Remote predecessor RPC is an
+optional acceleration, never a requirement for host-loss promotion. A paused or
+resumed old manager cannot renew, publish, serve successful stale responses, or
+execute SSH under a fenced grant. No host power operation is used.
+
+SSH helper responses add structured `outcome`: `completed` with integer
+`exit_code` 0..254 and `ok == (exit_code == 0)`; `rejected` for proven
+pre-dispatch failure; or `uncertain` for a possibly dispatched incomplete action.
+A completed nonzero exit returns the existing sanitized failure to its caller,
+never success or retry, and is a durably completed executor job. Rejection is
+also terminal. Timeout, lost transport, helper crash, malformed evidence and an
+unfinished durable intent remain uncertain across restart and block later jobs.
+No stderr parsing supplies completion evidence; preserve standalone errors,
+password/jump transports, host pins and secret sanitization. Legacy `ok:true`
+responses remain completed for compatibility; generic `ok:false` is uncertain.
+
+`common.encode_chunk(raw_bytes)` returns `{encoding:"raw"|"zlib",data_b64}`
+for 1..1048576 bytes. `common.decode_chunk(record,entry)` returns exact bytes
+only with matching size/hash; it rejects invalid encodings/base64, trailing
+compressed data, truncation and decompression beyond the one-chunk bound.
+Permanent archive versions contain `database.sql`, full logical identity files
+and `manifest.json` under `credential_root/versions/<content-sha256>/`; the durable
+`index.json` lists version, project, machine, purpose, date and actual file path.
+Restore database.sql with sqlite3; enumerated telemetry table schemas remain,
+with no historical metric rows. Unknown tables retain complete recoverable data.
+
+Independent lifecycle test API: `Lifecycle(root,consul,executor,clock=...,boot=...)`
+uses an injected CLOCK_BOOTTIME-equivalent clock and witness boot identifier.
+`status()` returns `{worker,remaining_ms,ready,closed_through}`. `reserve(identity,
+{epoch,session,proof})` returns a durable reservation `token`; `confirm(identity,
+{epoch,session,proof,token})` proves local arming. `empty(identity,{epoch,boot_id,
+cgroup_empty:true})` records authenticated local empty-cgroup evidence. A proof
+contains `boot_id`, `unit`, integer stop_budget_ms 100..4999, integer remaining_ms 1..15000, bool armed, and
+`properties` with ActiveState=active, KillMode=control-group, SendSIGKILL=yes,
+Restart=no, WatchdogUSec=2s, NotifyAccess=main, WatchdogSignal=9,
+ProtectControlGroups=yes, NoNewPrivileges=yes and TimeoutStopUSec within the
+configured safe stop budget (100ms..4999ms). New reservations run the executor's
+barrier before replacing the last worker; same-grant renewal of an armed worker
+must not wait behind an SSH action. Failed or unconfirmed reservations remain
+possibly running and block successors through expiry. An expired same epoch
+cannot be revived. On witness reboot, old outstanding arms wait a full15s from
+the new boot clock. A missing history with epoch>1 fails closed. Different or
+fenced authority cannot confirm/extend old arms, and an authenticated empty proof
+must match the recorded node/epoch/boot. Failed candidates never erase the worker.
+
+The SSH helper is testable through its documented public async handler in a
+child process with isolated environment and fake `ssh`, `sshpass`, `ssh-keyscan`,
+`ssh-keygen` on PATH. Only a valid request reaches transport dispatch. Malformed
+requests may return CoreError or structured `rejected` (zero dispatch either
+way). A process-observed ssh exit0..254 is completion evidence; ssh255, signal,
+connection loss and timeout are uncertain. Fixtures never contact real hosts.
+Executor operational metadata retains the newest1024 completed jobs plus a
+durable completed_count; every unfinished/uncertain intent remains retained and
+blocking. Compaction cannot dispatch or erase an uncertain job.
+
+Before `install` replaces any existing local database/identity file (including a
+rejoining controller's divergent state), independently archive its actual
+credential/config values and complete identity bytes. A readable SQLite database
+uses the same conservative SQL extraction; a corrupt destination retains its
+complete original bytes as `database.raw` plus every available WAL/SHM/journal
+(`db_wal`, `db_shm`, `db_journal`), with no claim of compact extraction. If a
+consistent backup fails even for readable SQLite, preserve that same complete
+raw recovery set before replacement. Account for staging on each filesystem and
+check the configured reserve during streaming writes and SQLite backup progress.
+Failure to retain leaves destinations unchanged. No credential archive is pruned.
+
+Worker fixture surface (no real unit required for spec tests): config has
+`node_id`, `state_dir`, optional `runtime_dir`, `stop_budget_ms`, `worker`, `db`,
+`worker_addr`, and `identities` (`worker_env`, `known_hosts`, `deploy_key`). The
+authority file is `<runtime_dir>/authority.json`, or
+`<state_dir>/runtime/authority.json`. `Worker.command(*args,check=True)` returns
+stdout text, `properties()` returns a dict, and `stop()` confirms stop; test
+subclasses may override these methods to record calls without running systemd.
+`prepare(deadline,socket_path,epoch=1,boottime_deadline=None)` stages an unarmed
+worker; `extend(deadline,token="direct-lifecycle-fixture",boottime_deadline=None)`
+arms; `publish_deadline(deadline,token=None,boottime_deadline=None)` publishes a
+bound. Authority JSON contains `epoch`, original monotonic `deadline`, original
+absolute `boottime_deadline`, `boot_id`, bool `armed`, and `arm_token`.
+A deadline needs strictly more than watchdog2s+stop_budget in BOTH clocks and at
+most15s in either clock. For explicit boot bounds, do not adjust the bound even
+if clocks diverge. Recheck after blocking stop/properties/systemd calls before
+publishing or claiming preparation. Required staged properties include
+KillMode=control-group, SendSIGKILL=yes, Restart=no. Arming additionally requires
+ActiveState=active, WatchdogUSec=2s and NotifyAccess=main. The optional direct
+fixture path captures its boot bound once at method entry; runtime always
+supplies the immutable grant bound.
+
+## Bounded immutable transfer pins
+
+A follower download pins one immutable generation at the authenticated witness;
+new publications do not revoke its chunks. Pins are fixed to the requesting
+controller certificate, generation and random opaque token, with one active pin
+per configured controller and a non-renewable bounded lifetime (default600s,
+maximum3600s). Pins retain hard links to already verified/archived files, so
+pruning numeric operational generations cannot remove an active transfer. Release,
+expiry or witness restart removes only duplicate operational hard links, never
+credential archives. Expired/replaced/unknown tokens and other controller names
+fail closed; no caller supplies a filesystem path. Quorum/SSH lifecycle RPCs do
+not wait behind pin creation, reading or cleanup.
+
+Public test API (Python stdlib):
+`TransferPins(root,store,holders,ttl_seconds=600,clock=time.monotonic)`; store is
+SnapshotStore and holders is a nonempty collection of configured logical node IDs.
+`acquire(holder,generation)` returns `{pin,description}` (description is the
+SnapshotStore bounded chunk plan). `chunk(holder,pin,generation,name,index)`
+returns one raw verified chunk of that pinned generation, even after newer
+published generations are pruned. `release(holder,pin)` is idempotent and never
+releases a different holder's or replacement token. `reap()` removes expired
+pins. Constructor rejects nonpositive/>3600/nonfinite TTL and unsafe holder names;
+restart invalidates old pins and removes their duplicate operational storage.
+At exact expiry, no chunk is available. Incomplete pin creation never returns a
+usable token. A second acquire for the same holder replaces its prior pin and
+cannot accumulate generations. One holder cannot request/release another's pin.
+Pin descriptions and chunks retain full manifest/schema/build/identity checks.
+HTTP snapshot responses return this opaque pin; follower chunk requests and
+release must present it over mTLS. Latest is checked when pinning starts, and
+publication may then advance while the transfer finishes. Promotion still
+requires the latest advertised generation and its unchanged creation time; a
+pin never makes an old snapshot fresh.
+
+TransferPins.root must be a dedicated child directory of store.root (for example
+store.root/".transfers"), on the same filesystem, and outside all numeric
+generation directories and the permanent credential archive. Unsafe roots fail
+before deleting anything. Minimal schema1 SQLite fixture:
+`CREATE TABLE _sqlx_migrations(version INTEGER PRIMARY KEY,success INTEGER,
+checksum BLOB); INSERT INTO _sqlx_migrations VALUES(1,1,<48-byte BLOB>);`
+plus any ordinary fixture data table. Identity logical names match
+`[a-z][a-z0-9_-]{0,63}` excluding `inv_db` and `manifest`; `deploy_key`, `env`,
+`known_hosts` are valid. Build is any nonempty configured string, matching both
+stores. Synthetic checksum bytes(range(48)) and timestamps1000000 are valid.
+
+SQLite online backup pins an explicit read transaction before copying batches,
+so ongoing WAL metric writes cannot repeatedly restart a large snapshot. Writers
+continue on WAL; verification/publication still happens after the copy completes.

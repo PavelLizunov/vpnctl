@@ -9,7 +9,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use vpnctl_core::{CoreError, PinnedJumpRoute, Result};
 
-use super::SubprocessSshTransport;
+use super::{DispatchOutcome, SubprocessSshTransport};
 
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const MAX_TIMEOUT_MS: u64 = 3_600_000;
@@ -44,9 +44,64 @@ struct Response {
     ok: bool,
     stdout_b64: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<Outcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_code: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     known_hosts_b64: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Outcome {
+    Completed,
+    Rejected,
+    Uncertain,
+}
+
+impl Response {
+    fn validate_outcome(&self) -> Result<()> {
+        let valid = match (&self.outcome, self.exit_code) {
+            (None, None) => true,
+            (Some(Outcome::Completed), Some(code @ 0..=254)) => self.ok == (code == 0),
+            (Some(Outcome::Rejected | Outcome::Uncertain), None) => !self.ok,
+            _ => false,
+        };
+        if !valid {
+            return Err(transport_error("invalid response outcome evidence"));
+        }
+        Ok(())
+    }
+
+    fn failure(outcome: DispatchOutcome) -> Self {
+        let (outcome, exit_code, error) = match outcome {
+            DispatchOutcome::Completed(code) => (
+                Outcome::Completed,
+                Some(code),
+                format!("remote command failed (exit code {code})"),
+            ),
+            DispatchOutcome::Rejected => (
+                Outcome::Rejected,
+                None,
+                "request rejected before remote dispatch".into(),
+            ),
+            DispatchOutcome::Uncertain => (
+                Outcome::Uncertain,
+                None,
+                "remote outcome uncertain; never retry".into(),
+            ),
+        };
+        Self {
+            ok: false,
+            stdout_b64: String::new(),
+            outcome: Some(outcome),
+            exit_code,
+            error: Some(error),
+            known_hosts_b64: None,
+        }
+    }
 }
 
 fn transport_error(message: impl Into<String>) -> CoreError {
@@ -163,6 +218,7 @@ pub(super) async fn execute(
         .map_err(|_| transport_error("socket deadline exceeded; outcome unknown, never retry"))??;
     let response: Response = serde_json::from_slice(&response)
         .map_err(|e| transport_error(format!("invalid response JSON: {e}")))?;
+    response.validate_outcome()?;
     if !response.ok {
         return Err(transport_error(response.error.unwrap_or_else(|| {
             "request failed without an error description".into()
@@ -242,9 +298,17 @@ async fn read_frame(stream: &mut UnixStream) -> Result<Vec<u8>> {
 /// `VPNCTLD_HA_EXECUTOR_SOCKET` is present is rejected before any dispatch. The
 /// helper stages known_hosts privately and uses the ordinary pinned/TOFU SSH
 /// paths exactly once. It never retries. Output is JSON with `ok`, `stdout_b64`,
-/// optional `error`, and successful changed `known_hosts_b64`. Invalid requests
-/// return an error; a dispatched transport failure returns `ok: false`.
+/// structured `outcome`, a completed `exit_code`, optional `error`, and successful
+/// changed `known_hosts_b64`. Proven pre-dispatch failures are rejected; observed
+/// exits 0..254 are completed. All other possibly dispatched failures are uncertain.
 pub async fn handle_ha_execute_request(bytes: &[u8]) -> Result<Vec<u8>> {
+    let response = execute_request(bytes)
+        .await
+        .unwrap_or_else(|_| Response::failure(DispatchOutcome::Rejected));
+    encode_frame(&response)
+}
+
+async fn execute_request(bytes: &[u8]) -> Result<Response> {
     if std::env::var_os("VPNCTLD_HA_EXECUTOR_SOCKET").is_some() {
         return Err(transport_error(
             "helper invocation in broker mode is forbidden",
@@ -309,10 +373,10 @@ pub async fn handle_ha_execute_request(bytes: &[u8]) -> Result<Vec<u8>> {
         .known_hosts(known_hosts_path.clone())
         .timeout(Duration::from_millis(request.timeout_ms));
     let output = match request.operation {
-        Operation::Exec => transport.run_local(request.remote_cmd, stdin).await,
+        Operation::Exec => transport.run_local_outcome(request.remote_cmd, stdin).await,
         Operation::ExecPassword => {
             transport
-                .exec_password_local_bytes(
+                .exec_password_local_outcome(
                     request.password.as_deref().unwrap_or_default(),
                     &request.remote_cmd,
                 )
@@ -321,22 +385,22 @@ pub async fn handle_ha_execute_request(bytes: &[u8]) -> Result<Vec<u8>> {
     };
     let response = match output {
         Ok(stdout) => {
-            let updated = read_known_hosts(&known_hosts_path)?.unwrap_or_default();
+            let updated = match read_known_hosts(&known_hosts_path) {
+                Ok(updated) => updated.unwrap_or_default(),
+                Err(_) => return Ok(Response::failure(DispatchOutcome::Uncertain)),
+            };
             Response {
                 ok: true,
                 stdout_b64: B64_STANDARD.encode(stdout),
+                outcome: Some(Outcome::Completed),
+                exit_code: Some(0),
                 error: None,
                 known_hosts_b64: (updated != known_hosts).then(|| B64_STANDARD.encode(updated)),
             }
         }
-        Err(error) => Response {
-            ok: false,
-            stdout_b64: String::new(),
-            error: Some(error.to_string()),
-            known_hosts_b64: None,
-        },
+        Err(failure) => Response::failure(failure.outcome),
     };
-    encode_frame(&response)
+    Ok(response)
 }
 
 #[cfg(test)]
@@ -351,6 +415,59 @@ mod tests {
             .port(2202)
             .known_hosts(dir.join("known_hosts"))
             .timeout(Duration::from_millis(5))
+    }
+
+    #[test]
+    fn response_requires_coherent_exit_evidence_and_sanitizes_failure() {
+        for (value, valid) in [
+            (serde_json::json!({"ok": true, "stdout_b64": ""}), true),
+            (
+                serde_json::json!({"ok": true, "stdout_b64": "", "outcome": "completed", "exit_code": 0}),
+                true,
+            ),
+            (
+                serde_json::json!({"ok": false, "stdout_b64": "", "outcome": "completed", "exit_code": 254}),
+                true,
+            ),
+            (
+                serde_json::json!({"ok": false, "stdout_b64": "", "outcome": "rejected"}),
+                true,
+            ),
+            (
+                serde_json::json!({"ok": false, "stdout_b64": "", "outcome": "uncertain"}),
+                true,
+            ),
+            (
+                serde_json::json!({"ok": true, "stdout_b64": "", "outcome": "rejected"}),
+                false,
+            ),
+            (
+                serde_json::json!({"ok": false, "stdout_b64": "", "outcome": "completed", "exit_code": 0}),
+                false,
+            ),
+            (
+                serde_json::json!({"ok": true, "stdout_b64": "", "outcome": "completed", "exit_code": 1}),
+                false,
+            ),
+            (
+                serde_json::json!({"ok": false, "stdout_b64": "", "outcome": "completed", "exit_code": 255}),
+                false,
+            ),
+            (
+                serde_json::json!({"ok": false, "stdout_b64": "", "outcome": "completed"}),
+                false,
+            ),
+        ] {
+            let response: Response = serde_json::from_value(value).unwrap();
+            assert_eq!(response.validate_outcome().is_ok(), valid);
+        }
+        let response = Response::failure(DispatchOutcome::Completed(42));
+        let response: serde_json::Value =
+            serde_json::from_slice(&encode_frame(&response).unwrap()).unwrap();
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["outcome"], "completed");
+        assert_eq!(response["exit_code"], 42);
+        assert_eq!(response["stdout_b64"], "");
     }
 
     #[tokio::test]
@@ -518,6 +635,8 @@ mod tests {
             let response = Response {
                 ok: true,
                 stdout_b64: B64_STANDARD.encode(stdout),
+                outcome: None,
+                exit_code: None,
                 error: None,
                 known_hosts_b64: None,
             };
@@ -565,6 +684,8 @@ mod tests {
             let response = Response {
                 ok: true,
                 stdout_b64: B64_STANDARD.encode(b"\0\xffoutput"),
+                outcome: None,
+                exit_code: None,
                 error: None,
                 known_hosts_b64: Some(B64_STANDARD.encode(b"old host entry\nnew host entry\n")),
             };
@@ -614,6 +735,8 @@ mod tests {
             let response = Response {
                 ok: false,
                 stdout_b64: String::new(),
+                outcome: None,
+                exit_code: None,
                 error: Some("dispatch outcome unknown: job-placeholder".into()),
                 known_hosts_b64: Some(B64_STANDARD.encode(b"must not be installed")),
             };

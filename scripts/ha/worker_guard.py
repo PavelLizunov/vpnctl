@@ -33,11 +33,12 @@ def main():
     watchdog = int(os.environ["WATCHDOG_USEC"]) / 1_000_000
     def authorized():
         record = json.loads(Path(args.authority).read_bytes())
-        remaining = record["deadline"] - time.monotonic()
-        return (record["boot_id"] == boot and record["epoch"] == args.epoch
-                and watchdog + args.stop_budget < remaining <= 15)
-    if not authorized():
-        return 1
+        remaining = record["boottime_deadline"] - time.clock_gettime(time.CLOCK_BOOTTIME)
+        if not (record["boot_id"] == boot and record["epoch"] == args.epoch
+                and watchdog + args.stop_budget < remaining <= 15):
+            raise RuntimeError("worker watchdog authority expired")
+        return record.get("armed") is True and bool(record.get("arm_token"))
+    authorized()
     environment = dict(os.environ)
     for key in ("NOTIFY_SOCKET", "WATCHDOG_USEC", "WATCHDOG_PID"):
         environment.pop(key, None)
@@ -45,8 +46,13 @@ def main():
     environment["VPNCTLD_HA_KNOWN_HOSTS"] = args.known_hosts
     environment["VPNCTLD_DEPLOY_KEY"] = args.deploy_key
     environment["VPNCTLD_TRUSTED_PROXIES"] = "127.0.0.1,::1"
-    child = subprocess.Popen(args.worker, env=environment)
+    # Stage an inspected live watchdog without starting the application.  Only
+    # a durable witness reservation permits the manager to publish an arm.
     notify("READY=1\nWATCHDOG=1")
+    while not authorized():
+        notify("WATCHDOG=1")
+        time.sleep(min(.05, watchdog / 4))
+    child = subprocess.Popen(args.worker, env=environment)
     while child.poll() is None:
         if not authorized():
             return 1  # Main exits; KillMode=control-group reaps every descendant.

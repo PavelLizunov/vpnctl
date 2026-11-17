@@ -10,6 +10,82 @@ from gateway import Server
 
 
 class ReviewedGatewayRegression(unittest.TestCase):
+    def test_local_and_forwarded_streams_close_before_stale_chunks(self):
+        for forwarded in (False, True):
+            with self.subTest(forwarded=forwarded):
+                release = threading.Event()
+                fenced = threading.Event()
+                class Worker(BaseHTTPRequestHandler):
+                    def do_GET(self):
+                        self.send_response(200); self.send_header("Connection", "close"); self.end_headers()
+                        self.wfile.write(b"current\n"); self.wfile.flush()
+                        release.wait(3)
+                        self.wfile.write(b"stale\n"); self.wfile.flush()
+                    def log_message(self, *args): pass
+                worker = ThreadingHTTPServer(("127.0.0.1", 0), Worker)
+                class App:
+                    config = {"peers": [], "trusted_proxies": []}
+                    def upstream(self): return "http://127.0.0.1:" + str(worker.server_port), object() if forwarded else None
+                    def response_authority(self): return ("old", 1)
+                    def forward_response_authority(self, upstream): return ("forward-old", 1)
+                    def validate_response_authority(self, token):
+                        if fenced.is_set(): raise RuntimeError("fixture epoch fenced")
+                server = Server(("127.0.0.1", 0), App())
+                for item in (worker, server):
+                    threading.Thread(target=item.serve_forever, daemon=True).start()
+                    self.addCleanup(item.server_close); self.addCleanup(item.shutdown)
+                connection = http.client.HTTPConnection(*server.server_address, timeout=4)
+                try:
+                    connection.request("GET", "/stream")
+                    response = connection.getresponse()
+                    self.assertEqual(response.fp.readline(), b"current\n")
+                    fenced.set(); release.set()
+                    self.assertEqual(response.read(), b"")
+                finally:
+                    release.set(); connection.close()
+
+    def test_delayed_local_and_forwarded_success_is_rejected_after_authority_loss(self):
+        for forwarded in (False, True):
+            with self.subTest(forwarded=forwarded):
+                reached = threading.Event()
+                release = threading.Event()
+                fenced = threading.Event()
+                class Worker(BaseHTTPRequestHandler):
+                    def do_GET(self):
+                        reached.set()
+                        release.wait(3)
+                        self.send_response(200)
+                        self.send_header("Content-Length", "13")
+                        self.end_headers()
+                        self.wfile.write(b"stale-success")
+                    def log_message(self, *args): pass
+                worker = ThreadingHTTPServer(("127.0.0.1", 0), Worker)
+                class App:
+                    config = {"peers": [], "trusted_proxies": []}
+                    def upstream(self): return "http://127.0.0.1:" + str(worker.server_port), object() if forwarded else None
+                    def response_authority(self): return ("old", 1)
+                    def forward_response_authority(self, upstream): return ("forward-old", 1)
+                    def validate_response_authority(self, token):
+                        if fenced.is_set(): raise RuntimeError("fixture epoch fenced")
+                server = Server(("127.0.0.1", 0), App())
+                for item in (worker, server):
+                    threading.Thread(target=item.serve_forever, daemon=True).start()
+                    self.addCleanup(item.server_close); self.addCleanup(item.shutdown)
+                result = []
+                def get():
+                    connection = http.client.HTTPConnection(*server.server_address, timeout=4)
+                    try:
+                        connection.request("GET", "/mutation-result")
+                        response = connection.getresponse()
+                        result.append((response.status, response.read()))
+                    finally: connection.close()
+                client = threading.Thread(target=get); client.start()
+                self.assertTrue(reached.wait(2))
+                fenced.set(); release.set(); client.join(4)
+                self.assertFalse(client.is_alive())
+                self.assertEqual(result[0][0], 502)
+                self.assertNotIn(b"stale-success", result[0][1])
+
     def test_connection_cannot_remove_request_framing_and_smuggle_trusted_request(self):
         hits = []
         class Worker(BaseHTTPRequestHandler):

@@ -49,6 +49,207 @@ class SnapshotTests(unittest.TestCase):
     def create(self, generation=1):
         return self.store.create(self.source, self.identities, generation, 100)
 
+    def test_interrupted_retirement_preserves_latest_and_recovers_on_restart(self):
+        for generation in range(1, 5):
+            self.create(generation)
+        old_versions = set((self.store.credential_root / "versions").iterdir())
+        with mock.patch.object(replica.shutil, "rmtree", side_effect=OSError("fixture interrupted prune")):
+            with self.assertRaises(replica.SnapshotError):
+                self.store.prune(4)
+        self.store.verify(4, 100, 0)
+        self.store.verify(3, 100, 0)
+        restarted = replica.SnapshotStore(self.store.root, "fixture-build", 1)
+        restarted.prune(4)
+        self.assertEqual({p.name for p in restarted.root.iterdir() if p.name.isdecimal()}, {"3", "4"})
+        self.assertTrue(old_versions.issubset(set((restarted.credential_root / "versions").iterdir())))
+
+    def test_prune_does_not_remove_a_newer_generation_awaiting_publication(self):
+        for generation in range(1, 5):
+            self.create(generation)
+        self.store.prune(3)
+        self.store.verify(4, 100, 0)
+        self.store.prune(4)
+        self.assertEqual({p.name for p in self.store.root.iterdir() if p.name.isdecimal()}, {"3", "4"})
+
+    def test_failed_unpublished_cycles_remain_bounded_after_credential_retention(self):
+        self.create()
+        for generation in range(2, 12):
+            self.store._retire_unpublished(1)
+            self.create(generation)
+            self.assertEqual(len([p for p in self.store.root.iterdir() if p.name.isdecimal()]), 2)
+        self.store._retire_unpublished(1)
+        self.store.verify(1, 100, 0)
+        self.assertEqual(len(list((self.store.credential_root / "versions").iterdir())), 1)
+
+    def test_install_retains_divergent_database_credentials_and_full_identity(self):
+        self.create()
+        self.database.execute("CREATE TABLE future_credentials(token TEXT,private_key BLOB)")
+        self.database.execute("INSERT INTO future_credentials VALUES(?,?)",
+                              ("fixture-divergent-token", b"fixture-divergent-private-key"))
+        self.database.commit()
+        self.identities["environment"].write_bytes(b"FIXTURE_DIVERGENT_ENV=retained\n")
+        self.database.close()
+        self.store.install(1, self.source, self.identities, 100, 0)
+        recovered = []
+        environments = []
+        for version in (self.store.credential_root / "versions").iterdir():
+            environments.append((version / "environment").read_bytes())
+            with closing(sqlite3.connect(":memory:")) as restored:
+                restored.executescript((version / "database.sql").read_text())
+                if restored.execute("SELECT 1 FROM sqlite_schema WHERE name='future_credentials'").fetchone():
+                    recovered.extend(restored.execute("SELECT token,private_key FROM future_credentials"))
+        self.assertIn(("fixture-divergent-token", b"fixture-divergent-private-key"), recovered)
+        self.assertIn(b"FIXTURE_DIVERGENT_ENV=retained\n", environments)
+
+    def test_install_retains_generated_credentials_and_sqlite_sequence(self):
+        self.create()
+        self.database.executescript("CREATE TABLE generated_credentials(base TEXT,token TEXT GENERATED ALWAYS AS (base || '-derived-token') STORED);"
+                                    "INSERT INTO generated_credentials(base) VALUES('fixture');"
+                                    "CREATE TABLE credential_sequence(id INTEGER PRIMARY KEY AUTOINCREMENT,secret TEXT);"
+                                    "INSERT INTO credential_sequence(id,secret) VALUES(9000,'fixture-removed-secret');"
+                                    "DELETE FROM credential_sequence;")
+        self.database.commit()
+        self.database.close()
+        self.store.install(1, self.source, self.identities, 100, 0)
+        recovered = []
+        for version in (self.store.credential_root / "versions").iterdir():
+            with closing(sqlite3.connect(":memory:")) as restored:
+                restored.executescript((version / "database.sql").read_text())
+                if restored.execute("SELECT 1 FROM sqlite_schema WHERE name='generated_credentials'").fetchone():
+                    recovered.extend(restored.execute("SELECT token FROM generated_credentials"))
+                    self.assertEqual(restored.execute("SELECT seq FROM sqlite_sequence WHERE name='credential_sequence'").fetchone(), (9000,))
+        self.assertIn(("fixture-derived-token",), recovered)
+
+    def test_install_checks_capacity_on_the_destination_filesystem(self):
+        self.create()
+        with tempfile.TemporaryDirectory(prefix="vpnctl-ha-destination-", dir="/dev/shm") as destination:
+            target = Path(destination) / "database.db"
+            target.write_bytes(b"fixture-old-destination")
+            targets = {name: Path(destination) / name for name in self.identities}
+            usage = replica.shutil.disk_usage(self.store.root)
+            def capacity(path):
+                if Path(path).is_relative_to(Path(destination)):
+                    return usage._replace(free=self.store.reserve_bytes)
+                return usage
+            with mock.patch.object(replica.shutil, "disk_usage", side_effect=capacity):
+                with self.assertRaisesRegex(replica.SnapshotError, "reserve"):
+                    self.store.install(1, target, targets, 100, 0)
+            self.assertEqual(target.read_bytes(), b"fixture-old-destination")
+            self.assertFalse(any(Path(destination).glob(".vpnctl-ha-*")))
+
+    def test_failed_backup_retains_complete_raw_wal_recovery_set(self):
+        self.create()
+        self.database.execute("CREATE TABLE wal_credentials(token TEXT)")
+        self.database.execute("INSERT INTO wal_credentials VALUES('fixture-wal-only-token')")
+        self.database.commit()
+        self.assertTrue(Path(str(self.source) + "-wal").exists())
+        with mock.patch.object(self.store, "_backup", side_effect=sqlite3.OperationalError("fixture backup failure")):
+            self.store.install(1, self.source, self.identities, 100, 0)
+        recovered = []
+        recovery = self.root / "raw-recovery"
+        recovery.mkdir()
+        for version in (self.store.credential_root / "versions").iterdir():
+            if not (version / "database.raw").exists():
+                continue
+            shutil = replica.shutil
+            target = recovery / "restored.db"
+            shutil.copyfile(version / "database.raw", target)
+            for logical, suffix in (("db_wal", "-wal"), ("db_shm", "-shm"), ("db_journal", "-journal")):
+                if (version / logical).exists():
+                    shutil.copyfile(version / logical, Path(str(target) + suffix))
+            with closing(sqlite3.connect(target)) as restored:
+                recovered.extend(restored.execute("SELECT token FROM wal_credentials"))
+        self.assertIn(("fixture-wal-only-token",), recovered)
+
+    def test_corrupt_destination_data_pages_are_retained_before_recovery(self):
+        self.create()
+        self.database.execute("CREATE TABLE corrupt_credentials(secret TEXT)")
+        self.database.execute("INSERT INTO corrupt_credentials VALUES('fixture-corrupt-page-secret')")
+        self.database.commit()
+        page = self.database.execute("SELECT rootpage FROM sqlite_schema WHERE name='corrupt_credentials'").fetchone()[0]
+        page_size = self.database.execute("PRAGMA page_size").fetchone()[0]
+        self.database.close()
+        with self.source.open("r+b") as source:
+            source.seek((page - 1) * page_size)
+            source.write(b"\0" * 16)
+        original = self.source.read_bytes()
+        self.assertIn(b"fixture-corrupt-page-secret", original)
+        self.store.install(1, self.source, self.identities, 100, 0)
+        retained = [(version / "database.raw").read_bytes()
+                    for version in (self.store.credential_root / "versions").iterdir()
+                    if (version / "database.raw").exists()]
+        self.assertIn(original, retained)
+
+    def test_receive_preserves_reserve_when_capacity_changes_during_transfer(self):
+        self.create()
+        receiver = replica.SnapshotStore(self.root / "receiver", "fixture-build", 1)
+        description = self.store.describe(1)
+        receiver.receive(description, lambda name,index,entry:self.store.read_chunk(1,name,index), 100, 0)
+        self.identities["environment"].write_bytes(b"FIXTURE_CHANGED_CONFIG=yes\n")
+        self.create(2)
+        changed = self.store.describe(2)
+        consumed = False
+        usage = replica.shutil.disk_usage(receiver.root)
+        def capacity(path):
+            if consumed and Path(path).is_relative_to(receiver.root):
+                return usage._replace(free=receiver.reserve_bytes)
+            return usage
+        def reader(name,index,entry):
+            nonlocal consumed
+            consumed = True
+            return self.store.read_chunk(2,name,index)
+        with mock.patch.object(replica.shutil, "disk_usage", side_effect=capacity):
+            with self.assertRaisesRegex(replica.SnapshotError, "reserve"):
+                receiver.receive(changed, reader, 100, 0)
+        self.assertTrue(consumed)
+        receiver.verify(1, 100, 0)
+        self.assertFalse((receiver.root / "2").exists())
+
+    def test_wal_writer_during_bulk_backup_does_not_restart_its_read_snapshot(self):
+        self.database.execute("CREATE TABLE server_metrics(value BLOB)")
+        self.database.execute("INSERT INTO server_metrics VALUES(zeroblob(4194304))")
+        self.database.commit()
+        connect = sqlite3.connect
+        changed = False
+        source_path = self.source
+        class TrackedConnection(sqlite3.Connection):
+            def backup(self, target, *, pages, progress, sleep):
+                def concurrent_write(status, remaining, total):
+                    nonlocal changed
+                    if not changed:
+                        with closing(connect(source_path)) as writer:
+                            writer.execute("INSERT INTO parent VALUES(99)"); writer.commit()
+                        changed = True
+                    progress(status, remaining, total)
+                return super().backup(target, pages=pages, progress=concurrent_write, sleep=sleep)
+        def connection(path, **kwargs):
+            if str(path).startswith(source_path.as_uri()):
+                kwargs["factory"] = TrackedConnection
+            return connect(path, **kwargs)
+        with mock.patch.object(replica.sqlite3, "connect", side_effect=connection):
+            self.create()
+        self.assertTrue(changed)
+        with closing(connect(self.store.root / "1/inv_db")) as backed_up:
+            self.assertEqual(backed_up.execute("SELECT id FROM parent").fetchall(), [(1,)])
+        self.assertEqual(self.database.execute("SELECT id FROM parent ORDER BY id").fetchall(), [(1,), (99,)])
+
+    def test_archive_staging_is_included_in_capacity_reserve(self):
+        self.create()
+        self.database.execute("CREATE TABLE unknown_credentials(private_key BLOB)")
+        self.database.execute("INSERT INTO unknown_credentials VALUES(?)", (b"fixture" * 20000,))
+        self.database.commit()
+        baseline = self.source.stat().st_size + Path(str(self.source) + "-wal").stat().st_size
+        usage = replica.shutil.disk_usage(self.store.root)
+        def capacity(path):
+            if Path(path).is_relative_to(self.store.credential_root):
+                return usage._replace(free=self.store.reserve_bytes + baseline)
+            return usage
+        with mock.patch.object(replica.shutil, "disk_usage", side_effect=capacity):
+            with self.assertRaisesRegex(replica.SnapshotError, "reserve"):
+                self.create(2)
+        self.store.verify(1, 100, 0)
+        self.assertFalse((self.store.root / "2").exists())
+
     def rewrite_manifest(self, name, data):
         directory = self.store.root / "1"
         (directory / name).write_bytes(data)

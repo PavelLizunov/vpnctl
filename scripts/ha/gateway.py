@@ -47,6 +47,13 @@ def proxy(handler, upstream, context, client_ip, forwarded=False):
     conn, prefix = connection(upstream, context, timeout=3)
     started = False
     try:
+        app = handler.server.app
+        token = None
+        if hasattr(app, "response_authority"):
+            token = app.forward_response_authority(upstream) if forwarded else app.response_authority()
+        def check_response():
+            if token is not None:
+                app.validate_response_authority(token)
         lengths = handler.headers.get_all("Content-Length", [])
         encodings = handler.headers.get_all("Transfer-Encoding", [])
         if len(lengths) > 1 or len(encodings) > 1 or (lengths and encodings):
@@ -110,6 +117,7 @@ def proxy(handler, upstream, context, client_ip, forwarded=False):
         if conn.sock:
             conn.sock.settimeout(None)
         response = conn.getresponse()
+        check_response()
         handler.send_response_only(response.status, response.reason)
         dropped = stripped(response.headers)
         body_allowed = handler.command != "HEAD" and response.status not in (204, 304) and response.status >= 200
@@ -122,6 +130,7 @@ def proxy(handler, upstream, context, client_ip, forwarded=False):
         started = True
         if body_allowed:
             while data := response.read1(65536):
+                check_response()
                 handler.wfile.write(data)
                 handler.wfile.flush()
         handler.close_connection = True
@@ -266,7 +275,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def read_json(self):
         size = int(self.headers.get("Content-Length", "0"))
-        if self.headers.get("Transfer-Encoding") or not 0 <= size <= MAX_FRAME:
+        limit = 3 * 1024 * 1024 if self.path in ("/_ha/publish", "/_ha/chunk") else MAX_FRAME
+        if self.headers.get("Transfer-Encoding") or not 0 <= size <= limit:
             raise ValueError("invalid control body length")
         data = self.rfile.read(size)
         if len(data) != size:
@@ -380,6 +390,7 @@ class Handler(BaseHTTPRequestHandler):
                   ("Snapshot generation", status.get("generation") or "No verified generation"),
                   ("Snapshot age / possible data loss", "Unknown" if age is None else f"{age / 1000:.2f} seconds"),
                   ("Replication interval", f"{status.get('replication_interval_ms', 0) / 1000:g} seconds"),
+                  ("Replication status", status.get("replication_error") or "No replication failure reported"),
                   ("Maximum promotion age", f"{status.get('maximum_promotion_age_ms', status.get('max_replica_age_ms', 0)) / 1000:g} seconds"),
                   ("Worker admission", "Open" if status.get("worker_admitted") else "Closed"),
                   ("Local fencing", "Closed through epoch " + str(status.get("fenced_through", 0))),

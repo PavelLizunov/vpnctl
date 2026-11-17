@@ -3,9 +3,9 @@
 Standalone `vpnctld` is unchanged. HA uses two controller gateways, three real
 Consul voters, and an independent executor/storage witness. This candidate is
 not activated in production. The witness is an availability dependency: losing
-it blocks SSH operations and promotion. Controller host/network failure blocks
-promotion until the previous controller's cgroup can be positively fenced;
-this version does not power-fence hosts. A suspended gateway also suspends its
+it blocks SSH operations and promotion. An unreachable controller can be replaced after the witness proves its durable
+resource arm expired and the SSH epoch barrier has no unresolved action. This
+version does not power-fence hosts. A suspended gateway also suspends its
 own frontend until the process resumes or its service restarts.
 
 Replication is asynchronous. A promoted controller may lose **acknowledged**
@@ -22,7 +22,7 @@ The gateways run separately from their workers; followers never open inventory.
 1. Build the reviewed revision with `just build-release`. Inspect
    `vpnctld --ha-artifact`; copy its `executable_sha256` and `schema` into all
    configs. Migration checksums are checked independently at snapshot publication
-   and promotion. Package `scripts/ha/{common,controller_ha,executor,gateway,replica,worker,worker_guard}.py`
+   and promotion. Package `scripts/ha/{common,controller_ha,executor,gateway,lifecycle,replica,transfer_pins,worker,worker_guard}.py`
    together under `/opt/vpnctl/ha/`. No third-party Python packages are needed.
 2. Prepare three Consul voters with TLS, gossip encryption and ACLs. Gateways use
    consistent reads, TTL sessions and atomic CAS+lock transactions. Allow
@@ -82,9 +82,10 @@ No database merge, automatic migration or subscription-identity regeneration
 occurs during promotion. Exact executable, embedded migrations, file hashes,
 SQLite integrity/FKs and deployment identity must match.
 
-The executor fsyncs an intent before every SSH dispatch. Any error, lost result
-or interrupted helper becomes **uncertain**, survives restart and blocks every
-later dispatch and promotion. The status lists exact job IDs. There is no blind
+The executor fsyncs an intent before every SSH dispatch. An observed remote exit (including 1..254) or a proven pre-dispatch rejection
+is a completed failure returned once to its caller; it does not block later
+operations. A lost result, SSH exit 255, timeout or interrupted helper is
+**uncertain**, survives restart and blocks later dispatch and promotion. The status lists exact job IDs. There is no blind
 retry or “mark successful” button. Remote completion/fencing must be proven
 before an operator can perform recovery; this candidate deliberately has no
 unsupported automatic resolution for an unreachable remote action. Preserve its
@@ -112,8 +113,77 @@ They use loopback three-voter Consul, a fixture CA, temporary SQLite/identities,
 fixture transports and only `vpnctl-ha-worker-fixture-{a,b}.service` transient
 units. No real node commands, production keys, inventory or services are used.
 
-Immutable generations and the executor ledger currently have no automatic
-pruning. Provision durable capacity for the chosen snapshot interval before
-activation; do not silently discard credential-bearing history. This candidate
-has no automatic resolution of uncertain remote execution and no host power
-fence. Both dependencies remain visible as blocked readiness conditions.
+Snapshot data uses fixed logical files and verified 1 MiB chunks over mTLS,
+with bounded zlib decoding. Authenticated transfer pins keep one immutable
+generation readable per controller while newer generations publish and prune.
+Pins expire without renewal (default ten minutes, configurable
+`snapshot_transfer_timeout_ms`, maximum one hour), release after download, and
+are invalidated on witness restart; their hard links add bounded operational
+retention without copying file data. Receivers reuse unchanged chunks from their previous
+verified generation. Full-file hashes, SQLite integrity/FKs, exact migrations,
+build and identity checks still precede publication. Each process uses bounded
+SQLite caches; no whole inventory enters a control JSON/base64 frame. The 8 GiB
+snapshot limit bounds disk use; it is not an allocation.
+
+Operational stores keep the latest advertised generation and one previous
+recovery generation, plus an in-progress generation. `snapshot_keep_generations`
+may raise the two-generation minimum; `snapshot_reserve_bytes` defaults to 2 GiB.
+Capacity failure degrades replication without stopping a healthy controller;
+the UI shows the error and increasing snapshot age. Bulk copying, verification,
+installation and pruning run separately from authority renewal. No generation is
+advertised after its authority or age check fails. Failed unpublished verified
+generations are removed after a later successful publication; the reserve stops
+further allocations if publication cannot recover.
+
+Set `credential_root` to an absolute directory under the operator's
+`~/.local/share/agent-credentials/vpnctl-ha/` on each participating machine,
+independent of operational `state_dir`. The default uses that location under the
+service account's home, keyed by store path. Never include it in snapshot cleanup.
+Immutable `versions/<sha256>/` directories contain complete deploy/private/public
+key, known_hosts and environment bytes, plus SQLite-restorable `database.sql`
+with credential/config rows and schema. The archive excludes only the explicit
+pure telemetry allowlist in `replica.py`; unknown tables and token-bearing bans
+are retained. Before recovery overwrites a divergent local database/identity,
+archive that state too. If consistent extraction fails, `database.raw` and fixed
+`db_wal`/`db_shm`/`db_journal` companions preserve the full recovery set. Restore
+the raw file with companions named `<db>-wal`, `<db>-shm`, `<db>-journal`. `index.json` records project, machine, purpose, timestamp and actual
+version path. Changed/deleted values remain recoverable in earlier versions;
+unchanged credentials deduplicate. Retention has no TTL. Permanent credential
+history necessarily grows when retained content changes; monitor its capacity
+independently. Failure to archive prevents operational publication/pruning.
+
+The independent witness reserves a durable bounded arm before the controller may
+start or extend its watchdog. The record includes authenticated cgroup properties,
+boot identity, epoch/session and a witness CLOCK_BOOTTIME expiry. Failed
+candidates do not replace the last possibly running worker. Expired arms plus the
+durable SSH barrier allow failover without contacting a dead or frozen manager.
+Missing lifecycle history and unfinished SSH intents fail closed with a reason.
+The old gateway rechecks authority before response headers and each streamed
+chunk; stale successful responses are rejected. This fences controller resources;
+it does not power off the machine or its unrelated VLESS service.
+
+For a disposable current-size storage/codec benchmark, run
+`python3 scripts/ha/benchmark_replica.py --output /tmp/ha-size.json`.
+The fixture is >=1,101,983,744 bytes and limits virtual memory to 512 MiB. It uses
+incompressible random telemetry, so cold transfer expands to approximately 1.47 GB
+with base64; this is an honest worst-compression fixture, not a WAN measurement.
+A one-row update transfers only changed chunks; unchanged cycles transfer no file
+chunks. Hashing/SQLite verification still read local data. Select the promotion
+age limit from measured copy time and WAN rate; the sample uses ten minutes,
+not a promise that a first cold transfer over a slow WAN will fit that limit.
+Real-size isolated mTLS/cgroup tests can opt in with
+`VPNCTL_HA_FIXTURE_BYTES=1101983744` in addition to the flags above (fixture age
+and request budgets increase explicitly). Normal CI keeps its small fixtures.
+
+There is no automatic resolution of uncertain remote execution. The independent
+witness remains an availability dependency. Production activation, topology,
+certificates and external frontend routing require separate integration; this
+candidate does not change current production, main, DNS or VPN nodes.
+
+Dedicated workers also declare `Conflicts=sleep.target` and
+`Before=sleep.target`. The witness checks those properties. Ordinary systemd
+host sleep stops the entire cgroup before sleeping, including a frozen staged
+guard, and leaves it stopped on resume. Forced hypervisor/physical freezes do
+not provide a pre-sleep transaction; external controller resources still require
+the fresh witness epoch/SSH barrier and gateway authority checks. There is no
+host power fence or claim that userspace runs while a machine is frozen.

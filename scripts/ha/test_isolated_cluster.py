@@ -6,6 +6,7 @@ Only disposable fixture workers, keys, SQLite files and transient units are used
 from __future__ import annotations
 
 import base64
+from contextlib import closing
 import hashlib
 import http.client
 import json
@@ -28,6 +29,8 @@ from common import Consul, canonical, request, tls_context
 ROOT = Path(__file__).resolve().parent
 CONSUL = os.environ.get("VPNCTL_HA_CONSUL_BINARY")
 SYSTEMD = os.environ.get("VPNCTL_HA_SYSTEMD_TESTS") == "1"
+FIXTURE_BYTES = int(os.environ.get("VPNCTL_HA_FIXTURE_BYTES", "0"))
+FIXTURE_ADDRESS_SPACE_BYTES = 1536 * 1024 * 1024
 USED_PORTS = set()
 
 
@@ -36,12 +39,21 @@ def port():
         with socket.socket() as stream:
             stream.bind(("127.0.0.1", 0))
             value = stream.getsockname()[1]
+            # Consul gossip binds TCP and UDP on the same port.  A free TCP
+            # ephemeral port can still collide with an unrelated UDP service.
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as datagram:
+                    datagram.bind(("127.0.0.1", value))
+            except OSError:
+                continue
         if value not in USED_PORTS:
             USED_PORTS.add(value)
             return value
 
 
 def eventually(action, timeout=40):
+    if FIXTURE_BYTES:
+        timeout = max(timeout, 240)
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:
@@ -56,7 +68,7 @@ def eventually(action, timeout=40):
 
 
 FIXTURE_WORKER = r'''#!/usr/bin/env python3
-import base64,hashlib,http.server,json,os,pathlib,socket,sqlite3,subprocess,sys,time,urllib.parse
+import base64,contextlib,hashlib,http.server,json,os,pathlib,socket,sqlite3,subprocess,sys,time,urllib.parse
 SELF=pathlib.Path(__file__).resolve()
 MIGRATION="1:" + "01"*48 + "\n"
 if "--ha-artifact" in sys.argv:
@@ -77,9 +89,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
   url=urllib.parse.urlsplit(self.path)
   if url.path=="/api/v1/health":body=b"ok"
   elif url.path=="/write":
-   with sqlite3.connect(db) as c:c.execute("update fixture set count=count+1");body=str(c.execute("select count from fixture").fetchone()[0]).encode()
+   with contextlib.closing(sqlite3.connect(db)) as c,c:c.execute("update fixture set count=count+1");body=str(c.execute("select count from fixture").fetchone()[0]).encode()
   else:
-   with sqlite3.connect(db) as c:body=c.execute("select artifact from fixture").fetchone()[0].encode()
+   with contextlib.closing(sqlite3.connect(db)) as c:body=c.execute("select artifact from fixture").fetchone()[0].encode()
   self.send_response(200);self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
 http.server.ThreadingHTTPServer((host,int(p)),Handler).serve_forever()
 '''
@@ -87,6 +99,38 @@ http.server.ThreadingHTTPServer((host,int(p)),Handler).serve_forever()
 
 @unittest.skipUnless(CONSUL and SYSTEMD, "requires explicit real Consul/systemd fixture opt-in")
 class ClusterFaultTests(unittest.TestCase):
+    def test_slow_pinned_follower_download_survives_multiple_publications(self):
+        from common import decode_chunk
+        from replica import SnapshotStore
+        follower = self.controllers["fixture-b"]
+        os.kill(follower.pid, signal.SIGSTOP)
+        self.addCleanup(os.kill, follower.pid, signal.SIGCONT)
+        witness = self.configs["fixture-witness"]["peers"]["fixture-witness"]
+        context = self.contexts["fixture-b"]
+        latest = request(witness, "GET", "/_ha/snapshot-status", context=context)["manifest"]
+        generation = latest["generation"]
+        transfer = request(witness, "GET", "/_ha/snapshot/" + str(generation), context=context, timeout=30)
+        reads = 0
+        try:
+            sink = SnapshotStore(self.root / "slow-follower-transfer", self.configs["fixture-b"]["build"], 1)
+            def reader(name, index, entry):
+                nonlocal reads
+                chunk = request(witness, "POST", "/_ha/chunk", {"pin": transfer["pin"], "generation": generation,
+                                "name": name, "index": index}, context=context)
+                reads += 1
+                if reads == 1:
+                    eventually(lambda: request(witness, "GET", "/_ha/snapshot-status", context=context)["manifest"]["generation"] >= generation + 3)
+                    self.assertFalse((self.root / "fixture-witness/state/generations" / str(generation)).exists())
+                return decode_chunk(chunk, entry)
+            installed = sink.receive(transfer["description"], reader, transfer["witness_now_ms"], 120000)
+            self.assertEqual(installed, latest)
+            self.assertGreater(reads, 1)
+            self.assertEqual(sink.verify(generation, transfer["witness_now_ms"], 120000), latest)
+            self.assertTrue(self.status("fixture-a")["worker_admitted"])
+        finally:
+            request(witness, "POST", "/_ha/snapshot-release", {"pin": transfer["pin"]}, context=context)
+            os.kill(follower.pid, signal.SIGCONT)
+
     def setUp(self):
         previous_umask = os.umask(0o077)
         self.addCleanup(os.umask, previous_umask)
@@ -128,6 +172,7 @@ class ClusterFaultTests(unittest.TestCase):
         build = hashlib.sha256(self.helper.read_bytes()).hexdigest()
         self.configs = {}
         self.token = "fixture-management-token-not-live"
+        (self.root / "retained-fixture-identities").mkdir(mode=0o700)
         for node in self.names:
             directory = self.root / node;directory.mkdir(mode=0o711);directory.chmod(0o711)
             data_dir = directory / "data";data_dir.mkdir(mode=0o700)
@@ -143,10 +188,15 @@ class ClusterFaultTests(unittest.TestCase):
                 path = (directory if name == "worker_env" else data_dir) / name
                 path.write_text(value);identities[name] = str(path)
             database = data_dir / "inventory.db"
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db, db:
                 db.executescript("create table _sqlx_migrations(version bigint primary key,description text,installed_on text,success boolean,checksum blob,execution_time bigint);create table fixture(artifact text,count int);")
                 db.execute("insert into _sqlx_migrations values(1,'fixture','2026-01-01',1,?,0)", (bytes([1])*48,))
                 db.execute("insert into fixture values('fixture-subscription-byte-contract',0)")
+                if FIXTURE_BYTES:
+                    # Generated fixture telemetry, never a production DB copy.
+                    db.execute("create table server_metrics(id integer primary key, sample blob)")
+                    for _ in range((FIXTURE_BYTES + 1024 * 1024 - 1) // (1024 * 1024)):
+                        db.execute("insert into server_metrics(sample) values(zeroblob(1048576))")
             config = {"node_id": node, "role": "witness" if node == "fixture-witness" else "controller", "state_dir": str(directory / "state"), "runtime_dir": str(directory / "runtime"),
                       "worker": str(self.helper), "build": build, "schema": 1,
                       "tls": {"ca": str(self.root / "ca.crt"), "cert": str(self.root / (node + ".crt")), "key": str(self.root / (node + ".key"))},
@@ -154,17 +204,18 @@ class ClusterFaultTests(unittest.TestCase):
                       "witness": "fixture-witness", "seed_node": "fixture-a", "control_addr": "127.0.0.1:" + str(self.controls[node]),
                       "public_addr": "127.0.0.1:" + str(self.public.get(node, 0)), "admin_token_file": str(token), "db": str(database),
                       "identities": identities, "deploy_key": identities["deploy_key"], "worker_addr": "127.0.0.1:" + str(port()),
-                      "systemd_user": os.geteuid() != 0, "stop_budget_ms": 1000, "replication_interval_ms": 1000, "max_replica_age_ms": 120000}
+                      "systemd_user": os.geteuid() != 0, "stop_budget_ms": 1000, "replication_interval_ms": 1000, "max_replica_age_ms": 600000 if FIXTURE_BYTES else 120000,
+                      "credential_root": str(self.root / "retained-fixture-identities" / node)}
             if worker_user:
                 config["worker_user"] = worker_user
             path = directory / "config.json";path.write_bytes(canonical(config));self.configs[node] = config
             self.controllers[node] = self.spawn([sys.executable, str(self.bundle / "controller_ha.py"), "--config", str(path)], node)
         self.contexts = {node: tls_context(config["tls"]) for node, config in self.configs.items()}
-        eventually(lambda: self.status("fixture-a")["node"] == "fixture-a")
+        eventually(lambda: all(self.status(node)["node"] == node for node in self.names))
         self.manage("fixture-a", "pause")  # Existing settings are not lease history.
         self.manage("fixture-a", "initialize")
         self.manage("fixture-a", "resume")
-        eventually(lambda: self.status("fixture-a")["worker_admitted"])
+        eventually(lambda: self.status("fixture-a")["worker_admitted"] and self.consul.settings().get("target") is None)
         def follower_ready():
             code, body = self.get("fixture-b", "/sub/fixture-token")
             if code == 200 and body == b"fixture-subscription-byte-contract":
@@ -174,7 +225,28 @@ class ClusterFaultTests(unittest.TestCase):
 
     def spawn(self, command, name):
         log = (self.root / (name + ".log")).open("ab");self.logs.append(log)
-        return subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+        limiter = None
+        if FIXTURE_BYTES and any(str(value).endswith("/controller_ha.py") for value in command):
+            def limiter():
+                import resource
+                resource.setrlimit(resource.RLIMIT_AS, (FIXTURE_ADDRESS_SPACE_BYTES, FIXTURE_ADDRESS_SPACE_BYTES))
+        environment = dict(os.environ)
+        if limiter:
+            # Bound glibc's virtual malloc arenas as well as live buffers while
+            # measuring a constrained fixture; this does not affect the host.
+            environment["MALLOC_ARENA_MAX"] = "2"
+        return subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                preexec_fn=limiter, env=environment)
+
+    def memory_high_water(self):
+        result = {}
+        for node, process in self.controllers.items():
+            try:
+                fields = Path("/proc/" + str(process.pid) + "/status").read_text().splitlines()
+                result[node] = next(line.split(":", 1)[1].strip() for line in fields if line.startswith("VmHWM:"))
+            except (FileNotFoundError, StopIteration):
+                pass
+        return result
 
     def make_certificates(self):
         def openssl(*args):
@@ -197,7 +269,7 @@ class ClusterFaultTests(unittest.TestCase):
         finally:conn.close()
 
     def manage(self, node, action, target="fixture-b"):
-        conn = http.client.HTTPConnection("127.0.0.1", self.public[node], timeout=10)
+        conn = http.client.HTTPConnection("127.0.0.1", self.public[node], timeout=600 if FIXTURE_BYTES else 10)
         headers={"Authorization":"Basic "+base64.b64encode(("ha:"+self.token).encode()).decode()}
         try:
             conn.request("GET","/admin/ha",headers=headers);response=conn.getresponse();body=response.read().decode()
@@ -225,6 +297,9 @@ class ClusterFaultTests(unittest.TestCase):
             command=["systemctl"]+(["--user"] if os.geteuid()!=0 else [])+["stop","vpnctl-ha-worker-"+node+".service"]
             subprocess.run(command,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
         for log in getattr(self,"logs",[]):log.close()
+        for path in self.root.glob("*.log"):
+            if not path.name.startswith("consul-") and path.stat().st_size:
+                print("fixture process log " + path.name + ": " + path.read_text()[-6000:], flush=True)
         if hasattr(self,"temporary"):self.temporary.cleanup()
 
     def test_crash_sigstop_handover_and_byte_compatible_forwarding(self):
@@ -257,13 +332,114 @@ class ClusterFaultTests(unittest.TestCase):
         # Even a frozen supervisor cannot extend the independent systemd deadline.
         pid=int(Path(self.configs["fixture-a"]["db"]).with_suffix(".pid").read_text())
         eventually(lambda:not Path("/proc/"+str(pid)).exists(),timeout=25)
-        time.sleep(2)
-        self.assertFalse(self.status("fixture-b")["worker_admitted"])
-        os.kill(old.pid,signal.SIGCONT)
+        # No RPC response from the suspended manager is required: the durable
+        # witness arm and independent systemd watchdog prove bounded resource
+        # access, while the executor barrier closes its old SSH epoch.
         eventually(lambda:self.status("fixture-b")["worker_admitted"],timeout=60)
+        os.kill(old.pid,signal.SIGCONT)
+        eventually(lambda:not self.status("fixture-a")["worker_admitted"])
+        self.assertEqual(self.get("fixture-a", "/sub/fixture-token"), (200, b"fixture-subscription-byte-contract"))
         for process in self.processes[1:]:process.terminate();process.wait(timeout=8)
         eventually(lambda:not self.status("fixture-b")["worker_admitted"],timeout=25)
         self.assertNotEqual(self.get("fixture-b","/sub/fixture-token")[0],200)
+
+    def test_killed_unreachable_manager_promotes_after_independent_arm(self):
+        old = self.controllers["fixture-a"]
+        pid = int(Path(self.configs["fixture-a"]["db"]).with_suffix(".pid").read_text())
+        old_grant = self.consul.get("lease")["record"]
+        peak_before = self.memory_high_water()
+        started = time.monotonic()
+        old.kill(); old.wait()
+        eventually(lambda: self.status("fixture-b")["worker_admitted"], timeout=60)
+        self.assertFalse(Path("/proc/" + str(pid)).exists())
+        self.assertEqual(self.get("fixture-b", "/sub/fixture-token"), (200, b"fixture-subscription-byte-contract"))
+        stale_effect = self.root / "stale-external-effect"
+        with self.assertRaises(RuntimeError):
+            request(self.configs["fixture-a"]["peers"]["fixture-witness"], "POST", "/_ha/execute",
+                    {**old_grant, "build": self.configs["fixture-a"]["build"],
+                     "transport": {"timeout_ms": 1000, "remote_cmd": "append|" + str(stale_effect) + "|0|ok"}},
+                    context=self.contexts["fixture-a"])
+        self.assertFalse(stale_effect.exists())
+        if FIXTURE_BYTES:
+            manifest = json.loads((self.root / "fixture-witness/state/snapshots.json").read_text())["latest"]
+            print("current-size isolated evidence: " + json.dumps({
+                "fixture_requested_bytes": FIXTURE_BYTES,
+                "snapshot_database_bytes": manifest["files"]["inv_db"]["size_bytes"],
+                "snapshot_total_bytes": sum(entry["size_bytes"] for entry in manifest["files"].values()),
+                "supervisor_address_space_limit_bytes": FIXTURE_ADDRESS_SPACE_BYTES,
+                "fixture_malloc_arena_max": 2,
+                "peak_rss_before_crash": peak_before, "peak_rss_after_promotion": self.memory_high_water(),
+                "failover_to_usable_seconds": round(time.monotonic() - started, 3),
+                "old_worker_reaped": True, "subscription_bytes_preserved": True, "stale_external_dispatch_count": 0,
+            }), flush=True)
+        # Restarting the old manager fences any leftover worker and rejoins as
+        # a proxy; its divergent inventory cannot regain authority.
+        path = self.root / "fixture-a" / "config.json"
+        self.controllers["fixture-a"] = self.spawn([sys.executable, str(self.bundle / "controller_ha.py"), "--config", str(path)], "old-manager-restart")
+        eventually(lambda: self.get("fixture-a", "/sub/fixture-token") == (200, b"fixture-subscription-byte-contract"))
+        self.assertFalse(self.status("fixture-a")["worker_admitted"])
+
+    def test_failed_candidate_preserves_unreachable_predecessor_evidence(self):
+        old = self.controllers["fixture-a"]
+        os.kill(old.pid, signal.SIGSTOP)
+        original = self.consul.get("lease")["record"]
+        self.consul.release(original["session"])
+        candidate = eventually(lambda: (item["record"] if (item := self.consul.get("lease")) and item.get("Session")
+                                         and item["record"]["epoch"] > original["epoch"] else None))
+        self.assertEqual(candidate["holder"], "fixture-b")
+        # Fail a candidate before it can arm a worker, then let a later lease
+        # recover.  Consul's immediate previous lease now names the candidate,
+        # while the independent lifecycle must still name the actual worker.
+        self.consul.release(candidate["session"])
+        url = self.configs["fixture-b"]["peers"]["fixture-witness"]
+        evidence = request(url, "GET", "/_ha/lifecycle-status", context=self.contexts["fixture-b"])
+        self.assertEqual(evidence["worker"]["node"], "fixture-a")
+        self.assertEqual(evidence["worker"]["epoch"], original["epoch"])
+        self.assertFalse(evidence["ready"])
+        eventually(lambda: self.status("fixture-b")["worker_admitted"], timeout=60)
+        current = self.consul.get("lease")["record"]
+        self.assertGreater(current["epoch"], candidate["epoch"])
+        os.kill(old.pid, signal.SIGCONT)
+        eventually(lambda: not self.status("fixture-a")["worker_admitted"])
+        self.assertEqual(self.get("fixture-a", "/sub/fixture-token"), (200, b"fixture-subscription-byte-contract"))
+
+    def test_stalled_replication_does_not_block_renewal_or_quorum_loss_stop(self):
+        # Instrument only the disposable copied module, then restart the
+        # witness-independent follower and the leader supervisor cleanly.
+        source = self.bundle / "replica.py"
+        source.write_text(source.read_text() + """\n
+_fixture_create = SnapshotStore.create
+def _fixture_stall(self, *args, **kwargs):
+    marker = Path(""" + repr(str(self.root / "stall-copy")) + """)
+    if marker.exists():
+        marker.with_suffix('.started').touch()
+        import time
+        time.sleep(40)
+    return _fixture_create(self, *args, **kwargs)
+SnapshotStore.create = _fixture_stall
+""")
+        old = self.controllers["fixture-a"]
+        old.terminate(); old.wait(timeout=8)
+        path = self.root / "fixture-a" / "config.json"
+        self.controllers["fixture-a"] = self.spawn([sys.executable, str(self.bundle / "controller_ha.py"), "--config", str(path)], "stalled-copy-manager")
+        eventually(lambda: self.status("fixture-a")["worker_admitted"] or self.status("fixture-b")["worker_admitted"], timeout=60)
+        if self.status("fixture-b")["worker_admitted"]:
+            self.manage("fixture-b", "handover", target="fixture-a")
+            eventually(lambda: self.status("fixture-a")["worker_admitted"], timeout=60)
+        (self.root / "stall-copy").touch()
+        eventually(lambda: (self.root / "stall-copy.started").exists())
+        epoch = self.consul.get("lease")["record"]["epoch"]
+        time.sleep(17)  # A snapshot spans more than the 15-second grant bound.
+        self.assertTrue(self.status("fixture-a")["worker_admitted"])
+        self.assertEqual(self.consul.get("lease")["record"]["epoch"], epoch)
+        self.assertEqual(self.get("fixture-a", "/sub/fixture-token"), (200, b"fixture-subscription-byte-contract"))
+        started = time.monotonic()
+        for process in self.processes[1:]:
+            process.terminate(); process.wait(timeout=8)
+        eventually(lambda: not self.status("fixture-a")["worker_admitted"], timeout=20)
+        self.assertLess(time.monotonic() - started, 20)
+        self.assertNotEqual(self.get("fixture-a", "/sub/fixture-token")[0], 200)
+        self.assertTrue((self.root / "stall-copy.started").exists())
 
     def test_stale_and_mismatched_generation_block_automatic_promotion(self):
         self.manage("fixture-a", "pause")

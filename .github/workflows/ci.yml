@@ -329,3 +329,5 @@ jobs:
         run: |
           sudo env VPNCTL_HA_CONSUL_BINARY=/tmp/ha-consul/consul VPNCTL_HA_SYSTEMD_TESTS=1 \
             python3 -m unittest discover -s scripts/ha -p test_isolated_cluster.py -v
+          sudo env VPNCTL_HA_SYSTEMD_TESTS=1 \
+            python3 -m unittest discover -s scripts/ha -p test_worker_sleep.py -v

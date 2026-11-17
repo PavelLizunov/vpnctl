@@ -5,8 +5,8 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 517 (333 prod / 184 test)
-- **Total Rust LOC:** 190,496 (99,629 prod / 90,867 test)
+- **Tracked Rust Files:** 518 (333 prod / 185 test)
+- **Total Rust LOC:** 190,990 (99,894 prod / 91,096 test)
 - **Database Migrations:** 75
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 144
 
@@ -22,9 +22,9 @@
 | `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 58 tests | 18,636 (63) | 27,297 (64) | **45,933** |
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 6,753 (14) | 1,554 (6) | **8,307** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,236 (20) | 4,817 (12) | **9,053** |
-| `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,560 (5) | 1,191 (5) | **3,751** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 28 tests | 57,643 (190) | 52,498 (89) | **110,141** |
-| **Total** | | | | **99,629 (333)** | **90,867 (184)** | **190,496** |
+| `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,825 (5) | 1,191 (5) | **4,016** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 29 tests | 57,643 (190) | 52,727 (90) | **110,370** |
+| **Total** | | | | **99,894 (333)** | **91,096 (185)** | **190,990** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -43,12 +43,12 @@
 | `daemon/tests/admin_smoke/alerts_health.rs` | 1,514 | `daemon` | Test |
 | `daemon/tests/admin_smoke/servers.rs` | 1,452 | `daemon` | Test |
 | `daemon/tests/spec_corp_policy_eligibility.rs` | 1,404 | `daemon` | Test |
+| `crates/ssh/src/subprocess.rs` | 1,380 | `crates/ssh` | Prod |
 | `daemon/tests/sub_endpoint/mihomo.rs` | 1,324 | `daemon` | Test |
 | `daemon/tests/admin_smoke/server_detail/setup_config.rs` | 1,318 | `daemon` | Test |
 | `crates/inventory/tests/spec_full_node_traffic.rs` | 1,313 | `crates/inventory` | Test |
 | `daemon/src/handlers/auth.rs` | 1,288 | `daemon` | Prod |
 | `crates/boosty-bridge/tests/sync_integration.rs` | 1,285 | `crates/boosty-bridge` | Test |
-| `crates/ssh/src/subprocess.rs` | 1,238 | `crates/ssh` | Prod |
 | `daemon/tests/admin_smoke/dashboard.rs` | 1,217 | `daemon` | Test |
 | `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,200 | `daemon` | Test |
 | `daemon/src/handlers/admin/boosty.rs` | 1,170 | `daemon` | Prod |

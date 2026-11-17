@@ -11,8 +11,41 @@ import ssl
 import tempfile
 import time
 import urllib.parse
+import zlib
 
-MAX_FRAME = 384 * 1024 * 1024
+MAX_FRAME = 96 * 1024 * 1024  # SSH output; snapshots never use whole-file frames.
+CHUNK_BYTES = 1024 * 1024
+
+
+def encode_chunk(data):
+    if not isinstance(data, bytes) or not 0 < len(data) <= CHUNK_BYTES:
+        raise ValueError("invalid raw chunk size")
+    packed = zlib.compress(data, level=1)
+    compressed = len(packed) < len(data)
+    return {"encoding": "zlib" if compressed else "raw",
+            "data_b64": base64.b64encode(packed if compressed else data).decode("ascii")}
+
+
+def decode_chunk(value, entry):
+    size = entry["size_bytes"]
+    if (type(size) is not int or not 0 < size <= CHUNK_BYTES
+            or not isinstance(value, dict) or set(value) != {"encoding", "data_b64"}
+            or not isinstance(value["data_b64"], str)
+            or len(value["data_b64"]) > 4 * ((CHUNK_BYTES + 2) // 3)):
+        raise ValueError("invalid encoded chunk")
+    packed = base64.b64decode(value["data_b64"], validate=True)
+    if value["encoding"] == "raw":
+        data = packed
+    elif value["encoding"] == "zlib":
+        decoder = zlib.decompressobj()
+        data = decoder.decompress(packed, size + 1)
+        if not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
+            raise ValueError("compressed chunk exceeds bound or has trailing data")
+    else:
+        raise ValueError("unsupported chunk encoding")
+    if len(data) != size or hashlib.sha256(data).hexdigest() != entry["sha256"]:
+        raise ValueError("chunk digest or length mismatch")
+    return data
 
 
 def canonical(value):

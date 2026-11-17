@@ -18,6 +18,46 @@ const DEFAULT_KNOWN_HOSTS: &str = "/var/lib/vpnctl/.ssh/known_hosts";
 
 const DEFAULT_SSH_TIMEOUT_SECS: u64 = 300;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DispatchOutcome {
+    Completed(u8),
+    Rejected,
+    Uncertain,
+}
+
+#[derive(Debug)]
+struct ExecutionFailure {
+    error: CoreError,
+    outcome: DispatchOutcome,
+}
+
+impl ExecutionFailure {
+    fn rejected(error: CoreError) -> Self {
+        Self {
+            error,
+            outcome: DispatchOutcome::Rejected,
+        }
+    }
+
+    fn uncertain(error: CoreError) -> Self {
+        Self {
+            error,
+            outcome: DispatchOutcome::Uncertain,
+        }
+    }
+
+    fn observed_failure(error: CoreError, status: Option<std::process::ExitStatus>) -> Self {
+        let outcome = status
+            .and_then(|status| status.code())
+            .filter(|code| (1..=254).contains(code))
+            .map(|code| DispatchOutcome::Completed(code as u8))
+            .unwrap_or(DispatchOutcome::Uncertain);
+        Self { error, outcome }
+    }
+}
+
+type ExecutionResult = std::result::Result<Vec<u8>, ExecutionFailure>;
+
 fn default_ssh_timeout() -> Duration {
     let secs = std::env::var("VPNCTLD_SSH_TIMEOUT_SECS")
         .ok()
@@ -138,10 +178,20 @@ impl SubprocessSshTransport {
     }
 
     async fn exec_password_local_bytes(&self, password: &str, remote_cmd: &str) -> Result<Vec<u8>> {
+        self.exec_password_local_outcome(password, remote_cmd)
+            .await
+            .map_err(|failure| failure.error)
+    }
+
+    async fn exec_password_local_outcome(
+        &self,
+        password: &str,
+        remote_cmd: &str,
+    ) -> ExecutionResult {
         if self.jump.is_some() {
-            return Err(CoreError::Transport(
+            return Err(ExecutionFailure::rejected(CoreError::Transport(
                 "password authentication through a jump host is not supported".into(),
-            ));
+            )));
         }
         let transport = self.clone();
         let password = password.to_string();
@@ -149,7 +199,7 @@ impl SubprocessSshTransport {
         tokio::task::spawn_blocking(move || {
             // Keep the private known_hosts alive until sshpass and ssh have exited.
             let prepared = if transport.target_fingerprint.is_some() {
-                Some(prepare_pinned_direct(&transport)?)
+                Some(prepare_pinned_direct(&transport).map_err(ExecutionFailure::rejected)?)
             } else {
                 None
             };
@@ -173,10 +223,14 @@ impl SubprocessSshTransport {
                     .arg(&remote_cmd);
             }
             let label = format!("{}@{}:{}", transport.user, transport.host, transport.port);
-            run_child_with_timeout(cmd, None, transport.timeout, &label)
+            run_child_with_timeout_outcome(cmd, None, transport.timeout, &label)
         })
         .await
-        .map_err(|e| CoreError::Transport(format!("spawn_blocking JoinError: {e}")))?
+        .map_err(|e| {
+            ExecutionFailure::uncertain(CoreError::Transport(format!(
+                "spawn_blocking JoinError: {e}"
+            )))
+        })?
     }
 
     async fn run(&self, remote_cmd: String, stdin_bytes: Option<Vec<u8>>) -> Result<Vec<u8>> {
@@ -188,28 +242,42 @@ impl SubprocessSshTransport {
     }
 
     async fn run_local(&self, remote_cmd: String, stdin_bytes: Option<Vec<u8>>) -> Result<Vec<u8>> {
+        self.run_local_outcome(remote_cmd, stdin_bytes)
+            .await
+            .map_err(|failure| failure.error)
+    }
+
+    async fn run_local_outcome(
+        &self,
+        remote_cmd: String,
+        stdin_bytes: Option<Vec<u8>>,
+    ) -> ExecutionResult {
         let transport = self.clone();
         let label = format!("{}@{}:{}", self.user, self.host, self.port);
         let handle = tokio::task::spawn_blocking(move || {
             if transport.jump.is_some() {
-                let prepared = prepare_pinned_jump(&transport)?;
+                let prepared =
+                    prepare_pinned_jump(&transport).map_err(ExecutionFailure::rejected)?;
                 let mut cmd = Command::new("ssh");
                 cmd.args(prepared.final_args(&remote_cmd));
-                run_child_with_timeout(cmd, stdin_bytes, transport.timeout, &label)
+                run_child_with_timeout_outcome(cmd, stdin_bytes, transport.timeout, &label)
             } else if transport.target_fingerprint.is_some() {
-                let prepared = prepare_pinned_direct(&transport)?;
+                let prepared =
+                    prepare_pinned_direct(&transport).map_err(ExecutionFailure::rejected)?;
                 let mut cmd = Command::new("ssh");
                 cmd.args(prepared.final_args(&remote_cmd));
-                run_child_with_timeout(cmd, stdin_bytes, transport.timeout, &label)
+                run_child_with_timeout_outcome(cmd, stdin_bytes, transport.timeout, &label)
             } else {
                 let mut cmd = Command::new("ssh");
                 cmd.args(transport.build_direct_ssh_args(&remote_cmd));
-                run_child_with_timeout(cmd, stdin_bytes, transport.timeout, &label)
+                run_child_with_timeout_outcome(cmd, stdin_bytes, transport.timeout, &label)
             }
         });
-        handle
-            .await
-            .map_err(|e| CoreError::Transport(format!("spawn_blocking JoinError: {e}")))?
+        handle.await.map_err(|e| {
+            ExecutionFailure::uncertain(CoreError::Transport(format!(
+                "spawn_blocking JoinError: {e}"
+            )))
+        })?
     }
 }
 
@@ -531,11 +599,21 @@ fn config_quote(value: &str) -> String {
 }
 
 fn run_child_with_timeout(
-    mut cmd: Command,
+    cmd: Command,
     stdin_bytes: Option<Vec<u8>>,
     timeout: Duration,
     label: &str,
 ) -> Result<Vec<u8>> {
+    run_child_with_timeout_outcome(cmd, stdin_bytes, timeout, label)
+        .map_err(|failure| failure.error)
+}
+
+fn run_child_with_timeout_outcome(
+    mut cmd: Command,
+    stdin_bytes: Option<Vec<u8>>,
+    timeout: Duration,
+    label: &str,
+) -> ExecutionResult {
     use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::process::CommandExt;
@@ -552,9 +630,9 @@ fn run_child_with_timeout(
     #[cfg(unix)]
     cmd.process_group(0);
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| CoreError::Transport(format!("spawning ssh {label}: {e}")))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        ExecutionFailure::rejected(CoreError::Transport(format!("spawning ssh {label}: {e}")))
+    })?;
 
     let pid = child.id();
     let kill_and_reap = |child: &mut std::process::Child| {
@@ -594,7 +672,7 @@ fn run_child_with_timeout(
             if let Some(w) = in_writer {
                 let _ = w.join();
             }
-            return Err(output_limit_error(label));
+            return Err(ExecutionFailure::uncertain(output_limit_error(label)));
         }
         if Instant::now() >= deadline {
             kill_and_reap(&mut child);
@@ -603,9 +681,9 @@ fn run_child_with_timeout(
             if let Some(w) = in_writer {
                 let _ = w.join();
             }
-            return Err(CoreError::Transport(format!(
+            return Err(ExecutionFailure::uncertain(CoreError::Transport(format!(
                 "ssh {label} timed out after {timeout:?} (remote command killed)"
-            )));
+            ))));
         }
 
         match child.try_wait() {
@@ -616,7 +694,7 @@ fn run_child_with_timeout(
             {
                 break status;
             }
-            Ok(Some(_)) | Ok(None) => {
+            Ok(observed_status) => {
                 if let Some(ref w) = in_writer
                     && w.is_finished()
                     && let Some(w) = in_writer.take()
@@ -626,17 +704,21 @@ fn run_child_with_timeout(
                             kill_and_reap(&mut child);
                             let _ = out_reader.join();
                             let _ = err_reader.join();
-                            return Err(CoreError::Transport(format!(
-                                "ssh stdin write {label}: {e}"
-                            )));
+                            return Err(ExecutionFailure::observed_failure(
+                                CoreError::Transport(format!("ssh stdin write {label}: {e}")),
+                                observed_status,
+                            ));
                         }
                         Err(_) => {
                             kill_and_reap(&mut child);
                             let _ = out_reader.join();
                             let _ = err_reader.join();
-                            return Err(CoreError::Transport(format!(
-                                "ssh stdin write {label}: writer thread panicked"
-                            )));
+                            return Err(ExecutionFailure::observed_failure(
+                                CoreError::Transport(format!(
+                                    "ssh stdin write {label}: writer thread panicked"
+                                )),
+                                observed_status,
+                            ));
                         }
                         Ok(Ok(())) => {}
                     }
@@ -650,7 +732,9 @@ fn run_child_with_timeout(
                 if let Some(w) = in_writer {
                     let _ = w.join();
                 }
-                return Err(CoreError::Transport(format!("ssh wait {label}: {e}")));
+                return Err(ExecutionFailure::uncertain(CoreError::Transport(format!(
+                    "ssh wait {label}: {e}"
+                ))));
             }
         }
     };
@@ -663,7 +747,7 @@ fn run_child_with_timeout(
         if let Some(w) = in_writer {
             let _ = w.join();
         }
-        return Err(output_limit_error(label));
+        return Err(ExecutionFailure::uncertain(output_limit_error(label)));
     }
 
     if let Some(w) = in_writer {
@@ -671,20 +755,26 @@ fn run_child_with_timeout(
             Ok(Err(e)) => {
                 if !status.success() {
                     let stderr = String::from_utf8_lossy(&stderr);
-                    return Err(CoreError::Transport(format!(
-                        "ssh {label} exit={:?} stderr={}",
-                        status.code(),
-                        stderr.trim()
-                    )));
+                    return Err(ExecutionFailure::observed_failure(
+                        CoreError::Transport(format!(
+                            "ssh {label} exit={:?} stderr={}",
+                            status.code(),
+                            stderr.trim()
+                        )),
+                        Some(status),
+                    ));
                 }
-                return Err(CoreError::Transport(format!(
+                return Err(ExecutionFailure::uncertain(CoreError::Transport(format!(
                     "ssh stdin write {label}: {e}"
-                )));
+                ))));
             }
             Err(_) => {
-                return Err(CoreError::Transport(format!(
-                    "ssh stdin write {label}: writer thread panicked"
-                )));
+                return Err(ExecutionFailure::observed_failure(
+                    CoreError::Transport(format!(
+                        "ssh stdin write {label}: writer thread panicked"
+                    )),
+                    Some(status),
+                ));
             }
             Ok(Ok(())) => {}
         }
@@ -692,11 +782,14 @@ fn run_child_with_timeout(
 
     if !status.success() {
         let stderr = String::from_utf8_lossy(&stderr);
-        return Err(CoreError::Transport(format!(
-            "ssh {label} exit={:?} stderr={}",
-            status.code(),
-            stderr.trim()
-        )));
+        return Err(ExecutionFailure::observed_failure(
+            CoreError::Transport(format!(
+                "ssh {label} exit={:?} stderr={}",
+                status.code(),
+                stderr.trim()
+            )),
+            Some(status),
+        ));
     }
     Ok(stdout)
 }
@@ -1038,6 +1131,55 @@ mod tests {
         cmd.args(["-c", "printf '\\000\\377hello'; printf diagnostic >&2"]);
         let bytes = run_child_with_timeout(cmd, None, Duration::from_secs(5), "test").unwrap();
         assert_eq!(bytes, b"\0\xffhello");
+    }
+
+    #[test]
+    fn observed_exit_status_classifies_completion_without_parsing_stderr() {
+        for code in [1, 42, 254, 255] {
+            let mut cmd = Command::new("/bin/sh");
+            cmd.args([
+                "-c",
+                &format!("printf 'exit=Some(0) fixture-secret' >&2; exit {code}"),
+            ]);
+            let failure =
+                run_child_with_timeout_outcome(cmd, None, Duration::from_secs(5), "fixture")
+                    .unwrap_err();
+            let expected = if code == 255 {
+                DispatchOutcome::Uncertain
+            } else {
+                DispatchOutcome::Completed(code)
+            };
+            assert_eq!(failure.outcome, expected);
+            assert_eq!(
+                failure.error.to_string(),
+                format!(
+                    "ssh transport error: ssh fixture exit=Some({code}) stderr=exit=Some(0) fixture-secret"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn spawn_failure_is_rejected_but_timeout_and_signal_are_uncertain() {
+        let dir = TempDir::new().unwrap();
+        let failure = run_child_with_timeout_outcome(
+            Command::new(dir.path().join("missing")),
+            None,
+            Duration::from_secs(1),
+            "fixture",
+        )
+        .unwrap_err();
+        assert_eq!(failure.outcome, DispatchOutcome::Rejected);
+        for (script, timeout) in [
+            ("exec /bin/sleep 1", Duration::from_millis(20)),
+            ("kill -TERM $$", Duration::from_secs(5)),
+        ] {
+            let mut cmd = Command::new("/bin/sh");
+            cmd.args(["-c", script]);
+            let failure =
+                run_child_with_timeout_outcome(cmd, None, timeout, "fixture").unwrap_err();
+            assert_eq!(failure.outcome, DispatchOutcome::Uncertain);
+        }
     }
 
     #[tokio::test]

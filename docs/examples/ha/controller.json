@@ -43,6 +43,10 @@
   },
   "stop_budget_ms": 2000,
   "replication_interval_ms": 5000,
-  "max_replica_age_ms": 60000,
+  "max_replica_age_ms": 600000,
+  "snapshot_keep_generations": 2,
+  "snapshot_transfer_timeout_ms": 600000,
+  "snapshot_reserve_bytes": 2147483648,
+  "credential_root": "/home/OPERATOR/.local/share/agent-credentials/vpnctl-ha/controller-a",
   "trusted_proxies": ["127.0.0.1/32", "::1/128"]
 }
