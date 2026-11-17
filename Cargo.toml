@@ -26,6 +26,8 @@ publish = false
 # Provenance and removal conditions: vendor/README.md.
 [patch.crates-io]
 sqlx-sqlite = { path = "vendor/sqlx-sqlite" }
+chrono = { git = "https://github.com/PavelLizunov/ninitux-chrono", rev = "c14b4599d07ef36ffa1f8a531fb0bc7eb3b42464" }
+chrono-tz = { git = "https://github.com/PavelLizunov/ninitux-chrono-tz", rev = "e15d1f308a1ac2fdf3f1bf19c325dc202d418081" }
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

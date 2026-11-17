@@ -636,8 +636,7 @@ dependencies = [
 [[package]]
 name = "chrono"
 version = "0.4.44"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c673075a2e0e5f4a1dde27ce9dee1ea4558c7ffe648f576438a20ca1d2acc4b0"
+source = "git+https://github.com/PavelLizunov/ninitux-chrono?rev=c14b4599d07ef36ffa1f8a531fb0bc7eb3b42464#c14b4599d07ef36ffa1f8a531fb0bc7eb3b42464"
 dependencies = [
  "iana-time-zone",
  "js-sys",
@@ -650,8 +649,7 @@ dependencies = [
 [[package]]
 name = "chrono-tz"
 version = "0.10.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6139a8597ed92cf816dfb33f5dd6cf0bb93a6adc938f11039f371bc5bcd26c3"
+source = "git+https://github.com/PavelLizunov/ninitux-chrono-tz?rev=e15d1f308a1ac2fdf3f1bf19c325dc202d418081#e15d1f308a1ac2fdf3f1bf19c325dc202d418081"
 dependencies = [
  "chrono",
  "phf",

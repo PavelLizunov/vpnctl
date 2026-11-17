@@ -310,7 +310,7 @@ export async function verifyDiagnostics(browser, expect, shot) {
       const h = await harness(width, mode);
       try {
         if (mode === "empty") {
-          await expect(h.page.locator("#diagnostics-status")).toContainText("Отчётов пока нет");
+          await expect(h.page.locator("#diagnostics-list")).toContainText("Отчётов пока нет");
           await expect(h.page.locator(".report-select")).toHaveCount(0);
           await expect(h.page.locator("#diagnostics-more")).toBeHidden();
         } else {

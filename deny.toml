@@ -48,4 +48,8 @@ deny = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = ["https://github.com/PavelLizunov/boosty_api_rs"]
+allow-git = [
+    "https://github.com/PavelLizunov/boosty_api_rs",
+    "https://github.com/PavelLizunov/ninitux-chrono",
+    "https://github.com/PavelLizunov/ninitux-chrono-tz",
+]
