@@ -205,7 +205,9 @@ mod spec {
 
         async fn login(&self) -> (String, String) {
             let response = self
-                .call(login_request(&format!("password={PASSWORD}")))
+                .call(login_request(&format!(
+                    "username=http-spec-user&password={PASSWORD}"
+                )))
                 .await;
             assert_eq!(response.status, StatusCode::SEE_OTHER);
             security_headers(&response);
@@ -857,7 +859,9 @@ mod spec {
         let mut prior = None;
         for _ in 0..2 {
             let response = fixture
-                .call(login_request(&format!("password={PASSWORD}")))
+                .call(login_request(&format!(
+                    "username=http-spec-user&password={PASSWORD}"
+                )))
                 .await;
             assert_eq!(response.status, StatusCode::SEE_OTHER);
             assert_eq!(response.headers["location"], "/");
@@ -907,7 +911,8 @@ mod spec {
             Some("https://evil.example"),
             Some("https://admin.corp.ninitux.com/"),
         ] {
-            let mut request = login_request(&format!("password={PASSWORD}"));
+            let mut request =
+                login_request(&format!("username=http-spec-user&password={PASSWORD}"));
             request.headers_mut().remove("origin");
             request.headers_mut().insert(
                 "referer",
@@ -921,7 +926,8 @@ mod spec {
             assert_eq!(fixture.call(request).await.status, StatusCode::FORBIDDEN);
         }
         for name in ["origin", "content-type"] {
-            let mut request = login_request(&format!("password={PASSWORD}"));
+            let mut request =
+                login_request(&format!("username=http-spec-user&password={PASSWORD}"));
             let value = request.headers()[name].clone();
             request.headers_mut().append(name, value);
             let response = fixture.call(request).await;
@@ -929,10 +935,10 @@ mod spec {
             assert!(!response.headers.contains_key("set-cookie"));
         }
         for body in [
-            format!("password={PASSWORD}&password={PASSWORD}"),
-            format!("password={PASSWORD}&extra=1"),
-            "password=".to_owned(),
-            format!("password={}", "a".repeat(513)),
+            format!("username=http-spec-user&password={PASSWORD}&password={PASSWORD}"),
+            format!("username=http-spec-user&password={PASSWORD}&extra=1"),
+            "username=http-spec-user&password=".to_owned(),
+            format!("username=http-spec-user&password={}", "a".repeat(513)),
         ] {
             let response = fixture.call(login_request(&body)).await;
             assert!(response.status.is_client_error());
@@ -944,12 +950,16 @@ mod spec {
     async fn wrong_password_is_401_and_sixth_attempt_is_throttled_per_address() {
         let fixture = Fixture::new(true, true).await;
         for _ in 0..5 {
-            let response = fixture.call(login_request("password=wrong")).await;
+            let response = fixture
+                .call(login_request("username=http-spec-user&password=wrong"))
+                .await;
             assert_eq!(response.status, StatusCode::UNAUTHORIZED);
             assert!(!response.headers.contains_key("set-cookie"));
         }
         let response = fixture
-            .call(login_request(&format!("password={PASSWORD}")))
+            .call(login_request(&format!(
+                "username=http-spec-user&password={PASSWORD}"
+            )))
             .await;
         assert_eq!(response.status, StatusCode::TOO_MANY_REQUESTS);
         assert!(
@@ -1601,7 +1611,9 @@ mod spec {
                 .await
                 .unwrap();
             let response = fixture
-                .call(login_request(&format!("password={PASSWORD}")))
+                .call(login_request(&format!(
+                    "username=http-spec-user&password={PASSWORD}"
+                )))
                 .await;
             assert_eq!(response.status, StatusCode::UNAUTHORIZED, "{to}");
             assert!(!response.headers.contains_key("set-cookie"));
@@ -1929,7 +1941,9 @@ mod spec {
                 percent_encoding::NON_ALPHANUMERIC,
             );
             let response = fixture
-                .call(login_request(&format!("password={encoded}")))
+                .call(login_request(&format!(
+                    "username=http-spec-user&password={encoded}"
+                )))
                 .await;
             assert_eq!(response.status, StatusCode::SEE_OTHER);
             assert!(response.headers.contains_key("set-cookie"));
@@ -2052,7 +2066,9 @@ mod spec {
         assert_eq!(login_page.headers["referrer-policy"], "same-origin");
         security_headers(&login_page);
         let login = fixture
-            .call(login_request(&format!("password={PASSWORD}")))
+            .call(login_request(&format!(
+                "username=http-spec-user&password={PASSWORD}"
+            )))
             .await;
         assert_eq!(login.status, StatusCode::SEE_OTHER);
         assert_eq!(login.headers["referrer-policy"], "no-referrer");

@@ -6,9 +6,10 @@ Each company is one existing vpnctl subscription user, selected by username,
 with its own portal password, signed site and phone rules, categories and
 reports. The operator remains one owner; this is not multi-operator RBAC.
 The owner confirmed this model on2026-11-17. Existing company data must survive.
-The current instruction forbids compiled rebuilds; the delivered VoIP exception
-is complete. This record prepares a concrete backend change; it does not claim
-multi-company support is implemented or deploy a database migration.
+The owner explicitly resumed this implementation on2026-11-17. Necessary
+server builds/CI are now in scope; Windows/client builds remain outside scope.
+The frozen parallel API contract is corp-companies-implementation.md. Existing
+production still supports only one company until verified migration/activation.
 
 ## Confirmed defects
 
@@ -129,8 +130,27 @@ other proxy handlers, daemon PIDs and credential files were preserved. No Corp
 form was submitted, no compiled build ran and no build-triggering PR was opened.
 The source branch is published; it is not merged into main.
 
-An independent Terra research pass confirmed the singleton/session/namespace
-findings and proposed migration boundaries. This was research, not an independent
-implementation review. Multiple-company implementation remains pending a specific
-server-build exception to the owner's existing no-rebuild instruction; no second
-company has been created or reported as ready.
+The owner subsequently resumed implementation with necessary server builds in
+scope. Scoped storage/migration, username login, operator company selection,
+reader/egress and receiver/edge integration are now implemented in the task
+branch. Independent storage diff review returned[]; receiver review corrections
+were applied before publication. Backend build/HTTP/browser CI and production
+migration/acceptance remain pending. No second live company has been created or
+reported as ready. Windows/client rebuilding remains outside this task.
+
+Scoped pre-publication checks: receiver registry/HTTP12pass, receiver regression
+26pass, category regression15pass; real Caddy2.11.4 loopback edge9pass including
+forged/missing company context and restored UTF8 bodies. No local Rust compile
+or broad suite ran. Exact-SHA backend CI and candidate are still required.
+
+A consistent private copy of the actual live1.1GB database was permanently
+archived, then migration0075 was rehearsed on an isolated copy. All45 original
+tables/fields compared identically; integrity_check=ok and no foreign-key
+violations. This raw-SQL rehearsal complements, not substitutes, exact SQLx
+migration replay in CI/candidate. The live database/daemon were unchanged.
+
+Independent integration review returned four findings (unusable-session company
+switch, global refresh failure coupling, hidden diagnostics setup failure and
+username disclosure by differing errors). All were corrected before CI and
+covered by focused regressions; the original strict auth/CSRF gates remain.
+Company list/detail and diagnostics company assertions now have browser coverage.

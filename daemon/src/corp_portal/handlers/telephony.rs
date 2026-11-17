@@ -36,8 +36,8 @@ pub(super) async fn handle(
         return invalid();
     }
     if method == Method::GET && matches!(path.as_str(), "" | "/state") {
-        let current = match app
-            .inv
+        let current = match context
+            .store
             .corp_current_phone_policy(context.record.status.config_version)
             .await
         {
@@ -59,7 +59,7 @@ pub(super) async fn handle(
             .into_response();
     }
     if method == Method::GET && path == "/history" {
-        let rows = match app.inv.corp_phone_history(100).await {
+        let rows = match context.store.corp_phone_history(100).await {
             Ok(rows) => rows,
             Err(error_value) => return store_error(&error_value),
         };
@@ -100,7 +100,7 @@ pub(super) async fn handle(
             Ok(input) => input,
             Err(response) => return *response,
         };
-        let row = match app.inv.corp_phone_revision(input.revision).await {
+        let row = match context.store.corp_phone_revision(input.revision).await {
             Ok(Some(row)) => row,
             Ok(None) => return error(StatusCode::NOT_FOUND, "Эта версия уже недоступна."),
             Err(error_value) => return store_error(&error_value),

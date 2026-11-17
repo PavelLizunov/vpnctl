@@ -1671,7 +1671,7 @@ mod spec {
             let (state, status) = enabled_state().await;
             let mut connection = sql_connection(&state).await;
             sqlx::query(&format!(
-                "UPDATE corp_policy_settings SET {column} = ? WHERE id = 1"
+                "UPDATE corp_policy_settings SET {column} = ? WHERE company_id = 'legacy'"
             ))
             .bind(i64::try_from(CORP_MAX_REVISION).unwrap())
             .execute(&mut connection)
@@ -1753,7 +1753,7 @@ mod spec {
     async fn last_revision_is_publishable_once_and_floor_never_wraps() {
         let (state, _) = enabled_state().await;
         let mut connection = sql_connection(&state).await;
-        sqlx::query("UPDATE corp_policy_settings SET revision = ? WHERE id = 1")
+        sqlx::query("UPDATE corp_policy_settings SET revision = ? WHERE company_id = 'legacy'")
             .bind(i64::try_from(CORP_MAX_REVISION - 1).unwrap())
             .execute(&mut connection)
             .await
@@ -2358,7 +2358,7 @@ mod spec {
             .unwrap();
         let mut connection = sql_connection(&state).await;
         sqlx::query(
-            "UPDATE corp_policy_settings SET auth_generation = ?, config_version = ? WHERE id = 1",
+            "UPDATE corp_policy_settings SET auth_generation = ?, config_version = ? WHERE company_id = 'legacy'",
         )
         .bind(i64::try_from(CORP_MAX_REVISION).unwrap())
         .bind(i64::try_from(CORP_MAX_REVISION).unwrap())

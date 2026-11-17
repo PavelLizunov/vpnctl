@@ -76,7 +76,7 @@
   const product = document.querySelector(".corp-product");
   if (product) product.textContent = "VPNRouter";
   const identity = document.querySelector(".corp-identity > :last-child");
-  if (identity && identity !== product) identity.textContent = "Corp · корпоративный VPN";
+  if (identity && identity !== product) identity.textContent = main.dataset.username ? `Компания: ${main.dataset.username}` : "Corp · корпоративный VPN";
   const nav = main.querySelector(".portal-nav");
   function makeNav() {
     nav?.replaceChildren();
@@ -427,7 +427,7 @@
     try {
       const response = await fetch(path, {
         method: body === undefined ? "GET" : "POST", credentials: "same-origin", cache: "no-store", redirect: "error", signal: controller.signal,
-        headers: body === undefined ? {Accept: "application/json"} : {Accept: "application/json", "Content-Type": "application/json", "X-Corp-CSRF": feeds[source === "metadata" ? "site" : source].csrf},
+        headers: body === undefined ? {Accept: "application/json", ...(main.dataset.username ? {"X-Corp-Expected-Company": main.dataset.username} : {})} : {Accept: "application/json", ...(main.dataset.username ? {"X-Corp-Expected-Company": main.dataset.username} : {}), "Content-Type": "application/json", "X-Corp-CSRF": feeds[source === "metadata" ? "site" : source].csrf},
         body: body === undefined ? undefined : JSON.stringify(body),
       });
       const data = await response.json().catch(() => null);

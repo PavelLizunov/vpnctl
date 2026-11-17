@@ -32,6 +32,7 @@ class MockUpstream(http.server.ThreadingHTTPServer):
         self.role = role
         self.calls = []
         self.status = None
+        self.company = 'synthetic-policy-id'
         self.thread = threading.Thread(target=self.serve_forever, daemon=True)
         self.thread.start()
 
@@ -75,6 +76,8 @@ class MockHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(raw)))
+        if self.server.role == 'backend' and code == 200 and self.path == '/api/corp/normalize' and self.server.company is not None:
+            self.send_header('X-Corp-Company', self.server.company)
         self.end_headers()
         self.wfile.write(raw)
 
@@ -97,6 +100,7 @@ class CorpEdgeTests(unittest.TestCase):
         assets.mkdir()
         self.assets = {'corp.css': b'body { color: #123; }',
                        'corp.js': b'// synthetic portal',
+                       'corp-phone.js': b'// synthetic compatibility',
                        'corp-diagnostics.js': b'// synthetic diagnostics'}
         for name, content in self.assets.items():
             (assets / name).write_bytes(content)
@@ -199,6 +203,7 @@ class CorpEdgeTests(unittest.TestCase):
                          ('DELETE', '/internal/corp-diagnostics/reports/' + REPORT_ID, b'{}'))
         self.assertEqual(headers['authorization'], 'Bearer synthetic-service-capability')
         self.assertEqual(headers['content-type'], 'application/json')
+        self.assertEqual(headers['x-corp-company'], 'synthetic-policy-id')
         self.assertEqual(headers['content-length'], '2')
         for name in ('cookie', 'origin', 'x-corp-csrf', 'x-real-ip', 'forwarded',
                      'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-browser-only'):
@@ -220,6 +225,29 @@ class CorpEdgeTests(unittest.TestCase):
                 method, path, delete_body, headers = self.receiver.calls[0]
                 self.assertEqual((method, path, delete_body, headers['content-length']),
                                  ('DELETE', '/internal/corp-diagnostics/reports/' + REPORT_ID, b'{}', '2'))
+
+    def test_caller_cannot_select_company_and_missing_authority_fails_closed(self):
+        self.assertEqual(self.request('DELETE', DELETE_PATH, headers={'X-Corp-Company': 'foreign-policy'})[0], 200)
+        self.assertNotIn('x-corp-company', self.backend.calls[-1][3])
+        self.assertEqual(self.receiver.calls[-1][3]['x-corp-company'], 'synthetic-policy-id')
+        self.backend.company = None
+        self.receiver.calls.clear()
+        for method, path in [('DELETE', DELETE_PATH), ('POST', '/api/corp/categories/state')]:
+            self.assertEqual(self.request(method, path)[0], 503)
+        self.assertEqual(self.receiver.calls, [])
+
+    def test_category_utf8_body_is_restored_with_authoritative_company(self):
+        body = json.dumps({'expected_revision': 0, 'categories': [{'id': 'work', 'name': 'Работа'}],
+                           'assignments': []}, ensure_ascii=False).encode()
+        code, _, _ = self.request('POST', '/api/corp/categories/save', body=body,
+                                  headers={'X-Corp-Company': 'foreign-policy'})
+        self.assertEqual(code, 200)
+        self.assertNotIn('x-corp-company', self.backend.calls[-1][3])
+        method, path, forwarded, headers = self.receiver.calls[-1]
+        self.assertEqual((method, path, forwarded), ('POST', '/internal/corp-categories/save', body))
+        self.assertEqual(headers['x-corp-company'], 'synthetic-policy-id')
+        self.assertEqual(headers['x-corp-expected-length'], str(len(body)))
+        self.assertEqual(headers['authorization'], 'Bearer synthetic-service-capability')
 
     def test_backend_denials_never_call_receiver(self):
         for override in ({'Origin': 'https://spoof.invalid'}, {'X-Corp-CSRF': 'bad'},

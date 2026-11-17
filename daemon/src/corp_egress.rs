@@ -84,7 +84,7 @@ struct Challenge {
 #[derive(Default)]
 struct Private {
     challenge: Option<Challenge>,
-    attempts: HashMap<ServerId, Attempt>,
+    attempts: HashMap<(String, ServerId), Attempt>,
 }
 pub struct EgressController {
     runner: Arc<dyn ProbeRunner>,
@@ -115,6 +115,7 @@ impl ProbeRunner for Disabled {
 struct JobGuard {
     controller: Arc<EgressController>,
     server: ServerId,
+    company_id: String,
     complete: bool,
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
@@ -130,7 +131,7 @@ impl Drop for JobGuard {
             if let Ok(mut private) = self.controller.private.lock() {
                 private.challenge = None;
                 private.attempts.insert(
-                    self.server.clone(),
+                    (self.company_id.clone(), self.server.clone()),
                     Attempt {
                         state: AttemptState::Failed,
                         finished_at: None,
@@ -164,10 +165,17 @@ impl EgressController {
             && self.runner.available()
     }
     pub fn attempt(&self, server: &ServerId) -> Attempt {
+        self.attempt_for("legacy", server)
+    }
+    pub fn attempt_for(&self, company_id: &str, server: &ServerId) -> Attempt {
         self.private
             .lock()
             .ok()
-            .and_then(|p| p.attempts.get(server).copied())
+            .and_then(|p| {
+                p.attempts
+                    .get(&(company_id.to_owned(), server.clone()))
+                    .copied()
+            })
             .unwrap_or(Attempt {
                 state: AttemptState::Idle,
                 finished_at: None,
@@ -211,13 +219,25 @@ impl EgressController {
         expected_config_version: u64,
         server: ServerId,
     ) -> Result<ProbeTicket, ProbeError> {
+        self.queue_probe_for(app, "legacy", expected_config_version, server)
+            .await
+    }
+    pub async fn queue_probe_for(
+        self: &Arc<Self>,
+        app: AppState,
+        company_id: &str,
+        expected_config_version: u64,
+        server: ServerId,
+    ) -> Result<ProbeTicket, ProbeError> {
+        let company_id = company_id.to_owned();
+        let attempt_key = (company_id.clone(), server.clone());
         if !self.available() {
             return Err(ProbeError::Unavailable);
         }
         let permit = Arc::clone(&self.permit)
             .try_acquire_owned()
             .map_err(|_| ProbeError::Busy)?;
-        let record = binding(&app, expected_config_version).await?;
+        let record = binding(&app, &company_id, expected_config_version).await?;
         let plan = probe_plan(&app, &record.status.user_id, &server)
             .await
             .map_err(|_| ProbeError::Unavailable)?
@@ -230,7 +250,7 @@ impl EgressController {
         }
         {
             let mut p = self.private.lock().map_err(|_| ProbeError::Unavailable)?;
-            if !p.attempts.contains_key(&server) && p.attempts.len() >= 512 {
+            if !p.attempts.contains_key(&attempt_key) && p.attempts.len() >= 512 {
                 let oldest = p
                     .attempts
                     .iter()
@@ -244,7 +264,7 @@ impl EgressController {
                 }
             }
             p.attempts.insert(
-                server.clone(),
+                attempt_key,
                 Attempt {
                     state: AttemptState::Running,
                     finished_at: None,
@@ -256,22 +276,23 @@ impl EgressController {
         let mut guard = JobGuard {
             controller: Arc::clone(&controller),
             server: server.clone(),
+            company_id: company_id.clone(),
             complete: false,
             _permit: permit,
         };
         drop(tokio::spawn(async move {
-            let result = controller.execute(&app, &record, plan).await;
+            let result = controller.execute(&app, &company_id, &record, plan).await;
             if result == Err(ProbeError::CleanupFailed) {
                 controller.poisoned.store(true, Ordering::SeqCst);
             }
-            controller.finish(&server, result);
+            controller.finish(&company_id, &server, result);
             guard.mark_complete();
             drop(guard);
             let _ = sender.send(result);
         }));
         Ok(ProbeTicket { receiver })
     }
-    fn finish(&self, server: &ServerId, result: Result<(), ProbeError>) {
+    fn finish(&self, company_id: &str, server: &ServerId, result: Result<(), ProbeError>) {
         if let Ok(mut p) = self.private.lock() {
             p.challenge = None;
             let state = match result {
@@ -281,7 +302,7 @@ impl EgressController {
                 _ => AttemptState::Failed,
             };
             p.attempts.insert(
-                server.clone(),
+                (company_id.to_owned(), server.clone()),
                 Attempt {
                     state,
                     finished_at: Some((self.clock)()),
@@ -292,6 +313,7 @@ impl EgressController {
     async fn execute(
         &self,
         app: &AppState,
+        company_id: &str,
         record: &CorpRecord,
         plan: CorpProbePlan,
     ) -> Result<(), ProbeError> {
@@ -328,7 +350,7 @@ impl EgressController {
             result?;
             ips.insert(observed.ok_or(ProbeError::Failed)?);
         }
-        let current = binding(app, record.status.config_version).await?;
+        let current = binding(app, company_id, record.status.config_version).await?;
         if current.status.user_id != record.status.user_id
             || current.status.policy_id != record.status.policy_id
         {
@@ -346,13 +368,13 @@ impl EgressController {
         if !valid_time(completed) || completed < wall_start {
             return Err(ProbeError::Failed);
         }
-        let previous = app
-            .inv
+        let store = app.inv.corp_for(company_id);
+        let previous = store
             .corp_verified_egress()
             .await
             .map_err(|error| store_error(&error))?;
         // Recheck the generation immediately before the durable storage CAS.
-        binding(app, record.status.config_version).await?;
+        binding(app, company_id, record.status.config_version).await?;
         let mut rows: Vec<_> = previous
             .iter()
             .filter(|r| r.server_id != plan.server.server_id)
@@ -365,7 +387,7 @@ impl EgressController {
             verified_at: completed,
         }));
         if identities(&previous) == identities(&rows) {
-            app.inv
+            store
                 .refresh_corp_egress(
                     record.status.config_version,
                     &previous,
@@ -375,7 +397,7 @@ impl EgressController {
                 .await
                 .map_err(|error| store_error(&error))?;
         } else {
-            app.inv
+            store
                 .replace_corp_egress(record.status.config_version, &rows, "corp.egress")
                 .await
                 .map_err(|error| store_error(&error))?;
@@ -387,15 +409,25 @@ impl EgressController {
         app: &AppState,
         expected_config_version: u64,
     ) -> Result<bool, ProbeError> {
+        self.ready_to_enable_for(app, "legacy", expected_config_version)
+            .await
+    }
+    pub async fn ready_to_enable_for(
+        &self,
+        app: &AppState,
+        company_id: &str,
+        expected_config_version: u64,
+    ) -> Result<bool, ProbeError> {
         if !self.available() {
             return Err(ProbeError::Unavailable);
         }
-        let record = binding(app, expected_config_version).await?;
+        let record = binding(app, company_id, expected_config_version).await?;
         let eligible = eligible_servers(app, &record.status.user_id)
             .await
             .map_err(|_| ProbeError::Unavailable)?;
         let rows = app
             .inv
+            .corp_for(company_id)
             .corp_verified_egress()
             .await
             .map_err(|error| store_error(&error))?;
@@ -419,29 +451,52 @@ impl EgressController {
             return Err(ProbeError::Unavailable);
         }
         let _scan = self.scan.try_acquire().map_err(|_| ProbeError::Busy)?;
-        let record = app
+        let companies = app
             .inv
-            .corp_record()
+            .corp_companies()
             .await
-            .map_err(|error| store_error(&error))?
-            .ok_or(ProbeError::NotFound)?;
-        let servers = eligible_servers(&app, &record.status.user_id)
-            .await
-            .map_err(|_| ProbeError::Unavailable)?;
-        if servers.is_empty() {
-            return Ok(());
+            .map_err(|error| store_error(&error))?;
+        let mut targets = Vec::new();
+        let mut incomplete = false;
+        for company in companies {
+            let servers = match eligible_servers(&app, &company.status.user_id).await {
+                Ok(servers) => servers,
+                Err(_) => {
+                    incomplete = true;
+                    tracing::warn!(
+                        "Corp company eligibility unavailable; refreshing other companies"
+                    );
+                    continue;
+                }
+            };
+            for server in servers {
+                targets.push((company.company_id.clone(), server));
+            }
         }
-        let start = self.cursor.load(Ordering::SeqCst) % servers.len();
-        for offset in 0..servers.len().min(4) {
-            let index = (start + offset) % servers.len();
+        if targets.is_empty() {
+            return if incomplete {
+                Err(ProbeError::Unavailable)
+            } else {
+                Ok(())
+            };
+        }
+        let start = self.cursor.load(Ordering::SeqCst) % targets.len();
+        for offset in 0..targets.len().min(4) {
+            let index = (start + offset) % targets.len();
             self.cursor
-                .store((index + 1) % servers.len(), Ordering::SeqCst);
-            let server = &servers[index];
-            let rows = app
-                .inv
-                .corp_verified_egress()
-                .await
-                .map_err(|error| store_error(&error))?;
+                .store((index + 1) % targets.len(), Ordering::SeqCst);
+            let (company_id, server) = &targets[index];
+            let store = app.inv.corp_for(company_id);
+            let rows = match store.corp_verified_egress().await {
+                Ok(rows) => rows,
+                Err(_) => {
+                    incomplete = true;
+                    tracing::warn!(
+                        "Corp company egress state unavailable; refreshing other companies"
+                    );
+                    continue;
+                }
+            };
             let now = (self.clock)();
             if !valid_time(now) {
                 return Err(ProbeError::Failed);
@@ -456,15 +511,18 @@ impl EgressController {
             if !matching.is_empty() && matching.iter().all(|r| fresh(r, now, 21599)) {
                 continue;
             }
-            let current = app
-                .inv
-                .corp_record()
-                .await
-                .map_err(|error| store_error(&error))?
-                .ok_or(ProbeError::NotFound)?;
+            let current = match store.corp_record().await {
+                Ok(Some(current)) => current,
+                _ => {
+                    incomplete = true;
+                    tracing::warn!("Corp company binding unavailable; refreshing other companies");
+                    continue;
+                }
+            };
             match self
-                .queue_probe(
+                .queue_probe_for(
                     app.clone(),
+                    company_id,
                     current.status.config_version,
                     server.server_id.clone(),
                 )
@@ -476,11 +534,20 @@ impl EgressController {
                     }
                 }
                 Err(ProbeError::Busy) => return Err(ProbeError::Busy),
-                Err(ProbeError::Unavailable) => return Err(ProbeError::Unavailable),
-                Err(_) => {}
+                Err(ProbeError::Unavailable) if !self.available() => {
+                    return Err(ProbeError::Unavailable);
+                }
+                Err(_) => {
+                    incomplete = true;
+                    tracing::warn!("Corp company refresh failed; refreshing other companies");
+                }
             }
         }
-        Ok(())
+        if incomplete {
+            Err(ProbeError::Unavailable)
+        } else {
+            Ok(())
+        }
     }
 }
 fn canonical(ip: IpAddr) -> IpAddr {
@@ -512,9 +579,10 @@ fn store_error(error: &CorpStoreError) -> ProbeError {
         _ => ProbeError::Unavailable,
     }
 }
-async fn binding(app: &AppState, version: u64) -> Result<CorpRecord, ProbeError> {
+async fn binding(app: &AppState, company_id: &str, version: u64) -> Result<CorpRecord, ProbeError> {
     let record = app
         .inv
+        .corp_for(company_id)
         .corp_record()
         .await
         .map_err(|error| store_error(&error))?

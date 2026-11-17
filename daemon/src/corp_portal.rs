@@ -1,4 +1,4 @@
-//! Fixed corporate browser portal and independent read-only client capability.
+//! Corporate browser portal and independent company-scoped client capabilities.
 
 use std::convert::Infallible;
 use std::sync::Arc;

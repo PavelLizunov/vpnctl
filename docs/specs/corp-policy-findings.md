@@ -145,3 +145,14 @@ tracked in the VPNRouter Corp acceptance brief. No product code changes here.
   per existing username. Do not create another company until scoped storage,
   auth, reader/egress routing and receiver capabilities are implemented.
   Concrete migration and acceptance contract:corp-companies.md.
+
+## Company implementation validation,2026-11-17
+
+Storage/migration independent diff review returned[]. Root aligned synthetic
+fixtures to the accepted payload schema, credential DTO projection and86400s
+session bound; old legacy fixture SQL now uses company_id='legacy'. Preserve
+all behavioral assertions. Receiver independent review found root enabled-state
+gating and crash-recovery revocation windows; corrected before deployment.
+Current policy IDs are opaque bounded ASCII identifiers, not necessarily UUIDs.
+New expected-company assertions reject cross-tab account switches without
+choosing authority. No production company/security/data changes yet.

@@ -59,6 +59,9 @@ const NAV: &[NavItem] = &[
 ];
 
 pub(crate) fn nav_href(key: &str) -> String {
+    if key == "corp" {
+        return "/admin/corp/companies".to_owned();
+    }
     if key == "dashboard" {
         "/admin/".to_string()
     } else {

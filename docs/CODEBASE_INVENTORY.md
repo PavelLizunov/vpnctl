@@ -5,9 +5,9 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 510 (330 prod / 180 test)
-- **Total Rust LOC:** 186,003 (97,629 prod / 88,374 test)
-- **Database Migrations:** 74
+- **Tracked Rust Files:** 512 (330 prod / 182 test)
+- **Total Rust LOC:** 188,097 (98,491 prod / 89,606 test)
+- **Database Migrations:** 75
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 144
 
 ## Workspace Crates & Targets
@@ -19,12 +19,12 @@
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,419 (13) | 0 (0) | **1,419** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 318 (1) | 125 (1) | **443** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 193 (1) | 454 (2) | **647** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 57 tests | 18,352 (63) | 26,778 (63) | **45,130** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 58 tests | 18,624 (63) | 27,297 (64) | **45,921** |
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 6,753 (14) | 1,554 (6) | **8,307** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,236 (20) | 4,817 (12) | **9,053** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,757 (4) | 1,191 (5) | **2,948** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 25 tests | 56,730 (188) | 50,524 (86) | **107,254** |
-| **Total** | | | | **97,629 (330)** | **88,374 (180)** | **186,003** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 26 tests | 57,320 (188) | 51,237 (87) | **108,557** |
+| **Total** | | | | **98,491 (330)** | **89,606 (182)** | **188,097** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -32,22 +32,22 @@
 |---|---|---|---|
 | `daemon/tests/admin_smoke/settings_integrations.rs` | 2,575 | `daemon` | Test |
 | `crates/inventory/tests/spec_corp_policy.rs` | 2,574 | `crates/inventory` | Test |
-| `daemon/tests/spec_corp_policy_http.rs` | 2,321 | `daemon` | Test |
-| `daemon/tests/spec_corp_operator.rs` | 2,030 | `daemon` | Test |
+| `daemon/tests/spec_corp_policy_http.rs` | 2,337 | `daemon` | Test |
+| `daemon/tests/spec_corp_operator.rs` | 2,052 | `daemon` | Test |
 | `crates/inventory/src/sqlite/tests.rs` | 1,948 | `crates/inventory` | Prod |
 | `daemon/src/health_monitor/tests.rs` | 1,845 | `daemon` | Prod |
 | `crates/kernels/src/caddy/tests.rs` | 1,800 | `crates/kernels` | Prod |
 | `vendor/sqlx-sqlite/src/connection/explain.rs` | 1,779 | `other` | Prod |
 | `crates/kernels/src/sing_box/tests.rs` | 1,711 | `crates/kernels` | Prod |
+| `daemon/tests/spec_corp_egress.rs` | 1,531 | `daemon` | Test |
 | `daemon/tests/admin_smoke/alerts_health.rs` | 1,514 | `daemon` | Test |
-| `daemon/tests/spec_corp_egress.rs` | 1,461 | `daemon` | Test |
 | `daemon/tests/admin_smoke/servers.rs` | 1,452 | `daemon` | Test |
 | `daemon/tests/spec_corp_policy_eligibility.rs` | 1,404 | `daemon` | Test |
 | `daemon/tests/sub_endpoint/mihomo.rs` | 1,324 | `daemon` | Test |
 | `daemon/tests/admin_smoke/server_detail/setup_config.rs` | 1,318 | `daemon` | Test |
 | `crates/inventory/tests/spec_full_node_traffic.rs` | 1,313 | `crates/inventory` | Test |
+| `daemon/src/handlers/auth.rs` | 1,288 | `daemon` | Prod |
 | `crates/boosty-bridge/tests/sync_integration.rs` | 1,285 | `crates/boosty-bridge` | Test |
-| `daemon/src/handlers/auth.rs` | 1,260 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/dashboard.rs` | 1,217 | `daemon` | Test |
 | `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,200 | `daemon` | Test |
 | `daemon/src/handlers/admin/boosty.rs` | 1,170 | `daemon` | Prod |
@@ -56,7 +56,7 @@
 | `crates/ssh/src/subprocess.rs` | 1,127 | `crates/ssh` | Prod |
 | `daemon/src/protocol_assurance_poller.rs` | 1,100 | `daemon` | Prod |
 
-## Database Migrations (74)
+## Database Migrations (75)
 
 | Version | Migration Name | File | Lines |
 |---|---|---|---|
@@ -134,6 +134,7 @@
 | `0072` | service path incidents | `crates/inventory/migrations/0072_service_path_incidents.sql` | 16 |
 | `0073` | ssh access | `crates/inventory/migrations/0073_ssh_access.sql` | 7 |
 | `0074` | corp telephony | `crates/inventory/migrations/0074_corp_telephony.sql` | 14 |
+| `0075` | corp companies | `crates/inventory/migrations/0075_corp_companies.sql` | 97 |
 
 ## `daemon/src/app/routes.rs` `.route(...)` Registrations (144)
 

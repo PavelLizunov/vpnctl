@@ -19,6 +19,7 @@ pub struct Client {
     http: reqwest::Client,
     base: Url,
     bearer: HeaderValue,
+    company: Option<HeaderValue>,
 }
 impl fmt::Debug for Client {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -62,7 +63,12 @@ impl Client {
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(|_| ConfigError)?;
-        Ok(Self { http, base, bearer })
+        Ok(Self {
+            http,
+            base,
+            bearer,
+            company: None,
+        })
     }
 
     pub(crate) fn from_env() -> Option<Self> {
@@ -85,17 +91,48 @@ impl Client {
         load().ok()
     }
 
+    pub(crate) fn for_company(&self, policy_id: &str) -> Result<Self, BridgeError> {
+        if !(1..=64).contains(&policy_id.len())
+            || !policy_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        {
+            return Err(BridgeError::Invalid);
+        }
+        let mut client = self.clone();
+        client.company = Some(HeaderValue::from_str(policy_id).map_err(|_| BridgeError::Invalid)?);
+        Ok(client)
+    }
     async fn request<T: DeserializeOwned + Serialize>(
         &self,
         method: Method,
         suffix: &str,
         query: &[(String, String)],
     ) -> Result<T, BridgeError> {
+        let expected = if method == Method::GET {
+            StatusCode::OK
+        } else {
+            StatusCode::ACCEPTED
+        };
+        self.request_at(
+            method,
+            &format!("/internal/corp-diagnostics/reports{suffix}"),
+            query,
+            None,
+            expected,
+        )
+        .await
+    }
+    async fn request_at<T: DeserializeOwned + Serialize>(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(String, String)],
+        body: Option<&serde_json::Value>,
+        expected: StatusCode,
+    ) -> Result<T, BridgeError> {
         let mut url = self.base.clone();
-        url.set_path(&format!(
-            "{}/internal/corp-diagnostics/reports{suffix}",
-            self.base.path().trim_end_matches('/')
-        ));
+        url.set_path(&format!("{}{path}", self.base.path().trim_end_matches('/')));
         if !query.is_empty() {
             url.query_pairs_mut()
                 .extend_pairs(query.iter().map(|(k, v)| (k.as_str(), v.as_str())));
@@ -105,15 +142,21 @@ impl Client {
             .request(method.clone(), url)
             .header(header::AUTHORIZATION, self.bearer.clone())
             .header(header::ACCEPT, "application/json");
+        if let Some(company) = &self.company {
+            request = request.header("x-corp-company", company.clone());
+        }
         if method == Method::POST {
+            let body = match body {
+                Some(value) => serde_json::to_vec(value).map_err(|_| BridgeError::Invalid)?,
+                None => b"{}".to_vec(),
+            };
             request = request
                 .header(header::CONTENT_TYPE, "application/json")
-                .body("{}");
+                .body(body);
         }
         let mut response = request.send().await.map_err(|_| BridgeError::Unavailable)?;
         match response.status() {
-            StatusCode::OK if method == Method::GET => {}
-            StatusCode::ACCEPTED if method == Method::POST => {}
+            status if status == expected => {}
             StatusCode::NOT_FOUND => return Err(BridgeError::NotFound),
             StatusCode::BAD_REQUEST => return Err(BridgeError::Invalid),
             StatusCode::CONFLICT if method == Method::POST => return Err(BridgeError::Conflict),
@@ -158,6 +201,47 @@ impl Client {
         }
         Ok(value)
     }
+    pub(crate) async fn provision(
+        &self,
+        policy_id: &str,
+        label: &str,
+    ) -> Result<ProvisionedSupport, BridgeError> {
+        self.for_company(policy_id)?;
+        if label.is_empty() || label.chars().count() > 128 || label.chars().any(char::is_control) {
+            return Err(BridgeError::Invalid);
+        }
+        let mut root = self.clone();
+        root.company = None;
+        let result: ProvisionedSupport = root
+            .request_at(
+                Method::POST,
+                "/internal/corp-companies/provision",
+                &[],
+                Some(&serde_json::json!({"policy_id":policy_id,"label":label})),
+                StatusCode::OK,
+            )
+            .await?;
+        let endpoint =
+            Url::parse(&result.support.endpoint).map_err(|_| BridgeError::Unavailable)?;
+        if result.schema != 1
+            || result.policy_id != policy_id
+            || endpoint.scheme() != "https"
+            || endpoint.host_str().is_none()
+            || !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+            || endpoint.query().is_some()
+            || endpoint.fragment().is_some()
+            || !(32..=512).contains(&result.support.token.len())
+            || !result
+                .support
+                .token
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-._~+/=".contains(&b))
+        {
+            return Err(BridgeError::Unavailable);
+        }
+        Ok(result)
+    }
     pub(super) async fn list(&self, query: &[(String, String)]) -> Result<List, BridgeError> {
         let list: List = self.request(Method::GET, "", query).await?;
         if list.schema != 1
@@ -194,7 +278,21 @@ impl Client {
     }
 }
 
-pub(super) enum BridgeError {
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SupportConfig {
+    pub endpoint: String,
+    pub token: String,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProvisionedSupport {
+    pub schema: u8,
+    pub policy_id: String,
+    pub support: SupportConfig,
+}
+
+pub(crate) enum BridgeError {
     Unavailable,
     NotFound,
     Invalid,

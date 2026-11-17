@@ -97,9 +97,9 @@
     el("error").hidden = !message;
   }
   async function request(path, method = "GET") {
-    const options = {method, credentials: "same-origin", cache: "no-store", redirect: "error"};
+    const options = {method, credentials: "same-origin", cache: "no-store", redirect: "error", headers: root.dataset.username ? {"X-Corp-Expected-Company": root.dataset.username} : {}};
     if (method === "POST" || method === "DELETE") {
-      options.headers = {"Content-Type": "application/json", "X-Corp-CSRF": csrf};
+      options.headers = {...options.headers, "Content-Type": "application/json", "X-Corp-CSRF": csrf};
       options.body = "{}";
     }
     let response;

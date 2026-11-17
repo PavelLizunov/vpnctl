@@ -44,8 +44,12 @@ admin.corp.ninitux.com {
 				header_up -Forwarded
 				header_up -X-Forwarded-For
 				header_up -X-Forwarded-Host
+				header_up -X-Corp-Company
 				@authorized status 200
 				handle_response @authorized {
+					vars corpServiceCompany {rp.header.X-Corp-Company}
+					@missingDeleteCompany expression `{http.vars.corpServiceCompany} == ""`
+					respond @missingDeleteCompany "Company context unavailable." 503
 					request_body {
 						set `\\{\\}`
 					}
@@ -56,6 +60,7 @@ admin.corp.ninitux.com {
 						# X-Corp-CSRF and Authorization, before adding service identity.
 						header_up -*
 						header_up Host {upstream_hostport}
+						header_up X-Corp-Company {http.vars.corpServiceCompany}
 						header_up Content-Type application/json
 						import __CORP_SERVICE_HEADER__
 						header_down Cache-Control no-store
@@ -97,8 +102,12 @@ admin.corp.ninitux.com {
 				header_up -Forwarded
 				header_up -X-Forwarded-For
 				header_up -X-Forwarded-Host
+				header_up -X-Corp-Company
 				@categoryAuthorized status 200
 				handle_response @categoryAuthorized {
+					vars corpServiceCompany {rp.header.X-Corp-Company}
+					@missingMetadataCompany expression `{http.vars.corpServiceCompany} == ""`
+					respond @missingMetadataCompany "Company context unavailable." 503
 					request_body {
 						set {http.vars.corpMetadataBody}
 					}
@@ -108,6 +117,7 @@ admin.corp.ninitux.com {
 						method POST
 						header_up -*
 						header_up Host {upstream_hostport}
+						header_up X-Corp-Company {http.vars.corpServiceCompany}
 						header_up Content-Type application/json
 						header_up X-Corp-Expected-Length {http.vars.corpMetadataLength}
 						import __CORP_SERVICE_HEADER__
@@ -128,6 +138,7 @@ admin.corp.ninitux.com {
 			header_up -Forwarded
 			header_up -X-Forwarded-For
 			header_up -X-Forwarded-Host
+				header_up -X-Corp-Company
 		}
 	}
 }

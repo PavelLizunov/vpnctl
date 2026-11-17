@@ -92,6 +92,9 @@ export async function verifyDiagnostics(browser, expect, shot) {
         const post = request.method() === "POST";
         const deleting = request.method() === "DELETE";
         assert.ok(post || deleting || request.method() === "GET");
+        const company = fixture.body.match(/data-username="([^"]+)"/)?.[1];
+        assert.ok(company, "Diagnostics fixture must name its selected company");
+        assert.equal(request.headers()["x-corp-expected-company"], company);
         calls.push({path: url.pathname, query: url.search, method: request.method()});
         if (deleting) {
           const id = url.pathname.slice("/api/corp/reports/".length);
