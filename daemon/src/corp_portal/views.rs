@@ -27,8 +27,8 @@ fn page(title: &str, body: &Markup) -> String {
             body {
                 header.corp-masthead {
                     div.corp-identity {
-                        span.corp-product { "vpnctl" }
-                        span { "Corp · корпоративный доступ" }
+                        span.corp-product { "VPNRouter" }
+                        span { "Corp · корпоративный VPN" }
                     }
                 }
                 (body)
@@ -39,6 +39,10 @@ fn page(title: &str, body: &Markup) -> String {
 }
 
 pub(super) fn login(error: Option<&str>) -> String {
+    login_for(error, "")
+}
+
+pub(super) fn login_for(error: Option<&str>, username: &str) -> String {
     page(
         "Вход",
         &html! {
@@ -46,14 +50,17 @@ pub(super) fn login(error: Option<&str>) -> String {
                 section.card aria-labelledby="page-title" {
                     p.eyebrow { "Корпоративные правила" }
                     h1 id="page-title" { "Вход" }
-                    p.muted { "Введите пароль, чтобы управлять маршрутами сайтов." }
+                    p.muted { "Введите username и пароль своей компании." }
                     @if let Some(message) = error {
                         p.notice.error role="alert" { (message) }
                     }
                     form method="post" action="https://admin.corp.ninitux.com/login" {
+                        label for="username" { "Username компании" }
+                        input id="username" name="username" type="text" value=(username)
+                            autocomplete="username" maxlength="64" required autofocus;
                         label for="password" { "Пароль" }
                         input id="password" name="password" type="password"
-                            autocomplete="current-password" required autofocus;
+                            autocomplete="current-password" required;
                         button.primary type="submit" { "Войти" }
                     }
                 }
@@ -104,11 +111,11 @@ pub(super) fn unavailable() -> String {
     )
 }
 
-pub(super) fn editor() -> String {
+pub(super) fn editor(username: &str) -> String {
     page(
         "Корпоративные правила",
         &html! {
-            main.editor id="corp-editor" aria-busy="true" {
+            main.editor id="corp-editor" data-username=(username) aria-busy="true" {
                 header.page-header {
                     div {
                         h1 { "Корпоративные правила" }
@@ -243,12 +250,12 @@ pub(super) fn editor() -> String {
     )
 }
 
-pub(super) fn diagnostics(csrf: &str) -> String {
+pub(super) fn diagnostics(csrf: &str, username: &str) -> String {
     page(
         "Диагностика",
         &html! {
             script src="/assets/corp-diagnostics.js" defer {}
-            main.editor id="corp-diagnostics" data-csrf=(csrf) {
+            main.editor id="corp-diagnostics" data-username=(username) data-csrf=(csrf) {
                 header.page-header {
                     div { h1 { "Диагностика" }
                         p.muted { "Выберите отчёт: сначала покажем вывод и что сделать, подробности можно раскрыть ниже." }

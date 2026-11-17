@@ -145,21 +145,31 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
         .get::<ConnectInfo<SocketAddr>>()
         .map(|peer| peer.0.ip());
     if matches!(path.as_str(), "/" | "/diagnostics") && method == Method::GET {
-        let record = match browser_access(&state.app, &headers, peer).await {
-            Ok((record, _)) => record,
+        match authorized(&state.app, &headers, peer).await {
+            Ok(context) => {
+                return Html(if path == "/diagnostics" {
+                    views::diagnostics(
+                        &context.session.csrf_token,
+                        &context.record.status.user_id.0,
+                    )
+                } else {
+                    views::editor(&context.record.status.user_id.0)
+                })
+                .into_response();
+            }
+            Err(response)
+                if matches!(
+                    response.status(),
+                    StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+                ) => {}
             Err(response) => return *response,
-        };
-        return if let Ok((_, current_session)) = session(&state.app, &headers, &record).await {
-            Html(if path == "/diagnostics" {
-                views::diagnostics(&current_session.csrf_token)
-            } else {
-                views::editor()
-            })
-            .into_response()
-        } else {
-            Html(views::login(None)).into_response()
-        };
+        }
+        if let Err(response) = anonymous_access(&state.app, &headers, peer).await {
+            return *response;
+        }
+        return Html(views::login(None)).into_response();
     }
+
     if path == "/login" && method == Method::POST {
         return login(&state, request, peer).await;
     }
@@ -167,6 +177,15 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
         Ok(context) => context,
         Err(response) => return api_gate_error(*response),
     };
+    if headers.contains_key("x-corp-expected-company")
+        && single_header(&headers, "x-corp-expected-company")
+            != Some(context.record.status.user_id.0.as_str())
+    {
+        return error(
+            StatusCode::UNAUTHORIZED,
+            "В другом окне изменена компания. Обновите страницу перед продолжением.",
+        );
+    }
     if method == Method::POST {
         if !security::same_origin(&headers)
             || !single_header(&headers, "x-corp-csrf")
@@ -181,13 +200,13 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
             return telephony::handle(&state.app, request, peer, context).await;
         }
         if diagnostics_route {
-            return diagnostics_request(&state.app, request).await;
+            return diagnostics_request(&state.app, request, &context.record.status.policy_id)
+                .await;
         }
         match path.as_str() {
             "/logout" => {
-                if let Err(error_value) = state
-                    .app
-                    .inv
+                if let Err(error_value) = context
+                    .store
                     .revoke_corp_session(&context.session_hash, "corp.browser")
                     .await
                 {
@@ -215,7 +234,13 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
                 {
                     return invalid();
                 }
-                return Json(json!({"domain": domain})).into_response();
+                let mut response = Json(json!({"domain": domain})).into_response();
+                if let Ok(value) = HeaderValue::from_str(&context.record.status.policy_id) {
+                    response.headers_mut().insert("x-corp-company", value);
+                } else {
+                    return unavailable();
+                }
+                return response;
             }
             "/api/corp/rules" => {
                 let input: Publish = match parse_json(request).await {
@@ -229,7 +254,7 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
                     Ok(input) => input,
                     Err(response) => return *response,
                 };
-                let prior = match state.app.inv.corp_revision(input.revision).await {
+                let prior = match context.store.corp_revision(input.revision).await {
                     Ok(Some(prior)) => prior,
                     Ok(None) => return error(StatusCode::NOT_FOUND, "Эта версия уже недоступна."),
                     Err(error_value) => return store_error(&error_value),
@@ -259,7 +284,8 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
             return telephony::handle(&state.app, request, peer, context).await;
         }
         if diagnostics_route {
-            return diagnostics_request(&state.app, request).await;
+            return diagnostics_request(&state.app, request, &context.record.status.policy_id)
+                .await;
         }
         match path.as_str() {
             "/api/corp/state" => {
@@ -267,10 +293,10 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
                     Ok(value) => value,
                     Err(response) => return *response,
                 };
-                return Json(json!({"revision": revision, "rules": rules, "csrf": context.session.csrf_token})).into_response();
+                return Json(json!({"revision": revision, "rules": rules, "csrf": context.session.csrf_token,"company":{"username":context.record.status.user_id.0}})).into_response();
             }
             "/api/corp/history" => {
-                let rows = match state.app.inv.corp_history(100).await {
+                let rows = match context.store.corp_history(100).await {
                     Ok(rows) => rows,
                     Err(error_value) => return store_error(&error_value),
                 };
@@ -293,9 +319,10 @@ pub(super) async fn handle(State(state): State<PortalState>, request: Request) -
     )
 }
 
-async fn active_record(app: &AppState) -> PortalResult<CorpRecord> {
+async fn active_record(app: &AppState, company_id: &str) -> PortalResult<CorpRecord> {
     let record = app
         .inv
+        .corp_for(company_id)
         .corp_record()
         .await
         .map_err(|error_value| store_error(&error_value))?
@@ -317,15 +344,36 @@ async fn active_record(app: &AppState) -> PortalResult<CorpRecord> {
     Ok(record)
 }
 
+async fn company_store(
+    app: &AppState,
+    record: &CorpRecord,
+) -> PortalResult<vpnctl_inventory::CorpInventory> {
+    let company = app
+        .inv
+        .corp_company_for_username(&record.status.user_id.0)
+        .await
+        .map_err(|error_value| store_error(&error_value))?
+        .ok_or_else(unavailable)?;
+    if company.status.policy_id != record.status.policy_id {
+        return Err(Box::new(unavailable()));
+    }
+    Ok(app.inv.corp_for(&company.company_id))
+}
+
+fn browser_ip(headers: &HeaderMap, peer: Option<IpAddr>) -> Option<IpAddr> {
+    let trusted =
+        peer.is_some_and(|ip| crate::real_ip::is_trusted_proxy(security::canonical_ip(ip)));
+    security::resolve_client_ip(headers, peer, trusted)
+}
+
 async fn browser_access(
     app: &AppState,
     headers: &HeaderMap,
     peer: Option<IpAddr>,
+    company_id: &str,
 ) -> PortalResult<(CorpRecord, IpAddr)> {
-    let record = active_record(app).await?;
-    let trusted =
-        peer.is_some_and(|ip| crate::real_ip::is_trusted_proxy(security::canonical_ip(ip)));
-    let ip = security::resolve_client_ip(headers, peer, trusted);
+    let record = active_record(app, company_id).await?;
+    let ip = browser_ip(headers, peer);
     let denied = || (StatusCode::FORBIDDEN, Html(views::vpn_required(ip))).into_response();
     let ip = ip.ok_or_else(denied)?;
     let eligible = eligible_servers(app, &record.status.user_id)
@@ -333,6 +381,7 @@ async fn browser_access(
         .map_err(|_| unavailable())?;
     let exits = app
         .inv
+        .corp_for(company_id)
         .corp_verified_egress()
         .await
         .map_err(|error_value| store_error(&error_value))?;
@@ -351,30 +400,49 @@ async fn browser_access(
     Ok((record, ip))
 }
 
-async fn session(
+async fn anonymous_access(
     app: &AppState,
     headers: &HeaderMap,
-    record: &CorpRecord,
-) -> PortalResult<(String, CorpSession)> {
-    let hash = security::session_hash(headers).ok_or_else(unauthorized)?;
-    let session = app
-        .inv
-        .corp_session(&hash, now())
-        .await
-        .map_err(|error_value| store_error(&error_value))?
-        .ok_or_else(unauthorized)?;
-    if session.auth_generation != record.status.auth_generation
-        || session.config_version != record.status.config_version
-    {
-        return Err(Box::new(unauthorized()));
+    peer: Option<IpAddr>,
+) -> PortalResult<()> {
+    let companies = app.inv.corp_companies().await.map_err(|_| unavailable())?;
+    let mut active = false;
+    for company in companies.iter().filter(|company| company.status.enabled) {
+        if app
+            .inv
+            .get_user(&company.status.user_id)
+            .await
+            .map_err(|_| unavailable())?
+            .is_none_or(|user| user.disabled)
+        {
+            continue;
+        }
+        active = true;
+        match browser_access(app, headers, peer, &company.company_id).await {
+            Ok(_) => return Ok(()),
+            Err(response) if response.status() == StatusCode::FORBIDDEN => {}
+            Err(response) => return Err(response),
+        }
     }
-    Ok((hash, session))
+    if !active {
+        return Err(Box::new(
+            (StatusCode::SERVICE_UNAVAILABLE, Html(views::unavailable())).into_response(),
+        ));
+    }
+    Err(Box::new(
+        (
+            StatusCode::FORBIDDEN,
+            Html(views::vpn_required(browser_ip(headers, peer))),
+        )
+            .into_response(),
+    ))
 }
 
 struct BrowserContext {
     record: CorpRecord,
     session: CorpSession,
     session_hash: String,
+    store: vpnctl_inventory::CorpInventory,
 }
 
 async fn authorized(
@@ -382,27 +450,38 @@ async fn authorized(
     headers: &HeaderMap,
     peer: Option<IpAddr>,
 ) -> PortalResult<BrowserContext> {
-    let (record, _) = browser_access(app, headers, peer).await?;
-    let (session_hash, session) = session(app, headers, &record).await?;
+    let session_hash = security::session_hash(headers).ok_or_else(unauthorized)?;
+    let scoped = app
+        .inv
+        .corp_company_session(&session_hash, now())
+        .await
+        .map_err(|error_value| store_error(&error_value))?
+        .ok_or_else(unauthorized)?;
+    let (record, _) = browser_access(app, headers, peer, &scoped.company_id).await?;
+    if scoped.session.auth_generation != record.status.auth_generation
+        || scoped.session.config_version != record.status.config_version
+    {
+        return Err(Box::new(unauthorized()));
+    }
     Ok(BrowserContext {
         record,
-        session,
+        session: scoped.session,
         session_hash,
+        store: app.inv.corp_for(&scoped.company_id),
     })
 }
 
 async fn login(state: &PortalState, request: Request, peer: Option<IpAddr>) -> Response {
     let headers = request.headers().clone();
-    let (record, ip) = match browser_access(&state.app, &headers, peer).await {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
     if !security::same_origin(&headers) {
         return error(StatusCode::FORBIDDEN, "Откройте страницу входа заново.");
     }
     if !content_type(&headers, "application/x-www-form-urlencoded") {
         return invalid();
     }
+    let Some(ip) = browser_ip(&headers, peer) else {
+        return error(StatusCode::FORBIDDEN, "Подключите корпоративный VPN.");
+    };
     if !state.logins.try_acquire(Some(ip), Instant::now()) {
         let mut response = error(
             StatusCode::TOO_MANY_REQUESTS,
@@ -417,29 +496,76 @@ async fn login(state: &PortalState, request: Request, peer: Option<IpAddr>) -> R
         Ok(bytes) => bytes,
         Err(_) => return invalid(),
     };
-    let form = url::form_urlencoded::parse(&body).collect::<Vec<_>>();
-    if form.len() != 1 || form[0].0 != "password" || !(1..=512).contains(&form[0].1.len()) {
+    if std::str::from_utf8(&body).is_err() {
         return invalid();
     }
-    let password = Zeroizing::new(form[0].1.to_string());
+    let mut fields = BTreeMap::new();
+    for (key, value) in url::form_urlencoded::parse(&body) {
+        if fields
+            .insert(key.into_owned(), Zeroizing::new(value.into_owned()))
+            .is_some()
+        {
+            return invalid();
+        }
+    }
+    if fields.len() != 2 || !fields.contains_key("username") || !fields.contains_key("password") {
+        return invalid();
+    }
+    let username = fields["username"].trim();
+    if !(1..=64).contains(&username.len())
+        || !username
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        || !(1..=512).contains(&fields["password"].len())
+    {
+        return invalid();
+    }
+    let wrong = || {
+        (
+            StatusCode::UNAUTHORIZED,
+            Html(views::login_for(
+                Some("Неверный username или пароль компании."),
+                username,
+            )),
+        )
+            .into_response()
+    };
+    let company = match state.app.inv.corp_company_for_username(username).await {
+        Ok(Some(company)) => company,
+        Ok(None) => {
+            let _ = security::verify_password(fields["password"].clone(), Zeroizing::new(
+                "$argon2id$v=19$m=19456,t=2,p=1$c3ludGhldGljc2FsdDEyMw$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned())).await;
+            return wrong();
+        }
+        Err(_) => return unavailable(),
+    };
+    let record = match state
+        .app
+        .inv
+        .corp_for(&company.company_id)
+        .corp_record()
+        .await
+    {
+        Ok(Some(record)) => record,
+        Ok(None) => return wrong(),
+        Err(_) => return unavailable(),
+    };
     if !security::verify_password(
-        password,
+        fields["password"].clone(),
         Zeroizing::new(record.credentials.password_phc.clone()),
     )
     .await
     {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Html(views::login(Some("Неверный пароль. Попробуйте ещё раз."))),
-        )
-            .into_response();
+        return wrong();
     }
-    let (fresh, _) = match browser_access(&state.app, &headers, peer).await {
+    let (fresh, _) = match browser_access(&state.app, &headers, peer, &company.company_id).await {
         Ok(value) => value,
-        Err(response) => return *response,
+        Err(_) => return wrong(),
     };
-    if fresh.status.auth_generation != record.status.auth_generation {
-        return unauthorized();
+    if fresh.status.auth_generation != record.status.auth_generation
+        || fresh.status.config_version != record.status.config_version
+    {
+        return wrong();
     }
     let (Some(token), Some(csrf)) = (security::random_token(), security::random_token()) else {
         return unavailable();
@@ -453,6 +579,7 @@ async fn login(state: &PortalState, request: Request, peer: Option<IpAddr>) -> R
     if let Err(error_value) = state
         .app
         .inv
+        .corp_for(&company.company_id)
         .issue_corp_session(
             record.status.auth_generation,
             &input,
@@ -530,8 +657,8 @@ async fn current_rules(
     app: &AppState,
     record: &CorpRecord,
 ) -> PortalResult<(u64, Vec<PolicyRule>)> {
-    let current = app
-        .inv
+    let store = company_store(app, record).await?;
+    let current = store
         .corp_current_policy(record.status.config_version)
         .await
         .map_err(|error_value| store_error(&error_value))?;
@@ -629,10 +756,13 @@ async fn publish_feed(
     {
         return invalid();
     }
+    let store = match company_store(app, &record).await {
+        Ok(store) => store,
+        Err(response) => return *response,
+    };
     let phone = matches!(&input.rules, PublicationRules::Phone(_));
     let current_revision = if phone {
-        match app
-            .inv
+        match store
             .corp_current_phone_policy(record.status.config_version)
             .await
         {
@@ -703,7 +833,9 @@ async fn publish_feed(
         Ok(fresh) => fresh,
         Err(response) => return api_gate_error(*response),
     };
-    if fresh.record.status.config_version != record.status.config_version {
+    if fresh.record.status.config_version != record.status.config_version
+        || fresh.record.status.policy_id != record.status.policy_id
+    {
         return conflict();
     }
     let publication = CorpPublication {
@@ -716,11 +848,11 @@ async fn publish_feed(
         envelope,
     };
     let result = if phone {
-        app.inv
+        store
             .publish_corp_phone_policy(&publication, "corp.browser")
             .await
     } else {
-        app.inv
+        store
             .publish_corp_policy(&publication, "corp.browser")
             .await
     };
@@ -734,10 +866,6 @@ async fn publish_feed(
 }
 
 async fn reader(app: &AppState, headers: &HeaderMap, phone: bool) -> Response {
-    let record = match active_record(app).await {
-        Ok(record) => record,
-        Err(response) => return api_gate_error(*response),
-    };
     let Some(token) = single_header(headers, "authorization")
         .filter(|value| value.len() <= 1024)
         .and_then(|value| value.strip_prefix("Bearer "))
@@ -747,19 +875,53 @@ async fn reader(app: &AppState, headers: &HeaderMap, phone: bool) -> Response {
     if !(32..=512).contains(&token.len()) {
         return unauthorized();
     }
-    let mut matches = false;
-    for reader in &record.credentials.reader_tokens {
-        matches |= equal_secret(token, &reader.token);
+    let companies = match app.inv.corp_companies().await {
+        Ok(value) => value,
+        Err(_) => return unavailable(),
+    };
+    if companies.is_empty() {
+        return unavailable();
     }
-    if !matches {
+    let mut selected = None;
+    for company in companies {
+        let record = match app.inv.corp_for(&company.company_id).corp_record().await {
+            Ok(Some(record)) => record,
+            Ok(None) => continue,
+            Err(_) => return unavailable(),
+        };
+        let mut matched = false;
+        for reader in &record.credentials.reader_tokens {
+            matched |= equal_secret(token, &reader.token);
+        }
+        if matched {
+            if selected.is_some() {
+                return unauthorized();
+            }
+            selected = Some((company.company_id, record));
+        }
+    }
+    let Some((company_id, _)) = selected else {
+        return unauthorized();
+    };
+    let record = match active_record(app, &company_id).await {
+        Ok(record) => record,
+        Err(response) => return api_gate_error(*response),
+    };
+    if !record
+        .credentials
+        .reader_tokens
+        .iter()
+        .any(|reader| equal_secret(token, &reader.token))
+    {
         return unauthorized();
     }
+    let store = app.inv.corp_for(&company_id);
     let current = if phone {
-        app.inv
+        store
             .corp_current_phone_policy(record.status.config_version)
             .await
     } else {
-        app.inv
+        store
             .corp_current_policy(record.status.config_version)
             .await
     };
@@ -810,7 +972,15 @@ async fn observation(app: &AppState, request: Request) -> Response {
     (StatusCode::NO_CONTENT, [("x-corp-probe", value)]).into_response()
 }
 
-async fn diagnostics_request(app: &AppState, request: Request) -> Response {
+async fn diagnostics_request(app: &AppState, request: Request, policy_id: &str) -> Response {
+    let client = match app
+        .corp_diagnostics
+        .as_ref()
+        .and_then(|client| client.for_company(policy_id).ok())
+    {
+        Some(client) => client,
+        None => return diagnostics_unavailable(),
+    };
     use super::diagnostics::{BridgeError, valid_id};
     let bad_request = || error(StatusCode::BAD_REQUEST, "Некорректный запрос отчёта.");
     let method = request.method().clone();
@@ -832,9 +1002,6 @@ async fn diagnostics_request(app: &AppState, request: Request) -> Response {
             }
             query.push((key.into_owned(), value.into_owned()));
         }
-        let Some(client) = &app.corp_diagnostics else {
-            return diagnostics_unavailable();
-        };
         client
             .list(&query)
             .await
@@ -850,9 +1017,6 @@ async fn diagnostics_request(app: &AppState, request: Request) -> Response {
         }
         let id = parts[0];
         if parts.len() == 1 && method == Method::GET {
-            let Some(client) = &app.corp_diagnostics else {
-                return diagnostics_unavailable();
-            };
             client
                 .detail(id)
                 .await
@@ -865,9 +1029,6 @@ async fn diagnostics_request(app: &AppState, request: Request) -> Response {
             if !body.as_object().is_some_and(|object| object.is_empty()) {
                 return bad_request();
             }
-            let Some(client) = &app.corp_diagnostics else {
-                return diagnostics_unavailable();
-            };
             client
                 .retry(id)
                 .await

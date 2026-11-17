@@ -23,3 +23,17 @@ button:disabled { opacity: .65; cursor: default; }
 code { display: block; user-select: all; padding: 14px; border: 1px solid; font-size: 1rem; }
 ul { padding-left: 20px; }
 @media (max-width: 440px) { dl { grid-template-columns: minmax(0, 1fr); gap: 4px; } dd { margin-bottom: 12px; } section { padding: 14px; } }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+th, td { padding: 10px 8px; border-bottom: 1px solid light-dark(#dce1e9, #4b5563); text-align: left; overflow-wrap: anywhere; }
+th:first-child, td:first-child { padding-left: 0; }
+th:last-child, td:last-child { padding-right: 0; }
+@media (max-width: 540px) {
+  table, tbody { display: block; }
+  thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  tr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(5rem, .7fr); gap: 4px 12px; padding: 12px 0; border-bottom: 1px solid light-dark(#dce1e9, #4b5563); }
+  td, td:first-child, td:last-child { border: 0; padding: 0; min-width: 0; }
+  td:first-child { font-weight: 600; }
+  td:nth-child(2) { grid-column: 1; grid-row: 2; }
+  td:nth-child(3) { grid-column: 1; grid-row: 3; }
+  td:last-child { grid-column: 2; grid-row: 1 / 4; align-self: center; }
+}

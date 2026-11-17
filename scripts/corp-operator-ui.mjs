@@ -11,7 +11,7 @@ export async function verifyOperator(browser, expect, shot) {
   const css = await readFile(source, "utf8");
   assert.equal(await readFile(path.join(fixtures, "assets/operator.css"), "utf8"), css);
   const pages = {};
-  for (const name of ["setup", "status", "password-result", "conflict", "egress-ready", "egress-running", "egress-failed", "egress-enabled"]) {
+  for (const name of ["setup", "status", "password-result", "conflict", "egress-ready", "egress-running", "egress-failed", "egress-enabled", "company-list", "company-selected"]) {
     const metadata = JSON.parse(await readFile(path.join(fixtures, `${name}.json`), "utf8"));
     assert.equal(metadata.status, name === "conflict" ? 409 : 200);
     assert.equal(metadata.headers["cache-control"], "no-store");
@@ -19,9 +19,12 @@ export async function verifyOperator(browser, expect, shot) {
     assert.equal(metadata.headers["set-cookie"], undefined);
     pages[name] = { ...metadata, body: await readFile(path.join(fixtures, `${name}.html`), "utf8") };
   }
+  const resultLink = pages["password-result"].body.match(/href="(\/admin\/corp\/company\/([A-Za-z0-9_.-]+))">Продолжить<\/a>/);
+  assert.ok(resultLink, "Password result fixture must identify its generated company");
+  const resultCompany = resultLink[2];
   const origin = "https://operator.example.test";
   const completed = [];
-  for (const width of [340, 420]) {
+  for (const width of [320, 390, 800, 1280]) {
     for (const name of Object.keys(pages)) {
       const context = await browser.newContext({
         offline: true,
@@ -40,7 +43,7 @@ export async function verifyOperator(browser, expect, shot) {
           const url = new URL(request.url());
           assert.equal(url.origin, origin);
           assert.equal(url.search, "");
-          if (request.method() === "GET" && url.pathname === "/admin/corp") {
+          if (request.method() === "GET" && (url.pathname === "/admin/corp" || /^\/admin\/corp\/company\/[A-Za-z0-9_.-]+$/.test(url.pathname))) {
             await route.fulfill(pages[name]);
           } else if (request.method() === "GET" && url.pathname === "/admin/corp/assets/operator.css") {
             await route.fulfill({ status: 200, contentType: "text/css", body: css });
@@ -53,7 +56,13 @@ export async function verifyOperator(browser, expect, shot) {
             assert.match(form.get("csrf"), /^v1\.\d+\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}$/);
             if (action !== "probe") assert.equal(form.get(name === "setup" ? "confirm_binding" : "confirm"), "true");
             if (name === "setup") assert.equal(form.get("user_id"), "synthetic-user");
-            else assert.match(form.get("expected_config_version"), /^[1-9]\d*$/);
+            else {
+              assert.match(form.get("expected_config_version"), /^[1-9]\d*$/);
+              assert.match(form.get("company_id") ?? "", /^[A-Za-z0-9_.-]{1,64}$/);
+              const expected = pages[name].body.match(/name="company_id" value="([A-Za-z0-9_.-]+)"/)?.[1];
+              assert.ok(expected, `${name}: fixture must identify the selected company`);
+              assert.equal(form.get("company_id"), expected);
+            }
             if (action === "enabled") assert.equal(form.get("enabled"), "true");
             if (action === "probe") assert.match(form.get("server_id"), /^[A-Za-z0-9_.-]{1,64}$/);
             posts.push(url.pathname);
@@ -77,6 +86,15 @@ export async function verifyOperator(browser, expect, shot) {
         await page.evaluate(() => document.fonts.ready);
         await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
         await shot(page, `operator-${name}`, width);
+        if (name === "company-list") {
+          await expect(page.getByRole("table", {name: "Корпоративные клиенты"})).toBeVisible();
+          await expect(page.getByRole("link", {name: "Настроить компанию"})).toHaveAttribute("href", resultLink[1]);
+          await expect(page.locator("tbody")).toContainText("synthetic-user");
+        }
+        if (name === "company-selected") {
+          await expect(page.getByRole("heading", {level: 1})).toContainText("synthetic-user");
+          for (const field of await page.locator('input[name="company_id"]').all()) await expect(field).toHaveValue(resultCompany);
+        }
         if (name === "status") {
           for (const action of ["enabled", "password/rotate", "sessions/revoke", "readers/add", "readers/remove", "signers/add", "signers/activate", "signers/remove", "export", "probe"]) {
             const forms = page.locator(`form[action="/admin/corp/${action}"]`);
@@ -85,6 +103,9 @@ export async function verifyOperator(browser, expect, shot) {
               await expect(form).toHaveAttribute("method", "post");
               await expect(form.locator('input[name="csrf"]')).toHaveAttribute("type", "hidden");
               await expect(form.locator('input[name="expected_config_version"]')).toHaveAttribute("type", "hidden");
+              const company = form.locator('input[name="company_id"]');
+              await expect(company).toHaveAttribute("type", "hidden");
+              await expect(company).toHaveValue(resultCompany);
               await expect(form.getByRole("button")).toBeVisible();
             }
           }
@@ -104,14 +125,14 @@ export async function verifyOperator(browser, expect, shot) {
         }
         if (name === "password-result") {
           await expect(page.locator("#corp-generated-password")).toHaveText(/^[A-Za-z0-9_-]{43}$/);
-          await expect(page.getByRole("link", { name: "Продолжить", exact: true })).toHaveAttribute("href", "/admin/corp");
+          await expect(page.getByRole("link", { name: "Продолжить", exact: true })).toHaveAttribute("href", resultLink[1]);
         }
         if (name === "conflict") {
-          await expect(page.getByRole("link", { name: "Загрузить текущее состояние", exact: true })).toHaveAttribute("href", "/admin/corp");
+          await expect(page.getByRole("link", { name: "Загрузить текущее состояние", exact: true })).toHaveAttribute("href", /^\/admin\/corp(?:\/company\/[A-Za-z0-9_.-]+)?$/);
           assert.equal(await page.locator("form").count(), 0, "Conflict must require a state reload");
         }
         if (name.startsWith("egress-")) {
-          await expect(page.getByRole("link", { name: "Обновить состояние проверки", exact: true })).toHaveAttribute("href", "/admin/corp");
+          await expect(page.getByRole("link", { name: "Обновить состояние проверки", exact: true })).toHaveAttribute("href", /^\/admin\/corp(?:\/company\/[A-Za-z0-9_.-]+)?$/);
           if (name === "egress-ready") {
             const form = page.locator('form[action="/admin/corp/enabled"]').filter({ has: page.locator('input[name="enabled"][value="true"]') });
             await expect(form.getByRole("button")).toBeEnabled();

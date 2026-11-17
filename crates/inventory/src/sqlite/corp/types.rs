@@ -7,9 +7,9 @@ use crate::SqliteInventoryError;
 
 pub const CORP_MAX_REVISION: u64 = 9_007_199_254_740_991;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum CorpStoreError {
-    #[error(transparent)]
+    #[error("Corp storage error")]
     Inventory(#[from] SqliteInventoryError),
     #[error("Corp state changed; reload before retrying")]
     Conflict,
@@ -17,6 +17,17 @@ pub enum CorpStoreError {
     Unavailable,
     #[error("invalid Corp input: {0}")]
     InvalidInput(&'static str),
+}
+
+impl fmt::Debug for CorpStoreError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Inventory(_) => f.write_str("Inventory(<redacted>)"),
+            Self::Conflict => f.write_str("Conflict"),
+            Self::Unavailable => f.write_str("Unavailable"),
+            Self::InvalidInput(message) => f.debug_tuple("InvalidInput").field(message).finish(),
+        }
+    }
 }
 
 impl From<sqlx::Error> for CorpStoreError {
@@ -42,6 +53,18 @@ pub struct CorpStatus {
     pub config_version: u64,
     pub revision: u64,
     pub active_key_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CorpCompany {
+    pub company_id: String,
+    pub status: CorpStatus,
+}
+
+#[derive(Clone, Debug)]
+pub struct CorpCompanySession {
+    pub company_id: String,
+    pub session: CorpSession,
 }
 
 #[derive(Clone, PartialEq, Eq)]

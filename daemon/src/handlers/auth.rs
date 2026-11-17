@@ -643,6 +643,34 @@ mod tests {
             ))
     }
 
+    #[tokio::test]
+    async fn operator_and_normal_admin_accept_the_same_session_without_basic_reentry() {
+        use axum::body::Body;
+        let operator = auth_plain("owner", "synthetic-shared-session-password");
+        let admin = auth_plain("owner", "synthetic-shared-session-password");
+        let router = protected_router(admin);
+        let cookie = operator.operator_session_cookie();
+        let cookie = cookie.split(';').next().unwrap();
+        let request = Request::builder()
+            .uri("/")
+            .header("cookie", cookie)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            router.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::OK
+        );
+        let request = Request::builder().uri("/").body(Body::empty()).unwrap();
+        assert_eq!(
+            router.oneshot(request).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let changed_operator = auth_plain("owner", "synthetic-changed-password");
+        let headers =
+            HeaderMap::from_iter([(header::COOKIE, HeaderValue::from_str(cookie).unwrap())]);
+        assert!(!changed_operator.authenticate_operator(&headers).await);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn argon2_verification_keeps_async_runtime_responsive() {
         use std::sync::atomic::{AtomicBool, Ordering};

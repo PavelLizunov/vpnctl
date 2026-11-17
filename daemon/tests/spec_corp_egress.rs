@@ -1459,3 +1459,73 @@ async fn callback_from_previous_endpoint_cannot_satisfy_the_next_endpoint() {
     assert_eq!(ticket.wait().await, Err(ProbeError::Failed));
     assert!(f.state.inv.corp_verified_egress().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn broken_company_does_not_prevent_another_company_refresh() {
+    let f = Fixture::new(false).await;
+    let mut broken_user = user();
+    broken_user.id = UserId("broken-company-user".into());
+    broken_user.uuid = "33333333-3333-4333-8333-333333333333".into();
+    f.state.inv.add_user(&broken_user).await.unwrap();
+    let mut server = f.state.inv.get_server(&sid()).await.unwrap().unwrap();
+    server.id = ServerId("broken-company-server".into());
+    server.address = "192.0.2.11".into();
+    f.state.inv.add_server(&server).await.unwrap();
+    f.state
+        .inv
+        .grant(&broken_user.id, &server.id)
+        .await
+        .unwrap();
+    for (name, value) in [
+        ("vless.public_key", "SYNTHETIC_INVALID_PUBLIC_KEY"),
+        ("vless.short_id", "12345678"),
+        ("vless.sni", "www.example.com"),
+    ] {
+        f.state
+            .inv
+            .set_server_secret(&server.id, name, value)
+            .await
+            .unwrap();
+    }
+    let credentials = f
+        .state
+        .inv
+        .corp_record()
+        .await
+        .unwrap()
+        .unwrap()
+        .credentials;
+    f.state
+        .inv
+        .corp_for("aaa-broken")
+        .create_corp(
+            &CorpSetup {
+                user_id: broken_user.id.clone(),
+                policy_id: "broken-policy".into(),
+                credentials,
+            },
+            "spec",
+        )
+        .await
+        .unwrap();
+    assert!(
+        vpnctld::corp_portal::eligibility::eligible_servers(&f.state, &broken_user.id)
+            .await
+            .is_err()
+    );
+    let controller = Arc::clone(&f.state.corp_egress);
+    let state = f.state.clone();
+    let refresh = tokio::spawn(async move { controller.refresh_due(state).await });
+    f.succeed(f.next().await, "198.51.100.20").await;
+    assert_eq!(refresh.await.unwrap(), Err(ProbeError::Unavailable));
+    assert_eq!(f.state.inv.corp_verified_egress().await.unwrap().len(), 1);
+    assert!(
+        f.state
+            .inv
+            .corp_for("aaa-broken")
+            .corp_verified_egress()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

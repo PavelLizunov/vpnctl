@@ -1,4 +1,4 @@
-//! Strict, preparation-only operator controls for the fixed Corp binding.
+//! Authenticated operator controls for independent corporate subscriptions.
 use std::{convert::Infallible, sync::Arc, time::Duration};
 
 use axum::{
@@ -75,6 +75,8 @@ struct OperatorState {
 }
 
 pub(crate) fn isolate(legacy: Router, app: AppState, config: OperatorConfig) -> Router {
+    let canonical_origin = config.origin.clone();
+    let canonical_authority = config.authority.clone();
     let operator = Router::new()
         .fallback(handle)
         .with_state(OperatorState { app, config })
@@ -86,8 +88,26 @@ pub(crate) fn isolate(legacy: Router, app: AppState, config: OperatorConfig) -> 
     Router::new().fallback_service(tower::service_fn(move |request: Request| {
         let legacy = legacy.clone();
         let operator = operator.clone();
+        let canonical_origin = canonical_origin.clone();
+        let canonical_authority = canonical_authority.clone();
         async move {
             let path = request.uri().path();
+            if (path == "/admin" || path.starts_with("/admin/"))
+                && let (Some(origin), Some(authority)) = (canonical_origin.as_deref(), canonical_authority.as_deref())
+                && authority.ends_with(".ts.net")
+                && let Some(short) = authority.split('.').next()
+                && let Some(host) = request.headers().get("host").and_then(|value| value.to_str().ok())
+                && (host.eq_ignore_ascii_case(short) || host.eq_ignore_ascii_case(&format!("{short}:80")) || host.eq_ignore_ascii_case(&format!("{authority}:80"))) {
+                if request.headers().get_all("host").iter().count() != 1
+                    || request.uri().authority().is_some_and(|value| !value.as_str().eq_ignore_ascii_case(host)) {
+                    return Ok::<_, Infallible>(crate::corp_portal::secure(error(StatusCode::BAD_REQUEST, "Некорректный адрес запроса.")));
+                }
+                if request.method() == Method::GET || request.method() == Method::HEAD {
+                    let target = format!("{origin}{}", request.uri().path_and_query().map_or("/admin/", |value| value.as_str()));
+                    return Ok(crate::corp_portal::secure(axum::response::Redirect::permanent(&target).into_response()));
+                }
+                return Ok(crate::corp_portal::secure(error(StatusCode::FORBIDDEN, "Откройте панель через её защищённый HTTPS-адрес и повторите действие.")));
+            }
             if path != "/admin/corp" && !path.starts_with("/admin/corp/") {
                 return legacy.oneshot(request).await;
             }
@@ -219,6 +239,19 @@ async fn process(state: &OperatorState, request: Request) -> Result<Response> {
     if method == Method::GET {
         return match path.as_str() {
             "/admin/corp" => views::page(state).await,
+            "/admin/corp/companies" => views::company_list(state).await,
+            path if path.starts_with("/admin/corp/company/") => {
+                let id = path.trim_start_matches("/admin/corp/company/");
+                if id.is_empty()
+                    || id.len() > 64
+                    || !id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+                {
+                    return Err(fail(StatusCode::NOT_FOUND));
+                }
+                views::page_for(state, id).await
+            }
             "/admin/corp/assets/operator.css" => Ok((
                 [("content-type", "text/css; charset=utf-8")],
                 include_str!("../assets/corp-operator.css"),

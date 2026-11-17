@@ -19,13 +19,47 @@ pub(super) fn document(title: &str, body: &str) -> String {
         escape(title)
     )
 }
-pub(super) fn reveal(password: &str) -> Response {
-    Html(document("Пароль создан", &format!("<section><h2>Сохраните пароль сейчас</h2><p>Пароль показывается только один раз. Передайте его разрешённым сотрудникам по защищённому каналу.</p><code id=\"corp-generated-password\">{}</code><p>Повторное открытие страницы не восстановит пароль. Если ответ потерян, сначала проверьте состояние, затем выполните новую ротацию.</p><a href=\"/admin/corp\">Продолжить</a></section>", escape(password)))).into_response()
+pub(super) fn reveal(password: &str, company_id: &str, username: &str) -> Response {
+    reveal_result(password, company_id, username, None)
 }
-fn form(action: &str, csrf: &str, version: Option<u64>, fields: &str, label: &str) -> String {
-    actionable_form(action, csrf, version, fields, label, true)
+pub(super) fn reveal_setup(
+    password: &str,
+    company_id: &str,
+    username: &str,
+    support_ready: bool,
+) -> Response {
+    reveal_result(password, company_id, username, Some(support_ready))
+}
+fn reveal_result(
+    password: &str,
+    company_id: &str,
+    username: &str,
+    support_ready: Option<bool>,
+) -> Response {
+    let company_url = company_url(company_id);
+    let support_status = match support_ready {
+        Some(true) => "<p>Диагностика компании настроена.</p>".to_owned(),
+        Some(false) => format!(
+            "<p role=\"status\">Компания создана, но настройка диагностики не завершилась. Пароль ниже действует; сохраните его сейчас.</p><p><a href=\"{}#company-diagnostics\">Повторить настройку диагностики</a>: откройте компанию и нажмите «Скачать настройки диагностики». Новый пароль создавать не нужно.</p>",
+            escape(&company_url)
+        ),
+        None => String::new(),
+    };
+    Html(document("Пароль создан", &format!("<section><h2>Сохраните пароль сейчас</h2><p>Username компании: <strong>{}</strong></p>{support_status}<p>Пароль показывается только один раз. Передайте его разрешённым сотрудникам по защищённому каналу.</p><code id=\"corp-generated-password\">{}</code><p>Повторное открытие страницы не восстановит пароль. Если ответ потерян, сначала проверьте состояние, затем выполните новую ротацию.</p><a href=\"{}\">Продолжить</a></section>", escape(username), escape(password), escape(&company_url)))).into_response()
+}
+
+fn form(
+    company_id: &str,
+    action: &str,
+    csrf: &str,
+    version: Option<u64>,
+    fields: &str,
+    label: &str,
+) -> String {
+    actionable_form(company_id, action, csrf, version, fields, label, true)
 }
 fn actionable_form(
+    company_id: &str,
     action: &str,
     csrf: &str,
     version: Option<u64>,
@@ -33,13 +67,21 @@ fn actionable_form(
     label: &str,
     available: bool,
 ) -> String {
+    let company = if company_id.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<input type=\"hidden\" name=\"company_id\" value=\"{}\">",
+            escape(company_id)
+        )
+    };
     let version = version
         .map(|version| {
             format!("<input type=\"hidden\" name=\"expected_config_version\" value=\"{version}\">")
         })
         .unwrap_or_default();
     format!(
-        "<form method=\"post\" action=\"/admin/corp/{action}\"><input type=\"hidden\" name=\"csrf\" value=\"{}\">{version}{fields}<button type=\"submit\"{}>{}</button></form>",
+        "<form method=\"post\" action=\"/admin/corp/{action}\"><input type=\"hidden\" name=\"csrf\" value=\"{}\">{company}{version}{fields}<button type=\"submit\"{}>{}</button></form>",
         escape(csrf),
         if available { "" } else { " disabled" },
         escape(label)
@@ -48,6 +90,23 @@ fn actionable_form(
 const CONFIRM: &str = "<label class=\"confirm\"><input type=\"checkbox\" name=\"confirm\" value=\"true\" required>Подтверждаю операцию</label>";
 
 pub(super) async fn page(state: &OperatorState) -> Result<Response> {
+    let companies = state
+        .app
+        .inv
+        .corp_companies()
+        .await
+        .map_err(|_| unavailable())?;
+    if companies.len() == 1 {
+        return page_for(state, &companies[0].company_id).await;
+    }
+    company_list(state).await
+}
+
+pub(super) fn company_url(company_id: &str) -> String {
+    format!("/admin/corp/company/{company_id}")
+}
+
+pub(super) async fn company_list(state: &OperatorState) -> Result<Response> {
     let config = &state.config;
     let csrf = config
         .auth
@@ -58,32 +117,67 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
             (config.clock)(),
         )
         .ok_or_else(unavailable)?;
-    let record = state
+    let companies = state
         .app
         .inv
-        .corp_record()
+        .corp_companies()
         .await
         .map_err(|_| unavailable())?;
-    let Some(record) = record else {
-        let users = state
-            .app
-            .inv
-            .list_users()
-            .await
-            .map_err(|_| unavailable())?;
-        let mut options = String::new();
-        for user in users.iter().filter(|user| !user.disabled) {
-            options.push_str(&format!(
-                "<option value=\"{}\">{}</option>",
-                escape(&user.id.0),
-                escape(&user.id.0)
-            ));
-        }
+    let users = state
+        .app
+        .inv
+        .list_users()
+        .await
+        .map_err(|_| unavailable())?;
+    let mut body = String::from(
+        "<section><h2>Компании</h2><p>У каждой компании свой username, пароль, правила и диагностика.</p><table aria-label=\"Корпоративные клиенты\"><thead><tr><th>Username</th><th>Доступ</th><th>Правила</th><th></th></tr></thead><tbody>",
+    );
+    for company in &companies {
+        body.push_str(&format!("<tr><td>{}</td><td>{}</td><td>Версия {}</td><td><a href=\"{}\">Настроить компанию</a></td></tr>", escape(&company.status.user_id.0), if company.status.enabled { "Включён" } else { "Выключен" }, company.status.revision, escape(&company_url(&company.company_id))));
+    }
+    body.push_str("</tbody></table></section><section><h2>Добавить компанию</h2><p>Выберите существующую корпоративную подписку. Пароль компании будет отдельным от пароля оператора.</p>");
+    if companies.is_empty() {
+        body.push_str("<p>Привязка отсутствует.</p>");
+    }
+    let mut options = String::new();
+    for user in users.iter().filter(|user| {
+        !user.disabled
+            && !companies
+                .iter()
+                .any(|company| company.status.user_id == user.id)
+    }) {
+        options.push_str(&format!(
+            "<option value=\"{}\">{}</option>",
+            escape(&user.id.0),
+            escape(&user.id.0)
+        ));
+    }
+    if options.is_empty() {
+        body.push_str("<p>Все доступные пользователи уже привязаны. Создайте подписку в разделе пользователей.</p>");
+    } else {
         let fields = format!(
-            "<label>Пользователь<select name=\"user_id\" required>{options}</select></label><label class=\"confirm\"><input type=\"checkbox\" name=\"confirm_binding\" value=\"true\" required>Подтверждаю постоянную привязку: заменить пользователя впоследствии нельзя</label>"
+            "<label>Username подписки<select name=\"user_id\" required>{options}</select></label><label class=\"confirm\"><input type=\"checkbox\" name=\"confirm_binding\" value=\"true\" required>Подтверждаю постоянную привязку компании к подписке</label>"
         );
-        return Ok(Html(document("Корпоративная политика", &format!("<section><h2>Привязка отсутствует</h2><p>Выберите существующего включённого пользователя. Настройка создаёт выключенную привязку без опубликованных правил.</p>{}</section>", form("setup", &csrf, None, &fields, "Создать привязку")))).into_response());
-    };
+        body.push_str(&form("", "setup", &csrf, None, &fields, "Создать компанию"));
+    }
+    body.push_str("</section>");
+    Ok(Html(document("Корпоративные клиенты", &body)).into_response())
+}
+
+pub(super) async fn page_for(state: &OperatorState, company_id: &str) -> Result<Response> {
+    let config = &state.config;
+    let csrf = config
+        .auth
+        .as_ref()
+        .ok_or_else(unavailable)?
+        .operator_csrf(
+            config.origin.as_deref().ok_or_else(unavailable)?,
+            (config.clock)(),
+        )
+        .ok_or_else(unavailable)?;
+    let store = state.app.inv.corp_for(company_id);
+    let record = store.corp_record().await.map_err(|_| unavailable())?;
+    let record = record.ok_or_else(|| super::fail(StatusCode::NOT_FOUND))?;
     let status = &record.status;
     let version = Some(status.config_version);
     let user = state
@@ -100,9 +194,7 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
     let servers = crate::corp_portal::eligibility::eligible_servers(&state.app, &status.user_id)
         .await
         .map_err(|_| unavailable())?;
-    let verified = state
-        .app
-        .inv
+    let verified = store
         .corp_verified_egress()
         .await
         .map_err(|_| unavailable())?;
@@ -112,7 +204,7 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
         && state
             .app
             .corp_egress
-            .ready_to_enable(&state.app, status.config_version)
+            .ready_to_enable_for(&state.app, company_id, status.config_version)
             .await
             .unwrap_or(false);
     let mut server_rows = String::new();
@@ -140,7 +232,12 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
         } else {
             "Проверка устарела"
         };
-        let attempt_label = match state.app.corp_egress.attempt(&server.server_id).state {
+        let attempt_label = match state
+            .app
+            .corp_egress
+            .attempt_for(company_id, &server.server_id)
+            .state
+        {
             crate::corp_egress::AttemptState::Idle => "Проверка ещё не запускалась",
             crate::corp_egress::AttemptState::Running => {
                 "Проверка выполняется. Обновите состояние через некоторое время"
@@ -159,7 +256,7 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
         server_rows.push_str(&format!(
             "<li><h3>{}</h3><p>Сохранённое подтверждение: {state_label}</p><p>Последняя попытка: {attempt_label}</p>{}</li>",
             escape(&server.label),
-            actionable_form(
+            actionable_form(company_id,
                 "probe",
                 &csrf,
                 version,
@@ -203,6 +300,10 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
     if status.revision == 0 {
         body.push_str("<p>Правила ещё не опубликованы (редакция 0).</p>");
     }
+    body.insert_str(
+        0,
+        "<p><a href=\"/admin/corp/companies\">Все компании</a></p>",
+    );
     body.push_str("<section><h2>Доступ</h2>");
     if !provider_available {
         body.push_str("<p>Включение недоступно: механизм проверки выхода не подключён.</p>");
@@ -210,6 +311,7 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
         body.push_str("<p>Для включения нужен доступный пользователь и актуальное подтверждение выхода. Запустите проверку сервера и обновите состояние.</p>");
     }
     body.push_str(&actionable_form(
+        company_id,
         "enabled",
         &csrf,
         version,
@@ -218,6 +320,7 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
         enable_ready,
     ));
     body.push_str(&form(
+        company_id,
         "enabled",
         &csrf,
         version,
@@ -225,6 +328,7 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
         "Отключить доступ",
     ));
     body.push_str(&form(
+        company_id,
         "sessions/revoke",
         &csrf,
         version,
@@ -233,6 +337,7 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
     ));
     body.push_str("</section><section><h2>Пароль сотрудников</h2><p>Новый пароль сразу заменяет прежний и завершает сессии. Старый пароль больше не принимается.</p>");
     body.push_str(&form(
+        company_id,
         "password/rotate",
         &csrf,
         version,
@@ -241,6 +346,7 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
     ));
     body.push_str("</section><section><h2>Доступ клиентов к политике</h2><p>Порядок ротации: добавить → выгрузить и перенести → удалить прежний. Файл содержит секрет доступа. Вставьте объект business.policy в сохранённый полный частный комплект. Это не самостоятельный файл импорта сотрудника и не замена VPN-подписки.</p>");
     body.push_str(&form(
+        company_id,
         "readers/add",
         &csrf,
         version,
@@ -254,6 +360,7 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
             escape(&reader.id)
         );
         body.push_str(&form(
+            company_id,
             "export",
             &csrf,
             version,
@@ -261,6 +368,7 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
             "Скачать business.policy",
         ));
         body.push_str(&form(
+            company_id,
             "readers/remove",
             &csrf,
             version,
@@ -269,8 +377,18 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
         ));
         body.push_str("</article>");
     }
+    body.push_str("</section><section id=\"company-diagnostics\"><h2>Диагностика компании</h2><p>Настройки относятся только к этой компании и добавляются в её частный комплект клиента.</p>");
+    body.push_str(&form(
+        company_id,
+        "support/export",
+        &csrf,
+        version,
+        "",
+        "Скачать настройки диагностики",
+    ));
     body.push_str("</section><section><h2>Ключи подписи</h2><p>Добавьте ключ, выгрузите доверие и перенесите его клиентам, затем активируйте. Отключённые клиенты могут ещё не знать новый ключ. Активация влияет на следующую публикацию и не переподписывает текущие правила. Используемые историей ключи удалить нельзя.</p>");
     body.push_str(&form(
+        company_id,
         "signers/add",
         &csrf,
         version,
@@ -293,6 +411,7 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
         );
         if key.id != record.credentials.active_key_id {
             body.push_str(&form(
+                company_id,
                 "signers/activate",
                 &csrf,
                 version,
@@ -300,6 +419,7 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
                 "Активировать ключ",
             ));
             body.push_str(&form(
+                company_id,
                 "signers/remove",
                 &csrf,
                 version,
@@ -321,9 +441,20 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
         body.push_str("<li>Нет подходящих серверов</li>");
     }
     body.push_str("</ul></section><p>Если операция завершилась ошибкой или ответ потерян, загрузите текущее состояние перед новой попыткой. Потерянный пароль требует новой ротации.</p>");
+    body = body.replace(
+        "href=\"/admin/corp\"",
+        &format!("href=\"{}\"", escape(&company_url(company_id))),
+    );
+    body = body.replace(
+        "Подтверждаю операцию",
+        &format!(
+            "Подтверждаю операцию для компании {}",
+            escape(&status.user_id.0)
+        ),
+    );
     Ok((
         StatusCode::OK,
-        Html(document("Корпоративная политика", &body)),
+        Html(document(&format!("Компания: {}", status.user_id.0), &body)),
     )
         .into_response())
 }

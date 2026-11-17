@@ -92,6 +92,9 @@ export async function verifyDiagnostics(browser, expect, shot) {
         const post = request.method() === "POST";
         const deleting = request.method() === "DELETE";
         assert.ok(post || deleting || request.method() === "GET");
+        const company = fixture.body.match(/data-username="([^"]+)"/)?.[1];
+        assert.ok(company, "Diagnostics fixture must name its selected company");
+        assert.equal(request.headers()["x-corp-expected-company"], company);
         calls.push({path: url.pathname, query: url.search, method: request.method()});
         if (deleting) {
           const id = url.pathname.slice("/api/corp/reports/".length);
@@ -200,7 +203,7 @@ export async function verifyDiagnostics(browser, expect, shot) {
       await expect(page.locator(".report-select")).toHaveCount(2);
       await shot(page, "diagnostics-list-hostile-text", width);
       const rules = page.getByRole("link", {name: "Правила", exact: true});
-      await expect(rules).toHaveAttribute("href", "/");
+      await expect(rules).toHaveAttribute("href", "/#rules");
       await rules.focus();
       await page.keyboard.press("Tab");
       await expect(page.getByRole("link", {name: "Диагностика", exact: true})).toBeFocused();
@@ -307,7 +310,7 @@ export async function verifyDiagnostics(browser, expect, shot) {
       const h = await harness(width, mode);
       try {
         if (mode === "empty") {
-          await expect(h.page.locator("#diagnostics-status")).toContainText("Отчётов пока нет");
+          await expect(h.page.locator("#diagnostics-list")).toContainText("Отчётов пока нет");
           await expect(h.page.locator(".report-select")).toHaveCount(0);
           await expect(h.page.locator("#diagnostics-more")).toBeHidden();
         } else {

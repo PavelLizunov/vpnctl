@@ -165,7 +165,7 @@ async fn admin_nav_icons_keep_visible_localized_labels_in_every_theme() {
                 ("/admin/alerts", "bell", "Alerts", "Алерты"),
                 ("/admin/settings", "settings-2", "Settings", "Настройки"),
                 ("/admin/boosty", "link", "Boosty", "Boosty"),
-                ("/admin/corp", "shield", "Corp", "Corp"),
+                ("/admin/corp/companies", "shield", "Corp", "Corp"),
             ] {
                 let anchor = anchors
                     .iter()

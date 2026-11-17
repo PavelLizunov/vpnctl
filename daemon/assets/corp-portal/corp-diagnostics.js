@@ -25,22 +25,48 @@
     return result;
   }
   function prepareInbox() {
-    const toolbar = node("div", undefined, "diagnostics-toolbar");
+    const list = el("list");
+    const section = list.closest("section");
+    const sectionTitle = section.querySelector("h2");
+    const heading = node("div", undefined, "section-heading");
+    sectionTitle.classList.add("section-title");
+    sectionTitle.textContent = "Отчёты";
+    const refresh = el("refresh");
+    const oldActions = refresh.parentElement;
+    refresh.classList.add("quiet");
+    heading.append(sectionTitle, refresh);
+    oldActions.remove();
+    section.querySelector("p")?.remove();
+    section.prepend(heading);
+    const toolbar = node("div", undefined, "workspace-toolbar");
     const field = node("div", undefined, "field");
-    const label = node("label", "Найти отчёт");
+    const label = node("label", "Поиск в загруженных отчётах");
     label.htmlFor = "diagnostics-search";
     const search = node("input");
     search.id = "diagnostics-search";
     search.type = "search";
     search.placeholder = "Устройство, дата или номер отчёта";
     search.autocomplete = "off";
-    field.append(label, search);
+    search.setAttribute("aria-describedby", "diagnostics-search-hint");
+    const hint = node("p", "Чтобы искать дальше, загрузите более ранние отчёты.", "muted small");
+    hint.id = "diagnostics-search-hint";
+    field.append(label, search, hint);
     toolbar.append(field);
-    const found = node("p", "", "muted small");
+    const found = node("p", "", "list-summary muted small");
     found.id = "diagnostics-found";
     found.setAttribute("role", "status");
     found.setAttribute("aria-live", "polite");
-    el("list").before(toolbar, found);
+    el("status").classList.add("muted", "small");
+    list.before(toolbar, found, el("status"));
+    const pagination = node("div", undefined, "actions");
+    el("more").textContent = "Загрузить более ранние отчёты";
+    list.after(pagination);
+    pagination.append(el("more"));
+    const detailHeading = node("div", undefined, "section-heading");
+    el("detail-title").classList.add("section-title");
+    el("detail").prepend(detailHeading);
+    detailHeading.append(el("detail-title"));
+    el("detail-body").replaceChildren(node("p", "Откройте отчёт, чтобы увидеть вывод и следующие шаги.", "muted"));
     deleteDialog = node("dialog");
     deleteDialog.id = "diagnostics-delete-dialog";
     deleteDialog.setAttribute("aria-labelledby", "diagnostics-delete-title");
@@ -71,9 +97,9 @@
     el("error").hidden = !message;
   }
   async function request(path, method = "GET") {
-    const options = {method, credentials: "same-origin", cache: "no-store", redirect: "error"};
+    const options = {method, credentials: "same-origin", cache: "no-store", redirect: "error", headers: root.dataset.username ? {"X-Corp-Expected-Company": root.dataset.username} : {}};
     if (method === "POST" || method === "DELETE") {
-      options.headers = {"Content-Type": "application/json", "X-Corp-CSRF": csrf};
+      options.headers = {...options.headers, "Content-Type": "application/json", "X-Corp-CSRF": csrf};
       options.body = "{}";
     }
     let response;
@@ -127,21 +153,29 @@
       button.type = "button";
       button.dataset.report = report.report_id;
       button.setAttribute("aria-pressed", String(report.report_id === active));
-      button.append(node("strong", timestamp(report.received_utc)), node("span", `Устройство: ${report.device_label || "не указано"}`, "report-device"), node("span", states[report.analysis_state] || "Неизвестно", "muted small"));
+      button.append(node("strong", report.device_label || "Устройство не указано", "report-device"), node("span", timestamp(report.received_utc), "report-meta muted small"), node("span", states[report.analysis_state] || "Неизвестно", "report-meta muted small"));
       button.addEventListener("click", () => loadDetail(report.report_id, true));
       item.append(button);
       el("list").append(item);
     }
-    el("found").textContent = query ? `Найдено в загруженных отчётах: ${matches.length}` : `Загружено отчётов: ${reports.length}`;
-    if (query && !matches.length) el("list").append(node("li", "Ничего не найдено. Измените поиск или очистите поле.", "muted"));
+    el("found").textContent = query ? `Найдено: ${matches.length} из ${reports.length} загруженных` : `Загружено отчётов: ${reports.length}`;
+    el("search-hint").hidden = !cursor;
+    el("more").hidden = !cursor;
+    el("more").textContent = query ? "Загрузить более ранние и продолжить поиск" : "Загрузить более ранние отчёты";
+    if (query && !matches.length) {
+      el("list").append(node("li", cursor
+        ? "В загруженных отчётах совпадений нет. Загрузите более ранние отчёты или измените поиск."
+        : "Совпадений нет. Измените поиск или очистите поле.", "muted"));
+    } else if (!reports.length) {
+      el("list").append(node("li", "Отчётов пока нет. Отправьте диагностику из приложения VPNRouter.", "muted"));
+    }
   }
   function renderDetail(data) {
     const report = data.report;
     const body = el("detail-body");
     body.replaceChildren();
-    el("detail-title").textContent = "Отчёт приложения";
-    body.append(node("p", `Получен: ${timestamp(report.received_utc)}`));
-    body.append(node("p", `Состояние: ${states[report.analysis_state] || "Неизвестно"}`));
+    el("detail-title").textContent = report.device_label || "Отчёт приложения";
+    body.append(node("p", `${timestamp(report.received_utc)} · ${states[report.analysis_state] || "Неизвестно"}`, "report-meta muted small"));
     const analysis = data.analysis;
     if (analysis && report.analysis_state !== "ready") {
       body.append(node("p", ["received", "pending", "running"].includes(report.analysis_state)
@@ -164,7 +198,6 @@
       } else {
         action.append(node("p", "В этом отчёте нет подтверждённого решения. Отправьте свежую диагностику сразу после повторения проблемы."));
       }
-      action.append(node("p", "Это рекомендации. Действия не выполняются автоматически.", "muted small"));
       body.append(action);
       const reasons = disclosure("Почему такой вывод", "diagnosis-reasons");
       for (const item of analysis.assessments || []) {
@@ -201,11 +234,11 @@
       technical.append(list);
     } else technical.append(node("p", report.model ? `Модель: ${report.model}. Другие сведения пока недоступны.` : "Сведения о выполнении пока недоступны.", "muted"));
     body.append(technical);
-    const refresh = node("button", "Обновить отчёт");
+    const refresh = node("button", "Обновить отчёт", "quiet");
     refresh.type = "button";
     refresh.disabled = locked;
     refresh.addEventListener("click", () => loadDetail(report.report_id));
-    const actions = node("div", undefined, "diagnostics-detail-actions");
+    const actions = node("div", undefined, "diagnostics-detail-actions actions");
     actions.append(refresh);
     if (!["pending", "running"].includes(report.analysis_state)) {
       const retry = node("button", "Повторить анализ");
@@ -223,7 +256,7 @@
       });
       actions.append(retry);
     }
-    const remove = node("button", "Удалить отчёт…", "remove");
+    const remove = node("button", "Удалить отчёт…", "remove quiet");
     remove.type = "button";
     remove.disabled = locked;
     remove.addEventListener("click", () => {
@@ -276,10 +309,9 @@
         if (existing >= 0) reports[existing] = report;
         else reports.push(report);
       }
-      renderList();
       cursor = data.next_cursor;
-      el("more").hidden = !cursor;
-      el("status").textContent = el("list").children.length ? "Выберите отчёт для просмотра анализа." : "Отчётов пока нет. Отправьте диагностику из приложения VPNRouter.";
+      renderList();
+      el("status").textContent = "";
     } catch (error) {
       if (generation !== listGeneration) return;
       el("status").textContent = "Список отчётов не загружен.";

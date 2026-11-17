@@ -918,7 +918,7 @@ async fn disable_is_available_and_identical_disable_has_no_audit() {
         )
         .await;
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_eq!(reply.headers["location"], "/admin/corp");
+    assert_eq!(reply.headers["location"], "/admin/corp/company/legacy");
     assert_eq!(f.snapshot().await, before);
     assert_eq!(f.audits().await, audits);
 }
@@ -1390,6 +1390,8 @@ async fn optional_synthetic_ui_capture_contains_actual_router_responses() {
         .post("/setup", "user_id=synthetic-user&confirm_binding=true")
         .await;
     assert_eq!(reveal.status, StatusCode::OK);
+    assert!(reveal.body.contains("настройка диагностики не завершилась"));
+    assert!(reveal.body.contains("Повторить настройку диагностики"));
     save(&output, "password-result", &reveal);
     assert_eq!(
         f.post("/readers/add", &f.version_fields().await)
@@ -1448,6 +1450,26 @@ async fn optional_synthetic_ui_capture_contains_actual_router_responses() {
     assert!(f.state.inv.corp_verified_egress().await.unwrap().is_empty());
     let status = f.page().await;
     save(&output, "status", &status);
+    let companies = f
+        .send(
+            Method::GET,
+            "/admin/corp/companies",
+            "",
+            &[("host", HOST), ("authorization", &auth())],
+        )
+        .await;
+    assert_eq!(companies.status, StatusCode::OK);
+    save(&output, "company-list", &companies);
+    let selected = f
+        .send(
+            Method::GET,
+            "/admin/corp/company/legacy",
+            "",
+            &[("host", HOST), ("authorization", &auth())],
+        )
+        .await;
+    assert_eq!(selected.status, StatusCode::OK);
+    save(&output, "company-selected", &selected);
     for (route, _) in ROUTES.iter().filter(|(r, _)| *r != "/setup") {
         assert!(
             status.body.contains(&format!("/admin/corp{route}")),
@@ -1550,15 +1572,20 @@ async fn deleted_user_cannot_be_rebound_and_disabled_binding_can_still_be_repair
 #[tokio::test]
 async fn disabled_user_cannot_be_selected_for_setup() {
     let f = Fixture::new().await;
+    let csrf = f.page().await.csrf();
     f.state
         .inv
         .set_user_disabled(&UserId("synthetic-user".into()), true)
         .await
         .unwrap();
     assert_eq!(
-        f.post("/setup", "user_id=synthetic-user&confirm_binding=true")
-            .await
-            .status,
+        f.post_token(
+            "/setup",
+            "user_id=synthetic-user&confirm_binding=true",
+            &csrf
+        )
+        .await
+        .status,
         StatusCode::SERVICE_UNAVAILABLE
     );
     assert!(f.state.inv.corp_record().await.unwrap().is_none());
@@ -1835,7 +1862,7 @@ async fn emergency_disable_preserves_mismatched_signer_pair_and_revokes_sessions
         )
         .await;
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_eq!(reply.headers["location"], "/admin/corp");
+    assert_eq!(reply.headers["location"], "/admin/corp/company/legacy");
     let after = f.record().await;
     assert!(!after.status.enabled);
     assert_eq!(

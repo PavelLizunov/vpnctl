@@ -65,8 +65,12 @@ impl Form {
             .copied()
             .chain(std::iter::once("csrf"))
             .collect();
-        if self.0.len() != expected.len()
-            || self.0.keys().any(|key| !expected.contains(key.as_str()))
+        let company_present = self.0.contains_key("company_id");
+        if self.0.len() != expected.len() + usize::from(company_present)
+            || self
+                .0
+                .keys()
+                .any(|key| key != "company_id" && !expected.contains(key.as_str()))
         {
             return Err(fail(StatusCode::UNPROCESSABLE_ENTITY));
         }
@@ -121,6 +125,8 @@ pub(super) fn known_path(path: &str) -> bool {
             | "/admin/corp/sessions/revoke"
             | "/admin/corp/export"
             | "/admin/corp/probe"
+            | "/admin/corp/companies"
+            | "/admin/corp/support/export"
     )
 }
 fn store(error: &CorpStoreError) -> super::Failure {
@@ -150,6 +156,7 @@ pub(super) async fn perform(state: &OperatorState, path: &str, form: &Form) -> R
         "readers/remove" => &["expected_config_version", "reader_id", "confirm"],
         "signers/activate" | "signers/remove" => &["expected_config_version", "key_id", "confirm"],
         "export" => &["expected_config_version", "reader_id"],
+        "support/export" => &["expected_config_version"],
         "probe" => &["expected_config_version", "server_id"],
         _ => return Err(fail(StatusCode::NOT_FOUND)),
     };
@@ -160,10 +167,15 @@ pub(super) async fn perform(state: &OperatorState, path: &str, form: &Form) -> R
     if action == "setup" {
         return setup(state, form).await;
     }
+    let company_id = if form.0.contains_key("company_id") {
+        form.id("company_id")?
+    } else {
+        "legacy"
+    };
+    let destination = views::company_url(company_id);
+    let scoped = state.app.inv.corp_for(company_id);
     let version = form.version()?;
-    let mut record = state
-        .app
-        .inv
+    let mut record = scoped
         .corp_record()
         .await
         .map_err(|error| store(&error))?
@@ -250,9 +262,7 @@ pub(super) async fn perform(state: &OperatorState, path: &str, form: &Form) -> R
                 .iter()
                 .map(|key| (key.id.clone(), key.spki.clone()))
                 .collect();
-            for revision in state
-                .app
-                .inv
+            for revision in scoped
                 .corp_history(100)
                 .await
                 .map_err(|error| store(&error))?
@@ -267,9 +277,7 @@ pub(super) async fn perform(state: &OperatorState, path: &str, form: &Form) -> R
                     return Err(fail(StatusCode::CONFLICT));
                 }
             }
-            for revision in state
-                .app
-                .inv
+            for revision in scoped
                 .corp_phone_history(100)
                 .await
                 .map_err(|error| store(&error))?
@@ -287,26 +295,57 @@ pub(super) async fn perform(state: &OperatorState, path: &str, form: &Form) -> R
             record.credentials.signing_keys.retain(|key| key.id != id);
         }
         "sessions/revoke" => {
-            state
-                .app
-                .inv
+            scoped
                 .revoke_corp_sessions(version, "operator-corp-session-revoke")
                 .await
                 .map_err(|error| store(&error))?;
-            return Ok(Redirect::to("/admin/corp").into_response());
+            return Ok(Redirect::to(&destination).into_response());
         }
-        "export" => return export(state, &record, form.id("reader_id")?, version).await,
+        "export" => {
+            return export(state, company_id, &record, form.id("reader_id")?, version).await;
+        }
+        "support/export" => {
+            let client = state
+                .app
+                .corp_diagnostics
+                .as_ref()
+                .ok_or_else(unavailable)?;
+            let support = client
+                .provision(&record.status.policy_id, &record.status.user_id.0)
+                .await
+                .map_err(|_| unavailable())?;
+            let current = scoped
+                .corp_record()
+                .await
+                .map_err(|error| store(&error))?
+                .ok_or_else(unavailable)?;
+            if current.status.config_version != version {
+                return Err(fail(StatusCode::CONFLICT));
+            }
+            let bytes = serde_json::to_vec(&support.support).map_err(|_| unavailable())?;
+            return Ok((
+                [
+                    ("content-type", "application/json"),
+                    (
+                        "content-disposition",
+                        "attachment; filename=\"business.support.json\"",
+                    ),
+                ],
+                bytes,
+            )
+                .into_response());
+        }
         "probe" => {
             let server = ServerId(form.id("server_id")?.to_owned());
             let ticket = state
                 .app
                 .corp_egress
-                .queue_probe(state.app.clone(), version, server)
+                .queue_probe_for(state.app.clone(), company_id, version, server)
                 .await
                 .map_err(probe_error)?;
             // The controller owns the accepted job through cleanup, independently of this response.
             drop(ticket);
-            return Ok(Redirect::to("/admin/corp").into_response());
+            return Ok(Redirect::to(&destination).into_response());
         }
         _ => return Err(fail(StatusCode::NOT_FOUND)),
     }
@@ -319,15 +358,13 @@ pub(super) async fn perform(state: &OperatorState, path: &str, form: &Form) -> R
         && !state
             .app
             .corp_egress
-            .ready_to_enable(&state.app, version)
+            .ready_to_enable_for(&state.app, company_id, version)
             .await
             .map_err(probe_error)?
     {
         return Err(unavailable());
     }
-    state
-        .app
-        .inv
+    scoped
         .update_corp_security(
             version,
             enabled,
@@ -341,8 +378,12 @@ pub(super) async fn perform(state: &OperatorState, path: &str, form: &Form) -> R
         .await
         .map_err(|error| store(&error))?;
     match reveal {
-        Some(password) => Ok(views::reveal(&password)),
-        None => Ok(Redirect::to("/admin/corp").into_response()),
+        Some(password) => Ok(views::reveal(
+            &password,
+            company_id,
+            &record.status.user_id.0,
+        )),
+        None => Ok(Redirect::to(&destination).into_response()),
     }
 }
 fn actor(action: &str) -> &'static str {
@@ -359,16 +400,23 @@ fn actor(action: &str) -> &'static str {
 async fn setup(state: &OperatorState, form: &Form) -> Result<Response> {
     form.confirmed("confirm_binding")?;
     let user_id = UserId(form.id("user_id")?.to_owned());
-    if state
+    let companies = state
         .app
         .inv
-        .corp_record()
+        .corp_companies()
         .await
-        .map_err(|error| store(&error))?
-        .is_some()
+        .map_err(|error| store(&error))?;
+    if companies
+        .iter()
+        .any(|company| company.status.user_id == user_id)
     {
         return Err(fail(StatusCode::CONFLICT));
     }
+    let company_id = if companies.is_empty() {
+        "legacy".to_owned()
+    } else {
+        credentials::identifier()?
+    };
     let user = state
         .app
         .inv
@@ -388,23 +436,35 @@ async fn setup(state: &OperatorState, form: &Form) -> Result<Response> {
         signing_keys: vec![signer],
     };
     credentials::validate(&credentials)?;
+    let policy_id = credentials::identifier()?;
     state
         .app
         .inv
+        .corp_for(&company_id)
         .create_corp(
             &CorpSetup {
-                user_id,
-                policy_id: credentials::identifier()?,
+                user_id: user_id.clone(),
+                policy_id: policy_id.clone(),
                 credentials,
             },
             "operator-corp-setup",
         )
         .await
         .map_err(|error| store(&error))?;
-    Ok(views::reveal(&password))
+    let support_ready = match &state.app.corp_diagnostics {
+        Some(client) => client.provision(&policy_id, &user_id.0).await.is_ok(),
+        None => false,
+    };
+    Ok(views::reveal_setup(
+        &password,
+        &company_id,
+        &user_id.0,
+        support_ready,
+    ))
 }
 async fn export(
     state: &OperatorState,
+    company_id: &str,
     record: &vpnctl_inventory::CorpRecord,
     reader_id: &str,
     version: u64,
@@ -435,6 +495,7 @@ async fn export(
     let current = state
         .app
         .inv
+        .corp_for(company_id)
         .corp_record()
         .await
         .map_err(|error| store(&error))?

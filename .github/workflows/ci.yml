@@ -128,6 +128,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.23.0
+      - name: Verify inherited advisory coverage
+        run: python3 -m unittest discover -s scripts/tests -p 'test_date_fork_advisories.py' -v
+      - name: Audit upstream ancestry of maintained date forks
+        run: python3 scripts/audit-date-forks.py --output "$RUNNER_TEMP/date-fork-audit.lock"
       - name: record successful deny gate
         run: echo 'cargo deny check exit_code=0 (cargo-deny action)'
 

@@ -44,7 +44,7 @@ pub use sqlite::{
 };
 
 pub use sqlite::{
-    CORP_MAX_REVISION, CorpCredentials, CorpPublication, CorpReaderToken, CorpRecord, CorpResult,
-    CorpRevision, CorpSession, CorpSessionInput, CorpSetup, CorpSigningKey, CorpStatus,
-    CorpStoreError, CorpVerifiedEgress,
+    CORP_MAX_REVISION, CorpCompany, CorpCompanySession, CorpCredentials, CorpInventory,
+    CorpPublication, CorpReaderToken, CorpRecord, CorpResult, CorpRevision, CorpSession,
+    CorpSessionInput, CorpSetup, CorpSigningKey, CorpStatus, CorpStoreError, CorpVerifiedEgress,
 };
