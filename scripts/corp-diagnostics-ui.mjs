@@ -203,7 +203,7 @@ export async function verifyDiagnostics(browser, expect, shot) {
       await expect(page.locator(".report-select")).toHaveCount(2);
       await shot(page, "diagnostics-list-hostile-text", width);
       const rules = page.getByRole("link", {name: "Правила", exact: true});
-      await expect(rules).toHaveAttribute("href", "/");
+      await expect(rules).toHaveAttribute("href", "/#rules");
       await rules.focus();
       await page.keyboard.press("Tab");
       await expect(page.getByRole("link", {name: "Диагностика", exact: true})).toBeFocused();
