@@ -994,7 +994,8 @@ mod spec {
             seed_rules().unwrap()
         );
         assert_eq!(state["csrf"], csrf);
-        assert_eq!(state.as_object().unwrap().len(), 3);
+        assert_eq!(state.as_object().unwrap().len(), 4);
+        assert_eq!(state["company"], json!({"username": "http-spec-user"}));
         for secret in [
             PASSWORD,
             READER,
@@ -1016,7 +1017,7 @@ mod spec {
         for text in [
             "Корпоративные правила",
             "vpnctl",
-            "Corp · корпоративный доступ",
+            "Corp · корпоративный VPN",
             "Сайт",
             "Как открывать",
             "Комментарий",
