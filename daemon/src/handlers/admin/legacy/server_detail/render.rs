@@ -144,13 +144,10 @@ pub(super) async fn server_detail_render(
         (Some(pending), Some(measurement)) => Some(pending || measurement.provisioned_at.is_none()),
         _ => None,
     };
-    let path_current = state
+    let path_now = chrono::Utc::now();
+    let tcp_path = state
         .inv
-        .current_service_path(
-            &sid,
-            chrono::Utc::now(),
-            crate::quality_poller::path_max_age_secs(),
-        )
+        .current_service_path(&sid, path_now, crate::quality_poller::path_max_age_secs())
         .await;
     let path_incidents = state.inv.service_path_incidents(&sid, 20).await;
     let assurance_rows = state
@@ -158,6 +155,13 @@ pub(super) async fn server_detail_render(
         .latest_protocol_assurance_for_server(&sid)
         .await
         .unwrap_or_default();
+    let path_current = crate::handlers::admin::path_availability::with_observations(
+        &server,
+        &state.registry,
+        tcp_path.ok().flatten(),
+        &assurance_rows,
+        path_now,
+    );
 
     let trend_rows = state
         .inv
@@ -614,7 +618,7 @@ pub(super) async fn server_detail_render(
 
         @if tab == ServerTab::Status {
             (crate::handlers::admin::ssh_access::detail_section(&server, ssh_access.as_ref(), ssh_checking, lang))
-            (crate::handlers::admin::path_availability::detail_section(path_current.as_ref().ok().and_then(|s| s.as_ref()), path_incidents.as_deref().ok(), lang))
+            (crate::handlers::admin::path_availability::detail_section(Some(&path_current), path_incidents.as_deref().ok(), !assurance_rows.is_empty(), lang))
             div.ed-detail-grid {
                 div {
                     (server_detail_uptime_section(

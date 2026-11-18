@@ -33,7 +33,7 @@ fn server_row(
     >,
     observations: (
         Option<&vpnctl_inventory::NodeHealthRow>,
-        Option<&vpnctl_inventory::ServicePathState>,
+        Option<&super::path_availability::Availability>,
         Option<&vpnctl_inventory::SshAccessStatus>,
     ),
     name: Option<&str>,
@@ -155,35 +155,17 @@ pub(crate) async fn servers(
 
     let mut paths = std::collections::HashMap::new();
     let mut ssh_access = std::collections::HashMap::new();
+    let now = chrono::Utc::now();
     for server in &server_list {
         if let Ok(status) = state
             .inv
-            .ssh_access_for_server(
-                &server.id,
-                chrono::Utc::now(),
-                crate::ssh_access::max_age_secs(),
-            )
+            .ssh_access_for_server(&server.id, now, crate::ssh_access::max_age_secs())
             .await
         {
             ssh_access.insert(server.id.clone(), status);
         }
-        match state
-            .inv
-            .current_service_path(
-                &server.id,
-                chrono::Utc::now(),
-                crate::quality_poller::path_max_age_secs(),
-            )
-            .await
-        {
-            Ok(Some(path)) => {
-                paths.insert(server.id.clone(), path);
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::warn!(target = "vpnctld::admin", server = %server.id, %error, "current path query failed")
-            }
-        }
+        let path = super::path_availability::load(&state, server, now).await;
+        paths.insert(server.id.clone(), path);
     }
     let body = html! {
         div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageServers)) }
@@ -341,7 +323,7 @@ pub(crate) async fn servers(
                             th style="width: 34px;" { "№" }
                             th { (crate::i18n::tr(lang, "server", "сервер")) }
                             th { (crate::i18n::tr(lang, "endpoint", "адрес")) }
-                            th { (crate::i18n::tr(lang, "TCP path now", "TCP сейчас")) }
+                            th { (crate::i18n::tr(lang, "Availability now", "Доступность сейчас")) }
                             th { (crate::i18n::tr(lang, "SSH access", "SSH-доступ")) }
                             th { (crate::i18n::tr(lang, "hoster", "хостер")) }
                             th.num { (crate::i18n::tr(lang, "grants", "гранты")) }
