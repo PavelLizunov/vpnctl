@@ -15,6 +15,7 @@ import ssl
 import subprocess
 import threading
 import time
+import uuid
 
 from common import Consul, MAX_FRAME, atomic_json, canonical, decode_chunk, encode_chunk, now_ms, read_json, request, tls_context
 from executor import Executor
@@ -23,6 +24,7 @@ from replica import SnapshotStore, SnapshotError
 from transfer_pins import TransferPins
 from worker import Worker
 from lifecycle import Lifecycle, boot_id, boottime
+from observations import ObservationBook
 
 
 def address(value):
@@ -30,11 +32,25 @@ def address(value):
     return host.strip("[]"), int(port)
 
 
+class ObservationChanged(RuntimeError):
+    """The witness can no longer confirm the proposed takeover."""
+
+
 class Supervisor:
     def __init__(self, config):
         self.config = config
         self.node = config["node_id"]
         self.witness = config.get("role") == "witness"
+        self.observer_enabled = config.get("observations", False)
+        self.observer_cache = None
+        self.observer_cache_generation = 0
+        self.observer_read_lock = threading.Lock()
+        self.observer_heartbeat = None
+        self.verified_replica_until = 0
+        self.observer_book = None
+        if self.witness and "observer_listener" in config:
+            self.observer_book = ObservationBook(config["observer_listener"]["roster"],
+                                                 set(config["peers"]) - {config["witness"]})
         self.root = Path(config["state_dir"])
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.instance_lock = (self.root / "supervisor.lock").open("a+b")
@@ -210,7 +226,13 @@ class Supervisor:
             raise PermissionError("witness does not operate controllers")
         if method == "GET" and path == "/_ha/status":
             return self.status()
+        if not self.witness and method == "GET" and path == "/_ha/observer-incumbent" and self.observer_enabled:
+            return self.admitted_incumbent()
         if self.witness:
+            if method == "GET" and path == "/_ha/observer-status" and self.observer_book:
+                return {"tally": self.observer_book.summary(include_revision=True), "executor_ready": self.executor.status()["ready"]}
+            if method == "POST" and path in ("/_ha/observer-admit", "/_ha/observer-yield") and self.observer_book:
+                return self.commit_observer_transition(identity, value, yielding=path.endswith("yield"))
             if method == "GET" and path == "/_ha/lifecycle-status":
                 return self.lifecycle.status()
             if method == "POST" and path == "/_ha/lifecycle-reserve":
@@ -337,6 +359,7 @@ class Supervisor:
             self.replica_observed = time.monotonic()
 
     def fetch(self):
+        started = boottime()
         result = self.witness_call("/_ha/snapshot-status", method="GET")
         self.observe_replica(result)
         manifest = result["manifest"]
@@ -367,6 +390,7 @@ class Supervisor:
             raise RuntimeError("snapshot migrations differ from worker build")
         if local != manifest:
             raise RuntimeError("local immutable generation differs from witness pointer")
+        self.verified_replica_until = started + (self.config["max_replica_age_ms"] - age) / 1000
         return manifest, result["witness_now_ms"]
 
     def current_grant(self, record):
@@ -394,6 +418,8 @@ class Supervisor:
 
     def activate(self, record, deadline):
         self.current_grant(record)
+        settings = self.consul.settings()
+        self.require_activation_observation(settings)
         lifecycle = self.witness_call("/_ha/lifecycle-status", method="GET")
         previous = lifecycle.get("worker")
         if previous and not lifecycle["ready"]:
@@ -441,12 +467,15 @@ class Supervisor:
                     raise RuntimeError("worker failed to become healthy after activation")
                 self.exit.wait(.1)
         settings = self.consul.settings()
-        if settings.get("target") == self.node:
-            settings["target"] = None
-            self.consul.set_settings(settings)
+        enforced = settings.get("observer_enforced") is True
         with self.worker_lock:
             self.current_grant(record)
+            approval_until = self.commit_admission(record) if enforced else None
             with self.lock:
+                if approval_until is not None and boottime() >= approval_until:
+                    raise ObservationChanged("VPN observer approval expired before admission")
+                if self.deadline_reached(self.deadline, self.boottime_deadline):
+                    raise RuntimeError("authority expired before admission")
                 self.active_epoch = record["epoch"]
                 self.activation_epoch = 0
                 self.active = True
@@ -472,6 +501,8 @@ class Supervisor:
                             self.blocked = reason + "; worker cgroup stop unconfirmed"
                     else:
                         self.blocked = reason
+                        if record and isinstance(error, ObservationChanged):
+                            self.record_fence(record["epoch"])
                     if record and record["epoch"] <= self.fenced_through:
                         try:
                             self.consul.release(record["session"])
@@ -497,6 +528,205 @@ class Supervisor:
         if not self.executor_state["ready"]:
             raise RuntimeError("external executor has unresolved jobs: " + ",".join(j["id"] for j in self.executor_state["blocked_jobs"]))
         return settings
+
+    def read_observations(self, started):
+        try:
+            result = self.witness_call("/_ha/observer-status", method="GET")
+            tally = result["tally"]
+            directions = tally["directions"]
+            if (not isinstance(directions, dict) or directions.keys() != self.config["peers"].keys() - {self.config["witness"]}
+                    or type(tally["revision"]) is not int or tally["revision"] < 0):
+                return None
+            return (started, tally, result["executor_ready"] is True)
+        except (RuntimeError, TypeError, ValueError, KeyError):
+            return None
+
+    def refresh_observations(self):
+        if not self.observer_read_lock.acquire(blocking=False):
+            return None
+        try:
+            with self.lock:
+                generation = self.observer_cache_generation
+            result = self.read_observations(boottime())
+            with self.lock:
+                if generation != self.observer_cache_generation:
+                    return None
+                self.observer_cache = result
+                return result
+        finally:
+            self.observer_read_lock.release()
+
+    def invalidate_observations(self):
+        with self.lock:
+            self.observer_cache_generation += 1
+            self.observer_cache = None
+
+    def poll_observers(self):
+        while not self.exit.is_set():
+            self.refresh_observations()
+            self.exit.wait(1)
+
+    def current_observations(self):
+        cached = self.observer_cache
+        return cached if cached and boottime() - cached[0] < 5 else None
+
+    def observer_approval(self, source, cached):
+        if not cached or not isinstance(source, str):
+            return None
+        started, tally, executor_ready = cached
+        direction = tally["directions"].get(source)
+        if not executor_ready or not isinstance(direction, dict) or direction.get("confirmed") is not True:
+            return None
+        target = direction.get("target")
+        validity = direction.get("valid_for_ms")
+        if (type(validity) is int and 0 < validity <= 20000 and isinstance(target, str)
+                and target not in (source, self.config["witness"]) and target in self.config["peers"]):
+            deadline = min(started + validity / 1000, started + 5)
+            if boottime() < deadline:
+                return (target, tally["revision"], deadline)
+        return None
+
+    @staticmethod
+    def observation_incumbent(settings):
+        admission = settings.get("observer_admission")
+        if admission and admission["policy"] == settings.get("observer_policy"):
+            return admission["node"]
+        return settings.get("observer_seed")
+
+    def require_activation_observation(self, settings):
+        if settings.get("observer_enforced") is not True or settings.get("target") == self.node:
+            return
+        cached = self.refresh_observations()
+        if cached is None:
+            raise ObservationChanged("VPN observer confirmation could not be refreshed")
+        source = self.observation_incumbent(settings)
+        approval = self.observer_approval(source, cached)
+        selected = approval[0] if approval else source
+        if selected != self.node:
+            raise ObservationChanged("VPN observer confirmation expired or changed")
+
+    def admitted_incumbent(self):
+        epoch, session = self.response_authority()
+        self.validate_response_authority((epoch, session))
+        return {"node": self.node, "epoch": epoch}
+
+    def commit_observer_transition(self, identity, value, *, yielding=False):
+        record = self.consul.authority(identity, value["epoch"], value["session"])
+        settings = self.consul.settings()
+        target = settings.get("target")
+        enforced = settings.get("observer_enforced") is True
+        if yielding and (not enforced or settings.get("paused", True) or target is not None
+                         or value.get("settings_index") != settings["_index"]):
+            raise ObservationChanged("VPN observer handover settings changed")
+        if not yielding and target is not None and target != identity:
+            raise ObservationChanged("planned handover now targets a different controller")
+
+        def commit(tally, sampled_at):
+            deadline = sampled_at + 5
+            if enforced and target is None:
+                source = self.observation_incumbent(settings)
+                decision = self.observer_approval(source, (sampled_at, tally, self.executor.status()["ready"]))
+                selected = decision[0] if decision else source
+                if (yielding and (identity != source or not decision or selected != value.get("target"))
+                        or not yielding and selected != identity):
+                    raise ObservationChanged("VPN observer confirmation expired or changed")
+                if decision:
+                    deadline = decision[2]
+                    if deadline - boottime() < 3.5:
+                        raise ObservationChanged("VPN observer confirmation too old to commit admission")
+            updated = settings.copy()
+            admission = None
+            if yielding:
+                updated["last_observer_request"] = {"source": identity, "target": value["target"],
+                                                     "epoch": record["epoch"], "revision": tally["revision"]}
+            elif enforced:
+                admission = {"policy": settings["observer_policy"], "node": identity,
+                             "epoch": record["epoch"], "revision": tally["revision"]}
+                updated["observer_reservation"] = admission
+            index = self.consul.set_settings(updated, owner_session=record["session"])
+            if boottime() >= deadline:
+                raise ObservationChanged("VPN observer approval expired while committing the transition")
+            if admission is not None:
+                # A timely reservation certifies the observed decision under the
+                # exact lease. Publication persists that decision only if the
+                # same lease and reservation still hold in the final transaction.
+                updated.pop("observer_reservation")
+                try:
+                    self.consul.set_settings({**updated, "_index": index, "observer_admission": admission},
+                                             owner_session=record["session"])
+                finally:
+                    # A lost reply may still have committed. Votes from before
+                    # this authorization cannot initiate the next handover.
+                    self.observer_book.advance_admission()
+            return {"epoch": record["epoch"], "valid_for_ms": max(0, int((deadline - boottime()) * 1000))}
+
+        # Corrective reports serialize with the admission decision. This lock
+        # is independent of lifecycle renewal and SSH.
+        return self.observer_book.authorize(commit)
+
+    def observer_transition_permit(self, record, path, fields):
+        started = boottime()
+        try:
+            values = {"epoch": record["epoch"], "session": record["session"], **fields}
+            result = self.witness_call(path, values)
+            validity = result["valid_for_ms"]
+            if result["epoch"] == record["epoch"] and type(validity) is int and 0 < validity <= 5000:
+                return started + validity / 1000
+        except (RuntimeError, KeyError, TypeError):
+            pass
+        self.invalidate_observations()
+        self.refresh_observations()
+        raise ObservationChanged("witness did not confirm the VPN observer transition")
+
+    def commit_admission(self, record):
+        return self.observer_transition_permit(record, "/_ha/observer-admit", {})
+
+    def probe_status(self):
+        with self.lock:
+            now = boottime()
+            cached = self.current_observations()
+            recent = self.observer_heartbeat is not None and now - self.observer_heartbeat < 5
+            status = "unavailable"
+            if self.active:
+                status = "active" if recent and not self.deadline_reached(self.deadline, self.boottime_deadline) else "unknown"
+            elif (recent and not self.replication_error
+                  and now < self.verified_replica_until and cached and cached[2]):
+                status = "standby"
+            return {"node": self.node, "status": status}
+
+    def observed_handover(self, record):
+        if (self.settings.get("observer_enforced") is not True or self.settings.get("paused", True)
+                or self.settings.get("target") is not None):
+            return False
+        approval = self.observer_approval(self.node, self.current_observations())
+        if approval is None:
+            return False
+        try:
+            approval_until = self.observer_transition_permit(record, "/_ha/observer-yield", {
+                "target": approval[0], "settings_index": self.settings["_index"]})
+            with self.lock:
+                self.admit()
+                if boottime() >= approval_until:
+                    return False
+                self.active = False
+        except RuntimeError:
+            return False  # Failed CAS, stale votes or a revoked decision leave the current worker admitted.
+        self.stop("handover requested by VPN observers")
+        self.consul.release(record["session"])
+        self.session = None
+        return True
+
+    def observation_allows_acquisition(self, record):
+        if self.settings.get("observer_enforced") is not True or self.settings.get("target") == self.node:
+            return True
+        if record is None:
+            return False
+        cached = self.current_observations()
+        if cached is None:
+            return False
+        source = self.observation_incumbent(self.settings)
+        approval = self.observer_approval(source, cached)
+        return self.node == (approval[0] if approval else source)
 
     def action(self, action, target):
         if self.witness:
@@ -525,6 +755,40 @@ class Supervisor:
             with self.bulk_lock:
                 self.readiness()
             settings["paused"] = False
+        elif action in ("enforce-observers", "monitor-observers"):
+            if not self.observer_enabled:
+                raise RuntimeError("observer monitoring is not configured")
+            owner_session = None
+            if action == "enforce-observers" and settings.get("observer_enforced") is not True:
+                cached = self.current_observations()
+                if cached is None:
+                    raise RuntimeError("observer witness tally is unavailable")
+                tally = cached[1]
+                reports = [report for report in tally["observers"].values()
+                           if report["checks"] and "unknown" not in report["checks"].values()
+                           and {"active", "standby"}.intersection(report["checks"].values())]
+                if len(reports) < tally["required_votes"] or len({report["domain"] for report in reports}) < 2:
+                    raise RuntimeError("fresh checks from an observer majority in two hosting networks are required")
+                peer = next(node for node in self.config["peers"] if node not in (self.node, self.config["witness"]))
+                peer_status = self.remote(peer, "/_ha/status", method="GET")
+                if not peer_status or peer_status.get("observer_enabled") is not True:
+                    raise RuntimeError("both controllers must support observer monitoring")
+                current = self.consul.get("lease")
+                if not current or not current.get("Session"):
+                    raise RuntimeError("observer confirmation requires an active controller")
+                record = current["record"]
+                owner = record["holder"]
+                admitted = self.admitted_incumbent() if owner == self.node else self.remote(owner, "/_ha/observer-incumbent", method="GET")
+                if admitted != {"node": owner, "epoch": record["epoch"]}:
+                    raise RuntimeError("the provider of the current grant has not admitted its worker")
+                settings["observer_seed"] = owner
+                settings["observer_policy"] = uuid.uuid4().hex
+                settings.pop("observer_admission", None)
+                settings.pop("observer_reservation", None)
+                owner_session = current["Session"]
+            settings["observer_enforced"] = action == "enforce-observers"
+            self.consul.set_settings(settings, owner_session=owner_session)
+            return
         elif action == "handover":
             self.admit()
             if target not in self.config["peers"] or target in (self.node, self.config["witness"]):
@@ -550,6 +814,7 @@ class Supervisor:
         with self.lock:
             manifest = self.replica["manifest"] if self.replica else None
             age = None if manifest is None else max(0, self.replica["witness_now_ms"] - manifest["created_at_ms"] + int((time.monotonic() - self.replica_observed) * 1000))
+            observations = self.current_observations()
             return {"node": self.node, "role": "witness" if self.witness else "leader" if self.active else "follower" if self.lease and self.lease["holder"] != self.node else "isolated",
                     "leader": self.lease["holder"] if self.lease else None, "quorum": self.quorum,
                     "generation": manifest["generation"] if manifest else None, "snapshot_age_ms": age,
@@ -558,6 +823,7 @@ class Supervisor:
                     "rpo": "asynchronous; promotion may lose acknowledged changes up to the displayed snapshot age",
                     "fenced_through": self.fenced_through, "worker_admitted": self.active, "executor": self.executor_state,
                     "automatic_failover": getattr(self, "settings", {"paused": True}),
+                    "observer_enabled": self.observer_enabled, "observers": observations[1] if observations else None,
                     "blocked_reason": self.blocked, "replication_error": self.replication_error,
                     "lifecycle": self.lifecycle.status() if self.lifecycle else None}
 
@@ -593,6 +859,13 @@ class Supervisor:
                     self.arm_worker(record, deadline, boot_deadline)
                 if self.active:
                     self.worker.health()
+                    if self.settings.get("target") == self.node:
+                        try:
+                            self.consul.set_settings({**self.settings, "target": None}, owner_session=session)
+                        except RuntimeError:
+                            pass  # A planned target is cleared only after admission, with a CAS retry next step.
+                    if self.observed_handover(record):
+                        return
                     if time.monotonic() - self.last_snapshot >= self.config.get("replication_interval_ms", 5000) / 1000:
                         self.bulk("replicate", self.snapshot)
             else:
@@ -607,8 +880,14 @@ class Supervisor:
                     self.blocked = "automatic failover is paused"
                 elif target is not None and target != self.node:
                     self.blocked = "planned handover targets another controller"
+                elif not self.observation_allows_acquisition(record):
+                    self.blocked = "waiting for VPN observer confirmation"
                 else:
-                    acquired = self.consul.acquire(self.node, session)
+                    evidence = {}
+                    if self.observer_enabled or self.settings.get("observer_enforced") is True:
+                        evidence = {"lease_index": item["ModifyIndex"] if item else 0,
+                                    "settings_index": self.settings["_index"]}
+                    acquired = self.consul.acquire(self.node, session, **evidence)
                     if acquired:
                         with self.lock:
                             self.lease = acquired
@@ -620,7 +899,9 @@ class Supervisor:
         while not self.exit.is_set():
             try:
                 self.step()
+                self.observer_heartbeat = boottime()
             except Exception as error:
+                self.observer_heartbeat = None
                 reason = str(error) if isinstance(error, (RuntimeError, SnapshotError)) else "HA dependency unavailable (" + type(error).__name__ + ")"
                 try:
                     self.stop(reason)
@@ -687,6 +968,8 @@ def main():
     if not 100 <= budget < 5000:
         raise ValueError("stop budget must be 100..4999ms")
     if config.get("role") != "witness":
+        if "observer_listener" in config or type(config.get("observations", False)) is not bool:
+            raise ValueError("only the witness may host the observer listener")
         if config.get("worker_user") and not config.get("runtime_dir"):
             raise ValueError("a separate worker account requires an explicit searchable runtime_dir")
         required = {"deploy_key", "deploy_public", "known_hosts", "worker_env"}
@@ -705,6 +988,12 @@ def main():
     servers = []
     control = Server(address(config["control_addr"]), app, control=True, context=tls_context(config["tls"], server=True))
     servers.append(control)
+    if app.observer_book is not None:
+        listener = config["observer_listener"]
+        observer_tls = tls_context(listener["tls"], server=True)
+        if set(observer_tls.get_ca_certs(binary_form=True)) & set(control.tls_context.get_ca_certs(binary_form=True)):
+            raise ValueError("observer listener needs a CA separate from HA control")
+        servers.append(Server(address(listener["addr"]), app, context=observer_tls, observer_book=app.observer_book))
     if not app.witness:
         public_context = None
         if config.get("public_tls"):
@@ -724,7 +1013,10 @@ def main():
             import pwd
             os.chown(app.socket_path, pwd.getpwnam(config["worker_user"]).pw_uid, -1)
         servers.append(broker)
-        for task in (app.run, app.reap):
+        tasks = [app.run, app.reap]
+        if app.observer_enabled:
+            tasks.append(app.poll_observers)
+        for task in tasks:
             threading.Thread(target=task, daemon=True).start()
     for server in servers:
         threading.Thread(target=server.serve_forever, daemon=True).start()

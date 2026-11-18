@@ -9,6 +9,7 @@ import base64
 from contextlib import closing
 import hashlib
 import http.client
+import http.server
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,7 @@ import shutil
 import signal
 import socket
 import sqlite3
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -31,6 +33,8 @@ CONSUL = os.environ.get("VPNCTL_HA_CONSUL_BINARY")
 SYSTEMD = os.environ.get("VPNCTL_HA_SYSTEMD_TESTS") == "1"
 FIXTURE_BYTES = int(os.environ.get("VPNCTL_HA_FIXTURE_BYTES", "0"))
 FIXTURE_ADDRESS_SPACE_BYTES = 1536 * 1024 * 1024
+OBSERVER_HEALTH = "/_vpnctl_ha/health"
+OBSERVER_QUORUM = ("probe-one", "probe-two")
 USED_PORTS = set()
 
 
@@ -107,6 +111,43 @@ http.server.ThreadingHTTPServer((host,int(p)),Handler).serve_forever()
 '''
 
 
+class FixtureIngress(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        headers = {}
+        with closing(http.client.HTTPConnection("127.0.0.1", self.server.upstream, timeout=0.6)) as conn:
+            try:
+                conn.request("GET", self.path)
+                response = conn.getresponse()
+            except (ConnectionRefusedError, TimeoutError):
+                if self.path != OBSERVER_HEALTH:
+                    self.send_error(502)
+                    return
+                status = 200
+                headers = {"Content-Type": "application/json", "Cache-Control": "no-store"}
+                data = canonical({"node": self.server.node, "status": "unavailable"})
+            else:
+                status = response.status
+                headers["Content-Type"] = response.getheader("Content-Type", "application/octet-stream")
+                data = response.read()
+        self.send_response(status)
+        for key, value in headers.items():
+            self.send_header(key, value)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def fixture_tls(directory, name):
+    return {
+        "ca": str(directory / "ca.crt"),
+        "cert": str(directory / (name + ".crt")),
+        "key": str(directory / (name + ".key")),
+    }
+
+
 @unittest.skipUnless(CONSUL and SYSTEMD, "requires explicit real Consul/systemd fixture opt-in")
 class ClusterFaultTests(unittest.TestCase):
     def test_slow_pinned_follower_download_survives_multiple_publications(self):
@@ -178,6 +219,9 @@ class ClusterFaultTests(unittest.TestCase):
         self.consul = Consul({"url": "http://127.0.0.1:" + str(self.consul_ports[0]["http"])})
         eventually(lambda: self.consul.get("settings") is None and len(self.consul.call("GET", "operator/raft/configuration")["Servers"]) == 3)
         self.make_certificates()
+        observer_test = self._testMethodName.startswith("test_observer_")
+        if observer_test:
+            self.observer_listener = self.make_observer_fixture()
         self.helper = self.root / "fixture-worker.py";self.helper.write_text(FIXTURE_WORKER);self.helper.chmod(0o755)
         assets = self.root / "assets";assets.mkdir(mode=0o755);assets.chmod(0o755)
         (assets / "admin.js").write_bytes(b"fixture-installed-admin-asset")
@@ -221,6 +265,11 @@ class ClusterFaultTests(unittest.TestCase):
                       "credential_root": str(self.root / "retained-fixture-identities" / node)}
             if worker_user:
                 config["worker_user"] = worker_user
+            if observer_test:
+                if node == "fixture-witness":
+                    config["observer_listener"] = self.observer_listener
+                else:
+                    config["observations"] = True
             path = directory / "config.json";path.write_bytes(canonical(config));self.configs[node] = config
             self.controllers[node] = self.spawn([sys.executable, str(self.bundle / "controller_ha.py"), "--config", str(path)], node)
         self.contexts = {node: tls_context(config["tls"]) for node, config in self.configs.items()}
@@ -261,14 +310,130 @@ class ClusterFaultTests(unittest.TestCase):
                 pass
         return result
 
-    def make_certificates(self):
+    def make_certificates(self, directory=None, names=None):
+        directory = self.root if directory is None else directory
+        names = self.names if names is None else names
+        directory.mkdir(exist_ok=True)
+
         def openssl(*args):
             subprocess.run(["openssl", *args], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=HA-fixture-CA", "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign", "-keyout", str(self.root / "ca.key"), "-out", str(self.root / "ca.crt"))
-        extension = self.root / "ext";extension.write_text("subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth,clientAuth\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n")
-        for node in self.names:
-            openssl("req", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=" + node, "-keyout", str(self.root / (node + ".key")), "-out", str(self.root / (node + ".csr")))
-            openssl("x509", "-req", "-in", str(self.root / (node + ".csr")), "-CA", str(self.root / "ca.crt"), "-CAkey", str(self.root / "ca.key"), "-CAcreateserial", "-days", "1", "-extfile", str(extension), "-out", str(self.root / (node + ".crt")))
+
+        ca_key = str(directory / "ca.key")
+        openssl(
+            "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+            "-subj", "/CN=" + directory.name + "-CA",
+            "-addext", "basicConstraints=critical,CA:TRUE",
+            "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+            "-keyout", ca_key, "-out", str(directory / "ca.crt"),
+        )
+        extension = directory / "ext"
+        extension.write_text(
+            "subjectAltName=DNS:localhost\n"
+            "extendedKeyUsage=serverAuth,clientAuth\n"
+            "basicConstraints=critical,CA:FALSE\n"
+            "keyUsage=critical,digitalSignature,keyEncipherment\n"
+        )
+        for node in names:
+            tls = fixture_tls(directory, node)
+            csr = str(directory / (node + ".csr"))
+            openssl("req", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=" + node,
+                    "-keyout", tls["key"], "-out", csr)
+            openssl("x509", "-req", "-in", csr, "-CA", tls["ca"], "-CAkey", ca_key,
+                    "-CAcreateserial", "-days", "1", "-extfile", str(extension), "-out", tls["cert"])
+
+    def make_observer_fixture(self):
+        self.observer_pki = self.root / "observer-pki"
+        self.ingress_pki = self.root / "ingress-pki"
+        domains = {"probe-one": "network-one", "probe-two": "network-two", "probe-three": "network-one"}
+        self.make_certificates(self.observer_pki, ("collector", *domains, "probe-unpinned"))
+        self.make_certificates(self.ingress_pki, self.names[:2])
+        collector_port = port()
+        self.collector = "https://localhost:" + str(collector_port)
+        roster = {}
+        for observer, domain in domains.items():
+            pem = (self.observer_pki / (observer + ".crt")).read_text()
+            der = ssl.PEM_cert_to_DER_cert(pem)
+            roster[observer] = {"domain": domain, "certificate_sha256": hashlib.sha256(der).hexdigest()}
+        return {"addr": "127.0.0.1:" + str(collector_port),
+                "tls": fixture_tls(self.observer_pki, "collector"), "roster": roster}
+
+    def start_observer_ingress(self, node):
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", port()), FixtureIngress)
+        server.node = node
+        server.upstream = self.public[node]
+        tls = fixture_tls(self.ingress_pki, node)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_3
+        context.load_cert_chain(tls["cert"], tls["key"])
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+        thread.start()
+
+        def stop():
+            if thread.is_alive():
+                server.shutdown()
+                thread.join(timeout=2)
+            server.server_close()
+
+        self.addCleanup(stop)
+        return "https://localhost:" + str(server.server_port), stop
+
+    def start_observer_ingresses(self):
+        source, target = self.names[:2]
+        source_url, stop_source = self.start_observer_ingress(source)
+        target_url, _ = self.start_observer_ingress(target)
+        origins = {source: source_url, target: target_url}
+        for node, state in ((source, "active"), (target, "standby")):
+            eventually(lambda: self.ingress_health(origins[node]) == {"node": node, "status": state})
+        return origins, stop_source
+
+    def ingress_health(self, origin):
+        context = ssl.create_default_context(cafile=str(self.ingress_pki / "ca.crt"))
+        return request(origin, "GET", OBSERVER_HEALTH, context=context)
+
+    def observer_tally(self):
+        source, _, witness = self.names
+        return request(self.configs[witness]["peers"][witness], "GET", "/_ha/observer-status",
+                       context=self.contexts[source])["tally"]
+
+    def run_observer(self, observer, origins, *, ca=None):
+        if ca is None:
+            ca = self.ingress_pki / "ca.crt"
+        config = self.root / (observer + ".json")
+        config.write_bytes(canonical({"collector": self.collector, "controllers": origins,
+                                      "tls": fixture_tls(self.observer_pki, observer), "probe_ca": str(ca)}))
+        result = subprocess.run([sys.executable, str(self.bundle / "observer.py"), "--config", str(config)],
+                                capture_output=True, text=True, timeout=8)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def observer_round(self, origins, states):
+        for observer in OBSERVER_QUORUM:
+            self.run_observer(observer, origins)
+        observed = self.observer_tally()
+        self.assertEqual(observed["required_votes"], 2)
+        for observer in OBSERVER_QUORUM:
+            self.assertEqual(observed["observers"][observer]["checks"], states)
+        return observed["directions"][self.names[0]]
+
+    def worker_cgroup_events(self, node):
+        pid = Path(self.configs[node]["db"]).with_suffix(".pid").read_text().strip()
+        groups = (Path("/proc") / pid / "cgroup").read_text().splitlines()
+        group = next(line.removeprefix("0::") for line in groups if line.startswith("0::"))
+        events = Path("/sys/fs/cgroup") / group.lstrip("/") / "cgroup.events"
+        self.assertIn("populated 1", events.read_text().splitlines())
+        return events
+
+    def assert_worker_cgroup_empty(self, events):
+        try:
+            self.assertIn("populated 0", events.read_text().splitlines())
+        except FileNotFoundError:
+            pass  # systemd has already removed the empty group.
+
+    def current_grant(self, holder):
+        lease = self.consul.get("lease")
+        if lease and lease.get("Session") and lease["record"]["holder"] == holder:
+            return lease["record"]
+        return None
 
     def status(self, node):
         result = request(self.configs[node]["peers"][node], "GET", "/_ha/status", context=self.contexts["fixture-b"])
@@ -314,6 +479,133 @@ class ClusterFaultTests(unittest.TestCase):
             if not path.name.startswith("consul-") and path.stat().st_size:
                 print("fixture process log " + path.name + ": " + path.read_text()[-6000:], flush=True)
         if hasattr(self,"temporary"):self.temporary.cleanup()
+
+    def test_observer_quorum_controls_public_ingress_failover(self):
+        source, target = self.names[:2]
+        origins, stop_source_ingress = self.start_observer_ingresses()
+        unpinned_context = tls_context(fixture_tls(self.observer_pki, "probe-unpinned"))
+        with self.assertRaisesRegex(RuntimeError, "HTTP 403"):
+            request(self.collector, "POST", "/_ha/observer-challenge", {}, context=unpinned_context)
+
+        self.observer_round(origins, {source: "active", target: "standby"})
+        self.run_observer("probe-three", origins, ca=self.root / "ca.crt")
+        reports = self.observer_tally()["observers"]
+        self.assertEqual(reports["probe-three"]["checks"], {source: "unknown", target: "unknown"})
+
+        subscription_path = "/sub/fixture-token"
+        subscription = self.get(source, subscription_path)
+        self.assertEqual(subscription, (200, b"fixture-subscription-byte-contract"))
+        old_grant = self.current_grant(source)
+        self.assertIsNotNone(old_grant)
+        old_events = self.worker_cgroup_events(source)
+
+        stop_source_ingress()
+        outage = {source: "unreachable", target: "standby"}
+        for expected_votes in (0, 2):
+            time.sleep(2.1)  # The collector spaces challenges to each identity by two seconds.
+            result = self.observer_round(origins, outage)
+            self.assertEqual(result["votes"], expected_votes)
+            self.assertIs(result["confirmed"], expected_votes == 2)
+        self.assertEqual(result["domains"], ["network-one", "network-two"])
+
+        def source_has_cached_confirmation():
+            cached = self.status(source)["observers"]
+            return cached and cached["directions"][source]["confirmed"]
+
+        eventually(source_has_cached_confirmation, timeout=5)
+        time.sleep(2.1)  # Leave the healthy owner at least one full reconcile with confirmed evidence.
+        self.assertFalse(self.consul.settings().get("observer_enforced", False))
+        self.assertEqual(self.consul.get("lease")["Session"], old_grant["session"])
+        self.assertTrue(self.status(source)["worker_admitted"])
+        self.assertFalse(self.status(target)["worker_admitted"])
+        self.assertEqual(self.get(source, subscription_path), subscription)
+        backend_health, backend_body = self.get(source, OBSERVER_HEALTH)
+        self.assertEqual(backend_health, 200)
+        self.assertEqual(json.loads(backend_body), {"node": source, "status": "active"})
+
+        self.observer_round(origins, outage)
+        self.manage(source, "enforce-observers")
+        new_grant = eventually(lambda: self.current_grant(target), timeout=15)
+        self.assertNotEqual(new_grant["session"], old_grant["session"])
+        self.assertGreater(new_grant["epoch"], old_grant["epoch"])
+        self.assert_worker_cgroup_empty(old_events)
+        self.assertFalse(self.status(source)["worker_admitted"])
+        settings = self.consul.settings()
+        self.assertTrue(settings["observer_enforced"])
+        handover = settings["last_observer_request"]
+        self.assertEqual((handover["source"], handover["target"], handover["epoch"]),
+                         (source, target, old_grant["epoch"]))
+        self.assertGreater(handover["revision"], 0)
+        eventually(lambda: self.status(target)["worker_admitted"])
+        admission = self.consul.settings()["observer_admission"]
+        self.assertEqual((admission["node"], admission["epoch"]),
+                         (target, new_grant["epoch"]))
+        self.assertEqual(self.get(target, "/write"), (200, b"1"))
+        for node in (source, target):
+            self.assertEqual(self.get(node, subscription_path), subscription)
+
+        self.manage(target, "handover", source)
+        eventually(lambda: self.status(source)["worker_admitted"] and self.consul.settings()["target"] is None)
+        planned_grant = self.current_grant(source)
+        self.assertIsNotNone(planned_grant)
+        admission = self.consul.settings()["observer_admission"]
+        self.assertEqual((admission["node"], admission["epoch"]),
+                         (source, planned_grant["epoch"]))
+        self.assertEqual(self.get(source, "/write"), (200, b"2"))
+        self.assertEqual(self.get(target, subscription_path), subscription)
+
+    def test_observer_takeover_when_gateway_dies_behind_https_ingress(self):
+        source, target = self.names[:2]
+        origins, _ = self.start_observer_ingresses()
+        healthy = {source: "active", target: "standby"}
+        self.observer_round(origins, healthy)
+
+        def owner_has_healthy_reports():
+            observations = self.status(source)["observers"]
+            return observations and all(
+                observations["observers"][observer]["checks"] == healthy for observer in OBSERVER_QUORUM
+            )
+
+        eventually(owner_has_healthy_reports, timeout=5)
+        self.manage(source, "enforce-observers")
+        self.assertTrue(self.consul.settings()["observer_enforced"])
+        old_grant = self.current_grant(source)
+        self.assertIsNotNone(old_grant)
+        old_events = self.worker_cgroup_events(source)
+        subscription_path = "/sub/fixture-token"
+        subscription = self.get(source, subscription_path)
+        self.assertEqual(subscription, (200, b"fixture-subscription-byte-contract"))
+
+        gateway = self.controllers[source]
+        gateway.kill()
+        gateway.wait(timeout=8)
+        self.assertEqual(self.ingress_health(origins[source]), {"node": source, "status": "unavailable"})
+        eventually(lambda: self.status(target)["blocked_reason"] == "waiting for VPN observer confirmation", timeout=45)
+        self.assertIsNone(self.current_grant(target))
+        self.assertFalse(self.status(target)["worker_admitted"])
+
+        outage = {source: "unavailable", target: "standby"}
+        first = self.observer_round(origins, outage)
+        self.assertEqual(first["votes"], 0)
+        self.assertFalse(first["confirmed"])
+        time.sleep(2.1)
+        self.assertIsNone(self.current_grant(target))
+        self.assertFalse(self.status(target)["worker_admitted"])
+        second = self.observer_round(origins, outage)
+        self.assertEqual(second["votes"], 2)
+        self.assertEqual(second["domains"], ["network-one", "network-two"])
+        self.assertTrue(second["confirmed"])
+
+        new_grant = eventually(lambda: self.current_grant(target), timeout=15)
+        self.assertNotEqual(new_grant["session"], old_grant["session"])
+        self.assertGreater(new_grant["epoch"], old_grant["epoch"])
+        eventually(lambda: self.status(target)["worker_admitted"], timeout=15)
+        admission = self.consul.settings()["observer_admission"]
+        self.assertEqual((admission["node"], admission["epoch"]),
+                         (target, new_grant["epoch"]))
+        self.assert_worker_cgroup_empty(old_events)
+        self.assertEqual(self.get(target, "/write"), (200, b"1"))
+        self.assertEqual(self.get(target, subscription_path), subscription)
 
     def test_crash_sigstop_handover_and_byte_compatible_forwarding(self):
         for node in ("fixture-a", "fixture-b"):

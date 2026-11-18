@@ -1,0 +1,12 @@
+{
+  "collector": "https://witness.example.invalid:18405",
+  "tls": {
+    "ca": "collector-ca.crt",
+    "cert": "observer.crt",
+    "key": "observer.key"
+  },
+  "controllers": {
+    "controller-a": "https://controller-a.example.invalid",
+    "controller-b": "https://controller-b.example.invalid"
+  }
+}

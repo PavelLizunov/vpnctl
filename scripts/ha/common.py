@@ -188,9 +188,11 @@ class Consul:
     def release(self, session):
         self.call("PUT", "session/destroy/" + session)
 
-    def acquire(self, node, session):
+    def acquire(self, node, session, *, lease_index=None, settings_index=None):
         old = self.get("lease")
         if old and old.get("Session"):
+            return None
+        if lease_index is not None and lease_index != (old["ModifyIndex"] if old else 0):
             return None
         previous = old["record"] if old else None
         epoch = 1 if previous is None else previous["epoch"] + 1
@@ -200,6 +202,11 @@ class Consul:
         key = self.prefix + "/lease"
         checks = [{"KV": {"Verb": "check-index", "Key": key, "Index": old["ModifyIndex"]}}] if old else [
             {"KV": {"Verb": "check-not-exists", "Key": key}}]
+        if settings_index is not None:
+            settings_key = self.prefix + "/settings"
+            check = {"Verb": "check-index", "Key": settings_key, "Index": settings_index} if settings_index else {
+                "Verb": "check-not-exists", "Key": settings_key}
+            checks.append({"KV": check})
         checks.append({"KV": {"Verb": "lock", "Key": key, "Session": session,
                                 "Value": base64.b64encode(canonical(value)).decode()}})
         self.call("PUT", "txn", checks)
@@ -227,8 +234,19 @@ class Consul:
         item = self.get("settings")
         return {**item["record"], "_index": item["ModifyIndex"]} if item else {"paused": True, "target": None, "_index": 0}
 
-    def set_settings(self, settings):
+    def set_settings(self, settings, *, owner_session=None):
         value = {key: val for key, val in settings.items() if key != "_index"}
+        if owner_session is not None:
+            key = self.prefix + "/settings"
+            result = self.call("PUT", "txn", [
+                {"KV": {"Verb": "check-session", "Key": self.prefix + "/lease", "Session": owner_session}},
+                {"KV": {"Verb": "cas", "Key": key, "Index": settings["_index"],
+                        "Value": base64.b64encode(canonical(value)).decode()}},
+            ])
+            indexes = [entry["KV"]["ModifyIndex"] for entry in result["Results"] if entry.get("KV", {}).get("Key") == key]
+            if len(indexes) != 1 or type(indexes[0]) is not int or indexes[0] <= 0:
+                raise RuntimeError("Consul settings transaction did not return its committed revision")
+            return indexes[0]
         result = self.call("PUT", "kv/" + self.prefix + "/settings?cas=" + str(settings.get("_index", 0)), value)
         if result is not True:
             raise RuntimeError("HA settings changed concurrently; refresh readiness and retry")

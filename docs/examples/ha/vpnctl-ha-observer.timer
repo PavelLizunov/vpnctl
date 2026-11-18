@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the vpnctl HA observer every five seconds
+
+[Timer]
+OnActiveSec=1s
+OnUnitActiveSec=5s
+AccuracySec=100ms
+Unit=vpnctl-ha-observer.service
+
+[Install]
+WantedBy=timers.target

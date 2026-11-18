@@ -1,0 +1,38 @@
+[Unit]
+Description=vpnctl HA public health observer
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# The files in /etc are read by systemd and exposed read-only to the dynamic user.
+# Use an observer-specific client certificate and keep the source key root-owned (0600).
+# Relative file paths in observer.json resolve next to that config's loaded copy.
+LoadCredential=observer.json:/etc/vpnctl-ha/observer.json
+LoadCredential=collector-ca.crt:/etc/vpnctl-ha/collector-ca.crt
+LoadCredential=observer.crt:/etc/vpnctl-ha/observer.crt
+LoadCredential=observer.key:/etc/vpnctl-ha/observer.key
+# When setting "probe_ca": "probe-ca.crt", load the separate public health probe CA.
+# LoadCredential=probe-ca.crt:/etc/vpnctl-ha/probe-ca.crt
+# Preserve Content-Length and disable compression or body rewriting on proxied
+# /_vpnctl_ha/health replies.
+ExecStart=/usr/bin/python3 -I /opt/vpnctl/ha/observer.py --config %d/observer.json
+TimeoutStartSec=5s
+DynamicUser=yes
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes

@@ -146,9 +146,12 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, app, control=False, context=None):
+    def __init__(self, address, app, control=False, context=None, observer_book=None):
+        if observer_book is not None and (control or context is None or context.verify_mode != ssl.CERT_REQUIRED):
+            raise ValueError("observer listener requires a separate mutual TLS context")
         self.app = app
         self.control = control
+        self.observer_book = observer_book
         self.allowed_peers = set(app.config["peers"])
         self.connection_slots = threading.BoundedSemaphore(64)
         self.header_timeout_seconds = 15
@@ -283,6 +286,36 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("incomplete control body")
         return json.loads(data) if data else {}
 
+    def observation(self):
+        book = self.server.observer_book
+        if self.command != "POST" or self.path not in ("/_ha/observer-challenge", "/_ha/observer-report"):
+            self.reply(404, {"error": "unknown observer operation"})
+            return
+        identity = book.identity(self.connection.getpeercert(binary_form=True))
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdecimal() or len(lengths[0]) > 4:
+            raise ValueError("invalid observer framing")
+        size = int(lengths[0])
+        if not 1 <= size <= 1024 or "Transfer-Encoding" in self.headers:
+            raise ValueError("invalid observer body size")
+        data = self.rfile.read(size)
+        if len(data) != size:
+            raise ValueError("incomplete observer body")
+        def fields(pairs):
+            result = dict(pairs)
+            if len(result) != len(pairs):
+                raise ValueError("duplicate observer field")
+            return result
+        value = json.loads(data, object_pairs_hook=fields)
+        if self.path == "/_ha/observer-challenge":
+            if value != {}:
+                raise ValueError("unexpected challenge body")
+            result = book.challenge(identity)
+        else:
+            book.report(identity, value)
+            result = {"accepted": True}
+        self.reply(200, result)
+
     def dispatch(self):
         if not self.header_budget.admit():
             self.close_connection = True
@@ -290,7 +323,10 @@ class Handler(BaseHTTPRequestHandler):
         self.connection.settimeout(15)
         try:
             app = self.server.app
-            if self.server.control:
+            if self.server.observer_book is not None:
+                self.close_connection = True
+                self.observation()
+            elif self.server.control:
                 identity = peer_identity(self)
                 if self.path.startswith("/_ha/") and self.headers.get("X-Vpnctl-Ha-Application") != "1":
                     value = app.control(identity, self.command, self.path, self.read_json() if self.command == "POST" else {})
@@ -302,6 +338,11 @@ class Handler(BaseHTTPRequestHandler):
                     # Only an authenticated configured controller may assert this IP.
                     client_ip = str(ipaddress.ip_address(self.headers.get("x-real-ip", self.client_address[0])))
                     proxy(self, upstream, None, client_ip)
+            elif self.path == "/_vpnctl_ha/health" and getattr(app, "observer_enabled", False):
+                if self.command == "GET":
+                    self.reply(200, app.probe_status())
+                else:
+                    self.reply(405, {"error": "health requires GET"}, fields={"Allow": "GET"})
             elif urllib.parse.urlsplit(self.path).path == "/admin/ha":
                 self.management()
             else:
@@ -374,6 +415,9 @@ class Handler(BaseHTTPRequestHandler):
         controls = [("readiness", "Test readiness"), ("initialize", "Initialize stopped seed"),
                     ("pause", "Pause automatic failover"), ("resume", "Resume automatic failover"),
                     ("handover", "Hand over to peer")]
+        if status.get("observer_enabled"):
+            controls.extend([("enforce-observers", "Require observer confirmation"),
+                             ("monitor-observers", "Observe without blocking failover")])
         buttons = "".join('<button name="action" value="' + key + '">' + title + '</button>' for key, title in controls)
         peers = "".join('<option value="' + html.escape(node) + '">' + html.escape(node) + '</option>'
                         for node in app.config["peers"] if node != app.config["node_id"] and node != app.config.get("witness"))
@@ -410,10 +454,42 @@ class Handler(BaseHTTPRequestHandler):
                 '</style><a href="/admin/">Back to administration</a><h1>Controller availability</h1>'
                 '<p>Asynchronous replication can lose acknowledged changes since the latest verified snapshot. Snapshot age shows the current recovery point.</p>'
                 + message + '<table aria-label="Controller readiness"><tbody>' + rows + '</tbody></table>'
-                '<form method="post"><input type="hidden" name="csrf" value="' + csrf + '"><label>Handover target '
+                + self.observer_table(status)
+                + '<form method="post"><input type="hidden" name="csrf" value="' + csrf + '"><label>Handover target '
                 '<select name="target">' + peers + '</select></label><p>' + buttons + '</p></form>'
                 '<p>Initialization requires a stopped seed and no cluster history. An unresolved remote execution blocks promotion until its outcome is proven.</p></html>').encode()
         self.reply(200, body, "text/html; charset=utf-8", {"X-Frame-Options": "DENY", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"})
+
+    @staticmethod
+    def observer_table(status):
+        if not status.get("observer_enabled"):
+            return ""
+        enforced = status.get("automatic_failover", {}).get("observer_enforced") is True
+        mode = "Confirmation required" if enforced else "Monitoring only"
+        title = '<h2>VPN server observations</h2><p>' + mode + '</p>'
+        summary = status.get("observers")
+        if not summary:
+            return title + '<p>No fresh tally from the witness.</p>'
+        nodes = sorted(summary["directions"])
+        def cells(values):
+            return "".join("<td>" + html.escape(str(value)) + "</td>" for value in values)
+        def heading(value):
+            return '<th scope="col">' + html.escape(value) + '</th>'
+        rows = []
+        for identity, report in sorted(summary["observers"].items()):
+            age = report["age_ms"]
+            results = report["checks"] or {}
+            rows.append("<tr>" + cells([identity, report["domain"], "Never" if age is None else f"{age / 1000:.1f}s",
+                                        *(results.get(node, "No fresh result") for node in nodes)]) + "</tr>")
+        verdicts = []
+        for node in nodes:
+            decision = summary["directions"][node]
+            verdicts.append("<li>" + html.escape(f"{node} → {decision['target']}: {decision['votes']}/{summary['required_votes']} required votes, "
+                                                f"{len(decision['domains'])}/2 required hosting networks. "
+                                                + ("Confirmed." if decision["confirmed"] else "Waiting for confirmation.")) + "</li>")
+        return (title + "<ul>" + "".join(verdicts) + '</ul><table aria-label="Observer reports"><thead><tr>'
+                + "".join(heading(value) for value in ["Observer", "Hosting network", "Report age", *nodes])
+                + "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>")
 
     do_GET = dispatch
     do_HEAD = dispatch

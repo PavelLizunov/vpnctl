@@ -22,7 +22,7 @@ The gateways run separately from their workers; followers never open inventory.
 1. Build the reviewed revision with `just build-release`. Inspect
    `vpnctld --ha-artifact`; copy its `executable_sha256` and `schema` into all
    configs. Migration checksums are checked independently at snapshot publication
-   and promotion. Package `scripts/ha/{common,controller_ha,executor,gateway,lifecycle,replica,transfer_pins,worker,worker_guard}.py`
+   and promotion. Package `scripts/ha/{common,controller_ha,executor,gateway,lifecycle,observations,replica,transfer_pins,worker,worker_guard}.py`
    together under `/opt/vpnctl/ha/`. No third-party Python packages are needed.
 2. Prepare three Consul voters with TLS, gossip encryption and ACLs. Gateways use
    consistent reads, TTL sessions and atomic CAS+lock transactions. Allow
@@ -72,9 +72,70 @@ to the gateway, and systemd enforces its independent watchdog deadline.
 
 Use `/admin/ha` on either frontend for status, readiness, pausing/resuming
 promotion and planned handover. Planned handover publishes a final consistent
-snapshot, drains the worker, releases its session, and selects the peer. Pausing
-automatic failover retains an existing healthy leader; it prevents acquisition
-of a new lease. Each operation still requires quorum and fresh verified data.
+snapshot, selects the peer, drains the worker, and releases its session. In
+both observer modes, the selected peer clears the planned target once its
+worker is healthy and admitted, using a settings compare-and-swap tied to its
+session. Pausing automatic failover retains an existing healthy leader and
+prevents acquisition of a new lease. Each operation still requires quorum and
+fresh verified data.
+
+### Observe both controllers from the VPN fleet
+
+1. Enable `"observations": true` on both controllers. Give each gateway a
+   distinct, directly routed HTTPS origin with its own valid hostname. Either
+   serve TLS in the gateway or route `GET /_vpnctl_ha/health` from a local HTTPS
+   reverse proxy to that gateway's loopback listener. Preserve `Content-Length`
+   and the gateway response. Keep this route free of redirects, caching,
+   compression, and cross-site fallback. The shared subscription URL remains
+   independent.
+
+   A reverse proxy can still answer HTTPS after its gateway fails. Use the
+   [Caddy example](examples/ha/observer-health.Caddyfile) on each controller
+   to return HTTP 200 with `{"node":"controller-a","status":"unavailable"}`
+   for a dial failure or response-header timeout on that route to its local
+   loopback gateway. Set `node` to the expected controller ID and set the
+   upstream deadlines below the observer's probe deadline. Forward any HTTP
+   status actually returned by the gateway. Generic HTTP 502 responses, other
+   proxy errors, and TLS failures remain unknown to observers.
+2. On the witness add [observer listener settings](examples/ha/observer-listener.json)
+   to `witness.json` under `observer_listener`. The listener takes only probe
+   reports over mTLS and uses a different CA from the HA control plane. Issue a
+   separate client certificate for each VPN host. Enroll each unique leaf DER
+   SHA-256 fingerprint with a short ID and its hosting network (shared network
+   means shared label). At least three IDs and two networks are required.
+   Replacing or removing a pin and restarting the witness revokes the old
+   certificate for this listener and clears the old tally. Retain the complete
+   credentials before use. Keep the listener separate from the public ingress.
+3. Copy `scripts/ha/observer.py` to `/opt/vpnctl/ha/` on the VPN hosts and install
+   [the service](examples/ha/vpnctl-ha-observer.service) and
+   [timer](examples/ha/vpnctl-ha-observer.timer). Adapt
+   [observer.json](examples/ha/observer.json) and the systemd credentials on each
+   host. Enable the timer. The observer needs only outbound HTTPS to both
+   controllers and the collector. It has no Consul or controller permissions.
+4. Open `/admin/ha` and check the reports in **VPN server observations**. Start
+   in monitoring mode and verify both sites from each hosting network. Use
+   **Require observer confirmation** to require agreement for automatic
+   cross-site takeover. **Observe without blocking failover** restores the
+   existing automatic policy. The observer policy is shared through Consul.
+   A manual planned handover still needs a fresh replica and verified fencing.
+
+Each observation expires after twenty seconds. An opinion needs two fresh
+consecutive reports and a confirmed direction needs more than half of the
+configured observers with support from at least two different networks. Unknown
+TLS/DNS paths and missing reports never reduce that threshold. Under
+enforcement, if votes drop below the threshold, a running healthy owner can
+continue and a recovered incumbent can reacquire. A new owner needs
+confirmation or a planned handover.
+If the owner still reaches Consul while public access is lost, it records an
+automatic handover against its current session before closing the worker;
+the peer rechecks approval before attempting acquisition. The witness freezes
+the tally while reserving admission in Consul. The reservation must be confirmed
+before the proof expires. The witness then records admission in Consul settings
+using the same exact lease and the reservation index. A late or ambiguous
+reservation leaves the recorded incumbent unchanged. The worker serves only
+after admission is recorded, and only probe pairs started after admission can
+vote on the next transfer. The authorization path still verifies resource
+fencing and the latest recoverable SQLite copy.
 
 An old node rejoins with its local worker stopped, downloads the witness's latest
 immutable generation, and replaces its divergent database only after fencing.

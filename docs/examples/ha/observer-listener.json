@@ -1,0 +1,22 @@
+{
+  "addr": "0.0.0.0:18405",
+  "tls": {
+    "ca": "/etc/vpnctl-ha/observer-ca.crt",
+    "cert": "/etc/vpnctl-ha/observer-collector.crt",
+    "key": "/etc/vpnctl-ha/observer-collector.key"
+  },
+  "roster": {
+    "vpn-a": {
+      "domain": "hoster-one",
+      "certificate_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+    },
+    "vpn-b": {
+      "domain": "hoster-two",
+      "certificate_sha256": "0000000000000000000000000000000000000000000000000000000000000002"
+    },
+    "vpn-c": {
+      "domain": "hoster-three",
+      "certificate_sha256": "0000000000000000000000000000000000000000000000000000000000000003"
+    }
+  }
+}
