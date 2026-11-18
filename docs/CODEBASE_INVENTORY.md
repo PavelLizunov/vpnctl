@@ -5,10 +5,10 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 518 (333 prod / 185 test)
-- **Total Rust LOC:** 191,341 (100,071 prod / 91,270 test)
-- **Database Migrations:** 75
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 144
+- **Tracked Rust Files:** 523 (336 prod / 187 test)
+- **Total Rust LOC:** 192,603 (100,970 prod / 91,633 test)
+- **Database Migrations:** 76
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 148
 
 ## Workspace Crates & Targets
 
@@ -19,12 +19,12 @@
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,419 (13) | 0 (0) | **1,419** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 318 (1) | 125 (1) | **443** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 193 (1) | 454 (2) | **647** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 58 tests | 18,636 (63) | 27,297 (64) | **45,933** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 59 tests | 18,705 (64) | 27,430 (65) | **46,135** |
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 6,753 (14) | 1,554 (6) | **8,307** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,236 (20) | 4,817 (12) | **9,053** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,825 (5) | 1,191 (5) | **4,016** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 29 tests | 57,820 (190) | 52,901 (90) | **110,721** |
-| **Total** | | | | **100,071 (333)** | **91,270 (185)** | **191,341** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 29 tests | 58,650 (192) | 53,131 (91) | **111,781** |
+| **Total** | | | | **100,970 (336)** | **91,633 (187)** | **192,603** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -56,7 +56,7 @@
 | `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,164 | `daemon` | Test |
 | `daemon/src/protocol_assurance_poller.rs` | 1,112 | `daemon` | Prod |
 
-## Database Migrations (75)
+## Database Migrations (76)
 
 | Version | Migration Name | File | Lines |
 |---|---|---|---|
@@ -135,8 +135,9 @@
 | `0073` | ssh access | `crates/inventory/migrations/0073_ssh_access.sql` | 7 |
 | `0074` | corp telephony | `crates/inventory/migrations/0074_corp_telephony.sql` | 14 |
 | `0075` | corp companies | `crates/inventory/migrations/0075_corp_companies.sql` | 97 |
+| `0076` | server security reports | `crates/inventory/migrations/0076_server_security_reports.sql` | 6 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (144)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (148)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -167,6 +168,7 @@
 | `GET` | `/admin/monitoring/private-checks` | `admin::private_checks_page` |
 | `POST` | `/admin/monitoring/private-checks` | `admin::private_checks_run` |
 | `POST` | `/admin/monitoring/probe-all` | `admin::monitoring_probe_all` |
+| `GET` | `/admin/monitoring/security` | `admin::server_security::fleet` |
 | `GET` | `/admin/overview` | `admin::dashboard` |
 | `GET` | `/admin/search` | `admin::search` |
 | `GET` | `/admin/servers` | `admin::servers` |
@@ -214,6 +216,9 @@
 | `POST` | `/admin/servers/{id}/reality-config` | `admin::server_set_reality_config` |
 | `POST` | `/admin/servers/{id}/reserved-ports` | `admin::server_set_reserved_ports` |
 | `POST` | `/admin/servers/{id}/routing-policy` | `admin::server_set_routing_policy` |
+| `GET` | `/admin/servers/{id}/security` | `admin::server_security::detail` |
+| `POST` | `/admin/servers/{id}/security/apply` | `admin::server_security::apply` |
+| `POST` | `/admin/servers/{id}/security/check` | `admin::server_security::check` |
 | `POST` | `/admin/servers/{id}/set-fingerprint` | `admin::server_set_fingerprint` |
 | `GET` | `/admin/servers/{id}/setup` | `admin::server_detail_setup` |
 | `POST` | `/admin/servers/{id}/ss2022-mode` | `admin::server_set_ss2022_mode` |

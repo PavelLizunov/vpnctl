@@ -199,6 +199,22 @@ pub(crate) fn admin_router(state: AppState) -> Router {
         )
         .route("/admin/servers", get(admin::servers))
         .route("/admin/servers/", get(admin::servers))
+        .route(
+            "/admin/monitoring/security",
+            get(admin::server_security::fleet),
+        )
+        .route(
+            "/admin/servers/{id}/security",
+            get(admin::server_security::detail),
+        )
+        .route(
+            "/admin/servers/{id}/security/check",
+            post(admin::server_security::check),
+        )
+        .route(
+            "/admin/servers/{id}/security/apply",
+            post(admin::server_security::apply),
+        )
         .route("/admin/servers/billing", get(admin::servers_billing))
         .route("/admin/servers/billing/", get(admin::servers_billing))
         .route(
