@@ -1,0 +1,17 @@
+[Unit]
+Description=vpnctl cooperating-controller gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/vpnctl/ha/controller_ha.py --config /etc/vpnctl-ha/controller.json
+Restart=on-failure
+RestartSec=2
+UMask=0077
+# The supervisor manages a separate fixed worker cgroup via systemd.
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

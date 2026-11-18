@@ -1,0 +1,39 @@
+# Use one direct HTTPS probe hostname on each controller. Replace the hostname,
+# local gateway address (in both places), and node ID with that controller's values.
+# Keep application and subscription traffic on their existing site blocks.
+probe-a.example.invalid {
+	@health {
+		method GET
+		path /_vpnctl_ha/health
+	}
+	handle @health {
+		reverse_proxy 127.0.0.1:18402 {
+			header_up X-Real-IP {remote_host}
+			transport http {
+				compression off
+				keepalive off
+				dial_timeout 400ms
+				response_header_timeout 600ms
+			}
+		}
+	}
+	handle {
+		respond 404
+	}
+
+	handle_errors 502 504 {
+		@local_gateway_unavailable {
+			method GET
+			path /_vpnctl_ha/health
+			expression `{err.message}.startsWith("dial tcp 127.0.0.1:18402: ") || {err.message} == "net/http: timeout awaiting response headers"`
+		}
+		handle @local_gateway_unavailable {
+			header Content-Type application/json
+			header Cache-Control no-store
+			respond `{"node":"controller-a","status":"unavailable"}` 200
+		}
+		handle {
+			respond "" {err.status_code}
+		}
+	}
+}

@@ -70,7 +70,7 @@ clean:
 
 # Full local CI sweep — run before pushing. `gc` runs first so a
 # bloated target/ is trimmed before the build gates rebuild it.
-ci: gc project-map-check bundle-css-check fmt-check clippy test deny
+ci: gc project-map-check bundle-css-check fmt-check ha-test clippy test deny
     @echo "✔ all CI gates passed"
 
 # ─── Tools from 2026-05-18 security audit ──────────────────────────
@@ -101,3 +101,7 @@ mutants-protocols:
 coverage:
     cargo llvm-cov --workspace --html
     @echo "→ HTML report: target/llvm-cov/html/index.html"
+
+# Isolated HA contracts (real Consul/cgroup faults run in their CI job)
+ha-test:
+    python3 -m unittest discover -s scripts/ha -p 'test_*.py'

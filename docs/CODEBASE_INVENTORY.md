@@ -5,8 +5,8 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 512 (330 prod / 182 test)
-- **Total Rust LOC:** 188,454 (98,668 prod / 89,786 test)
+- **Tracked Rust Files:** 518 (333 prod / 185 test)
+- **Total Rust LOC:** 191,341 (100,071 prod / 91,270 test)
 - **Database Migrations:** 75
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 144
 
@@ -19,12 +19,12 @@
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,419 (13) | 0 (0) | **1,419** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 318 (1) | 125 (1) | **443** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 193 (1) | 454 (2) | **647** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 58 tests | 18,624 (63) | 27,297 (64) | **45,921** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 58 tests | 18,636 (63) | 27,297 (64) | **45,933** |
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 6,753 (14) | 1,554 (6) | **8,307** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,236 (20) | 4,817 (12) | **9,053** |
-| `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 1,757 (4) | 1,191 (5) | **2,948** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 26 tests | 57,497 (188) | 51,417 (87) | **108,914** |
-| **Total** | | | | **98,668 (330)** | **89,786 (182)** | **188,454** |
+| `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,825 (5) | 1,191 (5) | **4,016** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 29 tests | 57,820 (190) | 52,901 (90) | **110,721** |
+| **Total** | | | | **100,071 (333)** | **91,270 (185)** | **191,341** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -43,6 +43,7 @@
 | `daemon/tests/admin_smoke/alerts_health.rs` | 1,514 | `daemon` | Test |
 | `daemon/tests/admin_smoke/servers.rs` | 1,452 | `daemon` | Test |
 | `daemon/tests/spec_corp_policy_eligibility.rs` | 1,404 | `daemon` | Test |
+| `crates/ssh/src/subprocess.rs` | 1,380 | `crates/ssh` | Prod |
 | `daemon/tests/sub_endpoint/mihomo.rs` | 1,324 | `daemon` | Test |
 | `daemon/tests/admin_smoke/server_detail/setup_config.rs` | 1,318 | `daemon` | Test |
 | `crates/inventory/tests/spec_full_node_traffic.rs` | 1,313 | `crates/inventory` | Test |
@@ -53,7 +54,6 @@
 | `daemon/src/handlers/admin/boosty.rs` | 1,170 | `daemon` | Prod |
 | `daemon/tests/spec_corp_probe_runtime.rs` | 1,166 | `daemon` | Test |
 | `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,164 | `daemon` | Test |
-| `crates/ssh/src/subprocess.rs` | 1,127 | `crates/ssh` | Prod |
 | `daemon/src/protocol_assurance_poller.rs` | 1,112 | `daemon` | Prod |
 
 ## Database Migrations (75)

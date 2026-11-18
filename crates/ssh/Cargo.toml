@@ -17,9 +17,11 @@ vpnctl-host-fingerprint = { path = "../host-fingerprint" }
 async-trait = { workspace = true }
 base64 = "0.22"
 tempfile = "3"
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 russh = { version = "0.65.1", optional = true }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "io-util"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time", "io-util"] }
 tracing = "0.1"
 zeroize = { version = "1", features = ["derive"], optional = true }
 
