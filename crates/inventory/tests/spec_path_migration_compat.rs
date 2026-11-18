@@ -4,6 +4,7 @@ use std::{path::Path, path::PathBuf};
 
 use sqlx::{
     Row, SqlitePool,
+    migrate::Migrate,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 use tempfile::TempDir;
@@ -180,6 +181,7 @@ async fn retained_contents(pool: &SqlitePool) -> Vec<(String, Vec<Vec<String>>)>
             || table.starts_with("corp_policy_")
             || table.starts_with("service_path_")
             || table == "ssh_access_checks"
+            || table == "server_security_reports"
         {
             continue;
         }
@@ -215,6 +217,11 @@ async fn assert_current_migrations(pool: &SqlitePool) {
     }
     assert_eq!(reindex_count(pool).await, 0);
     assert!(table_contents(pool, "ssh_access_checks").await.is_empty());
+    assert!(
+        table_contents(pool, "server_security_reports")
+            .await
+            .is_empty()
+    );
 }
 
 impl Fixture {
@@ -378,20 +385,16 @@ async fn frozen_production_70_upgrades_normally_without_rewriting_any_legacy_dat
 #[tokio::test]
 async fn current_main_71_upgrades_path_history_preserving_both_published_migration_records() {
     let f = Fixture::new().await;
-    let inv = SqliteInventory::open(&f.path()).await.unwrap();
-    inv.close().await;
     let pool = f.pool().await;
-    sqlx::raw_sql(
-        "DROP TABLE service_path_states;
-         DROP TABLE service_path_incidents;
-         DROP TABLE ssh_access_checks;
-         DROP TABLE corp_policy_phone_revisions;
-         DROP TABLE corp_policy_phone_settings;
-         DELETE FROM _sqlx_migrations WHERE version >= 72;",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
+    let published = sqlx::migrate!("./migrations");
+    let migration = published
+        .iter()
+        .find(|migration| migration.version == 71)
+        .unwrap();
+    {
+        let mut connection = pool.acquire().await.unwrap();
+        connection.apply(migration).await.unwrap();
+    }
     let original_70 = marker(&pool, 70).await;
     let original_71 = marker(&pool, 71).await;
     let before = retained_contents(&pool).await;

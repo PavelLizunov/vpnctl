@@ -14,6 +14,7 @@ mod path_availability;
 pub(crate) mod private_checks;
 pub(crate) mod search;
 pub(crate) mod server_actions;
+pub(crate) mod server_security;
 pub(crate) mod servers;
 pub(crate) mod ssh_access;
 pub(crate) mod traffic;

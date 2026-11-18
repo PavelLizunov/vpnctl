@@ -184,6 +184,9 @@ pub(crate) async fn servers_billing(
             a.ed-tab.ed-tab--on href="/admin/servers/billing" {
                 (crate::i18n::tr(lang, "Billing & Rental", "Оплата и аренда"))
             }
+            a.ed-tab href="/admin/monitoring/security" {
+                (super::server_security::label(lang))
+            }
         }
 
         div.ed-headrow {

@@ -458,6 +458,10 @@ pub(super) async fn server_detail_render(
             }
             div.ed-headrow__actions {
                 a.ed-abtn.ed-abtn--secondary.ed-abtn--sm
+                    href=(crate::handlers::admin::server_security::path(&server.id)) {
+                    (crate::handlers::admin::server_security::label(lang))
+                }
+                a.ed-abtn.ed-abtn--secondary.ed-abtn--sm
                     href=(format!("/admin/servers/{}/cheburcheck", path_segment_encode(&server.id.0))) {
                     "Cheburcheck"
                 }
