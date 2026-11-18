@@ -198,23 +198,8 @@ async fn dashboard_render(
     let mut current_paths = std::collections::HashMap::new();
     let path_now = chrono::Utc::now();
     for server in &server_list_fleet {
-        match state
-            .inv
-            .current_service_path(
-                &server.id,
-                path_now,
-                crate::quality_poller::path_max_age_secs(),
-            )
-            .await
-        {
-            Ok(Some(path)) => {
-                current_paths.insert(server.id.clone(), path);
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::warn!(target = "vpnctld::admin", server = %server.id, %error, "dashboard current path query failed");
-            }
-        }
+        let path = crate::handlers::admin::path_availability::load(&state, server, path_now).await;
+        current_paths.insert(server.id.clone(), path);
     }
 
     let fleet_uptime: Vec<(

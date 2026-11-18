@@ -82,8 +82,8 @@ async fn current_availability_precedes_fleet_and_links_problems_in_priority_orde
         assert!(!panel.contains("data-path-server=\"s3\""));
         assert!(panel.contains("/admin/servers/s0/status#current-path-availability"));
         assert!(panel.contains("fixture &lt;network&gt;") && !panel.contains("fixture <network>"));
-        assert!(panel.contains("TCP VPN ports from the measurement network"));
-        assert!(panel.contains("UDP and VPN login are checked separately"));
+        assert!(panel.contains("TCP results show port reachability"));
+        assert!(panel.contains("UDP-only servers show results from external VPN client tests"));
         let fleet = html.split_once("id=\"fleet-at-a-glance\"").unwrap().1;
         let row = fleet
             .split("<tr>")
@@ -142,7 +142,9 @@ async fn main_dashboard_empty_state_and_russian_scope_are_pinned() {
     let panel = summary(&html);
     assert!(panel.contains("Доступность сейчас"));
     assert!(panel.contains("Два неудачных раунда подтверждают отказ"));
-    assert!(panel.contains("UDP и вход в VPN проверяются отдельно"));
+    assert!(panel.contains(
+        "Для серверов только с UDP-протоколами показаны результаты внешних подключений к VPN"
+    ));
 }
 
 #[tokio::test]
