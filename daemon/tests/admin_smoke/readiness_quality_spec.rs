@@ -260,3 +260,175 @@ async fn measured_tcp_failure_label_is_not_packet_loss_and_has_context() {
         );
     }
 }
+
+async fn udp_node(inv: &vpnctl_inventory::SqliteInventory) -> ServerId {
+    seed(inv, 1, 0, &[]).await;
+    let server = ServerId("s0".into());
+    inv.remove_server_protocol(&server, &ProtocolId("vless+reality".into()))
+        .await
+        .unwrap();
+    for protocol in ["amneziawg2", "hysteria2"] {
+        inv.add_server_protocol(&server, &ProtocolId(protocol.into()))
+            .await
+            .unwrap();
+    }
+    server
+}
+
+fn assurance(
+    server: &ServerId,
+    protocol: &str,
+    ts: chrono::DateTime<chrono::Utc>,
+    stage: AssuranceStage,
+    state: AssuranceState,
+) -> ProtocolAssuranceSample {
+    ProtocolAssuranceSample {
+        ts,
+        server_id: server.clone(),
+        protocol_id: ProtocolId(protocol.into()),
+        client_kind: "external-runner".into(),
+        stage,
+        state,
+        latency_ms: None,
+        failure_code: None,
+    }
+}
+
+#[tokio::test]
+async fn udp_availability_reports_partial_verified_coverage_on_each_admin_surface() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let server = udp_node(&s.inv).await;
+    let now = chrono::Utc::now();
+    for (protocol, stage, state) in [
+        (
+            "amneziawg2",
+            AssuranceStage::Transfer,
+            AssuranceState::Verified,
+        ),
+        (
+            "hysteria2",
+            AssuranceStage::ExternalPath,
+            AssuranceState::Unknown,
+        ),
+    ] {
+        s.inv
+            .record_protocol_assurance_sample(&assurance(&server, protocol, now, stage, state))
+            .await
+            .unwrap();
+    }
+
+    let app = router(s.clone());
+    for path in ["/admin/servers/s0/status", "/admin/servers", "/admin/"] {
+        let page = fetch_html_with_cookie(app.clone(), path, "vpnctl_lang=en").await;
+        assert!(
+            page.contains(r#"data-path-status="udp_verified""#),
+            "{path}"
+        );
+        assert!(page.contains("UDP VPN verified"), "{path}");
+        assert!(page.contains("1/2 verified"), "{path}");
+        assert!(!page.contains("2/2 verified"), "{path}");
+    }
+    let page =
+        fetch_html_with_cookie(app.clone(), "/admin/servers/s0/status", "vpnctl_lang=ru").await;
+    let current = section(&page, "current-path-availability");
+    assert!(current.contains("VPN по UDP проверен"));
+    assert!(current.contains("Проверено 1 из 2"));
+    assert!(current.contains(r##"href="#protocol-assurance""##));
+    assert!(!current.contains("Нет свежих данных"));
+    let dashboard = fetch_html(app.clone(), "/admin/").await;
+    assert!(section(&dashboard, "fleet-current-path").contains(r#"data-path-server="s0""#));
+
+    s.inv
+        .record_protocol_assurance_sample(&assurance(
+            &server,
+            "hysteria2",
+            now,
+            AssuranceStage::Transfer,
+            AssuranceState::Verified,
+        ))
+        .await
+        .unwrap();
+    let dashboard = fetch_html(app, "/admin/").await;
+    let summary = section(&dashboard, "fleet-current-path");
+    assert!(summary.contains(r#"data-path-count="udp_verified""#));
+    assert!(!summary.contains(r#"data-path-server="s0""#));
+}
+
+#[tokio::test]
+async fn udp_availability_requires_fresh_transfer_and_preserves_tcp_status_for_mixed_nodes() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let server = udp_node(&s.inv).await;
+    let now = chrono::Utc::now();
+    let app = router(s.clone());
+    let path = "/admin/servers/s0/status";
+    let no_samples = fetch_html(app.clone(), path).await;
+    let current = section(&no_samples, "current-path-availability");
+    assert!(current.contains(r#"data-path-status="udp_unknown""#));
+    assert!(current.contains(r##"href="#external-readiness""##));
+
+    for sample in [
+        assurance(
+            &server,
+            "amneziawg2",
+            now - chrono::TimeDelta::days(1),
+            AssuranceStage::Transfer,
+            AssuranceState::Verified,
+        ),
+        assurance(
+            &server,
+            "hysteria2",
+            now + chrono::TimeDelta::hours(1),
+            AssuranceStage::Transfer,
+            AssuranceState::Verified,
+        ),
+        assurance(
+            &server,
+            "vless+reality",
+            now,
+            AssuranceStage::Transfer,
+            AssuranceState::Verified,
+        ),
+        assurance(
+            &server,
+            "amneziawg2",
+            now,
+            AssuranceStage::Listener,
+            AssuranceState::Verified,
+        ),
+    ] {
+        s.inv
+            .record_protocol_assurance_sample(&sample)
+            .await
+            .unwrap();
+        let page = fetch_html(app.clone(), path).await;
+        let current = section(&page, "current-path-availability");
+        assert!(current.contains(r#"data-path-status="udp_unknown""#));
+        assert!(!current.contains(r#"data-path-status="udp_verified""#));
+    }
+
+    s.inv
+        .record_protocol_assurance_sample(&assurance(
+            &server,
+            "amneziawg2",
+            now,
+            AssuranceStage::Handshake,
+            AssuranceState::Blocked,
+        ))
+        .await
+        .unwrap();
+    let page = fetch_html(app.clone(), path).await;
+    let current = section(&page, "current-path-availability");
+    assert!(current.contains(r#"data-path-status="udp_failed""#));
+    assert!(current.contains("1 failed"));
+
+    s.inv
+        .add_server_protocol(&server, &ProtocolId("vless+reality".into()))
+        .await
+        .unwrap();
+    let page = fetch_html(app, path).await;
+    let current = section(&page, "current-path-availability");
+    assert!(current.contains(r#"data-path-status="unknown""#));
+    assert!(current.contains("TCP VPN ports"));
+}

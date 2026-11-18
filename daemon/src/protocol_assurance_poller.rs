@@ -51,14 +51,26 @@ enum RunnerAttempt {
     Failed(&'static str),
 }
 
+fn assurance_interval_secs() -> u64 {
+    crate::config::parse_positive_secs(
+        "VPNCTLD_PROTOCOL_ASSURANCE_INTERVAL_SECS",
+        DEFAULT_INTERVAL_SECS,
+    )
+}
+
+pub(crate) fn status_max_age() -> Duration {
+    Duration::from_secs(
+        assurance_interval_secs()
+            .saturating_mul(2)
+            .saturating_add(30),
+    )
+}
+
 pub fn spawn_protocol_assurance_poller(
     inv: SqliteInventory,
     registry: Arc<Registry>,
 ) -> tokio::task::JoinHandle<()> {
-    let seconds = crate::config::parse_positive_secs(
-        "VPNCTLD_PROTOCOL_ASSURANCE_INTERVAL_SECS",
-        DEFAULT_INTERVAL_SECS,
-    );
+    let seconds = assurance_interval_secs();
     tokio::spawn(async move {
         let mut tick = interval(Duration::from_secs(seconds));
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);

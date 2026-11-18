@@ -207,7 +207,7 @@ pub(in crate::handlers::admin::legacy) fn dashboard_fleet_table(
     kernel_versions: &[(vpnctl_core::ServerId, Option<String>)],
     current_paths: &std::collections::HashMap<
         vpnctl_core::ServerId,
-        vpnctl_inventory::ServicePathState,
+        crate::handlers::admin::path_availability::Availability,
     >,
     names: &crate::handlers::admin::helpers::ServerNames,
     lang: crate::i18n::Locale,
@@ -241,7 +241,7 @@ pub(in crate::handlers::admin::legacy) fn dashboard_fleet_table(
                         tr {
                             th { (tr(lang, "server", "сервер")) }
                             th { (tr(lang, "state", "состояние")) }
-                            th { (tr(lang, "TCP now", "TCP сейчас")) }
+                            th { (tr(lang, "Availability", "Доступность")) }
                             th.num { (tr(lang, "disk", "диск")) }
                             th.num { (tr(lang, "mem", "память")) }
                             th.num { (tr(lang, "conns", "подкл.")) }
