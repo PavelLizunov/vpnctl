@@ -158,9 +158,18 @@ class ClusterFaultTests(unittest.TestCase):
         self.addCleanup(os.kill, follower.pid, signal.SIGCONT)
         witness = self.configs["fixture-witness"]["peers"]["fixture-witness"]
         context = self.contexts["fixture-b"]
-        latest = request(witness, "GET", "/_ha/snapshot-status", context=context)["manifest"]
-        generation = latest["generation"]
-        transfer = request(witness, "GET", "/_ha/snapshot/" + str(generation), context=context, timeout=30)
+        for _ in range(8):
+            latest = request(witness, "GET", "/_ha/snapshot-status", context=context)["manifest"]
+            generation = latest["generation"]
+            try:
+                transfer = request(witness, "GET", "/_ha/snapshot/" + str(generation), context=context, timeout=30)
+            except RuntimeError as error:
+                if str(error) != "control request rejected: HTTP 503: requested generation is not latest":
+                    raise
+            else:
+                break
+        else:
+            self.fail("snapshot changed before every attempt to pin its generation")
         reads = 0
         try:
             sink = SnapshotStore(self.root / "slow-follower-transfer", self.configs["fixture-b"]["build"], 1)
@@ -617,23 +626,39 @@ class ClusterFaultTests(unittest.TestCase):
         self.assertEqual(self.get("fixture-b","/write"),(200,b"2"))
         eventually(lambda: self.status("fixture-b")["generation"] == self.status("fixture-a")["generation"])
         self.manage("fixture-a","handover")
-        eventually(lambda:self.status("fixture-b")["worker_admitted"])
+        planned = eventually(lambda: self.status("fixture-b")["worker_admitted"]
+                             and self.consul.settings()["target"] is None and self.current_grant("fixture-b"))
         self.assertEqual(self.get("fixture-a", "/admin/assets/admin.js"), (200, b"fixture-installed-admin-asset"))
-        self.assertEqual(self.get("fixture-a","/sub/fixture-token"),self.get("fixture-b","/sub/fixture-token"))
+        for node in self.names[:2]:
+            self.assertEqual(self.get(node, "/sub/fixture-token"), (200, b"fixture-subscription-byte-contract"))
         age=self.status("fixture-b")["snapshot_age_ms"];self.assertGreaterEqual(age,0);self.assertLess(age,120000)
         print("verified snapshot age observed after planned handover: " + str(age) + "ms (fixture RPO upper bound)", flush=True)
+
+        def admitted_after(previous):
+            item = self.consul.get("lease")
+            if not item or not item.get("Session") or item["record"]["epoch"] <= previous["epoch"]:
+                return None
+            grant = item["record"]
+            holder = grant["holder"]
+            if self.status(holder)["worker_admitted"] and self.current_grant(holder) == grant:
+                return grant
+            return None
+
         db=Path(self.configs["fixture-b"]["db"])
         old_pid=int(db.with_suffix(".pid").read_text());old_child=int(db.with_suffix(".childpid").read_text())
         os.kill(old_pid,signal.SIGSTOP)
-        eventually(lambda:self.status("fixture-a")["worker_admitted"],timeout=60)
+        recovered = eventually(lambda: admitted_after(planned), timeout=60)
         self.assertFalse(Path("/proc/"+str(old_pid)).exists())
         eventually(lambda: not Path("/proc/"+str(old_child)).exists() or Path("/proc/"+str(old_child)+"/stat").read_text().split()[2]=="Z")
         self.assertEqual(self.get("fixture-b","/sub/fixture-token"),(200,b"fixture-subscription-byte-contract"))
-        # A hard worker crash follows the same verified fence path.
-        pid=int(Path(self.configs["fixture-a"]["db"]).with_suffix(".pid").read_text())
+        # Either supervisor can recover a worker-only failure. Crash the worker
+        # that actually obtained the newer grant.
+        pid = int(Path(self.configs[recovered["holder"]]["db"]).with_suffix(".pid").read_text())
         os.kill(pid,signal.SIGKILL)
-        eventually(lambda:self.status("fixture-b")["worker_admitted"],timeout=60)
-        self.assertEqual(self.get("fixture-a","/sub/fixture-token"),(200,b"fixture-subscription-byte-contract"))
+        eventually(lambda: admitted_after(recovered), timeout=60)
+        self.assertFalse(Path("/proc/" + str(pid)).exists())
+        for node in self.names[:2]:
+            self.assertEqual(self.get(node, "/sub/fixture-token"), (200, b"fixture-subscription-byte-contract"))
 
     def test_quorum_loss_and_suspended_old_supervisor_fail_closed(self):
         old=self.controllers["fixture-a"];os.kill(old.pid,signal.SIGSTOP)
