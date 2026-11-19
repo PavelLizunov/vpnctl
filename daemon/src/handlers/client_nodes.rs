@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod activity_spec_tests;
-mod limits;
+pub(super) mod limits;
 mod projection;
 
 #[cfg(test)]
@@ -19,7 +19,7 @@ use axum::extract::{ConnectInfo, Path, State, rejection::PathRejection};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use vpnctl_core::{Server, User};
-use vpnctl_inventory::SqliteInventoryError;
+use vpnctl_inventory::{SqliteInventory, SqliteInventoryError};
 
 use crate::app::AppState;
 use projection::{NodeMetadata, NodesResponse};
@@ -45,7 +45,7 @@ pub(crate) async fn unauthorized_nodes() -> Response {
 }
 
 #[derive(Clone, Copy)]
-enum Identity {
+pub(super) enum Identity {
     Device,
     Subscription,
 }
@@ -58,7 +58,7 @@ impl Identity {
         }
     }
 
-    fn valid(&self, credential: &str) -> bool {
+    pub(super) fn valid(&self, credential: &str) -> bool {
         match self {
             Self::Device => vpnctl_crypto::is_valid_vpn_router_device_id(credential),
             // Imports may retain legacy tokens. Accept the existing URL-safe
@@ -70,6 +70,21 @@ impl Identity {
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
             }
+        }
+    }
+
+    pub(super) async fn find_user(
+        &self,
+        inventory: &SqliteInventory,
+        credential: &str,
+    ) -> Result<Option<User>, SqliteInventoryError> {
+        match self {
+            Self::Device => {
+                inventory
+                    .find_user_by_vpn_router_device_id(credential)
+                    .await
+            }
+            Self::Subscription => inventory.find_user_by_sub_token(credential).await,
         }
     }
 }
@@ -94,16 +109,7 @@ async fn get_nodes(
         }
     }
     drop(request);
-    let user = match identity {
-        Identity::Device => {
-            state
-                .inv
-                .find_user_by_vpn_router_device_id(&credential)
-                .await
-        }
-        Identity::Subscription => state.inv.find_user_by_sub_token(&credential).await,
-    };
-    let user = match user {
+    let user = match identity.find_user(&state.inv, &credential).await {
         Ok(Some(user)) if !user.disabled => user,
         Ok(_) => return unauthorized_nodes().await,
         Err(_) => return error_response(StatusCode::SERVICE_UNAVAILABLE, "unavailable"),

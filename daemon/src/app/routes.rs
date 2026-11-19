@@ -42,6 +42,7 @@ pub fn router_with_corp_operator(
     let admin_router = admin_router(state.clone());
 
     let public_router = Router::new()
+        .merge(handlers::nina_assistant::from_env())
         .route(
             "/api/v1/app/node-status/device/{*tail}",
             get(handlers::client_nodes::get_device_nodes),

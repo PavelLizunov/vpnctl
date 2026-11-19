@@ -33,7 +33,7 @@ impl PollLimits {
         capacity: u32,
     ) -> Result<(), u64> {
         let now = Instant::now();
-        let anonymous = namespace == b"nodes:ip";
+        let anonymous = matches!(namespace, b"nodes:ip" | b"nina:ip");
         let (buckets, max_buckets) = if anonymous {
             (&mut self.anonymous_ips, MAX_IP_BUCKETS)
         } else {
@@ -86,18 +86,24 @@ impl PollLimits {
     }
 }
 
-pub(super) fn acquire(
+pub(in crate::handlers) fn acquire(
     owner: &Arc<RateLimiter>,
     namespace: &[u8],
     identity: &str,
     capacity: u32,
 ) -> Result<(), u64> {
-    static LIMITS: OnceLock<Mutex<PollLimits>> = OnceLock::new();
+    static NODE_LIMITS: OnceLock<Mutex<PollLimits>> = OnceLock::new();
+    static ASSISTANT_LIMITS: OnceLock<Mutex<PollLimits>> = OnceLock::new();
+    let limits = if namespace.starts_with(b"nina:") {
+        &ASSISTANT_LIMITS
+    } else {
+        &NODE_LIMITS
+    };
     let mut digest = Sha256::new();
     digest.update(namespace);
     digest.update([0]);
     digest.update(identity.as_bytes());
-    LIMITS
+    limits
         .get_or_init(|| Mutex::new(PollLimits::default()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
