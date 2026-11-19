@@ -191,6 +191,7 @@ impl Fixture {
         let key = match protocol {
             "naive" => "naive.domain",
             "vless-ws" => "vlessws.domain",
+            "dnstt" => "dnstt.domain",
             _ => panic!("unsupported synthetic protocol alias"),
         };
         sqlx::query(
@@ -203,6 +204,29 @@ impl Fixture {
         .unwrap();
         self.inv
             .set_server_secret(&node.id, key, host)
+            .await
+            .unwrap();
+    }
+
+    pub(super) async fn record_dnstt_deployment(&self, node: &NodeFixture, domain: &str) {
+        self.set_dnstt_resolver(node, "192.0.2.53").await;
+        self.inv
+            .set_server_secret(&node.id, "dnstt.public_key", "fixture-public")
+            .await
+            .unwrap();
+        self.inv
+            .set_server_secret(
+                &node.id,
+                "observed.dnstt.applied",
+                &format!("{domain}+192.0.2.53+fixture-public"),
+            )
+            .await
+            .unwrap();
+    }
+
+    pub(super) async fn set_dnstt_resolver(&self, node: &NodeFixture, resolver: &str) {
+        self.inv
+            .set_server_secret(&node.id, "dnstt.resolver", resolver)
             .await
             .unwrap();
     }

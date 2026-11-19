@@ -141,6 +141,54 @@ async fn reality_and_vless_ws_ipv6_spellings_have_one_canonical_host() {
 }
 
 #[tokio::test]
+async fn dnstt_domain_metadata_is_on_the_deployed_node_row() {
+    let fixture = Fixture::new().await;
+    let user = fixture.user(false).await;
+    let other = fixture.user(false).await;
+    let node = fixture.node("192.0.2.10", true, "vpn-exit").await;
+    fixture.grant(&user, &node).await;
+    fixture
+        .protocol_alias(&node, "dnstt", "TUNNEL.EXAMPLE.INVALID")
+        .await;
+    let path = format!("/api/v1/app/node-status/device/{}", user.device_id);
+
+    let (status, _, not_deployed) = fixture.request(&path).await;
+    assert_eq!(status.as_u16(), 200);
+    assert_unknown_projection(&not_deployed, &["192.0.2.10"]);
+
+    fixture
+        .record_dnstt_deployment(&node, "other.example.invalid")
+        .await;
+    let (status, _, stale) = fixture.request(&path).await;
+    assert_eq!(status.as_u16(), 200);
+    assert_unknown_projection(&stale, &["192.0.2.10"]);
+
+    fixture
+        .record_dnstt_deployment(&node, "TUNNEL.EXAMPLE.INVALID")
+        .await;
+    let (status, _, deployed) = fixture.request(&path).await;
+    assert_eq!(status.as_u16(), 200);
+    assert_eq!(deployed["nodes"].as_array().unwrap().len(), 1);
+    let row = &deployed["nodes"][0];
+    assert_eq!(row["endpoint_host"], json!("192.0.2.10"));
+    assert_eq!(row["dnstt_domain"], json!("tunnel.example.invalid"));
+
+    fixture.set_dnstt_resolver(&node, "192.0.2.153").await;
+    let (status, _, resolver_changed) = fixture.request(&path).await;
+    assert_eq!(status.as_u16(), 200);
+    assert_unknown_projection(&resolver_changed, &["192.0.2.10"]);
+
+    let (status, _, other_profile) = fixture
+        .request(&format!(
+            "/api/v1/app/node-status/device/{}",
+            other.device_id
+        ))
+        .await;
+    assert_eq!(status.as_u16(), 200);
+    assert_unknown_projection(&other_profile, &[]);
+}
+
+#[tokio::test]
 async fn different_aliases_on_one_physical_node_remain_separate_hosts() {
     let fixture = Fixture::new().await;
     let user = fixture.user(false).await;

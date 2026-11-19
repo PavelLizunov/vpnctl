@@ -178,10 +178,22 @@ async fn project_nodes(
         let country = projection::country_for_node(&server.address, &cached_ips, |ip| {
             state.geo.lookup(ip).and_then(|info| info.country_iso)
         });
+        let dnstt_domain = if detour.is_none() && protocols.iter().any(|pid| pid.0 == "dnstt") {
+            deployed_dnstt_domain(state, server).await
+        } else {
+            None
+        };
+        let node_host = canonical_endpoint_host(&server.address);
         for endpoint_host in endpoints {
+            let domain = if Some(&endpoint_host) == node_host.as_ref() {
+                dnstt_domain.clone()
+            } else {
+                None
+            };
             nodes.push(
                 NodeMetadata::new(endpoint_host, country.clone(), sample.as_ref(), now, ttl)
-                    .with_activity(activity),
+                    .with_activity(activity)
+                    .with_dnstt_domain(domain),
             );
         }
     }
@@ -191,6 +203,30 @@ async fn project_nodes(
         max_age_seconds: ttl,
         nodes,
     })
+}
+
+async fn deployed_dnstt_domain(state: &AppState, server: &Server) -> Option<String> {
+    let inv = &state.inv;
+    let settings = tokio::try_join!(
+        inv.get_server_secret(&server.id, "dnstt.domain"),
+        inv.get_server_secret(&server.id, "dnstt.resolver"),
+        inv.get_server_secret(&server.id, "dnstt.public_key"),
+        inv.get_server_secret(&server.id, "observed.dnstt.applied"),
+    );
+    match settings {
+        Ok((Some(domain), Some(resolver), Some(noise), Some(applied)))
+            if !resolver.is_empty()
+                && !noise.is_empty()
+                && applied == format!("{domain}+{resolver}+{noise}") =>
+        {
+            canonical_endpoint_host(&domain)
+        }
+        Ok(_) => None,
+        Err(_) => {
+            tracing::warn!("Could not read optional DNSTT node metadata");
+            None
+        }
+    }
 }
 
 async fn endpoint_hosts(
