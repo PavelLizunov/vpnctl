@@ -1181,13 +1181,13 @@ fn user_uuid_diff_lists_only_removed_uuids() {
 #[test]
 fn user_uuid_diff_lists_the_pavel_2026_05_19_case() {
     let live = make_config(&[
-        "af6f36aa-2a51-45c7-82dd-5cd362ed970b",
-        "b25684c3-90d6-454a-a911-4e0abba568b0",
+        "f1c70219-0d27-4d9a-a145-0ffa00000e02",
+        "f1c70219-0d27-4d9a-a145-0ffa00000e01",
     ]);
-    let rendered = make_config(&["af6f36aa-2a51-45c7-82dd-5cd362ed970b"]);
+    let rendered = make_config(&["f1c70219-0d27-4d9a-a145-0ffa00000e02"]);
     let lost = user_uuid_diff(&live, &rendered).unwrap();
     assert_eq!(lost.len(), 1);
-    assert!(lost.contains("b25684c3-90d6-454a-a911-4e0abba568b0"));
+    assert!(lost.contains("f1c70219-0d27-4d9a-a145-0ffa00000e01"));
 }
 
 #[test]
