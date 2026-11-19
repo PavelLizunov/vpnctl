@@ -5110,10 +5110,12 @@ version = "0.9.0"
 dependencies = [
  "base64",
  "flate2",
+ "hex",
  "hmac 0.12.1",
  "percent-encoding",
  "serde_json",
  "sha2 0.10.9",
+ "ssh-key",
  "vpnctl-core",
 ]
 

@@ -34,6 +34,25 @@ pub(crate) async fn server_enable_protocol(
     }
 
     if !server.enabled_protocols.contains(&pid) {
+        if pid.0 == "dnstt" {
+            let secrets = match state.inv.list_server_secrets(&sid).await {
+                Ok(secrets) => secrets,
+                Err(error) => return internal_error(anyhow::Error::new(error)),
+            };
+            let ports = match state.inv.get_reserved_ports(&sid).await {
+                Ok(ports) => ports,
+                Err(error) => return internal_error(anyhow::Error::new(error)),
+            };
+            if ports.contains(&53) {
+                return bad_request("UDP/53 is reserved on this server");
+            }
+            if let Some(protocol) = state.registry.protocol(&pid)
+                && let Err(error) =
+                    protocol.validate_server(&vpnctl_core::RenderCtx::new(&server, &secrets))
+            {
+                return bad_request(&error.to_string());
+            }
+        }
         let mut after = server.clone();
         after.enabled_protocols.push(pid.clone());
         if let Some(msg) = super::kernels::unsupported_change(&state.registry, &server, &after) {

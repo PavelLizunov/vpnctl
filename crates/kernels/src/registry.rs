@@ -13,6 +13,7 @@ pub fn build_registry() -> vpnctl_core::Result<Registry> {
     reg.register_kernel(Box::new(AmneziaWg::new()))?;
     reg.register_kernel(Box::new(Caddy::new()))?;
     reg.register_kernel(Box::new(Xray::new()))?;
+    reg.register_kernel(Box::new(crate::DnsttKernel))?;
 
     reg.register_protocol(Box::new(VlessReality::new()))?;
     reg.register_protocol(Box::new(TuicV5::new()))?;
@@ -26,6 +27,7 @@ pub fn build_registry() -> vpnctl_core::Result<Registry> {
     reg.register_protocol(Box::new(Naive::new()))?;
     reg.register_protocol(Box::new(VlessWs::new()))?;
     reg.register_protocol(Box::new(VlessXhttp::new()))?;
+    reg.register_protocol(Box::new(vpnctl_protocols::Dnstt))?;
 
     Ok(reg)
 }
@@ -55,6 +57,7 @@ mod tests {
                 "naive",
                 "vless-ws",
                 "vless+xhttp",
+                "dnstt",
             ]
             .map(String::from)
             .to_vec(),
@@ -62,7 +65,7 @@ mod tests {
         );
         assert_eq!(
             kernels,
-            ["sing-box", "amneziawg", "caddy", "xray"]
+            ["sing-box", "amneziawg", "caddy", "xray", "dnstt"]
                 .map(String::from)
                 .to_vec(),
             "kernel registry membership and output order must stay stable"
@@ -103,7 +106,7 @@ mod tests {
         let registry = build_registry().unwrap();
         let count = registry.protocol_ids().len();
         assert!(readme.contains(&format!("**{count} protocols**")));
-        assert!(readme.contains(&format!("✅ ({count} across 4 kernels)")));
+        assert!(readme.contains(&format!("✅ ({count} across 5 kernels)")));
         for (label, risk) in [
             ("Strong", DpiRisk::Strong),
             ("Moderate", DpiRisk::Moderate),

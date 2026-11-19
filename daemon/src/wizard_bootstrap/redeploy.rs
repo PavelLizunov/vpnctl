@@ -460,7 +460,23 @@ async fn redeploy_pipeline(
             kid.0,
             protocols.len()
         );
-        let config = match kernel.render_config(&ctx, &users, &protocols) {
+        let filtered_users;
+        let deploy_users = if kernel.id().0 == "dnstt" {
+            filtered_users = match inv
+                .users_for_server_protocol(&server.id, &vpnctl_core::ProtocolId("dnstt".into()))
+                .await
+            {
+                Ok(users) => users,
+                Err(e) => {
+                    ssh_errors.push(format!("DNSTT grant lookup failed: {e}"));
+                    continue;
+                }
+            };
+            filtered_users.as_slice()
+        } else {
+            users.as_slice()
+        };
+        let config = match kernel.render_config(&ctx, deploy_users, &protocols) {
             Ok(c) => c,
             Err(e) => {
                 ssh_errors.push(format!("{}: render failed: {e}", kid.0));

@@ -120,13 +120,17 @@ pub(crate) async fn get_config(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let want_raw = is_vpn_client_ua(ua);
-    let has_detour_cap = is_vpnrouter_client_ua(ua)
-        && headers
-            .get_all("X-VPNRouter-Capabilities")
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .flat_map(|s| s.split(',').flat_map(str::split_whitespace))
-            .any(|token| token == "detour-v1");
+    let supports = |capability: &str| {
+        is_vpnrouter_client_ua(ua)
+            && headers
+                .get_all("X-VPNRouter-Capabilities")
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .flat_map(|s| s.split(',').flat_map(str::split_whitespace))
+                .any(|token| token == capability)
+    };
+    let has_detour_cap = supports("detour-v1");
+    let has_dnstt_cap = supports("dnstt-v1");
     let now = now_unix_secs();
 
     let peer_ip: Option<std::net::IpAddr> = request
@@ -220,6 +224,18 @@ pub(crate) async fn get_config(
         ));
     }
 
+    if has_dnstt_cap {
+        let dnstt = vpnctl_core::ProtocolId("dnstt".to_string());
+        uris.extend(collect_extra_protocol_uris(
+            &state,
+            &inputs,
+            &user,
+            &dnstt,
+            "DNSTT",
+            Some("dnstt.applied"),
+        ));
+    }
+
     let Some(config) = make_config_blob(&uris) else {
         return empty_response(want_raw, now);
     };
@@ -260,12 +276,14 @@ pub(crate) async fn get_config(
     );
 
     if want_raw {
-        return (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            config,
-        )
-            .into_response();
+        return config_response(
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                config,
+            )
+                .into_response(),
+        );
     }
 
     let body = AppConfigResponse {
@@ -277,5 +295,18 @@ pub(crate) async fn get_config(
         check_interval: CHECK_INTERVAL_SECS,
         timestamp: now,
     };
-    json_response(&body)
+    config_response(json_response(&body))
+}
+
+fn config_response(mut response: Response) -> Response {
+    use axum::http::HeaderValue;
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    response.headers_mut().append(
+        header::VARY,
+        HeaderValue::from_static("User-Agent, X-VPNRouter-Capabilities"),
+    );
+    response
 }

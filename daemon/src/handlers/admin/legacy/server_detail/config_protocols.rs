@@ -652,3 +652,53 @@ pub(crate) fn server_detail_reserved_ports_section(
         }
     }
 }
+
+pub(crate) fn server_detail_dnstt_section(
+    server: &vpnctl_core::Server,
+    secrets: &HashMap<String, String>,
+    health: Option<&vpnctl_inventory::NodeHealthRow>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    if server.address.parse::<std::net::Ipv4Addr>().is_err() {
+        return html! {};
+    }
+    let domain = secrets.get("dnstt.domain").map_or("", String::as_str);
+    let resolver = secrets.get("dnstt.resolver").map_or("", String::as_str);
+    let noise = secrets.get("dnstt.public_key").map_or("", String::as_str);
+    let applied = secrets
+        .get("dnstt.applied")
+        .is_some_and(|value| value == &format!("{domain}+{resolver}+{noise}"));
+    let enabled = server.enabled_protocols.iter().any(|p| p.0 == "dnstt");
+    let active = health
+        .filter(|row| chrono::Utc::now() - row.ts < chrono::Duration::minutes(30))
+        .and_then(|row| row.kernel_versions_json.as_deref())
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .and_then(|value| value["dnstt"]["active"].as_bool());
+    let state = match (enabled, applied, active) {
+        (false, _, _) => tr(lang, "Disabled", "Выключен"),
+        (true, false, _) => tr(lang, "Pending deploy", "Ожидает развёртывания"),
+        (true, true, Some(true)) => tr(lang, "Services active", "Службы активны"),
+        (true, true, Some(false)) => tr(lang, "Services down", "Службы остановлены"),
+        (true, true, None) => tr(
+            lang,
+            "Applied, awaiting a fresh probe",
+            "Применено, ожидает свежей пробы",
+        ),
+    };
+    let sid = path_segment_encode(&server.id.0);
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow id="dnstt" { "DNSTT + SSH" }
+        p { (state) }
+        form method="post" action=(format!("/admin/servers/{sid}/dnstt-config")) {
+            label { (tr(lang,"Delegated DNS zone","Делегированная DNS-зона")) " "
+                input.ed-field type="text" name="domain" value=(domain) maxlength="100" required;
+            }
+            label { (tr(lang,"UDP DNS resolver IPv4","IPv4 DNS-резолвера по UDP")) " "
+                input.ed-field type="text" name="resolver" value=(resolver) maxlength="15" required;
+            }
+            button.ed-abtn type="submit" { (tr(lang,"Save DNSTT settings","Сохранить настройки DNSTT")) }
+        }
+    }
+}

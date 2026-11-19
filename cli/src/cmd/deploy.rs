@@ -121,7 +121,16 @@ pub(crate) async fn run(
             users.len(),
             protocols_for_k.len()
         );
-        let config = k.render_config(&ctx, &users, &protocols_for_k)?;
+        let filtered_users;
+        let deploy_users = if k.id().0 == "dnstt" {
+            filtered_users = inv
+                .users_for_server_protocol(&sid, &vpnctl_core::ProtocolId("dnstt".into()))
+                .await?;
+            filtered_users.as_slice()
+        } else {
+            users.as_slice()
+        };
+        let config = k.render_config(&ctx, deploy_users, &protocols_for_k)?;
         if k.id().0 == "sing-box" {
             let reserved = inv.get_reserved_ports(&server.id).await?;
             vpnctl_kernels::validate_config_excludes_ports(&config, &reserved)?;

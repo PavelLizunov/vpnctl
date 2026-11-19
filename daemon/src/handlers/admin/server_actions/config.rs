@@ -504,3 +504,59 @@ pub(crate) async fn server_set_reserved_ports(
     ))
     .into_response()
 }
+
+pub(crate) async fn server_set_dnstt_config(
+    Path(server_id): Path<String>,
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id.clone());
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(server)) => server,
+        Ok(None) => return not_found("DNSTT server not found"),
+        Err(error) => return internal_error(anyhow::Error::new(error)),
+    };
+    let Some(protocol) = state
+        .registry
+        .protocol(&vpnctl_core::ProtocolId("dnstt".into()))
+    else {
+        return bad_request("DNSTT is not registered");
+    };
+    let domain = form_field(&body, "domain")
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let resolver = form_field(&body, "resolver")
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let values = [
+        ("dnstt.domain", domain.as_str()),
+        ("dnstt.resolver", resolver.as_str()),
+    ];
+    let mut secrets = match state.inv.list_server_secrets(&sid).await {
+        Ok(secrets) => secrets,
+        Err(error) => return internal_error(anyhow::Error::new(error)),
+    };
+    let changed = values
+        .iter()
+        .any(|(key, value)| secrets.get(*key).map(String::as_str) != Some(*value));
+    secrets.extend(values.map(|(key, value)| (key.to_owned(), value.to_owned())));
+    if let Err(error) = protocol.validate_server(&vpnctl_core::RenderCtx::new(&server, &secrets)) {
+        return bad_request(&error.to_string());
+    }
+    if changed
+        && let Err(error) = state
+            .inv
+            .set_server_secrets_audited(&sid, "admin", "server.dnstt.set", &values)
+            .await
+    {
+        return internal_error(anyhow::Error::new(error));
+    }
+    Redirect::to(&format!(
+        "/admin/servers/{}/protocols#dnstt",
+        path_segment_encode(&server_id)
+    ))
+    .into_response()
+}

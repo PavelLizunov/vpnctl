@@ -917,6 +917,75 @@ async fn users_for_server_excludes_disabled_users() -> Result<()> {
 }
 
 #[tokio::test]
+async fn users_for_server_protocol_applies_only_matching_grant_overrides() -> Result<()> {
+    let inv = fresh().await;
+    let dnstt = ProtocolId("dnstt".into());
+    let tuic = ProtocolId("tuic-v5".into());
+    let mut server = sample_server("srv");
+    server.enabled_protocols.push(dnstt.clone());
+    inv.add_server(&server).await?;
+    let mut other = sample_server("other");
+    other.address = "192.0.2.2".into();
+    other.enabled_protocols.push(dnstt.clone());
+    inv.add_server(&other).await?;
+
+    for id in ["alice", "bob", "carol", "dan"] {
+        inv.add_user(&sample_user(id)).await?;
+        inv.grant(&UserId(id.into()), &server.id).await?;
+    }
+    inv.add_user(&sample_user("erin")).await?;
+    inv.grant(&UserId("erin".into()), &other.id).await?;
+    inv.grant(&UserId("alice".into()), &other.id).await?;
+    inv.set_grant_protocol_override(&UserId("alice".into()), &other.id, &dnstt, true)
+        .await?;
+
+    let bob_uuid = "12345678-1234-1234-1234-123456789abc";
+    inv.set_grant_client_uuid(&UserId("bob".into()), &server.id, bob_uuid)
+        .await?;
+    let carol = UserId("carol".into());
+    inv.set_grant_protocol_override(&carol, &server.id, &dnstt, true)
+        .await?;
+    assert!(inv.set_user_disabled(&UserId("dan".into()), true).await?);
+
+    let identities = |users: Vec<User>| {
+        let mut identities: Vec<_> = users
+            .into_iter()
+            .map(|user| (user.id.0, user.uuid))
+            .collect();
+        identities.sort_unstable();
+        identities
+    };
+    let baseline = identities(inv.users_for_server(&server.id).await?);
+    assert_eq!(
+        baseline,
+        vec![
+            ("alice".to_owned(), "uuid-alice".to_owned()),
+            ("bob".to_owned(), bob_uuid.to_owned()),
+            ("carol".to_owned(), "uuid-carol".to_owned()),
+        ]
+    );
+    assert_eq!(
+        identities(inv.users_for_server_protocol(&server.id, &dnstt).await?),
+        vec![
+            ("alice".to_owned(), "uuid-alice".to_owned()),
+            ("bob".to_owned(), bob_uuid.to_owned()),
+        ]
+    );
+    assert_eq!(
+        identities(inv.users_for_server_protocol(&server.id, &tuic).await?),
+        baseline
+    );
+
+    inv.set_grant_protocol_override(&carol, &server.id, &dnstt, false)
+        .await?;
+    assert_eq!(
+        identities(inv.users_for_server_protocol(&server.id, &dnstt).await?),
+        baseline
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn cascade_delete_user_removes_grants() -> Result<()> {
     let inv = fresh().await;
     inv.add_server(&sample_server("srv")).await?;
