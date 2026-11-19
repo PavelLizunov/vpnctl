@@ -56,7 +56,7 @@ pub(crate) fn collect_vless_uris_for_user(
     let vless_id = vpnctl_core::ProtocolId("vless+reality".to_string());
     for input in inputs {
         let server = &input.server;
-        if input.suppressed || !input.visible.contains(&vless_id) {
+        if (input.suppressed && input.detour_via.is_none()) || !input.visible.contains(&vless_id) {
             continue;
         }
         let detour_via = input.detour_via.clone();

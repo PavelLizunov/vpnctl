@@ -40,6 +40,44 @@ pub(super) struct Fixture {
 }
 
 impl Fixture {
+    pub(super) async fn set_detour(&self, target: &NodeFixture, entry: &NodeFixture) {
+        self.inv
+            .set_client_detour_via_as("test", &target.id, Some(&entry.id))
+            .await
+            .unwrap();
+    }
+
+    pub(super) async fn suppress_direct(&self, node: &NodeFixture) {
+        self.inv
+            .set_server_auto_suppress(&node.id, true)
+            .await
+            .unwrap();
+        let now = chrono::Utc::now();
+        for seconds_ago in [30, 15] {
+            let sample = vpnctl_inventory::ServiceQualitySample {
+                ts: now - chrono::Duration::seconds(seconds_ago),
+                server_id: node.id.clone(),
+                vantage: "fixture measurement network".into(),
+                target_count: 1,
+                available_targets: 0,
+                attempts: 1,
+                successes: 0,
+                tcp_rtt_ms: vec![],
+                control_attempts: 1,
+                control_successes: 1,
+                control_rtt_ms: vec![10],
+                icmp_attempts: None,
+                icmp_successes: None,
+                icmp_rtt_ms: None,
+            };
+            self.inv
+                .record_service_path(&sample, "fixture:tcp-vpn-port", 120)
+                .await
+                .unwrap();
+        }
+        assert!(self.inv.is_server_auto_suppressed(&node.id).await.unwrap());
+    }
+
     pub(super) async fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("metadata-test.db");

@@ -74,19 +74,20 @@ async fn render_singbox_with(
         std::collections::HashMap::new();
 
     for server in &servers {
-        if state
-            .inv
-            .is_server_auto_suppressed(&server.id)
-            .await
-            .unwrap_or(false)
-        {
-            continue;
-        }
         let detour = state
             .inv
             .client_detour_via(&server.id)
             .await
             .map_err(|e| SubError::Internal(format!("inventory: {e}")))?;
+        if detour.is_none()
+            && state
+                .inv
+                .is_server_auto_suppressed(&server.id)
+                .await
+                .map_err(|e| SubError::Internal(format!("inventory: {e}")))?
+        {
+            continue;
+        }
         detours.insert(server.id.clone(), detour);
 
         let secrets = state
@@ -241,7 +242,7 @@ async fn render_singbox_with(
     let mut first_udp_tag_by_server: std::collections::HashMap<ServerId, String> =
         std::collections::HashMap::new();
     for (server_id, value, tag) in &rendered {
-        if !value.is_object() {
+        if !value.is_object() || !matches!(detours.get(server_id), Some(None)) {
             continue;
         }
         first_tag_by_server

@@ -1428,7 +1428,7 @@ async fn current_path_is_scoped_to_tcp_and_persistent_incident_visible() {
     let detail = fetch_html(app.clone(), "/admin/servers/s0").await;
     assert!(detail.contains("current-path-availability"));
     assert!(detail.contains("confirmed outage, recovery not confirmed"));
-    assert!(detail.contains("does not verify a new VPN login"));
+    assert!(detail.contains("A successful check confirms a connection to the port."));
     assert!(detail.contains("First deterioration:"));
 
     let stale_dir = TempDir::new().unwrap();

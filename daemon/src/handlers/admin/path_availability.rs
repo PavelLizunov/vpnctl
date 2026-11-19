@@ -5,7 +5,7 @@ use maud::{Markup, html};
 use vpnctl_inventory::{ServicePathIncident, ServicePathState, ServicePathStatus};
 
 use chrono::{DateTime, Utc};
-use vpnctl_core::{Registry, Server};
+use vpnctl_core::{ProtocolId, Registry, Server};
 use vpnctl_inventory::{AssuranceStage, AssuranceState, ProtocolAssuranceSample};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,27 +16,58 @@ enum Status {
     UdpUnknown,
 }
 
-pub(super) enum Availability {
-    Tcp(Option<ServicePathState>),
-    Udp {
-        total: usize,
-        verified: usize,
-        failed: usize,
-        checked_at: Option<DateTime<Utc>>,
-    },
+pub(super) struct Availability {
+    has_tcp: bool,
+    tcp: Option<ServicePathState>,
+    udp: Option<UdpAvailability>,
 }
 
-fn udp_only(server: &Server, registry: &Registry) -> bool {
-    !server.enabled_protocols.is_empty()
-        && server.enabled_protocols.iter().all(|id| {
-            registry.protocol(id).is_some_and(|protocol| {
-                let ports = protocol.listen_ports();
-                !ports.is_empty()
-                    && ports
-                        .iter()
-                        .all(|(transport, _)| transport.eq_ignore_ascii_case("udp"))
-            })
-        })
+struct UdpAvailability {
+    total: usize,
+    verified: usize,
+    failed: usize,
+    checked_at: Option<DateTime<Utc>>,
+}
+
+impl UdpAvailability {
+    fn status(&self) -> Status {
+        if self.verified > 0 {
+            Status::UdpVerified
+        } else if self.failed > 0 {
+            Status::UdpFailed
+        } else {
+            Status::UdpUnknown
+        }
+    }
+}
+
+struct Transports<'a> {
+    has_tcp: bool,
+    udp_only: Vec<&'a ProtocolId>,
+}
+
+impl<'a> Transports<'a> {
+    fn for_server(server: &'a Server, registry: &Registry) -> Self {
+        let mut transports = Self {
+            has_tcp: server.enabled_protocols.is_empty(),
+            udp_only: Vec::new(),
+        };
+        for id in &server.enabled_protocols {
+            let ports = registry
+                .protocol(id)
+                .map_or(&[][..], |protocol| protocol.listen_ports());
+            let is_udp = |(transport, _): &(&str, u16)| transport.eq_ignore_ascii_case("udp");
+            let has_udp = ports.iter().any(is_udp);
+            let udp_only = has_udp && ports.iter().all(is_udp);
+            transports.has_tcp |= !udp_only;
+            // Assurance samples identify the protocol. UDP transport is unambiguous
+            // only for protocols whose listeners are all UDP.
+            if udp_only {
+                transports.udp_only.push(id);
+            }
+        }
+        transports
+    }
 }
 
 pub(super) fn with_observations(
@@ -46,25 +77,43 @@ pub(super) fn with_observations(
     assurance: &[ProtocolAssuranceSample],
     now: DateTime<Utc>,
 ) -> Availability {
-    if udp_only(server, registry) {
-        udp_availability(server, assurance, now)
-    } else {
-        Availability::Tcp(tcp)
+    observations(
+        &Transports::for_server(server, registry),
+        server,
+        tcp,
+        assurance,
+        now,
+    )
+}
+
+fn observations(
+    transports: &Transports<'_>,
+    server: &Server,
+    tcp: Option<ServicePathState>,
+    assurance: &[ProtocolAssuranceSample],
+    now: DateTime<Utc>,
+) -> Availability {
+    Availability {
+        has_tcp: transports.has_tcp,
+        tcp,
+        udp: (!transports.udp_only.is_empty())
+            .then(|| udp_availability(server, &transports.udp_only, assurance, now)),
     }
 }
 
 fn udp_availability(
     server: &Server,
+    attributable_protocols: &[&ProtocolId],
     assurance: &[ProtocolAssuranceSample],
     now: DateTime<Utc>,
-) -> Availability {
+) -> UdpAvailability {
     let max_age = crate::protocol_assurance_poller::status_max_age();
     let mut verified = 0;
     let mut failed = 0;
     let mut checked_at = None;
     for row in assurance.iter().filter(|row| {
         row.server_id == server.id
-            && server.enabled_protocols.contains(&row.protocol_id)
+            && attributable_protocols.contains(&&row.protocol_id)
             && now
                 .signed_duration_since(row.ts)
                 .to_std()
@@ -80,8 +129,8 @@ fn udp_availability(
         }
         checked_at = checked_at.max(Some(row.ts));
     }
-    Availability::Udp {
-        total: server.enabled_protocols.len(),
+    UdpAvailability {
+        total: attributable_protocols.len(),
         verified,
         failed,
         checked_at,
@@ -93,41 +142,57 @@ pub(super) async fn load(
     server: &Server,
     now: DateTime<Utc>,
 ) -> Availability {
-    if udp_only(server, &state.registry) {
-        let assurance = state
-            .inv
-            .latest_protocol_assurance_for_server(&server.id)
-            .await;
-        match assurance {
-            Ok(rows) => udp_availability(server, &rows, now),
-            Err(error) => {
-                tracing::warn!(target = "vpnctld::admin", server = %server.id, %error, "UDP assurance query failed");
-                udp_availability(server, &[], now)
-            }
+    let transports = Transports::for_server(server, &state.registry);
+    let tcp = async {
+        if !transports.has_tcp {
+            return None;
         }
-    } else {
-        let tcp = state
+        state
             .inv
             .current_service_path(&server.id, now, crate::quality_poller::path_max_age_secs())
-            .await;
-        match tcp {
-            Ok(path) => Availability::Tcp(path),
-            Err(error) => {
+            .await
+            .unwrap_or_else(|error| {
                 tracing::warn!(target = "vpnctld::admin", server = %server.id, %error, "current path query failed");
-                Availability::Tcp(None)
-            }
+                None
+            })
+    };
+    let assurance = async {
+        if transports.udp_only.is_empty() {
+            return Vec::new();
         }
-    }
+        state
+            .inv
+            .latest_protocol_assurance_for_server(&server.id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(target = "vpnctld::admin", server = %server.id, %error, "UDP assurance query failed");
+                Vec::new()
+            })
+    };
+    let (tcp, assurance) = tokio::join!(tcp, assurance);
+    observations(&transports, server, tcp, &assurance, now)
 }
 
-fn path_status(observation: Option<&Availability>) -> Status {
-    match observation {
-        Some(Availability::Udp { verified, .. }) if *verified > 0 => Status::UdpVerified,
-        Some(Availability::Udp { failed, .. }) if *failed > 0 => Status::UdpFailed,
-        Some(Availability::Udp { .. }) => Status::UdpUnknown,
-        Some(Availability::Tcp(Some(state))) => Status::Tcp(state.status),
-        Some(Availability::Tcp(None)) | None => Status::Tcp(ServicePathStatus::Unknown),
+fn tcp_status(observation: Option<&Availability>) -> Option<Status> {
+    if observation.is_some_and(|record| !record.has_tcp) {
+        return None;
     }
+    Some(Status::Tcp(
+        observation
+            .and_then(|record| record.tcp.as_ref())
+            .map_or(ServicePathStatus::Unknown, |path| path.status),
+    ))
+}
+
+fn attention_status(observation: Option<&Availability>) -> Option<Status> {
+    tcp_status(observation)
+        .filter(|status| *status != Status::Tcp(ServicePathStatus::Available))
+        .or_else(|| {
+            observation
+                .and_then(|record| record.udp.as_ref())
+                .filter(|udp| udp.verified < udp.total)
+                .map(UdpAvailability::status)
+        })
 }
 
 fn status_label(status: Status, lang: Locale) -> (&'static str, &'static str, &'static str) {
@@ -140,7 +205,7 @@ fn status_label(status: Status, lang: Locale) -> (&'static str, &'static str, &'
         ),
         Status::Tcp(Degraded) => (
             "degraded",
-            tr(lang, "Deterioration", "Ухудшение"),
+            tr(lang, "TCP deterioration", "Ухудшение TCP"),
             "var(--acc)",
         ),
         Status::Tcp(Unreachable) => (
@@ -150,12 +215,12 @@ fn status_label(status: Status, lang: Locale) -> (&'static str, &'static str, &'
         ),
         Status::Tcp(Recovering) => (
             "recovering",
-            tr(lang, "Recovering", "Восстанавливается"),
+            tr(lang, "TCP recovering", "TCP восстанавливается"),
             "var(--mute)",
         ),
         Status::Tcp(Unknown) => (
             "unknown",
-            tr(lang, "Unknown / stale", "Нет свежих данных"),
+            tr(lang, "TCP · Unknown / stale", "TCP · Нет свежих данных"),
             "var(--mute)",
         ),
         Status::UdpVerified => (
@@ -181,32 +246,42 @@ fn status_label(status: Status, lang: Locale) -> (&'static str, &'static str, &'
 }
 
 pub(super) fn status_badge(observation: Option<&Availability>, lang: Locale) -> Markup {
-    let (code, label, color) = status_label(path_status(observation), lang);
     html! {
-        span data-path-status=(code) style=(format!("color: {color};")) { (label) }
-        @match observation {
-            Some(Availability::Tcp(Some(state))) => {
+        @if let Some(status) = tcp_status(observation) {
+            @let (code, label, color) = status_label(status, lang);
+            span data-path-transport="tcp" data-path-status=(code) style=(format!("color: {color};")) { (label) }
+            @if let Some(state) = observation.and_then(|record| record.tcp.as_ref()) {
                 small.ed-grid__mut style="display:block;" {
                     (state.vantage) " · " (format_msk_iso(state.checked_at))
                 }
             }
-            Some(Availability::Udp { verified, total, failed, checked_at: Some(at) }) => {
-                @let coverage = match lang {
-                    Locale::En => format!("{verified}/{total} verified"),
-                    Locale::Ru => format!("Проверено {verified} из {total}"),
-                };
+        }
+        @if let Some(udp) = observation.and_then(|record| record.udp.as_ref()) {
+            @let (code, label, color) = status_label(udp.status(), lang);
+            span data-path-transport="udp" data-path-status=(code) style=(format!("display:block;color: {color};")) { (label) }
+            @if let Some(at) = udp.checked_at {
+                @let UdpAvailability { verified, total, failed, .. } = *udp;
+                @let unknown = total.saturating_sub(verified + failed);
                 small.ed-grid__mut style="display:block;" {
-                    (coverage)
-                    @if *failed > 0 {
+                    (match lang {
+                        Locale::En => format!("{verified}/{total} verified"),
+                        Locale::Ru => format!("Проверено {verified} из {total}"),
+                    })
+                    @if failed > 0 {
                         " · " (match lang {
                             Locale::En => format!("{failed} failed"),
-                            Locale::Ru => format!("Ошибок: {failed}"),
+                            Locale::Ru => format!("{failed} с ошибкой"),
                         })
                     }
-                    " · " (format_msk_iso(*at))
+                    @if unknown > 0 {
+                        " · " (match lang {
+                            Locale::En => format!("{unknown} unverified"),
+                            Locale::Ru => format!("{unknown} без подтверждения"),
+                        })
+                    }
+                    " · " (format_msk_iso(at))
                 }
             }
-            _ => {}
         }
     }
 }
@@ -227,14 +302,22 @@ pub(super) fn fleet_summary(
         Status::Tcp(ServicePathStatus::Available),
         Status::UdpVerified,
     ];
-    let state_for = |server: &vpnctl_core::Server| path_status(paths.get(&server.id));
+    let has_status = |server: &Server, status: Status| {
+        let path = paths.get(&server.id);
+        match status {
+            Status::Tcp(_) => tcp_status(path) == Some(status),
+            _ => path
+                .and_then(|record| record.udp.as_ref())
+                .is_some_and(|udp| udp.status() == status),
+        }
+    };
     html! {
         section #fleet-current-path style="margin-top:18px;" {
             h2 { (tr(lang, "Availability now", "Доступность сейчас")) }
             p.ed-grid__mut {
                 (tr(lang,
-                    "TCP results show port reachability. Two failed rounds confirm an outage. Two successful rounds confirm recovery. UDP-only servers show results from external VPN client tests.",
-                    "Для TCP показана доступность портов. Два неудачных раунда подтверждают отказ. Два успешных раунда подтверждают восстановление. Для серверов только с UDP-протоколами показаны результаты внешних подключений к VPN."))
+                    "TCP results show port reachability. Two failed rounds confirm an outage. Two successful rounds confirm recovery. UDP results come from external VPN client tests. Counts are per transport.",
+                    "Для TCP показана доступность портов. Два неудачных раунда подтверждают отказ. Два успешных раунда подтверждают восстановление. Для UDP показаны результаты внешних проверок VPN. Счётчики ведутся отдельно по каждому транспорту."))
             }
             @if servers.is_empty() {
                 p {
@@ -245,7 +328,7 @@ pub(super) fn fleet_summary(
                 div style="display:flex;flex-wrap:wrap;gap:8px 20px;" {
                     @for status in statuses {
                         @let (code, label, color) = status_label(status, lang);
-                        @let count = servers.iter().filter(|s| state_for(s) == status).count();
+                        @let count = servers.iter().filter(|s| has_status(s, status)).count();
                         @if matches!(status, Status::Tcp(_)) || count > 0 {
                             span data-path-count=(code) style=(format!("color:{color};")) {
                                 (label) ": " b { (count) }
@@ -254,11 +337,8 @@ pub(super) fn fleet_summary(
                     }
                 }
                 div style="display:flex;flex-wrap:wrap;gap:12px 24px;margin-top:12px;" {
-                    @for status in statuses.into_iter().filter(|s| *s != Status::Tcp(ServicePathStatus::Available)) {
-                        @for server in servers.iter().filter(|s| {
-                            state_for(s) == status
-                                && !matches!(paths.get(&s.id), Some(Availability::Udp { total, verified, .. }) if total == verified)
-                        }) {
+                    @for status in statuses {
+                        @for server in servers.iter().filter(|s| attention_status(paths.get(&s.id)) == Some(status)) {
                             div data-path-server=(server.id.0) {
                                 a.ed-grid__id href=(format!("/admin/servers/{}/status#current-path-availability", path_segment_encode(&server.id.0))) {
                                     (crate::handlers::admin::helpers::named_server(&server.id, names))
@@ -283,7 +363,7 @@ pub(super) fn detail_section(
         section #current-path-availability style="margin-bottom:24px;" {
             h2 { (tr(lang, "Current path availability", "Доступность сейчас")) }
             (status_badge(current, lang))
-            @if matches!(current, Some(Availability::Udp { .. })) {
+            @if current.is_some_and(|record| record.udp.is_some()) {
                 p.ed-grid__mut {
                     (tr(lang,
                         "An external VPN client confirms a protocol by transferring data through the tunnel. See the result for each protocol.",
@@ -293,17 +373,18 @@ pub(super) fn detail_section(
                         (tr(lang, "Protocol checks", "Проверка протоколов"))
                     }
                 }
-            } @else {
+            }
+            @if tcp_status(current).is_some() {
                 p.ed-grid__mut {
                     (tr(lang,
-                        "TCP VPN ports from the named measurement network. This does not verify a new VPN login, UDP protocols or accessibility from every user's network. Node health and protocol tests are shown separately below.",
-                        "TCP-порты VPN из указанной сети проверки. Это не проверка нового входа в VPN, UDP-протоколов или доступа из сетей всех пользователей. Состояние узла и проверки протоколов показаны ниже.",
+                        "TCP VPN ports are checked from the named measurement network. A successful check confirms a connection to the port. Node health and protocol tests appear below.",
+                        "TCP-порты VPN проверяются из указанной сети. Успешная проверка подтверждает соединение с портом. Состояние узла и проверки протоколов показаны ниже.",
                     ))
                 }
                 p.ed-grid__mut {
                     (tr(lang,
-                        "Two failed rounds confirm an outage. Two successful rounds confirm recovery. With auto-suppress enabled, confirmed outages hide the server from subscriptions until recovery.",
-                        "Два неудачных раунда подтверждают отказ. Два успешных раунда подтверждают восстановление. При включённом авто-скрытии подтверждённый отказ убирает сервер из подписок до восстановления.",
+                        "Two failed rounds confirm an outage. Two successful rounds confirm recovery. With auto-suppress enabled, confirmed outages hide direct routes from subscriptions until recovery.",
+                        "Два неудачных раунда подтверждают отказ. Два успешных раунда подтверждают восстановление. При включённом автоскрытии подтверждённый отказ убирает прямые маршруты из подписок до восстановления.",
                     ))
                 }
             }
@@ -400,7 +481,7 @@ mod tests {
     fn unknown_and_tcp_scope_never_claim_full_vpn_readiness() {
         let page = detail_section(None, None, false, Locale::En).into_string();
         assert!(page.contains("Unknown / stale"));
-        assert!(page.contains("does not verify a new VPN login"));
+        assert!(page.contains("A successful check confirms a connection to the port"));
         assert!(page.contains("could not be loaded"));
     }
 
