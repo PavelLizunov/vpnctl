@@ -8,7 +8,7 @@ WHO does what + HOW MUCH TIME each layer costs.
 **Why this exists.** Adding a VPN protocol to a Rust workspace looks
 small in code (one file, ~200 LOC, copy-paste from a sibling). The
 real cost is **proving it works** — handshake against a real client,
-survives DPI, survives 24h of traffic. The registry now ships 12 protocols;
+survives DPI, survives 24h of traffic. The registry now ships 13 protocols;
 this is what verification takes per protocol, distilled.
 
 ---
@@ -217,6 +217,7 @@ DPI tiers mirror each implementation's `dpi_risk()`.
 
 | Protocol / candidate | Wire | DPI tier | Use case | Status in vpnctl | Kernel / recommendation |
 |---|---|---|---|---|---|
+| `dnstt` | TCP over UDP DNS | Weak | Reserve access | ✅ shipped | `dnstt`; managed SSH |
 | `vless+reality` | TCP | Strong | Censorship-circumvention primary | ✅ shipped | `sing-box`; default |
 | `tuic-v5` | UDP | Moderate | Low-latency UDP-friendly net | ✅ shipped | `sing-box`; secondary |
 | `hysteria2` | UDP/QUIC | Weak | LTE/satellite; optional Salamander and Realm | ✅ shipped | `sing-box`; validate Realm across distinct networks |

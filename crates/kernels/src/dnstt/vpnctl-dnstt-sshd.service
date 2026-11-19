@@ -1,0 +1,16 @@
+[Unit]
+Description=vpnctl DNSTT SSH forwarding
+After=network.target
+
+[Service]
+Type=exec
+RuntimeDirectory=vpnctl-dnstt-ssh
+ExecStartPre=/usr/local/libexec/vpnctl-dnstt/egress-init
+ExecStartPre=/usr/sbin/sshd -t -f /etc/vpnctl-dnstt/sshd_config
+ExecStart=/usr/sbin/sshd -D -e -f /etc/vpnctl-dnstt/sshd_config
+Restart=on-failure
+RestartSec=3s
+MemoryMax=96M
+
+[Install]
+WantedBy=multi-user.target

@@ -113,7 +113,16 @@ pub(crate) async fn render_server_configs<W1: Write, W2: Write>(
     }
 
     writeln!(stderr, "# === kernel: {target_kid} ===")?;
-    let bytes = kernel.render_config(&ctx, &users, &protocols)?;
+    let filtered_users;
+    let deploy_users = if kernel.id().0 == "dnstt" {
+        filtered_users = inv
+            .users_for_server_protocol(sid, &vpnctl_core::ProtocolId("dnstt".into()))
+            .await?;
+        filtered_users.as_slice()
+    } else {
+        users.as_slice()
+    };
+    let bytes = kernel.render_config(&ctx, deploy_users, &protocols)?;
     stdout.write_all(&bytes)?;
     if !bytes.ends_with(b"\n") {
         writeln!(stdout)?;

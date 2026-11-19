@@ -176,7 +176,24 @@ async fn server_deploy_locked(
                 ssh_errors.push(format!("{}: ensure_installed failed: {e}", kid.0));
                 continue;
             };
-            let config = match kernel.render_config(&ctx, &users, &protocols) {
+            let filtered_users;
+            let deploy_users = if kernel.id().0 == "dnstt" {
+                filtered_users = match state
+                    .inv
+                    .users_for_server_protocol(&sid, &vpnctl_core::ProtocolId("dnstt".into()))
+                    .await
+                {
+                    Ok(users) => users,
+                    Err(e) => {
+                        ssh_errors.push(format!("DNSTT grant lookup failed: {e}"));
+                        continue;
+                    }
+                };
+                filtered_users.as_slice()
+            } else {
+                users.as_slice()
+            };
+            let config = match kernel.render_config(&ctx, deploy_users, &protocols) {
                 Ok(c) => c,
                 Err(e) => {
                     ssh_errors.push(format!("{}: render failed: {e}", kid.0));

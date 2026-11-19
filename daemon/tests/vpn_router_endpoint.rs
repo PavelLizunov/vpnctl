@@ -7,5 +7,7 @@ mod common;
 mod client_detour_capability;
 #[path = "vpn_router_endpoint/core_http.rs"]
 mod core_http;
+#[path = "vpn_router_endpoint/dnstt.rs"]
+mod dnstt;
 #[path = "vpn_router_endpoint/protocols.rs"]
 mod protocols;

@@ -4,7 +4,7 @@ use crate::sqlite::users::crud::row_to_user;
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 use std::collections::HashMap;
-use vpnctl_core::{Server, ServerId, User, UserId};
+use vpnctl_core::{ProtocolId, Server, ServerId, User, UserId};
 
 pub(super) async fn find_effective_uuid_conflict<'e, E>(
     executor: E,
@@ -235,15 +235,37 @@ impl SqliteInventory {
     }
 
     pub async fn users_for_server(&self, server: &ServerId) -> Result<Vec<User>> {
+        self.users_for_server_filtered(server, None).await
+    }
+
+    pub async fn users_for_server_protocol(
+        &self,
+        server: &ServerId,
+        protocol: &ProtocolId,
+    ) -> Result<Vec<User>> {
+        self.users_for_server_filtered(server, Some(protocol)).await
+    }
+
+    async fn users_for_server_filtered(
+        &self,
+        server: &ServerId,
+        protocol: Option<&ProtocolId>,
+    ) -> Result<Vec<User>> {
         let rows = sqlx::query(
             "SELECT u.id, COALESCE(g.client_uuid, u.uuid) AS uuid, u.tuic_password, u.wireguard_pubkey, u.wireguard_private, u.sub_token, u.vpn_router_device_id, u.disabled
              FROM users u
              INNER JOIN grants g ON g.user_id = u.id
              WHERE g.server_id = ?1
                AND u.disabled = 0
+               AND (?2 IS NULL OR NOT EXISTS (
+                   SELECT 1 FROM grant_protocol_overrides gpo
+                   WHERE gpo.server_id = g.server_id AND gpo.user_id = u.id
+                     AND gpo.protocol_id = ?2 AND gpo.state = 'disabled'
+               ))
              ORDER BY u.id",
         )
         .bind(&server.0)
+        .bind(protocol.map(|value| value.0.as_str()))
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(row_to_user).collect()

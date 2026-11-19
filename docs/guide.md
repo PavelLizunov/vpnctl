@@ -37,7 +37,7 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 
 | Aspect | Value |
 |---|---|
-| Protocols × Kernels | **12 protocols** × **4 kernels**, fully orthogonal (see [Architecture](#architecture)) |
+| Protocols × Kernels | **13 protocols** × **5 kernels**, fully orthogonal (see [Architecture](#architecture)) |
 | Inventory | SQLite via `sqlx`, audit-on-mutation |
 | Toolchain | Rust **1.89+**, edition **2024** · static musl Linux x86_64 binaries (`x86_64-unknown-linux-musl`) |
 
@@ -51,7 +51,7 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 | `vpnctld` daemon — REST API + `/sub/<token>` + Admin UI + per-IP rate-limit + persistent bans | ✅ |
 | Inventory — sqlx + SQLite, migrations, audit_log, retention scheduler | ✅ |
 | Kernels — `sing-box`, `amneziawg`, `caddy` (naive / vless-ws cover site), `xray` | ✅ |
-| Protocols — `vless+reality`, `tuic-v5`, `hysteria2`, `shadowsocks-2022`, `wireguard`, `amneziawg2`, `amneziawg3`, `anytls`, `trojan`, `naive`, `vless-ws`, `vless+xhttp` | ✅ (12 across 4 kernels) |
+| Protocols — `vless+reality`, `tuic-v5`, `hysteria2`, `shadowsocks-2022`, `wireguard`, `amneziawg2`, `amneziawg3`, `anytls`, `trojan`, `naive`, `vless-ws`, `vless+xhttp`, `dnstt` | ✅ (13 across 5 kernels) |
 | Hosters — DigitalOcean / Cloudzy / Generic (SSH port quirks) | ✅ |
 | Add-server **wizard** (Phase E) — paste IP+root password, SSE-streamed bootstrap | ✅ |
 | Backups — [hourly SQLite snapshots and daily encrypted DR bundles](specs/backup-restore.md), restore CLI/web self-test + CI-protected byte-equality (`restore_e2e`) + in-product Disaster Recovery section | ✅ |
@@ -59,7 +59,7 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 | Chain-capable subscriptions — stock sing-box JSON plus capability-gated VPNRouter app-config metadata, both with fail-closed entry filtering | ✅ |
 | Boosty subscription bridge — optionally auto-creates complete users for new eligible paid subscribers, grants current VPN-exit servers at creation, preserves existing users’ grants, and supports a configurable disable grace period | ✅ |
 | Protocol visibility — per-(server, protocol) hide + per-(user, server, protocol) deny with OR-semantics | ✅ |
-| DPI-risk tiers — Strong: `naive`, `vless+reality`, `vless+xhttp`, `vless-ws`; Moderate: `amneziawg2`, `amneziawg3`, `anytls`, `tuic-v5`; Weak: `hysteria2`, `shadowsocks-2022`, `trojan`, `wireguard` | ✅ |
+| DPI-risk tiers — Strong: `naive`, `vless+reality`, `vless+xhttp`, `vless-ws`; Moderate: `amneziawg2`, `amneziawg3`, `anytls`, `tuic-v5`; Weak: `dnstt`, `hysteria2`, `shadowsocks-2022`, `trojan`, `wireguard` | ✅ |
 | Monitoring — 24h sub-fetch sparkline + heavy-users heatmap + filtered `/admin/sharing` risk page + per-user UA fingerprint heuristic | ✅ |
 | Traffic accounting — cumulative per-user sing-box V2Ray Stats (Clash for live metadata; AmneziaWG independent) | ✅ |
 | Audit timeline — paginated + filtered + CSV export | ✅ |

@@ -5,26 +5,26 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 523 (336 prod / 187 test)
-- **Total Rust LOC:** 192,603 (100,970 prod / 91,633 test)
+- **Tracked Rust Files:** 527 (338 prod / 189 test)
+- **Total Rust LOC:** 194,041 (101,780 prod / 92,261 test)
 - **Database Migrations:** 76
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 148
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 149
 
 ## Workspace Crates & Targets
 
 | Crate | Path | Version | Targets | Prod LOC (Files) | Test LOC (Files) | Total LOC |
 |---|---|---|---|---|---|---|
-| `vpnctl` | `cli` | 0.9.0 | bin, 2 tests | 6,377 (20) | 1,586 (3) | **7,963** |
+| `vpnctl` | `cli` | 0.9.0 | bin, 2 tests | 6,395 (20) | 1,586 (3) | **7,981** |
 | `vpnctl-boosty-bridge` | `crates/boosty-bridge` | 0.9.0 | lib, 2 tests | 1,494 (6) | 1,345 (2) | **2,839** |
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,419 (13) | 0 (0) | **1,419** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 318 (1) | 125 (1) | **443** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 193 (1) | 454 (2) | **647** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 59 tests | 18,705 (64) | 27,430 (65) | **46,135** |
-| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 6,753 (14) | 1,554 (6) | **8,307** |
-| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,236 (20) | 4,817 (12) | **9,053** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 59 tests | 18,852 (64) | 27,430 (65) | **46,282** |
+| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 6,991 (15) | 1,554 (6) | **8,545** |
+| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,436 (21) | 4,817 (12) | **9,253** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,825 (5) | 1,191 (5) | **4,016** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 29 tests | 58,650 (192) | 53,131 (91) | **111,781** |
-| **Total** | | | | **100,970 (336)** | **91,633 (187)** | **192,603** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 29 tests | 58,857 (192) | 53,759 (93) | **112,616** |
+| **Total** | | | | **101,780 (338)** | **92,261 (189)** | **194,041** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -33,8 +33,8 @@
 | `daemon/tests/admin_smoke/settings_integrations.rs` | 2,575 | `daemon` | Test |
 | `crates/inventory/tests/spec_corp_policy.rs` | 2,574 | `crates/inventory` | Test |
 | `daemon/tests/spec_corp_policy_http.rs` | 2,338 | `daemon` | Test |
+| `crates/inventory/src/sqlite/tests.rs` | 2,065 | `crates/inventory` | Prod |
 | `daemon/tests/spec_corp_operator.rs` | 2,057 | `daemon` | Test |
-| `crates/inventory/src/sqlite/tests.rs` | 1,948 | `crates/inventory` | Prod |
 | `daemon/src/health_monitor/tests.rs` | 1,845 | `daemon` | Prod |
 | `crates/kernels/src/caddy/tests.rs` | 1,800 | `crates/kernels` | Prod |
 | `vendor/sqlx-sqlite/src/connection/explain.rs` | 1,779 | `other` | Prod |
@@ -137,7 +137,7 @@
 | `0075` | corp companies | `crates/inventory/migrations/0075_corp_companies.sql` | 97 |
 | `0076` | server security reports | `crates/inventory/migrations/0076_server_security_reports.sql` | 6 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (148)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (149)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -201,6 +201,7 @@
 | `POST` | `/admin/servers/{id}/deploy` | `admin::server_deploy` |
 | `GET` | `/admin/servers/{id}/deploy/sse` | `admin::server_deploy_sse` |
 | `POST` | `/admin/servers/{id}/display-name` | `admin::server_set_display_name` |
+| `POST` | `/admin/servers/{id}/dnstt-config` | `admin::server_set_dnstt_config` |
 | `GET` | `/admin/servers/{id}/grants` | `admin::server_detail_grants_tab` |
 | `POST` | `/admin/servers/{id}/grants` | `admin::server_grant_user_form` |
 | `POST` | `/admin/servers/{id}/grants/_grant-all` | `admin::server_grant_all_users` |

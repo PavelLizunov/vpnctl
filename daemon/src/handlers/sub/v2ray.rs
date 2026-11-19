@@ -66,7 +66,7 @@ pub(super) async fn render_v2ray_subscription(
         let visible_set: std::collections::HashSet<&vpnctl_core::ProtocolId> =
             visible_protocols.iter().collect();
         for pid in &server.enabled_protocols {
-            if !visible_set.contains(pid) {
+            if pid.0 == "dnstt" || !visible_set.contains(pid) {
                 continue;
             }
             let Some(proto) = state.registry.protocol(pid) else {

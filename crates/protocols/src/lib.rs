@@ -1,5 +1,6 @@
 mod amneziawg;
 mod anytls;
+mod dnstt;
 mod encoding;
 mod hysteria2;
 mod naive;
@@ -16,6 +17,7 @@ pub use amneziawg::{
     AmneziaWg2, AmneziaWg3, awg2_share_link, awg3_share_link, render_amnezia_conf,
 };
 pub use anytls::{ANYTLS_PORT, AnyTls};
+pub use dnstt::Dnstt;
 pub use hysteria2::Hysteria2;
 pub use naive::{NAIVE_PORT, Naive};
 pub use shadowsocks2022::{SS_2022_PORT, Shadowsocks2022};

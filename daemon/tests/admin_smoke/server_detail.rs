@@ -1,3 +1,5 @@
+#[path = "server_detail/dnstt_settings.rs"]
+mod dnstt_settings;
 #[path = "server_detail/drift_traffic.rs"]
 mod drift_traffic;
 #[path = "server_detail/kernels.rs"]
