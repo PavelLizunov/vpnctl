@@ -14,6 +14,8 @@ pub(super) struct NodesResponse {
 #[derive(Serialize)]
 pub(super) struct NodeMetadata {
     endpoint_host: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dnstt_domain: Option<String>,
     country_iso: Option<String>,
     memory_total_mib: Option<u64>,
     memory_available_mib: Option<u64>,
@@ -41,6 +43,7 @@ impl NodeMetadata {
             .and_then(|age| u64::try_from(age).ok());
         Self {
             endpoint_host,
+            dnstt_domain: None,
             country_iso,
             memory_total_mib: memory.map(|(total, _)| total),
             memory_available_mib: memory.map(|(_, available)| available),
@@ -54,6 +57,11 @@ impl NodeMetadata {
                 None => "unknown",
             },
         }
+    }
+
+    pub(super) fn with_dnstt_domain(mut self, domain: Option<String>) -> Self {
+        self.dnstt_domain = domain;
+        self
     }
 
     pub(super) fn with_activity(mut self, bytes: Option<u64>) -> Self {

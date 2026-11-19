@@ -19,10 +19,10 @@ No admin credential in a client. No fleet, peer, private-key, SSH or employee da
   429 + Retry-After when throttled. Token budget is 60 requests/minute per identity; the 61st immediate request is 429, while a distinct identity has its own budget. IP attempts are also bounded without persistent state. Trace only matched route templates; no secrets.
 - All responses have no-store/nosniff/no-referrer headers. Success JSON:
   `{"schema":1,"generated_at":UNIX_SECONDS,"max_age_seconds":TTL,"nodes":[...]}`.
-- Each node has ONLY `endpoint_host`, `country_iso`, `memory_total_mib`,
+- Each node has `endpoint_host`, `country_iso`, `memory_total_mib`,
   `memory_available_mib`, `load_1min_x100`, `observed_at`, `age_seconds`, `freshness`,
-  and the additive `activity_level` described below.
-  Optional data is JSON null, never zero as a stand-in for absent data. Country
+  the `activity_level` described below, and may include `dnstt_domain`. The
+  domain is omitted when unavailable. Other optional data is JSON null. Country
   is uppercase ISO alpha-2 from existing local AppState.geo lookup of the node
   IP, or existing cached resolved IPs for a hostname. Conflicting/missing cached
   countries mean null. No outbound lookup or use of provider names/access logs.
@@ -30,6 +30,10 @@ No admin credential in a client. No fleet, peer, private-key, SSH or employee da
   existing protocol enable/visibility/override policy. Never include another
   user's grants, hidden nodes, peers or audit rows. Match endpoints to issued
   host semantics, not display labels. Explicit DTO fields prevent extra leakage.
+  For an eligible direct DNSTT node, its canonical node-address row also includes
+  an optional `dnstt_domain` with the deployed DNS domain. Clients match DNSTT
+  rows through this field and ignore ambiguous domains. The recursive resolver
+  and ordinary endpoint aliases belong to separate lookups.
 - Use existing latest node_health data. Valid memory has total>0, 0<=available
   <=total; invalid/missing pair becomes null. Load outside 0..u32::MAX becomes null (existing inventory typed range). The
   value is Unix load average times100, NOT CPU percentage. Do not invent CPU%.
