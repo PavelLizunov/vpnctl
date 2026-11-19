@@ -5,7 +5,7 @@ use qrcode::render::unicode;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use vpnctl_core::{ProtocolId, Registry, RenderCtx, Server, User, UserId};
+use vpnctl_core::{CoreError, ProtocolId, Registry, RenderCtx, Server, User, UserId};
 use vpnctl_inventory::SqliteInventory;
 
 #[derive(Serialize)]
@@ -138,9 +138,11 @@ async fn collect_links(
             let proto = registry
                 .protocol(pid)
                 .ok_or_else(|| anyhow::anyhow!("protocol '{pid}' not registered"))?;
-            let link = proto
-                .share_link(&ctx, &per_server_user)
-                .with_context(|| format!("cannot build link for {}/{}", server.id.0, pid.0))?;
+            let link = match proto.share_link(&ctx, &per_server_user) {
+                Err(CoreError::ShareLinkUnavailable(_)) => continue,
+                result => result
+                    .with_context(|| format!("cannot build link for {}/{}", server.id.0, pid.0))?,
+            };
             entries.push(LinkEntry {
                 server: server.id.0.clone(),
                 protocol: pid.0.clone(),
@@ -260,6 +262,31 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.to_string().contains("not registered"));
+    }
+
+    #[tokio::test]
+    async fn uri_export_omits_unavailable_protocols_and_keeps_other_links() {
+        let (_dir, inv) = setup().await;
+        let sid = ServerId("de".into());
+        inv.add_server_protocol(&sid, &ProtocolId("hysteria2".into()))
+            .await
+            .unwrap();
+        inv.set_server_secret(&sid, "vless.public_key", "fixture-public-key")
+            .await
+            .unwrap();
+        inv.set_server_secret(&sid, "vless.short_id", "12345678")
+            .await
+            .unwrap();
+        let user = inv
+            .get_user(&UserId("alice".into()))
+            .await
+            .unwrap()
+            .unwrap();
+        let registry = crate::registry::build().unwrap();
+        let links = collect_links(&inv, &registry, &user, false).await.unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].protocol, "vless+reality");
+        assert!(links[0].link.starts_with("vless://"));
     }
 
     #[tokio::test]

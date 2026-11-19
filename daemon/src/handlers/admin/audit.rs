@@ -43,6 +43,9 @@ pub(crate) fn redact_audit_payload(payload: &serde_json::Value) -> serde_json::V
         serde_json::Value::Array(items) => {
             serde_json::Value::Array(items.iter().map(redact_audit_payload).collect())
         }
+        serde_json::Value::String(text) => serde_json::Value::String(
+            crate::credential_redaction::redact_uuid_literals(text).into_owned(),
+        ),
         other => other.clone(),
     }
 }
@@ -406,7 +409,8 @@ fn audit_timeline_grouped(
                     span.ed-time-row__pl {
                         (tr(lang, "by ", "автор: ")) (e.actor)
                         @if let Some(p) = &e.payload {
-                            @let summary = summarize_audit_payload(p);
+                            @let redacted = redact_audit_payload(p);
+                            @let summary = summarize_audit_payload(&redacted);
                             @if !summary.is_empty() {
                                 " · " span.ed-mono { (summary) }
                             }
@@ -414,7 +418,7 @@ fn audit_timeline_grouped(
                             details style="display: inline-block; vertical-align: baseline;" {
                                 summary style="cursor: pointer; color: var(--acc); font-family: var(--mono); font-size: 10px; list-style: none; display: inline;" { (icon("code")) "{…}" }
                                 pre style="margin: 4px 0 0; padding: 8px 10px; background: var(--paper-2); border: 1px solid var(--rule); font-family: var(--mono); font-size: 10px; white-space: pre-wrap; max-width: 680px;" {
-                                    (serde_json::to_string_pretty(&redact_audit_payload(p)).unwrap_or_default())
+                                    (serde_json::to_string_pretty(&redacted).unwrap_or_default())
                                 }
                             }
                         }

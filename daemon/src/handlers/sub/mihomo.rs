@@ -2,7 +2,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use vpnctl_core::{User, UserId};
 
-use super::handler::SubError;
+use super::handler::{SubError, supports_core_version, ua_product_version};
 use super::singbox::render_singbox_for_mihomo;
 use crate::app::AppState;
 
@@ -28,11 +28,23 @@ struct CandidateProxy {
     val: Value,
 }
 
+fn mihomo_supports_quic_pinning(user_agent: Option<&str>) -> bool {
+    // v1.19.20 also verifies hostname and chain validity for a non-leaf match.
+    ua_product_version(user_agent).is_some_and(|(client, version)| {
+        ["mihomo", "clashmeta", "clash.meta"]
+            .iter()
+            .any(|name| client.eq_ignore_ascii_case(name))
+            && supports_core_version(version, (1, 19, 20))
+    })
+}
+
 pub(super) async fn render_mihomo(
     state: &AppState,
     user: &User,
+    user_agent: Option<&str>,
 ) -> Result<(UserId, String), SubError> {
-    let (user_id, singbox_cfg) = render_singbox_for_mihomo(state, user).await?;
+    let quic_pinning = mihomo_supports_quic_pinning(user_agent);
+    let (user_id, singbox_cfg) = render_singbox_for_mihomo(state, user, quic_pinning).await?;
 
     let mut candidates: Vec<CandidateProxy> = Vec::new();
 

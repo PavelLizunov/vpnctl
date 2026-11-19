@@ -281,6 +281,9 @@ pub(crate) async fn seed_hy2_opts(
         usage_coefficient: 1.0,
     };
     inv.add_server(&hy).await.unwrap();
+    inv.set_server_secret(&hy.id, "tls.cert_sha256", &"ab".repeat(32))
+        .await
+        .unwrap();
     inv.set_server_display_name(&hy.id, Some("Latvia"))
         .await
         .unwrap();
@@ -336,6 +339,9 @@ pub(crate) async fn seed_state_with_paired_node(dir: &TempDir) -> AppState {
         usage_coefficient: 1.0,
     };
     inv.add_server(&cdn).await.unwrap();
+    inv.set_server_secret(&cdn.id, "tls.cert_sha256", &"ab".repeat(32))
+        .await
+        .unwrap();
     inv.set_server_secret(&cdn.id, "naive.domain", "cdn.example.com")
         .await
         .unwrap();

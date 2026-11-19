@@ -17,6 +17,8 @@ pub enum CoreError {
     Transport(String),
     #[error("config render error: {0}")]
     Render(String),
+    #[error("share link unavailable: {0}")]
+    ShareLinkUnavailable(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]

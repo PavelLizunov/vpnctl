@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use vpnctl_core::{KernelId, Protocol, RenderCtx, Server, ServerId, User, UserId};
-use vpnctl_protocols::{Hysteria2, TuicV5, VlessReality};
+use vpnctl_protocols::{TuicV5, VlessReality};
 
 fn srv() -> Server {
     Server {
@@ -249,62 +249,36 @@ fn vless_missing_public_key_is_error() {
 }
 
 #[test]
-fn tuic_happy_path_byte_equal() {
+fn tuic_pinned_client_config_byte_equal() {
     let s = srv();
-    let secrets = HashMap::new();
+    let secrets = HashMap::from([
+        ("tls.cert_sha256".into(), "ab".repeat(32)),
+        (
+            "observed.tls.cert_public_key_sha256".into(),
+            "cd".repeat(32),
+        ),
+    ]);
     let ctx = ctx_with(&s, &secrets);
     let u = user("alice", Some("pw-alice"));
-    let link = TuicV5::new().share_link(&ctx, &u).unwrap();
-    assert_eq!(
-        link,
-        "tuic://00000000-0000-0000-0000-000000000001:pw-alice@203.0.113.7:8443?congestion_control=bbr&alpn=h3&allow_insecure=1#alice",
-    );
-}
-
-#[test]
-fn tuic_userinfo_percent_encodes_colon_in_password_byte_equal() {
-    let s = srv();
-    let secrets = HashMap::new();
-    let ctx = ctx_with(&s, &secrets);
-    let u = user("alice", Some("pw:x"));
-    let link = TuicV5::new().share_link(&ctx, &u).unwrap();
-    assert_eq!(
-        link,
-        "tuic://00000000-0000-0000-0000-000000000001:pw%3Ax@203.0.113.7:8443?congestion_control=bbr&alpn=h3&allow_insecure=1#alice",
-    );
-}
-
-#[test]
-fn tuic_percent_encodes_percent_sign_in_password_and_fragment_byte_equal() {
-    let s = srv();
-    let secrets = HashMap::new();
-    let ctx = ctx_with(&s, &secrets);
-    let u = user("alice%1", Some("pw%20"));
-    let link = TuicV5::new().share_link(&ctx, &u).unwrap();
-    assert_eq!(
-        link,
-        "tuic://00000000-0000-0000-0000-000000000001:pw%2520@203.0.113.7:8443?congestion_control=bbr&alpn=h3&allow_insecure=1#alice%251",
-    );
-}
-
-#[test]
-fn tuic_missing_password_is_error() {
-    let s = srv();
-    let secrets = HashMap::new();
-    let ctx = ctx_with(&s, &secrets);
-    let u = user("alice", None);
-    let res = TuicV5::new().share_link(&ctx, &u);
-    assert!(
-        res.is_err(),
-        "expected Err when tuic_password is absent; got {res:?}",
-    );
-    match res {
-        Err(vpnctl_core::CoreError::Render(msg)) => {
-            assert!(msg.contains("alice"));
-            assert!(msg.contains("tuic_password"));
+    let out = TuicV5::new().client_config(&ctx, &u).unwrap();
+    let expected = serde_json::json!({
+        "type": "tuic",
+        "tag": "tuic-out",
+        "server": "203.0.113.7",
+        "server_port": 8443,
+        "uuid": "00000000-0000-0000-0000-000000000001",
+        "password": "pw-alice",
+        "congestion_control": "bbr",
+        "udp_relay_mode": "native",
+        "tls": {
+            "enabled": true,
+            "insecure": false,
+            "alpn": ["h3"],
+            "certificate_public_key_sha256": ["zc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc0="]
         }
-        other => panic!("expected CoreError::Render, got {other:?}"),
-    }
+    });
+    assert_eq!(out.to_string(), expected.to_string());
+    assert!(TuicV5::new().share_link(&ctx, &u).is_err());
 }
 
 #[test]
@@ -325,45 +299,6 @@ fn tuic_client_config_missing_password_is_error() {
         }
         other => panic!("expected CoreError::Render, got {other:?}"),
     }
-}
-
-#[test]
-fn hysteria2_happy_path_byte_equal() {
-    let s = srv();
-    let secrets = HashMap::new();
-    let ctx = ctx_with(&s, &secrets);
-    let u = user("alice", Some("pw-alice"));
-    let link = Hysteria2::new().share_link(&ctx, &u).unwrap();
-    assert_eq!(
-        link,
-        "hysteria2://pw-alice@203.0.113.7:8444/?sni=203.0.113.7&insecure=1#alice",
-    );
-}
-
-#[test]
-fn hysteria2_fragment_percent_encodes_hash_byte_equal() {
-    let s = srv();
-    let secrets = HashMap::new();
-    let ctx = ctx_with(&s, &secrets);
-    let u = user("alice#1", Some("pw-alice"));
-    let link = Hysteria2::new().share_link(&ctx, &u).unwrap();
-    assert_eq!(
-        link,
-        "hysteria2://pw-alice@203.0.113.7:8444/?sni=203.0.113.7&insecure=1#alice%231",
-    );
-}
-
-#[test]
-fn hysteria2_missing_password_is_error() {
-    let s = srv();
-    let secrets = HashMap::new();
-    let ctx = ctx_with(&s, &secrets);
-    let u = user("alice", None);
-    let res = Hysteria2::new().share_link(&ctx, &u);
-    assert!(
-        res.is_err(),
-        "expected Err when tuic_password is absent; got {res:?}",
-    );
 }
 
 #[test]

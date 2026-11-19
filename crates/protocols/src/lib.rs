@@ -5,6 +5,7 @@ mod encoding;
 mod hysteria2;
 mod naive;
 mod shadowsocks2022;
+mod tls;
 mod trojan;
 mod tuic_v5;
 mod vless_reality;

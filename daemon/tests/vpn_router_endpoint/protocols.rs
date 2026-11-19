@@ -4,12 +4,12 @@ use tempfile::TempDir;
 
 use vpnctl_core::{KernelId, ProtocolId, Registry, Server, ServerId, User, UserId};
 use vpnctl_inventory::SqliteInventory;
-use vpnctl_kernels::{AmneziaWg, Caddy, SingBox};
+use vpnctl_kernels::AmneziaWg;
 use vpnctl_protocols::{Hysteria2, Naive, VlessReality, WireGuard};
 use vpnctld::router;
 
 use super::common::{
-    AWG_DEVICE_ID, HY2_DEVICE_ID, NAIVE_DEVICE_ID, PAIR_DEVICE_ID, XHTTP_DEVICE_ID, seed_hy2_opts,
+    AWG_DEVICE_ID, HY2_DEVICE_ID, NAIVE_DEVICE_ID, PAIR_DEVICE_ID, XHTTP_DEVICE_ID,
     seed_state_with_awg, seed_state_with_awg2, seed_state_with_awg2_and_awg3, seed_state_with_awg3,
     seed_state_with_hy2, seed_state_with_naive, seed_state_with_paired_node, seed_state_with_xhttp,
     subscription_lines, subscription_lines_for_ua,
@@ -155,309 +155,23 @@ async fn vpn_router_malformed_naive_domain_no_injection_vless_intact() {
 }
 
 #[tokio::test]
-async fn vpn_router_hysteria2_uri_appended_after_vless_with_obfs() {
+async fn vpn_router_omits_hysteria2_even_with_an_observed_fingerprint() {
     let dir = TempDir::new().unwrap();
     let state = seed_state_with_hy2(&dir).await;
     let lines = subscription_lines(router(state), HY2_DEVICE_ID).await;
-
-    assert_eq!(lines.len(), 2, "expected 1 vless + 1 hysteria2: {lines:?}");
-    assert!(
-        lines[0].starts_with("vless://") && lines[0].contains("@de.example.com"),
-        "vless must be first: {lines:?}"
-    );
-    let hy2 = lines.last().unwrap();
-    assert!(
-        hy2.starts_with("hysteria2://") && hy2.contains("@hy.example.com:8444/"),
-        "hysteria2 last, official scheme + UDP port: {lines:?}"
-    );
-    assert!(
-        hy2.contains("obfs=salamander") && hy2.contains("obfs-password="),
-        "Salamander obfs params present (DPI-resistant): {hy2}"
-    );
-    assert!(
-        hy2.ends_with("#Latvia%20HY2%20~tester-1"),
-        "fragment must carry the server display label, not the username: {hy2}"
-    );
-    assert!(
-        !hy2.contains("pair="),
-        "an HY2-only node must not carry a pair param: {hy2}"
-    );
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].starts_with("vless://"));
+    assert!(lines[0].contains("@de.example.com"));
 }
 
 #[tokio::test]
-async fn vpn_router_hidden_hysteria2_excluded_vless_intact() {
-    let dir = TempDir::new().unwrap();
-    let state = seed_state_with_hy2(&dir).await;
-    state
-        .inv
-        .set_server_protocol_hidden(
-            &ServerId("hy".into()),
-            &ProtocolId("hysteria2".into()),
-            true,
-        )
-        .await
-        .unwrap();
-    let lines = subscription_lines(router(state), HY2_DEVICE_ID).await;
-
-    assert!(
-        !lines.iter().any(|l| l.starts_with("hysteria2://")),
-        "hidden hysteria2 must be absent: {lines:?}"
-    );
-    assert!(
-        lines.iter().any(|l| l.contains("@de.example.com")),
-        "vless must remain: {lines:?}"
-    );
-}
-
-#[tokio::test]
-async fn vpn_router_hysteria2_without_tuic_password_skipped_vless_intact() {
-    let dir = TempDir::new().unwrap();
-    let state = seed_hy2_opts(&dir, None, true).await;
-    let lines = subscription_lines(router(state), HY2_DEVICE_ID).await;
-    assert_eq!(
-        lines.len(),
-        1,
-        "vless-only when the user has no tuic_password: {lines:?}"
-    );
-    assert!(
-        !lines.iter().any(|l| l.starts_with("hysteria2://")),
-        "no hy2 line for a credential-less user: {lines:?}"
-    );
-    assert!(
-        lines[0].starts_with("vless://") && lines[0].contains("@de.example.com:443"),
-        "vless intact: {lines:?}"
-    );
-}
-
-#[tokio::test]
-async fn vpn_router_hysteria2_without_obfs_secret_emits_bare_uri() {
-    let dir = TempDir::new().unwrap();
-    let state = seed_hy2_opts(&dir, Some("PW"), false).await;
-    let lines = subscription_lines(router(state), HY2_DEVICE_ID).await;
-    let hy2 = lines
-        .iter()
-        .find(|l| l.starts_with("hysteria2://"))
-        .expect("hy2 must render even without an obfs secret");
-    assert!(
-        !hy2.contains("obfs="),
-        "no obfs params when the secret is absent: {hy2}"
-    );
-    assert!(
-        hy2.contains("@hy.example.com:8444/"),
-        "still a valid hysteria2 endpoint: {hy2}"
-    );
-}
-
-#[tokio::test]
-async fn vpn_router_vless_then_naive_then_hysteria2_order() {
-    let dir = TempDir::new().unwrap();
-    let inv = SqliteInventory::open(&dir.path().join("inv.db"))
-        .await
-        .unwrap();
-    let mut reg = Registry::new();
-    reg.register_kernel(Box::new(SingBox::new())).unwrap();
-    reg.register_kernel(Box::new(Caddy::new())).unwrap();
-    reg.register_protocol(Box::new(VlessReality::new()))
-        .unwrap();
-    reg.register_protocol(Box::new(Naive::new())).unwrap();
-    reg.register_protocol(Box::new(Hysteria2::new())).unwrap();
-
-    let mk = |id: &str, proto: &str, kernel: &str| Server {
-        id: ServerId(id.into()),
-        address: format!("{id}.example.com"),
-        ssh_port: 22,
-        ssh_user: "root".into(),
-        kernels: vec![KernelId(kernel.into())],
-        enabled_protocols: vec![ProtocolId(proto.into())],
-        trusted_host_fingerprint: None,
-        hoster: "generic".into(),
-        jump_via: None,
-        usage_coefficient: 1.0,
-    };
-    let de = mk("de", "vless+reality", "sing-box");
-    inv.add_server(&de).await.unwrap();
-    inv.set_server_secret(&de.id, "vless.public_key", "PUB_de")
-        .await
-        .unwrap();
-    inv.set_server_secret(&de.id, "vless.short_id", "12345678")
-        .await
-        .unwrap();
-    let cdn = mk("cdn", "naive", "caddy");
-    inv.add_server(&cdn).await.unwrap();
-    inv.set_server_secret(&cdn.id, "naive.domain", "cdn.example.com")
-        .await
-        .unwrap();
-    let hy = mk("hy", "hysteria2", "sing-box");
-    inv.add_server(&hy).await.unwrap();
-
-    let user = User {
-        id: UserId("tester-1".into()),
-        uuid: "11111111-2222-3333-4444-555555555555".into(),
-        tuic_password: Some("PW".into()),
-        wireguard_pubkey: None,
-        wireguard_private: None,
-        sub_token: None,
-        vpn_router_device_id: None,
-        disabled: false,
-    };
-    inv.add_user(&user).await.unwrap();
-    inv.set_vpn_router_device_id(&user.id, HY2_DEVICE_ID)
-        .await
-        .unwrap();
-    for s in ["de", "cdn", "hy"] {
-        inv.grant(&user.id, &ServerId(s.into())).await.unwrap();
-    }
-
-    let (state, _w) = vpnctld::make_app_state_for_tests(inv, Arc::new(reg));
-    let lines = subscription_lines(router(state), HY2_DEVICE_ID).await;
-    assert_eq!(lines.len(), 3, "vless + naive + hy2: {lines:?}");
-    assert!(lines[0].starts_with("vless://"), "vless first: {lines:?}");
-    assert!(
-        lines[1].starts_with("naive+https://"),
-        "naive second: {lines:?}"
-    );
-    assert!(
-        lines[2].starts_with("hysteria2://"),
-        "hysteria2 third: {lines:?}"
-    );
-    assert!(
-        lines[1].ends_with("#CDN%20NAIVE%20~tester-1"),
-        "naive fallback label: {}",
-        lines[1]
-    );
-    assert!(
-        lines[2].ends_with("#HY%20HY2%20~tester-1"),
-        "hy2 fallback label: {}",
-        lines[2]
-    );
-}
-
-#[tokio::test]
-async fn vpn_router_extra_protocol_label_injection_is_neutralized() {
-    let dir = TempDir::new().unwrap();
-    let state = seed_hy2_opts(&dir, Some("PW"), true).await;
-    state
-        .inv
-        .set_server_display_name(&ServerId("hy".into()), Some("Evil\nLatvia#x"))
-        .await
-        .unwrap();
-    let lines = subscription_lines(router(state), HY2_DEVICE_ID).await;
-
-    assert_eq!(lines.len(), 2, "no forged blob line: {lines:?}");
-    let hy2 = lines
-        .iter()
-        .find(|l| l.starts_with("hysteria2://"))
-        .expect("hy2 present");
-    assert!(
-        !hy2.contains("Evil\nLatvia"),
-        "raw newline must not survive into the URI: {hy2}"
-    );
-}
-
-#[tokio::test]
-async fn vpn_router_colocated_naive_and_hy2_share_a_pair_param() {
+async fn vpn_router_retains_naive_without_an_unavailable_hysteria2_pair() {
     let dir = TempDir::new().unwrap();
     let state = seed_state_with_paired_node(&dir).await;
     let lines = subscription_lines(router(state), PAIR_DEVICE_ID).await;
-    let naive = lines
-        .iter()
-        .find(|l| l.starts_with("naive+https://"))
-        .expect("naive line");
-    let hy2 = lines
-        .iter()
-        .find(|l| l.starts_with("hysteria2://"))
-        .expect("hy2 line");
-
-    assert!(naive.contains("?pair=cdn#"), "naive pair in query: {naive}");
-    assert!(hy2.contains("&pair=cdn#"), "hy2 pair in query: {hy2}");
-
-    let pair_of = |u: &str| {
-        u.split("pair=")
-            .nth(1)
-            .and_then(|s| s.split(['#', '&']).next())
-            .map(str::to_string)
-    };
-    assert_eq!(pair_of(naive), Some("cdn".to_string()));
-    assert_eq!(
-        pair_of(naive),
-        pair_of(hy2),
-        "naive & hy2 of one node must share the pair"
-    );
-
-    assert!(
-        naive.find("pair=").unwrap() < naive.find('#').unwrap(),
-        "pair must precede the fragment: {naive}"
-    );
-}
-
-#[tokio::test]
-async fn vpn_router_two_paired_nodes_get_distinct_pair_values() {
-    let dir = TempDir::new().unwrap();
-    let state = seed_state_with_paired_node(&dir).await;
-
-    let nl2 = Server {
-        id: ServerId("nl2".into()),
-        address: "1.2.3.4".into(),
-        ssh_port: 22,
-        ssh_user: "root".into(),
-        kernels: vec![KernelId("caddy".into()), KernelId("sing-box".into())],
-        enabled_protocols: vec![ProtocolId("naive".into()), ProtocolId("hysteria2".into())],
-        trusted_host_fingerprint: None,
-        hoster: "generic".into(),
-        jump_via: None,
-        usage_coefficient: 1.0,
-    };
-    state.inv.add_server(&nl2).await.unwrap();
-    state
-        .inv
-        .set_server_secret(&nl2.id, "naive.domain", "nl2.example.com")
-        .await
-        .unwrap();
-    state
-        .inv
-        .grant(&UserId("tester-1".into()), &ServerId("nl2".into()))
-        .await
-        .unwrap();
-    state
-        .inv
-        .set_server_udp_pair_enabled(&ServerId("nl2".into()), true)
-        .await
-        .unwrap();
-
-    let lines = subscription_lines(router(state), PAIR_DEVICE_ID).await;
-    let has = |scheme: &str, pair: &str| {
-        lines
-            .iter()
-            .any(|l| l.starts_with(scheme) && l.contains(pair))
-    };
-    assert!(has("naive+https://", "pair=cdn#"), "cdn naive: {lines:?}");
-    assert!(has("hysteria2://", "pair=cdn#"), "cdn hy2: {lines:?}");
-    assert!(has("naive+https://", "pair=nl2#"), "nl2 naive: {lines:?}");
-    assert!(has("hysteria2://", "pair=nl2#"), "nl2 hy2: {lines:?}");
-}
-
-#[tokio::test]
-async fn vpn_router_paired_node_without_optin_has_no_pair() {
-    let dir = TempDir::new().unwrap();
-    let state = seed_state_with_paired_node(&dir).await;
-    state
-        .inv
-        .set_server_udp_pair_enabled(&ServerId("cdn".into()), false)
-        .await
-        .unwrap();
-    let lines = subscription_lines(router(state), PAIR_DEVICE_ID).await;
-    assert!(
-        !lines.iter().any(|l| l.contains("pair=")),
-        "no pair tag without the opt-in: {lines:?}"
-    );
-    assert!(
-        lines.iter().any(|l| l.starts_with("naive+https://")),
-        "naive still renders: {lines:?}"
-    );
-    assert!(
-        lines.iter().any(|l| l.starts_with("hysteria2://")),
-        "hy2 still renders: {lines:?}"
-    );
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].starts_with("naive+https://"));
+    assert!(!lines[0].contains("pair="));
 }
 
 #[tokio::test]
@@ -830,6 +544,7 @@ async fn seed_extra_protocol_uuid_state(dir: &TempDir) -> vpnctld::AppState {
             .unwrap();
     }
     for (key, value) in [
+        ("tls.cert_sha256", &"ab".repeat(32) as &str),
         ("vlessws.domain", "cdn.example.com"),
         ("vlessws.path", "wspath"),
         ("vlessxhttp.path", "xhttppath"),
@@ -844,7 +559,6 @@ async fn seed_extra_protocol_uuid_state(dir: &TempDir) -> vpnctld::AppState {
 const EXTRA_PROTOCOL_UUID_BYTES: &str = concat!(
     "vless://11111111-2222-3333-4444-555555555555@de.example.com:443?encryption=none&type=tcp&security=reality&pbk=PUB_de&fp=randomized&sni=yahoo.com&sid=12345678&spx=%2F&flow=xtls-rprx-vision&packetEncoding=xudp#Germany%20VLESS%20~tester-1\n",
     "naive+https://tester-1:NAIVE_TEST_PW@cdn.example.com#Latvia%20NAIVE%20~tester-1\n",
-    "hysteria2://NAIVE_TEST_PW@cdn.example.com:8444/?sni=cdn.example.com&insecure=1#Latvia%20HY2%20~tester-1\n",
     "vless://11111111-2222-3333-4444-555555555555@cdn.example.com:8443?encryption=none&type=ws&security=tls&sni=cdn.example.com&host=cdn.example.com&path=%2Fwspath&fp=chrome#Latvia%20WS%20~tester-1\n",
     "vless://11111111-2222-3333-4444-555555555555@cdn.example.com:9443?encryption=none&security=reality&sni=yahoo.com&fp=randomized&pbk=PUB_cdn&sid=abcdef12&type=xhttp&path=%2Fxhttppath%2F&mode=auto#Latvia%20XHTTP%20~tester-1",
 );

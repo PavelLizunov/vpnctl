@@ -89,15 +89,18 @@ fn vless_ipv6_authority_is_bracketed() {
 }
 
 #[test]
-fn tuic_ipv6_authority_is_bracketed() {
+fn tuic_ipv6_outbound_uses_bare_server_address() {
     let s = srv_ipv6();
-    let secrets = HashMap::new();
+    let secrets = HashMap::from([(
+        "observed.tls.cert_public_key_sha256".into(),
+        "cd".repeat(32),
+    )]);
     let ctx = ctx_with(&s, &secrets);
-    let link = TuicV5::new()
-        .share_link(&ctx, &user("alice", Some("pw1")))
+    let outbound = TuicV5::new()
+        .client_config(&ctx, &user("alice", Some("pw1")))
         .unwrap();
-    let tail = assert_bracketed_authority(&link, "tuic://");
-    assert!(tail.starts_with(":8443?"), "expected :8443? got {tail}");
+    assert_eq!(outbound["server"], IP6);
+    assert_eq!(outbound["server_port"], 8443);
 }
 
 #[test]
@@ -117,23 +120,18 @@ fn shadowsocks_ipv6_authority_is_bracketed() {
 }
 
 #[test]
-fn hysteria2_ipv6_authority_bracketed_but_sni_is_bare() {
+fn hysteria2_ipv6_outbound_uses_bare_server_address() {
     let s = srv_ipv6();
-    let secrets = HashMap::new();
+    let secrets = HashMap::from([(
+        "observed.tls.cert_public_key_sha256".into(),
+        "cd".repeat(32),
+    )]);
     let ctx = ctx_with(&s, &secrets);
-    let link = Hysteria2::new()
-        .share_link(&ctx, &user("alice", Some("pw1")))
+    let outbound = Hysteria2::new()
+        .client_config(&ctx, &user("alice", Some("pw1")))
         .unwrap();
-    let tail = assert_bracketed_authority(&link, "hysteria2://");
-    assert!(tail.starts_with(":8444/"), "expected :8444/ got {tail}");
-    assert!(
-        link.contains(&format!("sni={IP6}&")),
-        "sni must be the BARE IPv6 literal (no brackets): {link}"
-    );
-    assert!(
-        !link.contains(&format!("sni={IP6_BRACKETED}")),
-        "sni must NOT be bracketed: {link}"
-    );
+    assert_eq!(outbound["server"], IP6);
+    assert_eq!(outbound["server_port"], 8444);
 }
 
 #[test]

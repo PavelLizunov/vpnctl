@@ -2,11 +2,12 @@
 
 use std::collections::HashMap;
 
-use serde_json::Value;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde_json::{Value, json};
 use vpnctl_core::{
     DpiRisk, KernelId, Protocol, ProtocolId, RenderCtx, Server, ServerId, User, UserId,
 };
-use vpnctl_protocols::{AnyTls, Hysteria2, Trojan, TuicV5};
+use vpnctl_protocols::{AnyTls, Hysteria2, Trojan};
 
 fn srv() -> Server {
     Server {
@@ -41,41 +42,38 @@ fn ctx_with<'a>(server: &'a Server, secrets: &'a HashMap<String, String>) -> Ren
 }
 
 #[test]
-fn certificate_pin_share_links_and_legacy_client_json_byte_equal() {
+fn pinned_hysteria2_native_config_is_stable_and_uri_is_unavailable() {
     let server = srv();
     let user = user("alice", Some("pw1"));
     let protocol = Hysteria2::new();
-    let pin = "ab".repeat(32);
     for obfs in [false, true] {
         let mut secrets = HashMap::new();
-        let obfs_suffix = if obfs {
+        if obfs {
             secrets.insert("hysteria2.obfs.password".into(), "obfs-pass".into());
-            "&obfs=salamander&obfs-password=obfs-pass"
-        } else {
-            ""
-        };
-        let legacy = format!(
-            "hysteria2://pw1@203.0.113.7:8444/?sni=203.0.113.7&insecure=1{obfs_suffix}#alice"
-        );
+        }
         let ctx = ctx_with(&server, &secrets);
-        assert_eq!(
-            protocol.share_link(&ctx, &user).unwrap().as_bytes(),
-            legacy.as_bytes()
+        let mut expected = protocol.client_config(&ctx, &user).unwrap();
+        assert_eq!(expected["tls"]["insecure"], false);
+        assert!(
+            expected["tls"]
+                .get("certificate_public_key_sha256")
+                .is_none()
         );
-        let client = serde_json::to_vec(&protocol.client_config(&ctx, &user).unwrap()).unwrap();
         let inbound = serde_json::to_vec(&protocol.server_inbound(&ctx, &[]).unwrap()).unwrap();
-        secrets.insert("tls.cert_sha256".into(), pin.clone());
+        secrets.insert("tls.cert_sha256".into(), "ab".repeat(32));
+        secrets.insert(
+            "observed.tls.cert_public_key_sha256".into(),
+            "cd".repeat(32),
+        );
         let ctx = ctx_with(&server, &secrets);
-        let pinned = format!(
-            "hysteria2://pw1@203.0.113.7:8444/?sni=203.0.113.7&insecure=1{obfs_suffix}&pinSHA256={pin}#alice"
-        );
-        assert_eq!(
-            protocol.share_link(&ctx, &user).unwrap().as_bytes(),
-            pinned.as_bytes()
-        );
+        assert!(matches!(
+            protocol.share_link(&ctx, &user),
+            Err(vpnctl_core::CoreError::ShareLinkUnavailable(_))
+        ));
+        expected["tls"]["certificate_public_key_sha256"] = json!([STANDARD.encode([0xcd; 32])]);
         assert_eq!(
             serde_json::to_vec(&protocol.client_config(&ctx, &user).unwrap()).unwrap(),
-            client
+            serde_json::to_vec(&expected).unwrap()
         );
         assert_eq!(
             serde_json::to_vec(&protocol.server_inbound(&ctx, &[]).unwrap()).unwrap(),
@@ -89,7 +87,7 @@ fn certificate_pin_keeps_other_tls_protocol_links_and_json_byte_equal() {
     let server = srv();
     let user = user("alice", Some("pw1"));
     let mut secrets = HashMap::new();
-    let protocols: [&dyn Protocol; 3] = [&Trojan::new(), &AnyTls::new(), &TuicV5::new()];
+    let protocols: [&dyn Protocol; 2] = [&Trojan::new(), &AnyTls::new()];
     for protocol in protocols {
         secrets.clear();
         let ctx = ctx_with(&server, &secrets);
@@ -255,7 +253,7 @@ fn h3_client_config_user_without_password_returns_error() {
 }
 
 #[test]
-fn h3_client_config_tls_insecure_and_alpn() {
+fn h3_client_config_requires_tls_verification_and_h3_alpn() {
     let s = srv();
     let secrets = HashMap::new();
     let ctx = ctx_with(&s, &secrets);
@@ -263,7 +261,7 @@ fn h3_client_config_tls_insecure_and_alpn() {
     let v = Hysteria2::new().client_config(&ctx, &u).unwrap();
     assert_eq!(
         v.pointer("/tls/insecure").and_then(Value::as_bool),
-        Some(true),
+        Some(false),
     );
     let alpn = v
         .pointer("/tls/alpn")
@@ -272,111 +270,6 @@ fn h3_client_config_tls_insecure_and_alpn() {
     assert!(
         alpn.iter().any(|x| x.as_str() == Some("h3")),
         "client tls.alpn must contain \"h3\"; got {alpn:?}"
-    );
-}
-
-#[test]
-fn h4_share_link_starts_with_hysteria2_scheme() {
-    let s = srv();
-    let secrets = HashMap::new();
-    let ctx = ctx_with(&s, &secrets);
-    let u = user("alice", Some("pw"));
-    let link = Hysteria2::new().share_link(&ctx, &u).unwrap();
-    assert!(link.starts_with("hysteria2://"), "got link: {link}");
-}
-
-#[test]
-fn h4_share_link_password_segment_percent_encodes_colon_and_at() {
-    let s = srv();
-    let secrets = HashMap::new();
-    let ctx = ctx_with(&s, &secrets);
-    let u = user("alice", Some("ab:cd@ef"));
-    let link = Hysteria2::new().share_link(&ctx, &u).unwrap();
-
-    let after_scheme = link
-        .strip_prefix("hysteria2://")
-        .expect("link must start with hysteria2://");
-    let at_idx = after_scheme
-        .rfind('@')
-        .expect("share link must contain '@' between userinfo and host");
-    let userinfo = &after_scheme[..at_idx];
-
-    assert!(
-        userinfo.contains("%3A") || userinfo.contains("%3a"),
-        "raw ':' must be percent-encoded in password; userinfo = {userinfo:?}",
-    );
-    assert!(
-        userinfo.contains("%40"),
-        "raw '@' must be percent-encoded in password; userinfo = {userinfo:?}",
-    );
-    assert!(
-        !userinfo.contains('@'),
-        "raw '@' leaked into userinfo: {userinfo:?}",
-    );
-}
-
-#[test]
-fn h4_share_link_fragment_percent_encodes_space_and_hash() {
-    let s = srv();
-    let secrets = HashMap::new();
-    let ctx = ctx_with(&s, &secrets);
-    let u = user("alice cool#1", Some("pw"));
-    let link = Hysteria2::new().share_link(&ctx, &u).unwrap();
-
-    let frag_idx = link
-        .find('#')
-        .expect("share link must contain a '#' fragment separator");
-    let fragment = &link[frag_idx + 1..];
-
-    assert!(
-        fragment.contains("%20"),
-        "space must be %20 in fragment; got {fragment:?}",
-    );
-    assert!(
-        fragment.contains("%23"),
-        "'#' must be %23 in fragment; got {fragment:?}",
-    );
-    assert!(
-        !fragment.contains(' '),
-        "raw space leaked into fragment: {fragment:?}",
-    );
-    assert!(
-        !fragment.contains('#'),
-        "raw '#' leaked into fragment: {fragment:?}",
-    );
-}
-
-#[test]
-fn h4_share_link_contains_insecure_and_sni_query_params() {
-    let s = srv();
-    let secrets = HashMap::new();
-    let ctx = ctx_with(&s, &secrets);
-    let u = user("alice", Some("pw"));
-    let link = Hysteria2::new().share_link(&ctx, &u).unwrap();
-    assert!(
-        link.contains("insecure=1"),
-        "share link must carry insecure=1; got {link}",
-    );
-    assert!(
-        link.contains(&format!("sni={}", s.address)),
-        "share link must carry sni=<address>; got {link}",
-    );
-    assert!(
-        !link.contains("alpn="),
-        "share link must NOT carry alpn (not in official URI spec); got {link}",
-    );
-}
-
-#[test]
-fn h4_share_link_user_without_password_returns_error() {
-    let s = srv();
-    let secrets = HashMap::new();
-    let ctx = ctx_with(&s, &secrets);
-    let u = user("alice", None);
-    let res = Hysteria2::new().share_link(&ctx, &u);
-    assert!(
-        res.is_err(),
-        "expected Err for user without tuic_password, got {res:?}",
     );
 }
 
@@ -498,20 +391,15 @@ fn h7_empty_server_url_does_not_activate_realm() {
 #[test]
 fn h8_no_obfs_secret_means_no_obfs_key_anywhere() {
     let s = srv();
-    let secrets = HashMap::new();
+    let secrets = HashMap::from([("tls.cert_sha256".into(), "ab".repeat(32))]);
     let ctx = ctx_with(&s, &secrets);
     let u = user("alice", Some("pw1"));
     let inbound = Hysteria2::new()
         .server_inbound(&ctx, std::slice::from_ref(&u))
         .unwrap();
     let outbound = Hysteria2::new().client_config(&ctx, &u).unwrap();
-    let link = Hysteria2::new().share_link(&ctx, &u).unwrap();
     assert!(inbound.get("obfs").is_none(), "inbound back-compat");
     assert!(outbound.get("obfs").is_none(), "outbound back-compat");
-    assert!(
-        !link.contains("obfs="),
-        "share_link back-compat must not carry &obfs= query; got: {link}"
-    );
 }
 
 #[test]
@@ -550,29 +438,6 @@ fn h8_client_config_mirrors_server_obfs_password() {
         obfs.get("password").and_then(Value::as_str),
         Some("shared-secret"),
         "client + server MUST share the obfs password (it's the QUIC-handshake key)"
-    );
-}
-
-#[test]
-fn h8_share_link_obfs_query_format() {
-    let s = srv();
-    let mut secrets = HashMap::new();
-    secrets.insert("hysteria2.obfs.password".into(), "salt+pepper sea".into());
-    let ctx = ctx_with(&s, &secrets);
-    let link = Hysteria2::new()
-        .share_link(&ctx, &user("alice", Some("pw1")))
-        .unwrap();
-    assert!(
-        link.contains("&obfs=salamander&obfs-password="),
-        "official URI scheme requires &obfs=salamander&obfs-password=; got: {link}"
-    );
-    assert!(
-        !link.contains("obfsParam") && !link.contains("obfs_password"),
-        "wrong query parameter name: {link}"
-    );
-    assert!(
-        link.contains("salt%2Bpepper%20sea"),
-        "obfs-password must be percent-encoded with USERINFO charset; got: {link}"
     );
 }
 

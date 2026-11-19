@@ -89,6 +89,7 @@ pub(super) async fn render_v2ray_subscription(
                         singbox_links.push(link);
                     }
                 }
+                Err(vpnctl_core::CoreError::ShareLinkUnavailable(_)) => continue,
                 Err(e) => {
                     tracing::warn!(
                         target = "vpnctld::sub",

@@ -59,19 +59,30 @@ async fn deployed_certificate_pin_reads_default_and_quoted_override_paths() {
     let ssh = vpnctl_ssh::MockTransport::new();
     for path in ["/etc/sing-box/cert.pem", "/etc/custom/cert's file.pem"] {
         let secrets = HashMap::from([("tuic.cert_path".into(), path.into())]);
-        let command = format!(
-            "openssl x509 -in {} -noout -fingerprint -sha256",
-            vpnctl_core::shell::single_quote(path)
-        );
+        let command = certificate_observation_command(path);
+        assert!(command.ends_with(&vpnctl_core::shell::single_quote(path)));
         ssh.expect(
             &command,
-            &format!("sha256 Fingerprint={}\n", ["AB"; 32].join(":")),
+            &format!(
+                "sha256 Fingerprint={}\n{} *stdin\n",
+                ["AB"; 32].join(":"),
+                "CD".repeat(32)
+            ),
         );
         let observed = SingBox::new()
             .deployed_server_secrets(&ssh, &dummy_ctx(&server, &secrets))
             .await
             .unwrap();
-        assert_eq!(observed, vec![("tls.cert_sha256".into(), "ab".repeat(32))]);
+        assert_eq!(
+            observed,
+            vec![
+                ("tls.cert_sha256".into(), "ab".repeat(32)),
+                (
+                    "observed.tls.cert_public_key_sha256".into(),
+                    "cd".repeat(32)
+                ),
+            ]
+        );
         assert_eq!(ssh.executed_commands().unwrap().last(), Some(&command));
     }
     let secrets = HashMap::new();
@@ -80,7 +91,13 @@ async fn deployed_certificate_pin_reads_default_and_quoted_override_paths() {
             .deployed_server_secrets(&ssh, &dummy_ctx(&server, &secrets))
             .await
             .unwrap(),
-        vec![("tls.cert_sha256".into(), "ab".repeat(32))]
+        vec![
+            ("tls.cert_sha256".into(), "ab".repeat(32)),
+            (
+                "observed.tls.cert_public_key_sha256".into(),
+                "cd".repeat(32)
+            ),
+        ]
     );
 }
 
@@ -92,11 +109,20 @@ async fn deployed_certificate_pin_rejects_missing_or_invalid_output() {
     let kernel = SingBox::new();
     let ctx = dummy_ctx(&server, &secrets);
     assert!(kernel.deployed_server_secrets(&ssh, &ctx).await.is_err());
-    ssh.expect(
-        "openssl x509 -in '/etc/sing-box/cert.pem' -noout -fingerprint -sha256",
-        "sha256 Fingerprint=not-a-fingerprint\n",
-    );
-    assert!(kernel.deployed_server_secrets(&ssh, &ctx).await.is_err());
+    let cert_line = format!("sha256 Fingerprint={}\n", ["AB"; 32].join(":"));
+    for invalid in [
+        "sha256 Fingerprint=not-a-fingerprint\n".into(),
+        cert_line.clone(),
+        format!("{cert_line}{} *stdin\n", "xx".repeat(32)),
+        format!("{cert_line}{} *stdin\n", "ab".repeat(31)),
+        format!("{cert_line}{} *stdin\nextra output\n", "ab".repeat(32)),
+    ] {
+        ssh.expect(
+            &certificate_observation_command("/etc/sing-box/cert.pem"),
+            &invalid,
+        );
+        assert!(kernel.deployed_server_secrets(&ssh, &ctx).await.is_err());
+    }
 }
 
 #[test]
@@ -1449,7 +1475,7 @@ async fn apply_refuses_removing_uuid_unknown_to_inventory() {
         .expect_err("a UUID never known to inventory must stay protected");
     let msg = err.to_string();
     assert!(msg.contains("REMOVE 1 user UUID"), "{msg}");
-    assert!(msg.contains("foreign"), "{msg}");
+    assert!(!msg.contains("foreign"), "{msg}");
     assert!(!msg.contains("\"disabled\""), "{msg}");
     assert_eq!(ssh.uploaded("/etc/sing-box/config.json.new"), None);
 }

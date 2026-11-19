@@ -972,7 +972,24 @@ async fn admin_delivery_share_links_skip_hidden_and_user_disabled_protocols() {
     s.inv.mint_tuic_password_if_absent(&uid).await.unwrap();
 
     s.inv
+        .add_server_protocol(&sid, &ProtocolId("hysteria2".into()))
+        .await
+        .unwrap();
+
+    s.inv
         .add_server_protocol(&sid, &ProtocolId("tuic-v5".into()))
+        .await
+        .unwrap();
+    s.inv
+        .set_server_secret(&sid, "tls.cert_sha256", &"ab".repeat(32))
+        .await
+        .unwrap();
+    s.inv
+        .add_server_protocol(&sid, &ProtocolId("naive".into()))
+        .await
+        .unwrap();
+    s.inv
+        .set_server_secret(&sid, "naive.domain", "fixture.example.com")
         .await
         .unwrap();
 
@@ -994,8 +1011,11 @@ async fn admin_delivery_share_links_skip_hidden_and_user_disabled_protocols() {
         .unwrap();
 
     let html_before = fetch_html(router(s.clone()), "/admin/users/u0/delivery").await;
+    assert!(!html_before.contains(r#"data-share-server="s0" data-share-protocol="tuic-v5""#));
     assert!(html_before.contains(r#"data-share-server="s0" data-share-protocol="vless+reality""#));
-    assert!(html_before.contains(r#"data-share-server="s0" data-share-protocol="tuic-v5""#));
+    assert!(!html_before.contains(r#"data-share-server="s0" data-share-protocol="hysteria2""#));
+    assert!(html_before.contains(r#"data-share-server="s0" data-share-protocol="naive""#));
+    assert!(html_before.contains("?format=sing-box"));
 
     s.inv
         .set_server_protocol_hidden(&sid, &ProtocolId("vless+reality".into()), true)
@@ -1008,18 +1028,18 @@ async fn admin_delivery_share_links_skip_hidden_and_user_disabled_protocols() {
         "hidden protocol must not render in share links"
     );
     assert!(
-        html_hidden.contains(r#"data-share-server="s0" data-share-protocol="tuic-v5""#),
-        "unhidden protocol tuic-v5 must render"
+        html_hidden.contains(r#"data-share-server="s0" data-share-protocol="naive""#),
+        "unhidden protocol naive must render"
     );
 
     s.inv
-        .set_grant_protocol_override(&uid, &sid, &ProtocolId("tuic-v5".into()), true)
+        .set_grant_protocol_override(&uid, &sid, &ProtocolId("naive".into()), true)
         .await
         .unwrap();
 
     let html_disabled = fetch_html(router(s), "/admin/users/u0/delivery").await;
     assert!(
-        !html_disabled.contains(r#"data-share-server="s0" data-share-protocol="tuic-v5""#),
+        !html_disabled.contains(r#"data-share-server="s0" data-share-protocol="naive""#),
         "per-user-disabled protocol must not render in share links"
     );
 }

@@ -33,6 +33,25 @@ enum SubFormat {
 #[derive(Clone, Copy)]
 struct DefaultMihomo;
 
+pub(super) fn ua_product_version(user_agent: Option<&str>) -> Option<(&str, &str)> {
+    user_agent?.split_ascii_whitespace().next()?.split_once('/')
+}
+
+pub(super) fn supports_core_version(version: &str, minimum: (u32, u32, u32)) -> bool {
+    let version = version.trim_start_matches(['v', 'V']);
+    let version = version.split('+').next().unwrap_or(version);
+    let (version, prerelease) = version
+        .split_once('-')
+        .map_or((version, false), |(base, _)| (base, true));
+    let mut parts = version.split('.');
+    let major = parts.next().and_then(|part| part.parse::<u32>().ok());
+    let minor = parts.next().and_then(|part| part.parse::<u32>().ok());
+    let patch = parts.next().unwrap_or("0").parse::<u32>().ok();
+    matches!((major, minor, patch), (Some(major), Some(minor), Some(patch))
+        if parts.next().is_none()
+            && ((major, minor, patch) > minimum || ((major, minor, patch) == minimum && !prerelease)))
+}
+
 pub(crate) async fn get_mihomo(
     state: State<AppState>,
     path: Path<String>,
@@ -282,10 +301,12 @@ pub(crate) async fn get(
         SubFormat::V2Ray => render_v2ray_subscription(&state, &user, ua.as_deref())
             .await
             .map(|(uid, body)| (uid, body, "text/plain; charset=utf-8")),
-        SubFormat::SingBox { stock_only } => render_singbox(&state, &user, stock_only)
-            .await
-            .map(|(uid, cfg)| (uid, cfg.to_string(), "application/json")),
-        SubFormat::Mihomo => render_mihomo(&state, &user)
+        SubFormat::SingBox { stock_only } => {
+            render_singbox(&state, &user, stock_only, ua.as_deref())
+                .await
+                .map(|(uid, cfg)| (uid, cfg.to_string(), "application/json"))
+        }
+        SubFormat::Mihomo => render_mihomo(&state, &user, ua.as_deref())
             .await
             .map(|(uid, yaml)| (uid, yaml, "text/yaml")),
     };

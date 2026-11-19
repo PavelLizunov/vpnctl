@@ -25,6 +25,14 @@ async fn fixture(dir: &TempDir) -> AppState {
             .unwrap();
     }
     s.inv
+        .set_server_secret(
+            &ServerId("s0".into()),
+            "observed.tls.cert_public_key_sha256",
+            &"cd".repeat(32),
+        )
+        .await
+        .unwrap();
+    s.inv
         .audit("test", "server.deploy", Some("s0"), None)
         .await
         .unwrap();
@@ -47,7 +55,7 @@ async fn post(s: &AppState, suffix: &str, body: &str) -> axum::response::Respons
         .unwrap()
 }
 
-async fn share_links(s: &AppState) -> (String, String) {
+async fn client_artifacts(s: &AppState) -> (String, String) {
     let sid = ServerId("s0".into());
     let server = s.inv.get_server(&sid).await.unwrap().unwrap();
     let secrets = s.inv.list_server_secrets(&sid).await.unwrap();
@@ -61,7 +69,14 @@ async fn share_links(s: &AppState) -> (String, String) {
             .share_link(&ctx, &user)
             .unwrap()
     };
-    (link("vless+reality"), link("hysteria2"))
+    let hy2 = s
+        .registry
+        .protocol(&ProtocolId("hysteria2".into()))
+        .unwrap()
+        .client_config(&ctx, &user)
+        .unwrap()
+        .to_string();
+    (link("vless+reality"), hy2)
 }
 
 #[tokio::test]
@@ -97,14 +112,24 @@ async fn reality_sni_save_audits_changes_only_and_preserves_other_link_bytes() {
     let dir = TempDir::new().unwrap();
     let s = fixture(&dir).await;
     let sid = ServerId("s0".into());
-    let before = share_links(&s).await;
+    let before = client_artifacts(&s).await;
     assert_eq!(
         before.0.as_bytes(),
         b"vless://uuid-fixture@10.0.0.0:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=yahoo.com&fp=randomized&pbk=fixture-public-key&sid=deadbeef&type=tcp&packetEncoding=xudp#fixture"
     );
     assert_eq!(
         before.1.as_bytes(),
-        b"hysteria2://fixture-client-password@10.0.0.0:8444/?sni=10.0.0.0&insecure=1&obfs=salamander&obfs-password=fixture-old-obfs#fixture"
+        serde_json::json!({
+            "type": "hysteria2", "tag": "hy2-out",
+            "server": "10.0.0.0", "server_port": 8444, "password": "fixture-client-password",
+            "tls": {
+                "enabled": true, "insecure": false, "alpn": ["h3"],
+                "certificate_public_key_sha256": ["zc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc0="]
+            },
+            "obfs": {"type": "salamander", "password": "fixture-old-obfs"}
+        })
+        .to_string()
+        .as_bytes()
     );
     let resp = post(
         &s,
@@ -130,7 +155,7 @@ async fn reality_sni_save_audits_changes_only_and_preserves_other_link_bytes() {
         audit[0].payload,
         Some(serde_json::json!({"keys": ["vless.sni"]}))
     );
-    let after = share_links(&s).await;
+    let after = client_artifacts(&s).await;
     assert_eq!(
         after.0.as_bytes(),
         before
@@ -153,7 +178,7 @@ async fn reality_sni_save_audits_changes_only_and_preserves_other_link_bytes() {
     );
     assert_eq!(s.inv.recent_audit(1).await.unwrap()[0].id, latest);
     assert!(!s.inv.server_pending_deploy(&sid).await.unwrap());
-    assert_eq!(share_links(&s).await, after);
+    assert_eq!(client_artifacts(&s).await, after);
 
     // Existing port-only callers preserve the stored SNI.
     assert_eq!(
@@ -233,7 +258,7 @@ async fn hysteria2_rotation_generates_secret_audits_and_preserves_other_link_byt
             .await
             .unwrap();
         assert!(!s.inv.server_pending_deploy(&sid).await.unwrap());
-        let before = share_links(&s).await;
+        let before = client_artifacts(&s).await;
         let resp = post(&s, "hysteria2-obfs-rotate", "password=browser-supplied").await;
         assert_eq!(resp.status(), StatusCode::SEE_OTHER);
         assert_eq!(resp.headers()["location"], "/admin/servers/s0/protocols");
@@ -261,7 +286,7 @@ async fn hysteria2_rotation_generates_secret_audits_and_preserves_other_link_byt
         );
         let html = fetch_html(router(s.clone()), "/admin/servers/s0/protocols").await;
         assert!(!html.contains(&password));
-        let after = share_links(&s).await;
+        let after = client_artifacts(&s).await;
         assert_ne!(after.1.as_bytes(), before.1.as_bytes());
         assert_eq!(after.0.as_bytes(), before.0.as_bytes());
         assert_eq!(
@@ -269,8 +294,8 @@ async fn hysteria2_rotation_generates_secret_audits_and_preserves_other_link_byt
             before
                 .1
                 .replace(
-                    &format!("obfs-password={previous}#"),
-                    &format!("obfs-password={password}#")
+                    &format!(r#""password":"{previous}""#),
+                    &format!(r#""password":"{password}""#)
                 )
                 .as_bytes()
         );
@@ -466,7 +491,7 @@ async fn ss2022_mode_switch_audits_changes_only_and_restores_legacy_bytes() {
     let dir = TempDir::new().unwrap();
     let s = ss2022_fixture(&dir).await;
     let sid = ServerId("s0".into());
-    let unchanged = share_links(&s).await;
+    let unchanged = client_artifacts(&s).await;
     let latest = s.inv.recent_audit(1).await.unwrap()[0].id;
     assert_eq!(
         post(&s, "ss2022-mode", "mode=shared").await.status(),
@@ -516,7 +541,7 @@ async fn ss2022_mode_switch_audits_changes_only_and_restores_legacy_bytes() {
             protocol.share_link(&ctx, &user).unwrap().as_bytes(),
             expected.as_bytes()
         );
-        assert_eq!(share_links(&s).await, unchanged);
+        assert_eq!(client_artifacts(&s).await, unchanged);
         s.inv
             .audit("test", "server.deploy", Some("s0"), None)
             .await

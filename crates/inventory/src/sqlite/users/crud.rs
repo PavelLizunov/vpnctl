@@ -2,9 +2,10 @@ use std::collections::HashSet;
 
 use crate::sqlite::base::{SqliteInventory, map_unique};
 use crate::sqlite::models::{Result, SqliteInventoryError};
+use sha2::{Digest, Sha256};
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
-use vpnctl_core::{User, UserId};
+use vpnctl_core::{ServerId, User, UserId};
 
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn row_to_user(r: SqliteRow) -> Result<User> {
@@ -118,6 +119,93 @@ impl SqliteInventory {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(|(uuid,)| uuid).collect())
+    }
+
+    pub async fn rotate_user_uuid(
+        &self,
+        id: &UserId,
+        expected_sha256: &str,
+        replacement: &str,
+        actor: &str,
+    ) -> Result<Vec<ServerId>> {
+        if replacement.len() != 36
+            || replacement.bytes().any(|byte| byte.is_ascii_uppercase())
+            || !vpnctl_crypto::is_valid_uuid(replacement)
+        {
+            return Err(SqliteInventoryError::Invalid(
+                "replacement UUID must be canonical lowercase".into(),
+            ));
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let previous: Option<String> = sqlx::query_scalar("SELECT uuid FROM users WHERE id = ?1")
+            .bind(&id.0)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(previous) = previous else {
+            return Err(SqliteInventoryError::Invalid("no such user".into()));
+        };
+        let servers = sqlx::query_scalar::<_, String>(
+            "SELECT server_id FROM grants WHERE user_id = ?1 ORDER BY server_id",
+        )
+        .bind(&id.0)
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .map(ServerId)
+        .collect::<Vec<_>>();
+        if previous == replacement {
+            tx.commit().await?;
+            return Ok(servers);
+        }
+        if format!("{:x}", Sha256::digest(previous.to_ascii_lowercase())) != expected_sha256 {
+            return Err(SqliteInventoryError::Invalid(
+                "current UUID has changed".into(),
+            ));
+        }
+        let in_use: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM users WHERE uuid = ?1 COLLATE NOCASE
+                UNION ALL SELECT 1 FROM grants WHERE client_uuid = ?1 COLLATE NOCASE
+                UNION ALL SELECT 1 FROM retired_user_uuids WHERE uuid = ?1 COLLATE NOCASE
+            )",
+        )
+        .bind(replacement)
+        .fetch_one(&mut *tx)
+        .await?;
+        if in_use {
+            return Err(SqliteInventoryError::Invalid(
+                "replacement UUID is in use or retired".into(),
+            ));
+        }
+        sqlx::query("UPDATE users SET uuid = ?1 WHERE id = ?2")
+            .bind(replacement)
+            .bind(&id.0)
+            .execute(&mut *tx)
+            .await?;
+        let overrides = sqlx::query(
+            "UPDATE grants SET client_uuid = ?1
+             WHERE user_id = ?2 AND client_uuid = ?3 COLLATE NOCASE",
+        )
+        .bind(replacement)
+        .bind(&id.0)
+        .bind(&previous)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        sqlx::query(
+            "INSERT INTO audit_log (actor, action, target, payload)
+             VALUES (?1, 'user.uuid.rotate', ?2, ?3)",
+        )
+        .bind(actor)
+        .bind(&id.0)
+        .bind(
+            serde_json::json!({"servers": servers.len(), "replaced_overrides": overrides})
+                .to_string(),
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(servers)
     }
 
     pub async fn remove_user(&self, id: &UserId) -> Result<()> {

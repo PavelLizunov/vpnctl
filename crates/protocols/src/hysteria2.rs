@@ -1,7 +1,4 @@
-use crate::encoding::{FRAGMENT, QUERY, USERINFO};
-use percent_encoding::utf8_percent_encode;
 use serde_json::json;
-use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
 
 #[derive(Debug, Default)]
@@ -123,7 +120,7 @@ impl Protocol for Hysteria2 {
             "server": ctx.server.address,
             "server_port": 8444,
             "password": pw,
-            "tls": { "enabled": true, "insecure": true, "alpn": ["h3"] }
+            "tls": crate::tls::quic_client_tls(ctx)
         });
         if let Some(obfs_pw) = obfs_password(ctx)
             && let Some(map) = out.as_object_mut()
@@ -136,34 +133,9 @@ impl Protocol for Hysteria2 {
         Ok(out)
     }
 
-    fn share_link(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<String> {
-        let raw_pw = user.tuic_password.as_deref().ok_or_else(|| {
-            CoreError::Render(format!(
-                "user '{}' has no tuic_password — cannot mint a Hysteria2 link",
-                user.id.0
-            ))
-        })?;
-        let pw = utf8_percent_encode(raw_pw, USERINFO);
-        let name = utf8_percent_encode(&user.id.0, FRAGMENT);
-        let obfs_suffix = match obfs_password(ctx) {
-            Some(opw) => {
-                let opw_enc = utf8_percent_encode(opw, QUERY);
-                format!("&obfs=salamander&obfs-password={opw_enc}")
-            }
-            None => String::new(),
-        };
-        let pin_suffix = ctx
-            .secrets
-            .get("tls.cert_sha256")
-            .map(|pin| format!("&pinSHA256={pin}"))
-            .unwrap_or_default();
-        Ok(format!(
-            "hysteria2://{pw}@{host}:8444/?sni={sni}&insecure=1{obfs_suffix}{pin_suffix}#{name}",
-            pw = pw,
-            host = host_for_url(&ctx.server.address),
-            sni = ctx.server.address,
-            name = name,
-            obfs_suffix = obfs_suffix,
+    fn share_link(&self, _ctx: &RenderCtx<'_>, _user: &User) -> Result<String> {
+        Err(CoreError::ShareLinkUnavailable(
+            "use the pinned Hysteria2 sing-box or Mihomo subscription".into(),
         ))
     }
 }

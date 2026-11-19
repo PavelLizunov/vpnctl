@@ -6,14 +6,12 @@
   provides the local proxy/TUN settings; a bare core needs these merged into a
   local configuration with a proxy listener or enabled TUN routing. It is not
   a complete standalone core configuration.
-- Non-empty sing-box JSON remains byte-for-byte unchanged. The additive TLS pin
-  extension changes only Hysteria2 URIs in UA-selected and app-config payloads
-  when a node pin exists; see [self-signed TLS pinning](self-signed-tls-pinning.md).
+- Hysteria2 and TUIC use pinned native subscriptions. See
+  [self-signed TLS pinning](self-signed-tls-pinning.md).
 - The canonical public URL `GET /api/v1/sub/{token}` defaults to Mihomo YAML without requiring query parameters, while preserving full compatibility with legacy `?format=mihomo` query parameters.
-- Protocol scope includes VLESS+REALITY and Hysteria2, plus Trojan, AnyTLS and
-  TUIC-v5 when `tls.cert_sha256` exists. Hysteria2, Trojan, AnyTLS and TUIC carry
-  the certificate pin in `fingerprint` while retaining `skip-cert-verify`.
-  Without a pin the previous bytes and protocol omissions remain unchanged.
+- Protocol scope includes VLESS+REALITY, pinned Trojan and AnyTLS, and pinned
+  Hysteria2 and TUIC-v5 for identified Mihomo 1.19.20+ clients. Each pinned
+  proxy carries the certificate pin in `fingerprint`.
   XHTTP, VLESS-WS, Naive, SS-2022 and WireGuard remain omitted.
 - Distinct server records are never deduplicated by address: an S5 target and its entry remain separate proxies even when both use the same IP.
 - A chained target is emitted only with a usable upstream through Mihomo `dialer-proxy`; direct target fallback is forbidden.
