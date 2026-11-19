@@ -16,6 +16,8 @@ use super::client_nodes::{Identity, limits};
 use crate::app::AppState;
 
 const PATH: &str = "/api/v1/assistant/diagnose";
+const OPENCODE_GO: &str = "https://opencode.ai/inference/go/openai/v1/chat/completions";
+const DEEPSEEK_FLASH: &str = "deepseek-v4.1-flash";
 const UPSTREAM_LIMIT: usize = 32 * 1024;
 const CHECK_IDS: [&str; 6] = [
     "dns.youtube",
@@ -29,6 +31,7 @@ const PROMPT: &str = "Ты помощник NINA. Объясни по-русск
 
 type Result<T> = std::result::Result<T, ApiError>;
 
+#[derive(Debug)]
 enum ApiError {
     Unauthorized,
     Disabled,
@@ -133,9 +136,13 @@ impl Gateway {
         None
     }
 
-    async fn explain(&self, report: &Report, credential: &str) -> Result<Value> {
+    fn uses_open_code_flash(&self) -> bool {
+        self.url.as_str() == OPENCODE_GO && self.model == DEEPSEEK_FLASH
+    }
+
+    fn request(&self, report: &Report) -> Result<reqwest::RequestBuilder> {
         let report = serde_json::to_string(report).map_err(|_| ApiError::InvalidReport)?;
-        let request = json!({
+        let mut body = json!({
             "model": self.model,
             "messages": [
                 {"role": "system", "content": PROMPT},
@@ -144,12 +151,25 @@ impl Gateway {
             "max_tokens": 400,
             "stream": false,
         });
-        let mut response = self
+        let mut request = self
             .client
             .post(self.url.clone())
             .header(header::AUTHORIZATION, self.authorization.clone())
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(request.to_string())
+            .header(header::CONTENT_TYPE, "application/json");
+        if self.url.as_str() == OPENCODE_GO {
+            request = request
+                .header(header::USER_AGENT, "NINA-Assistant/1.0")
+                .header("x-opencode-session", vpnctl_crypto::gen_uuid());
+        }
+        if self.uses_open_code_flash() {
+            body["thinking"] = json!({"type": "disabled"});
+        }
+        Ok(request.body(body.to_string()))
+    }
+
+    async fn explain(&self, report: &Report, credential: &str) -> Result<Value> {
+        let mut response = self
+            .request(report)?
             .send()
             .await
             .map_err(|_| ApiError::Gateway)?;
@@ -166,7 +186,14 @@ impl Gateway {
             }
             bytes.extend_from_slice(&chunk);
         }
-        let payload: Value = serde_json::from_slice(&bytes).map_err(|_| ApiError::Gateway)?;
+        self.decode_explanation(&bytes, credential)
+    }
+
+    fn decode_explanation(&self, bytes: &[u8], credential: &str) -> Result<Value> {
+        let payload: Value = serde_json::from_slice(bytes).map_err(|_| ApiError::Gateway)?;
+        if self.uses_open_code_flash() && payload["model"].as_str() != Some(DEEPSEEK_FLASH) {
+            return Err(ApiError::Gateway);
+        }
         let explanation = payload["choices"][0]["message"]["content"]
             .as_str()
             .ok_or(ApiError::Gateway)?
@@ -182,6 +209,75 @@ impl Gateway {
             end -= 1;
         }
         Ok(json!({"schema": 1, "explanation": &explanation[..end]}))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod request_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_opencode_go_request_has_its_session_and_thinking_options() {
+        let report = Report {
+            schema: 1,
+            state: "active".into(),
+            enabled: Some(true),
+            checks: Vec::new(),
+        };
+        let gateway = Gateway::new(OPENCODE_GO, DEEPSEEK_FLASH, "synthetic-key").unwrap();
+        let first = gateway.request(&report).unwrap().build().unwrap();
+        let second = gateway.request(&report).unwrap().build().unwrap();
+        assert_eq!(first.headers()[header::USER_AGENT], "NINA-Assistant/1.0");
+        assert_ne!(
+            first.headers()["x-opencode-session"],
+            second.headers()["x-opencode-session"]
+        );
+        let body: Value =
+            serde_json::from_slice(first.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(body["model"], DEEPSEEK_FLASH);
+        assert_eq!(body["thinking"]["type"], "disabled");
+
+        let other = Gateway::new(
+            "https://synthetic.example/chat/completions",
+            DEEPSEEK_FLASH,
+            "synthetic-key",
+        )
+        .unwrap();
+        let request = other.request(&report).unwrap().build().unwrap();
+        assert!(!request.headers().contains_key("x-opencode-session"));
+        let body: Value =
+            serde_json::from_slice(request.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert!(body.get("thinking").is_none());
+
+        let other = Gateway::new(OPENCODE_GO, "synthetic-model", "synthetic-key").unwrap();
+        let request = other.request(&report).unwrap().build().unwrap();
+        assert!(request.headers().contains_key("x-opencode-session"));
+        let body: Value =
+            serde_json::from_slice(request.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn open_code_flash_explanations_must_identify_the_model() {
+        let gateway = Gateway::new(OPENCODE_GO, DEEPSEEK_FLASH, "synthetic-key").unwrap();
+        let mut response = json!({"choices":[{"message":{"content":"Explanation"}}]});
+        assert!(
+            gateway
+                .decode_explanation(response.to_string().as_bytes(), "synthetic-subscriber")
+                .is_err()
+        );
+        response["model"] = json!("synthetic-other-model");
+        assert!(
+            gateway
+                .decode_explanation(response.to_string().as_bytes(), "synthetic-subscriber")
+                .is_err()
+        );
+        response["model"] = json!(DEEPSEEK_FLASH);
+        let reply = gateway
+            .decode_explanation(response.to_string().as_bytes(), "synthetic-subscriber")
+            .unwrap();
+        assert_eq!(reply["explanation"], "Explanation");
     }
 }
 

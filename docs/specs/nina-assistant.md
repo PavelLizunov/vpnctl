@@ -30,3 +30,11 @@ HTTP is accepted for loopback endpoints. The gateway client uses a
 12-second deadline and keeps authentication on the configured endpoint.
 Route the exact POST path to vpnctld and set the trusted `X-Real-IP`
 header as described in [deployment.md](deployment.md).
+
+For the owner's OpenCode Go account, set the URL to
+`https://opencode.ai/inference/go/openai/v1/chat/completions` and the
+model to `deepseek-v4.1-flash`. vpnctld identifies itself as NINA, sends a
+fresh OpenCode session ID for each diagnostic explanation, and disables
+the reasoning phase so the bounded response contains user-facing text.
+It verifies the upstream model ID before returning that text. Other gateway
+configurations use the standard chat completions request.
