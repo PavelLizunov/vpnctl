@@ -232,7 +232,7 @@ pub(crate) async fn get_config(
             &user,
             &dnstt,
             "DNSTT",
-            Some("dnstt.applied"),
+            Some("observed.dnstt.applied"),
         ));
     }
 

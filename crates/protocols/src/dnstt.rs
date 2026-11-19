@@ -16,8 +16,8 @@ const RESOLVER: &str = "dnstt.resolver";
 const NOISE_PRIVATE: &str = "dnstt.private_key";
 const NOISE_PUBLIC: &str = "dnstt.public_key";
 const SSH_SEED: &str = "dnstt.ssh_seed";
-const SSH_HOST_KEY: &str = "dnstt.ssh_host_key";
-const APPLIED: &str = "dnstt.applied";
+const SSH_HOST_KEY: &str = "observed.dnstt.ssh_host_key";
+const APPLIED: &str = "observed.dnstt.applied";
 
 #[derive(Debug, Default)]
 pub struct Dnstt;
@@ -170,7 +170,7 @@ impl Protocol for Dnstt {
             .public_key()
             .to_openssh()
             .map_err(|_| CoreError::Render("cannot encode DNSTT client public key".into()))?;
-        if !secret(ctx, "dnstt.authorized_keys")?
+        if !secret(ctx, "observed.dnstt.authorized_keys")?
             .lines()
             .any(|line| line.trim() == authorized)
         {

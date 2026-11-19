@@ -3,6 +3,7 @@ use sqlx::Row;
 use std::collections::HashMap;
 use vpnctl_core::{ServerId, UserId};
 
+// Observed deployment outputs belong to the observed.* namespace.
 pub(crate) const DEPLOY_INPUT_REVISION_SQL: &str = "SELECT json_object(
         'server', (SELECT json_array(address, ssh_port, ssh_user, reserved_ports)
                    FROM servers WHERE id = ?1),
@@ -14,7 +15,14 @@ pub(crate) const DEPLOY_INPUT_REVISION_SQL: &str = "SELECT json_object(
                       WHERE server_id = ?1 ORDER BY protocol_id)),
         'secrets', (SELECT json_group_array(json_array(key, value)) FROM
                    (SELECT key, value FROM server_secrets
-                    WHERE server_id = ?1 AND key != 'tls.cert_sha256' ORDER BY key)),
+                    WHERE server_id = ?1 AND key != 'tls.cert_sha256'
+                      AND key NOT GLOB 'observed.*' ORDER BY key)),
+        'protocol_denials', (SELECT json_group_array(json_array(user_id, protocol_id)) FROM
+                         (SELECT o.user_id, o.protocol_id FROM grant_protocol_overrides o
+                          JOIN users u ON u.id = o.user_id
+                          JOIN server_protocols p ON p.server_id = o.server_id AND p.protocol_id = o.protocol_id
+                          WHERE o.server_id = ?1 AND o.state = 'disabled' AND u.disabled = 0
+                          ORDER BY o.user_id, o.protocol_id)),
         'users', (SELECT json_group_array(json_array(id, uuid, tuic_password,
                                                     wireguard_pubkey, wireguard_private, wg_octet)) FROM
                  (SELECT u.id AS id, COALESCE(g.client_uuid, u.uuid) AS uuid,

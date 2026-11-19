@@ -219,10 +219,13 @@ impl Kernel for DnsttKernel {
             ))
             .await?;
         Ok(vec![
-            ("dnstt.ssh_host_key".into(), host_key.trim().to_owned()),
-            ("dnstt.authorized_keys".into(), authorized),
             (
-                "dnstt.applied".into(),
+                "observed.dnstt.ssh_host_key".into(),
+                host_key.trim().to_owned(),
+            ),
+            ("observed.dnstt.authorized_keys".into(), authorized),
+            (
+                "observed.dnstt.applied".into(),
                 format!("{domain}+{resolver}+{noise}"),
             ),
         ])

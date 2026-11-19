@@ -667,7 +667,7 @@ pub(crate) fn server_detail_dnstt_section(
     let resolver = secrets.get("dnstt.resolver").map_or("", String::as_str);
     let noise = secrets.get("dnstt.public_key").map_or("", String::as_str);
     let applied = secrets
-        .get("dnstt.applied")
+        .get("observed.dnstt.applied")
         .is_some_and(|value| value == &format!("{domain}+{resolver}+{noise}"));
     let enabled = server.enabled_protocols.iter().any(|p| p.0 == "dnstt");
     let active = health

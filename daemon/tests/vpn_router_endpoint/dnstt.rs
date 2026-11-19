@@ -80,8 +80,8 @@ async fn add_dnstt_server(state: &AppState, name: &str) -> ServerId {
         ("dnstt.private_key", NOISE_PRIVATE),
         ("dnstt.public_key", NOISE_PUBLIC),
         ("dnstt.ssh_seed", SSH_SEED),
-        ("dnstt.ssh_host_key", SSH_HOST_KEY),
-        ("dnstt.applied", applied.as_str()),
+        ("observed.dnstt.ssh_host_key", SSH_HOST_KEY),
+        ("observed.dnstt.applied", applied.as_str()),
     ] {
         state.inv.set_server_secret(&id, key, value).await.unwrap();
     }
@@ -114,7 +114,7 @@ async fn simulate_apply(state: &AppState, id: &ServerId) {
         .join("\n");
     state
         .inv
-        .set_server_secret(id, "dnstt.authorized_keys", &keys)
+        .set_server_secret(id, "observed.dnstt.authorized_keys", &keys)
         .await
         .unwrap();
 }
@@ -290,9 +290,9 @@ async fn dnstt_omits_profiles_with_missing_or_invalid_managed_settings() {
         ("dnstt.private_key", "invalid-base64!"),
         ("dnstt.public_key", "AQID"),
         ("dnstt.ssh_seed", "AQID"),
-        ("dnstt.ssh_host_key", "ssh-ed25519 invalid!"),
-        ("dnstt.applied", "other.example.com+192.0.2.53"),
-        ("dnstt.authorized_keys", "unrecognized public key"),
+        ("observed.dnstt.ssh_host_key", "ssh-ed25519 invalid!"),
+        ("observed.dnstt.applied", "other.example.com+192.0.2.53"),
+        ("observed.dnstt.authorized_keys", "unrecognized public key"),
     ]
     .into_iter()
     .enumerate()

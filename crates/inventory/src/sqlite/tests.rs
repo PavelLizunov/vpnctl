@@ -1429,6 +1429,54 @@ async fn deploy_input_revision_changes_with_render_inputs() -> Result<()> {
 }
 
 #[tokio::test]
+async fn dnstt_deploy_revision_tracks_settings_and_access_but_ignores_observations() -> Result<()> {
+    let inv = fresh().await;
+    let mut server = sample_server("dnstt");
+    let protocol = ProtocolId("dnstt".into());
+    server.enabled_protocols.push(protocol.clone());
+    inv.add_server(&server).await?;
+    let user = sample_user("dnstt-user");
+    inv.add_user(&user).await?;
+    inv.grant(&user.id, &server.id).await?;
+    inv.set_server_secret(&server.id, "dnstt.domain", "t.example.test")
+        .await?;
+    let before_apply = inv.deploy_input_revision(&server.id).await?;
+
+    inv.set_server_secrets_audited(
+        &server.id,
+        "test",
+        "server.deployed_secrets.set",
+        &[
+            ("observed.dnstt.ssh_host_key", "observed host key"),
+            ("observed.dnstt.authorized_keys", "observed user key"),
+            ("observed.dnstt.applied", "observed settings"),
+        ],
+    )
+    .await?;
+    assert!(
+        inv.audit_deploy_if_revision("test", &server.id, &before_apply, &serde_json::json!({}))
+            .await?
+    );
+
+    inv.set_grant_protocol_override(&user.id, &server.id, &protocol, true)
+        .await?;
+    let denied = inv.deploy_input_revision(&server.id).await?;
+    assert_ne!(before_apply, denied);
+    assert!(
+        !inv.audit_deploy_if_revision("test", &server.id, &before_apply, &serde_json::json!({}))
+            .await?
+    );
+    inv.set_server_secret(&server.id, "dnstt.domain", "next.example.test")
+        .await?;
+    assert_ne!(denied, inv.deploy_input_revision(&server.id).await?);
+    assert!(
+        !inv.audit_deploy_if_revision("test", &server.id, &denied, &serde_json::json!({}))
+            .await?
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn session_observe_skips_unknown_user() -> Result<()> {
     let inv = fresh().await;
     inv.add_server(&sample_server("srv")).await?;

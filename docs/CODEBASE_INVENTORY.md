@@ -6,7 +6,7 @@
 
 - **Workspace Crates:** 10
 - **Tracked Rust Files:** 527 (338 prod / 189 test)
-- **Total Rust LOC:** 193,982 (101,721 prod / 92,261 test)
+- **Total Rust LOC:** 194,041 (101,780 prod / 92,261 test)
 - **Database Migrations:** 76
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 149
 
@@ -19,12 +19,12 @@
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,419 (13) | 0 (0) | **1,419** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 318 (1) | 125 (1) | **443** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 193 (1) | 454 (2) | **647** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 59 tests | 18,796 (64) | 27,430 (65) | **46,226** |
-| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 6,988 (15) | 1,554 (6) | **8,542** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 59 tests | 18,852 (64) | 27,430 (65) | **46,282** |
+| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 6,991 (15) | 1,554 (6) | **8,545** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,436 (21) | 4,817 (12) | **9,253** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,825 (5) | 1,191 (5) | **4,016** |
 | `vpnctld` | `daemon` | 0.9.0 | lib, bin, 29 tests | 58,857 (192) | 53,759 (93) | **112,616** |
-| **Total** | | | | **101,721 (338)** | **92,261 (189)** | **193,982** |
+| **Total** | | | | **101,780 (338)** | **92,261 (189)** | **194,041** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -33,8 +33,8 @@
 | `daemon/tests/admin_smoke/settings_integrations.rs` | 2,575 | `daemon` | Test |
 | `crates/inventory/tests/spec_corp_policy.rs` | 2,574 | `crates/inventory` | Test |
 | `daemon/tests/spec_corp_policy_http.rs` | 2,338 | `daemon` | Test |
+| `crates/inventory/src/sqlite/tests.rs` | 2,065 | `crates/inventory` | Prod |
 | `daemon/tests/spec_corp_operator.rs` | 2,057 | `daemon` | Test |
-| `crates/inventory/src/sqlite/tests.rs` | 2,017 | `crates/inventory` | Prod |
 | `daemon/src/health_monitor/tests.rs` | 1,845 | `daemon` | Prod |
 | `crates/kernels/src/caddy/tests.rs` | 1,800 | `crates/kernels` | Prod |
 | `vendor/sqlx-sqlite/src/connection/explain.rs` | 1,779 | `other` | Prod |
