@@ -356,7 +356,7 @@ async fn udp_availability_reports_partial_verified_coverage_on_each_admin_surfac
 }
 
 #[tokio::test]
-async fn udp_availability_requires_fresh_transfer_and_preserves_tcp_status_for_mixed_nodes() {
+async fn udp_availability_requires_fresh_transfer_and_reports_alongside_tcp_for_mixed_nodes() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let server = udp_node(&s.inv).await;
@@ -427,8 +427,77 @@ async fn udp_availability_requires_fresh_transfer_and_preserves_tcp_status_for_m
         .add_server_protocol(&server, &ProtocolId("vless+reality".into()))
         .await
         .unwrap();
-    let page = fetch_html(app, path).await;
+    let page = fetch_html(app.clone(), path).await;
     let current = section(&page, "current-path-availability");
     assert!(current.contains(r#"data-path-status="unknown""#));
+    assert!(current.contains(r#"data-path-status="udp_failed""#));
     assert!(current.contains("TCP VPN ports"));
+
+    s.inv
+        .record_protocol_assurance_sample(&assurance(
+            &server,
+            "hysteria2",
+            now,
+            AssuranceStage::Transfer,
+            AssuranceState::Verified,
+        ))
+        .await
+        .unwrap();
+    s.inv
+        .add_server_protocol(&server, &ProtocolId("shadowsocks-2022".into()))
+        .await
+        .unwrap();
+    s.inv
+        .record_protocol_assurance_sample(&assurance(
+            &server,
+            "shadowsocks-2022",
+            now,
+            AssuranceStage::Transfer,
+            AssuranceState::Verified,
+        ))
+        .await
+        .unwrap();
+    for seconds_ago in [60, 30] {
+        let mut sample = release_quality_sample(&server.0, 0, false);
+        sample.ts = now - chrono::TimeDelta::seconds(seconds_ago);
+        sample.successes = 0;
+        sample.available_targets = 0;
+        sample.vantage = "fixture mixed origin".into();
+        s.inv
+            .record_service_path(&sample, "mixed-availability", 630)
+            .await
+            .unwrap();
+    }
+
+    let dashboard = fetch_html(app.clone(), "/admin/").await;
+    let summary = section(&dashboard, "fleet-current-path");
+    for status in ["unreachable", "udp_verified"] {
+        let count = summary
+            .split_once(&format!(r#"data-path-count="{status}""#))
+            .unwrap()
+            .1
+            .split_once("</span>")
+            .unwrap()
+            .0;
+        assert!(count.contains("<b>1</b>"), "{status}: {count}");
+    }
+    assert_eq!(summary.matches(r#"data-path-server="s0""#).count(), 1);
+    for (path, section_id) in [
+        ("/admin/", Some("fleet-at-a-glance")),
+        ("/admin/servers", None),
+        (path, Some("current-path-availability")),
+    ] {
+        let page = fetch_html(app.clone(), path).await;
+        let area = section_id.map_or(page.as_str(), |id| section(&page, id));
+        assert!(area.contains(r#"data-path-status="unreachable""#), "{path}");
+        assert!(area.contains("fixture mixed origin"), "{path}");
+        assert!(
+            area.contains(r#"data-path-status="udp_verified""#),
+            "{path}"
+        );
+        assert!(area.contains("1/2 verified"), "{path}");
+        assert!(area.contains("1 failed"), "{path}");
+        assert!(!area.contains("1 unverified"), "{path}");
+        assert!(!area.contains("2/2 verified"), "{path}");
+    }
 }

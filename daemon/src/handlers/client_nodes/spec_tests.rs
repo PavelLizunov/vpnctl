@@ -293,6 +293,30 @@ async fn a_users_projection_contains_only_that_users_granted_nodes() {
 }
 
 #[tokio::test]
+async fn suppressed_detour_target_metadata_requires_an_unsuppressed_entry() {
+    let fixture = Fixture::new().await;
+    let user = fixture.user(false).await;
+    let target = fixture.node("192.0.2.21", true, "vpn-exit").await;
+    let entry = fixture.node("192.0.2.22", true, "vpn-exit").await;
+    fixture.grant(&user, &target).await;
+    fixture.grant(&user, &entry).await;
+    fixture.set_detour(&target, &entry).await;
+    fixture.suppress_direct(&target).await;
+    let path = format!("/api/v1/app/node-status/device/{}", user.device_id);
+    let before = metadata(&fixture, &path).await;
+    let hosts: Vec<_> = before["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["endpoint_host"].as_str().unwrap())
+        .collect();
+    assert!(hosts.contains(&"192.0.2.21") && hosts.contains(&"192.0.2.22"));
+
+    fixture.suppress_direct(&entry).await;
+    assert_eq!(metadata(&fixture, &path).await["nodes"], json!([]));
+}
+
+#[tokio::test]
 async fn revoked_grants_disappear_from_both_identity_projections() {
     let fixture = Fixture::new().await;
     let user = fixture.user(false).await;

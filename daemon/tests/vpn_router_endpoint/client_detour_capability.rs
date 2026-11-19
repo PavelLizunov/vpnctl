@@ -2,12 +2,14 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use chrono::{Duration, Utc};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
 use vpnctl_core::{ProtocolId, ServerId, UserId};
+use vpnctl_inventory::ServiceQualitySample;
 use vpnctld::router;
 
 use super::common::{TEST_DEVICE_ID, seed_state};
@@ -205,6 +207,96 @@ async fn capability_aware_vpnrouter_gets_entry_and_target_with_outbound_detour()
         target.contains("detour=is"),
         "target must carry detour=is: {target}"
     );
+}
+
+#[tokio::test]
+async fn confirmed_target_tcp_outage_preserves_only_the_capability_aware_detour() {
+    let dir = TempDir::new().unwrap();
+    let state = seed_state(&dir).await;
+    let inv = &state.inv;
+    let target_id = ServerId("de".into());
+    let entry_id = ServerId("is".into());
+    inv.set_client_detour_via_as("test", &target_id, Some(&entry_id))
+        .await
+        .unwrap();
+    let confirm_direct_outage = async |server_id: &ServerId| {
+        inv.set_server_auto_suppress(server_id, true).await.unwrap();
+        let base = Utc::now() - Duration::seconds(60);
+        for offset in [0, 10] {
+            let sample = ServiceQualitySample {
+                ts: base + Duration::seconds(offset),
+                server_id: server_id.clone(),
+                vantage: "fixture measurement network".into(),
+                target_count: 1,
+                available_targets: 0,
+                attempts: 3,
+                successes: 0,
+                tcp_rtt_ms: vec![],
+                control_attempts: 3,
+                control_successes: 3,
+                control_rtt_ms: vec![10; 3],
+                icmp_attempts: None,
+                icmp_successes: None,
+                icmp_rtt_ms: None,
+            };
+            inv.record_service_path(&sample, "fixture:tcp-vpn-port", 120)
+                .await
+                .unwrap();
+        }
+        assert!(inv.is_server_auto_suppressed(server_id).await.unwrap());
+    };
+    confirm_direct_outage(&target_id).await;
+
+    let path = format!("/api/v1/app/config/{TEST_DEVICE_ID}");
+    let fetch = async |user_agent, capability| {
+        let (status, body, _) =
+            get_with_headers(router(state.clone()), &path, user_agent, capability).await;
+        assert_eq!(status, StatusCode::OK);
+        decode_config_lines(&body)
+    };
+    let metadata = |line: &str| {
+        let uri = url::Url::parse(line).unwrap();
+        let mut fields: Vec<_> = uri
+            .query_pairs()
+            .filter(|(key, _)| matches!(key.as_ref(), "detour" | "outbound"))
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect();
+        fields.sort_unstable();
+        fields
+    };
+
+    let lines = fetch("VPNRouter/1.0", Some("detour-v1")).await;
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    let entry = lines
+        .iter()
+        .find(|line| line.contains("@is.example.com:443?"))
+        .expect("direct entry URI is present");
+    let target = lines
+        .iter()
+        .find(|line| line.contains("@de.example.com:443?"))
+        .expect("target URI is present through its entry");
+    assert_eq!(metadata(entry), ["outbound=is"]);
+    assert_eq!(metadata(target), ["detour=is", "outbound=de"]);
+
+    for (ua, capability) in [("VPNRouter/1.0", None), ("v2rayN/6.62", Some("detour-v1"))] {
+        let lines = fetch(ua, capability).await;
+        assert_eq!(lines.len(), 1, "{ua}: {lines:?}");
+        assert!(lines[0].contains("@is.example.com:443?"));
+        assert!(metadata(&lines[0]).is_empty());
+    }
+
+    confirm_direct_outage(&entry_id).await;
+    assert!(fetch("VPNRouter/1.0", Some("detour-v1")).await.is_empty());
+
+    inv.set_server_suppressed(&entry_id, false).await.unwrap();
+    inv.set_client_detour_via_as("test", &target_id, None)
+        .await
+        .unwrap();
+    let lines = fetch("VPNRouter/1.0", Some("detour-v1")).await;
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("@is.example.com:443?"));
+    assert!(metadata(&lines[0]).is_empty());
+    assert!(inv.is_server_auto_suppressed(&target_id).await.unwrap());
 }
 
 #[tokio::test]

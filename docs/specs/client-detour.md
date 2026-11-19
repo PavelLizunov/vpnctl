@@ -7,6 +7,10 @@
 - Maximum one client hop; self-reference, cycles, and nested chains are rejected.
 - Subscriptions with no client detour remain byte-for-byte unchanged.
 - If the entry server or its usable outbound is unavailable, hidden, suppressed, or not granted, the target is omitted with no direct fallback.
+- A confirmed direct TCP outage on the target preserves its explicitly
+  configured chain in compatible client formats. The target is delivered only
+  through its eligible direct entry. Clearing the policy while the target
+  remains suppressed keeps the target out of subscriptions.
 - URI-only formats that cannot represent chaining omit chained targets instead of leaking a direct route; capability-aware VPNRouter app-config is the only URI exception and carries explicit `outbound`/`detour` metadata.
 - Flowpool and VM 226 are outside this feature.
 

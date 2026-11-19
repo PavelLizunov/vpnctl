@@ -127,7 +127,8 @@ async fn project_nodes(
     let servers = state.inv.subscription_servers_for_user(&user.id).await?;
     let mut eligible = Vec::with_capacity(servers.len());
     for server in servers {
-        if state.inv.is_server_auto_suppressed(&server.id).await? {
+        let detour = state.inv.client_detour_via(&server.id).await?;
+        if detour.is_none() && state.inv.is_server_auto_suppressed(&server.id).await? {
             continue;
         }
         let visible = state
@@ -141,7 +142,6 @@ async fn project_nodes(
         if protocols.is_empty() {
             continue;
         }
-        let detour = state.inv.client_detour_via(&server.id).await?;
         eligible.push((server, protocols, detour));
     }
     let mut nodes = Vec::new();

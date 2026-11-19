@@ -32,11 +32,16 @@
 - Reuse `server.auto_suppressed` / `server.auto_restored` audit actions once per
   actual toggle, transactionally with the observation. No no-op audit spam. DB
   failures roll back both observation and toggle; malformed input changes nothing.
-- All existing subscription formats, app-config, chained routes and admin
-  deliveries use the existing suppression gate. The unaffected routes and the
+- All subscription formats, app-config and admin deliveries gate direct routes
+  on suppression. A chained target remains eligible in chain-capable formats
+  only through its configured, unsuppressed entry. The unaffected routes and the
   entire recovered response retain their exact pre-outage bytes. The switch's
   EN/RU copy explains two TCP rounds and two recovery rounds without claiming
   reachability when measurements are absent.
+- Availability reports the direct TCP vantage and fresh UDP VPN transfer
+  assurance independently, including when a server runs both transports.
+  A mixed TCP/UDP protocol's transport-agnostic assurance does not prove UDP.
+  SSH logins and configured client entries keep their own meaning.
 
 ## Verification
 - Independent spec tests cover default registration, two-round hide/restore,

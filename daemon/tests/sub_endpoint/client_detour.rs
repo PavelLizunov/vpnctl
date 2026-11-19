@@ -4,13 +4,14 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
 use base64::Engine;
+use chrono::{Duration, Utc};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::task::JoinHandle;
 use tower::ServiceExt;
 use vpnctl_core::{KernelId, ProtocolId, Registry, Server, ServerId, User, UserId};
-use vpnctl_inventory::SqliteInventory;
+use vpnctl_inventory::{ServiceQualitySample, SqliteInventory};
 use vpnctl_kernels::SingBox;
 use vpnctl_protocols::{Hysteria2, Naive, TuicV5, VlessReality, VlessWs, VlessXhttp};
 use vpnctld::{AppState, router};
@@ -374,6 +375,100 @@ async fn singbox_subscription_chains_s5_through_iceland() {
     assert_eq!(entry["tag"], "Iceland VLESS ~alice");
     assert_eq!(target["tag"], "S5 VLESS ~alice");
     assert_eq!(target["detour"], entry["tag"]);
+}
+
+#[tokio::test]
+async fn confirmed_target_tcp_outage_preserves_only_the_eligible_detour() {
+    for (format, list, tag, detour) in [
+        ("sing-box", "outbounds", "tag", "detour"),
+        ("mihomo", "proxies", "name", "dialer-proxy"),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let (state, token, _writer) = seed(&dir, true).await;
+        let inv = &state.inv;
+        let target_id = ServerId("s5".into());
+        let entry_id = ServerId("is".into());
+        let confirm_direct_outage = async |server_id: &ServerId| {
+            inv.set_server_auto_suppress(server_id, true).await.unwrap();
+            let base = Utc::now() - Duration::seconds(60);
+            for offset in [0, 10] {
+                let sample = ServiceQualitySample {
+                    ts: base + Duration::seconds(offset),
+                    server_id: server_id.clone(),
+                    vantage: "fixture measurement network".into(),
+                    target_count: 1,
+                    available_targets: 0,
+                    attempts: 3,
+                    successes: 0,
+                    tcp_rtt_ms: vec![],
+                    control_attempts: 3,
+                    control_successes: 3,
+                    control_rtt_ms: vec![10; 3],
+                    icmp_attempts: None,
+                    icmp_successes: None,
+                    icmp_rtt_ms: None,
+                };
+                inv.record_service_path(&sample, "fixture:tcp-vpn-port", 120)
+                    .await
+                    .unwrap();
+            }
+            assert!(inv.is_server_auto_suppressed(server_id).await.unwrap());
+        };
+        confirm_direct_outage(&target_id).await;
+
+        let uri = format!("/sub/{token}?format={format}");
+        let fetch = || async {
+            let (status, body) = get_sub_at(state.clone(), &uri, None).await;
+            assert_eq!(status, StatusCode::OK, "{format}");
+            let config: Value = if format == "mihomo" {
+                serde_saphyr::from_str(std::str::from_utf8(&body).unwrap()).unwrap()
+            } else {
+                serde_json::from_slice(&body).unwrap()
+            };
+            config[list]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|outbound| outbound["server"].is_string())
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+
+        let outbounds = fetch().await;
+        assert_eq!(outbounds.len(), 2, "{format}: {outbounds:?}");
+        let entry = outbounds
+            .iter()
+            .find(|outbound| outbound["server"] == "198.51.100.10")
+            .expect("direct entry is present");
+        let target = outbounds
+            .iter()
+            .find(|outbound| outbound["server"] == "198.51.100.50")
+            .expect("target is present through its entry");
+        assert_eq!(entry[tag], "Iceland VLESS ~alice");
+        assert!(entry.get(detour).is_none());
+        assert_eq!(target[detour], entry[tag]);
+
+        let (status, body) = get_sub(state.clone(), &token, Some("v2rayN/6.62")).await;
+        assert_eq!(status, StatusCode::OK);
+        let links = base64::engine::general_purpose::STANDARD
+            .decode(body)
+            .unwrap();
+        let links = std::str::from_utf8(&links).unwrap();
+        assert!(links.contains("@198.51.100.10:443"));
+        assert!(!links.contains("@198.51.100.50:443"));
+
+        confirm_direct_outage(&entry_id).await;
+        assert!(fetch().await.is_empty(), "{format}: entry suppressed");
+
+        inv.set_server_suppressed(&entry_id, false).await.unwrap();
+        inv.set_client_detour_via_as("test", &target_id, None)
+            .await
+            .unwrap();
+        let outbounds = fetch().await;
+        assert_eq!(outbounds.len(), 1, "{format}: {outbounds:?}");
+        assert_eq!(outbounds[0]["server"], "198.51.100.10");
+        assert!(inv.is_server_auto_suppressed(&target_id).await.unwrap());
+    }
 }
 
 #[tokio::test]
