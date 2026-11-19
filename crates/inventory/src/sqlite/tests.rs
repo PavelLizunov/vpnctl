@@ -1266,7 +1266,7 @@ async fn set_grant_client_uuid_same_value_writes_no_audit_row() -> Result<()> {
 async fn grant_rejects_effective_uuid_collision() -> Result<()> {
     let inv = fresh().await;
     inv.add_server(&sample_server("de")).await?;
-    let shared = "b25684c3-90d6-454a-a911-4e0abba568b0";
+    let shared = "f1c70219-0d27-4d9a-a145-0ffa00000e01";
     let mut aaa = sample_user("aaa");
     aaa.uuid = shared.into();
     inv.add_user(&aaa).await?;
