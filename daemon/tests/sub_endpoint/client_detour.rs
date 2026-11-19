@@ -124,6 +124,8 @@ async fn set_protocols(state: &AppState, server_id: &str, protocols: &[&str]) {
             .unwrap();
     }
     for (key, value) in [
+        ("tls.cert_sha256", &"ab".repeat(32) as &str),
+        ("observed.tls.cert_public_key_sha256", &"cd".repeat(32)),
         ("naive.domain", "entry.example.com"),
         ("vlessws.domain", "entry.example.com"),
         ("vlessws.path", "testpath"),
@@ -141,7 +143,7 @@ async fn udp_targets_skip_tcp_only_entries_and_never_fall_back_direct() {
             let (state, token, _writer) = seed(&dir, true).await;
             set_protocols(&state, "s5", &[target_pid]).await;
             set_protocols(&state, "is", &[entry_pid, "vless+reality"]).await;
-            let (status, body) = get_sub(state.clone(), &token, None).await;
+            let (status, body) = get_sub(state.clone(), &token, Some("SingBox/1.14.0")).await;
             assert_eq!(status, StatusCode::OK);
             let config: Value = serde_json::from_slice(&body).unwrap();
             let outbounds = config["outbounds"].as_array().unwrap();
@@ -158,7 +160,7 @@ async fn udp_targets_skip_tcp_only_entries_and_never_fall_back_direct() {
             assert_eq!(target["detour"], "Iceland VLESS ~alice");
 
             set_protocols(&state, "is", &[entry_pid]).await;
-            let (status, omitted) = get_sub(state.clone(), &token, None).await;
+            let (status, omitted) = get_sub(state.clone(), &token, Some("SingBox/1.14.0")).await;
             assert_eq!(status, StatusCode::OK);
             let config: Value = serde_json::from_slice(&omitted).unwrap();
             assert!(
@@ -177,14 +179,14 @@ async fn udp_targets_skip_tcp_only_entries_and_never_fall_back_direct() {
                 )
                 .await
                 .unwrap();
-            let (_, hidden) = get_sub(state.clone(), &token, None).await;
+            let (_, hidden) = get_sub(state.clone(), &token, Some("SingBox/1.14.0")).await;
             assert_eq!(
                 omitted, hidden,
                 "omitted target must not affect any response bytes"
             );
 
             set_protocols(&state, "s5", &["vless+reality"]).await;
-            let (_, body) = get_sub(state, &token, None).await;
+            let (_, body) = get_sub(state, &token, Some("SingBox/1.14.0")).await;
             let config: Value = serde_json::from_slice(&body).unwrap();
             let target = config["outbounds"]
                 .as_array()
@@ -207,7 +209,7 @@ async fn udp_targets_accept_vless_over_ws_and_xhttp_entries() {
         let (state, token, _writer) = seed(&dir, true).await;
         set_protocols(&state, "s5", &["hysteria2"]).await;
         set_protocols(&state, "is", &[entry_pid]).await;
-        let (status, body) = get_sub(state, &token, None).await;
+        let (status, body) = get_sub(state, &token, Some("SingBox/1.14.0")).await;
         assert_eq!(status, StatusCode::OK);
         let config: Value = serde_json::from_slice(&body).unwrap();
         let target = config["outbounds"]
@@ -236,7 +238,7 @@ async fn udp_entry_keeps_every_byte_except_the_target_detour() {
             .set_client_detour_via_as("test", &target_id, None)
             .await
             .unwrap();
-        let (_, direct) = get_sub(state.clone(), &token, None).await;
+        let (_, direct) = get_sub(state.clone(), &token, Some("SingBox/1.14.0")).await;
         let mut expected: Value = serde_json::from_slice(&direct).unwrap();
         let tag = if entry_pid == "hysteria2" {
             "Iceland HY2 ~alice"
@@ -255,19 +257,19 @@ async fn udp_entry_keeps_every_byte_except_the_target_detour() {
             .set_client_detour_via_as("test", &target_id, Some(&ServerId("is".into())))
             .await
             .unwrap();
-        let (status, chained) = get_sub(state, &token, None).await;
+        let (status, chained) = get_sub(state, &token, Some("SingBox/1.14.0")).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(chained, expected.to_string().as_bytes());
     }
 }
 
 #[tokio::test]
-async fn compatible_udp_detour_keeps_legacy_response_byte_equal() {
+async fn pinned_udp_detour_response_byte_equal() {
     for target_pid in ["hysteria2", "tuic-v5"] {
         let dir = TempDir::new().unwrap();
         let (state, token, _writer) = seed(&dir, true).await;
         set_protocols(&state, "s5", &[target_pid]).await;
-        let (_, body) = get_sub(state.clone(), &token, None).await;
+        let (_, body) = get_sub(state.clone(), &token, Some("SingBox/1.14.0")).await;
         let (status, stock) =
             get_sub_at(state, &format!("/sub/{token}?format=sing-box"), None).await;
         assert_eq!(status, StatusCode::OK);
@@ -278,7 +280,10 @@ async fn compatible_udp_detour_keeps_legacy_response_byte_equal() {
                 serde_json::json!({
                     "type": "hysteria2", "tag": "S5 HY2 ~alice",
                     "server": "198.51.100.50", "server_port": 8444, "password": "pw-alice",
-                    "tls": {"enabled": true, "insecure": true, "alpn": ["h3"]},
+                    "tls": {
+                        "enabled": true, "insecure": false, "alpn": ["h3"],
+                        "certificate_public_key_sha256": ["zc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc0="]
+                    },
                     "detour": "Iceland VLESS ~alice"
                 }),
             )
@@ -290,7 +295,10 @@ async fn compatible_udp_detour_keeps_legacy_response_byte_equal() {
                     "server": "198.51.100.50", "server_port": 8443, "password": "pw-alice",
                     "uuid": "11111111-2222-3333-4444-555555555555",
                     "congestion_control": "bbr", "udp_relay_mode": "native",
-                    "tls": {"enabled": true, "insecure": true, "alpn": ["h3"]},
+                    "tls": {
+                        "enabled": true, "insecure": false, "alpn": ["h3"],
+                        "certificate_public_key_sha256": ["zc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc0="]
+                    },
                     "detour": "Iceland VLESS ~alice"
                 }),
             )
@@ -326,7 +334,7 @@ async fn mihomo_udp_detour_ignores_tcp_only_entry_byte_equal() {
     let (state, token, _writer) = seed(&dir, true).await;
     set_protocols(&state, "s5", &["hysteria2"]).await;
     let uri = format!("/sub/{token}?format=mihomo");
-    let (status, original) = get_sub_at(state.clone(), &uri, None).await;
+    let (status, original) = get_sub_at(state.clone(), &uri, Some("Mihomo/1.19.20")).await;
     assert_eq!(status, StatusCode::OK);
     let config: Value = serde_saphyr::from_str(std::str::from_utf8(&original).unwrap()).unwrap();
     let target = config["proxies"]
@@ -337,10 +345,10 @@ async fn mihomo_udp_detour_ignores_tcp_only_entry_byte_equal() {
         .unwrap();
     assert_eq!(target["dialer-proxy"], "Iceland VLESS ~alice");
     set_protocols(&state, "is", &["vless+xhttp", "vless+reality"]).await;
-    let (_, actual) = get_sub_at(state.clone(), &uri, None).await;
+    let (_, actual) = get_sub_at(state.clone(), &uri, Some("Mihomo/1.19.20")).await;
     assert_eq!(actual, original);
     set_protocols(&state, "is", &["vless+xhttp"]).await;
-    let (_, body) = get_sub_at(state, &uri, None).await;
+    let (_, body) = get_sub_at(state, &uri, Some("Mihomo/1.19.20")).await;
     let config: Value = serde_saphyr::from_str(std::str::from_utf8(&body).unwrap()).unwrap();
     assert!(config["proxies"].as_array().unwrap().is_empty());
 }

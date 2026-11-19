@@ -196,7 +196,6 @@ pub(crate) async fn get_config(
 
     const EXTRA_PROTOCOLS: &[(&str, &str, Option<&str>)] = &[
         ("naive", "NAIVE", Some("naive.domain")),
-        ("hysteria2", "HY2", None),
         ("vless-ws", "WS", Some("vlessws.domain")),
     ];
     for (pid_str, label_tag, require_secret) in EXTRA_PROTOCOLS {

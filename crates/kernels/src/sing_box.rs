@@ -235,30 +235,18 @@ impl Kernel for SingBox {
         if let Ok(old_bytes) = ssh.read_file("/etc/sing-box/config.json").await {
             match user_uuid_diff(&old_bytes, config) {
                 Ok(removed) => {
-                    let mut unknown: Vec<String> = removed
+                    let unknown = removed
                         .into_iter()
                         .filter(|uuid| !known_user_uuids.contains(uuid))
-                        .collect();
-                    unknown.sort();
+                        .count();
                     let allow = std::env::var("VPNCTLD_ALLOW_USER_REMOVAL")
                         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                         .unwrap_or(false);
-                    if !unknown.is_empty() && !allow {
-                        let preview: Vec<&String> = unknown.iter().take(5).collect();
+                    if unknown != 0 && !allow {
                         return Err(CoreError::Render(format!(
                             "sing-box apply_config: refusing to deploy a config that would \
-                             REMOVE {} user UUID(s) from inbounds[*].users[]: {:?}{}. \
-                             These UUIDs are live on the server but were never known to \
-                             vpnctld's inventory. To keep them, add a user with the SAME \
-                             UUID in the admin UI and grant it on this server; to drop \
-                             them, add that user and then delete it.",
-                            unknown.len(),
-                            preview,
-                            if unknown.len() > preview.len() {
-                                format!(" (+{} more)", unknown.len() - preview.len())
-                            } else {
-                                String::new()
-                            },
+                             REMOVE {unknown} user UUID(s) unknown to the vpnctl inventory. \
+                             Review the unmatched users on the server's Grants tab before redeploying."
                         )));
                     }
                 }
@@ -307,18 +295,16 @@ impl Kernel for SingBox {
         ssh: &dyn SshTransport,
         ctx: &RenderCtx<'_>,
     ) -> Result<Vec<(String, String)>> {
-        let path = vpnctl_core::shell::single_quote(
-            ctx.or_default("tuic.cert_path", "/etc/sing-box/cert.pem"),
-        );
-        let output = ssh
-            .exec(&format!(
-                "openssl x509 -in {path} -noout -fingerprint -sha256"
-            ))
-            .await?;
-        let fingerprint = parse_cert_sha256(&output).ok_or_else(|| {
-            CoreError::Transport("invalid node TLS certificate SHA-256 fingerprint".into())
-        })?;
-        Ok(vec![("tls.cert_sha256".into(), fingerprint)])
+        let path = ctx.or_default("tuic.cert_path", "/etc/sing-box/cert.pem");
+        let output = ssh.exec(&certificate_observation_command(path)).await?;
+        let (fingerprint, public_key_pin) =
+            parse_certificate_observation(&output).ok_or_else(|| {
+                CoreError::Transport("invalid node TLS certificate SHA-256 observations".into())
+            })?;
+        Ok(vec![
+            ("tls.cert_sha256".into(), fingerprint),
+            ("observed.tls.cert_public_key_sha256".into(), public_key_pin),
+        ])
     }
 
     async fn status(&self, ssh: &dyn SshTransport) -> Result<KernelStatus> {
@@ -339,6 +325,33 @@ impl Kernel for SingBox {
             uptime_seconds: None,
         })
     }
+}
+
+fn certificate_observation_command(path: &str) -> String {
+    use vpnctl_core::shell::single_quote;
+
+    // Read the same leaf for both digests, even if the certificate file rotates.
+    let script = r#"cert=$(openssl x509 -in "$1" -outform PEM)
+printf '%s\n' "$cert" | openssl x509 -noout -fingerprint -sha256
+printf '%s\n' "$cert" | openssl x509 -noout -pubkey | openssl pkey -pubin -outform DER | openssl dgst -sha256 -r"#;
+    format!(
+        "bash -o pipefail -ec {} vpnctl-observe-tls {}",
+        single_quote(script),
+        single_quote(path),
+    )
+}
+
+fn parse_certificate_observation(output: &str) -> Option<(String, String)> {
+    let mut lines = output.lines();
+    let fingerprint = parse_cert_sha256(lines.next()?)?;
+    let digest = lines.next()?.strip_suffix(" *stdin")?;
+    if lines.next().is_some()
+        || digest.len() != 64
+        || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    Some((fingerprint, digest.to_ascii_lowercase()))
 }
 
 fn parse_cert_sha256(output: &str) -> Option<String> {

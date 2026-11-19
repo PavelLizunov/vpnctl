@@ -54,11 +54,9 @@ Behavior rules:
   confirmed recovery restores the exact prior response bytes. Existing cached
   profiles change when clients refresh their subscription. See
   [TCP subscription suppression](tcp-subscription-suppression.md).
-- After sing-box deployment collects `tls.cert_sha256`, fresh Hysteria2 links
-  add `pinSHA256`; Mihomo adds certificate fingerprints and enables pinned
-  Trojan, AnyTLS and TUIC proxies. Existing certificates, credentials and
-  insecure flags remain unchanged, so previously imported profiles keep working.
-  No-pin output, other share links and sing-box JSON retain their bytes.
+- Fresh Hysteria2 and TUIC routes require observed TLS pins in supported
+  native sing-box and Mihomo formats. Refresh or reimport a pinned subscription
+  to receive the new settings. Generic URI exports omit these protocols.
   See [self-signed TLS pinning](self-signed-tls-pinning.md).
 - Disabled users and users with no usable routes get an empty config envelope.
   Empty sing-box responses route DNS and final traffic to the existing `block`

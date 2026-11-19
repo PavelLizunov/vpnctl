@@ -168,8 +168,6 @@ pub(crate) fn collect_extra_protocol_uris(
         return Vec::new();
     };
 
-    let naive_pid = vpnctl_core::ProtocolId("naive".to_string());
-    let hy2_pid = vpnctl_core::ProtocolId("hysteria2".to_string());
     let mut uris: Vec<String> = Vec::new();
     for input in inputs {
         let server = &input.server;
@@ -190,17 +188,9 @@ pub(crate) fn collect_extra_protocol_uris(
                 let label = server_display_label(&server.id.0, input.display_name.as_deref());
                 let fragment = format!("{label} {label_tag} ~{}", user.id.0);
                 let encoded = utf8_percent_encode(&fragment, NINITUX_QUOTE).to_string();
-                let mut out = relabel_uri_fragment(&link, &encoded);
-                if (pid == &naive_pid || pid == &hy2_pid)
-                    && visible.contains(&naive_pid)
-                    && visible.contains(&hy2_pid)
-                    && input.udp_pair
-                {
-                    let pair = utf8_percent_encode(&server.id.0, NINITUX_QUOTE).to_string();
-                    out = add_query_param(&out, "pair", &pair);
-                }
-                uris.push(out);
+                uris.push(relabel_uri_fragment(&link, &encoded));
             }
+            Err(vpnctl_core::CoreError::ShareLinkUnavailable(_)) => continue,
             Err(e) => {
                 tracing::warn!(
                     target = "vpnctld::vpn_router",

@@ -68,6 +68,15 @@ pub(crate) fn render_delivery_tab(
                     ))
                 }))
             }
+            @if chain_sub_url_str.is_none() && servers.iter().any(|server| server.enabled_protocols.iter().any(|protocol| matches!(protocol.0.as_str(), "hysteria2" | "tuic-v5"))) {
+                (share_link_card(&format!("{url}?format=sing-box"), &html! {
+                    (crate::i18n::tr(
+                        lang,
+                        "Import in sing-box 1.13 or later. Available Hysteria2 and TUIC routes require a verified TLS pin. Mihomo 1.19.20 or later also supports these routes.",
+                        "Импортируй в sing-box 1.13 или новее. Доступные маршруты Hysteria2 и TUIC требуют проверенного отпечатка TLS. Эти маршруты также поддерживает Mihomo 1.19.20 или новее.",
+                    ))
+                }))
+            }
         }
         @if let Some(url) = chain_sub_url_str {
             div style="margin: 20px 0; padding: 16px; border: 1px solid var(--rule); background: var(--paper-2);" {

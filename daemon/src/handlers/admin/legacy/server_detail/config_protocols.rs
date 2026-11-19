@@ -537,47 +537,17 @@ pub(crate) fn server_detail_auto_suppress_section(
     }
 }
 
-pub(crate) fn server_detail_udp_pair_section(
-    server: &vpnctl_core::Server,
-    enabled: bool,
-    lang: crate::i18n::Locale,
-) -> Markup {
+pub(crate) fn server_detail_udp_pair_section(lang: crate::i18n::Locale) -> Markup {
     use crate::i18n::tr;
-    let sid_enc = path_segment_encode(&server.id.0);
-    let (btn_bg, btn_fg) = if enabled {
-        ("transparent", "var(--ink)")
-    } else {
-        ("var(--ink)", "var(--paper)")
-    };
     html! {
         div.ed-rule {}
-        div.ed-art-eyebrow
-            title=(tr(
-                lang,
-                "When ON, this node's naive AND HY2 share-links carry a shared `pair=<server id>` tag, so a client routes UDP — which naive can't carry — over the HY2 co-located on the same node. Effective only if this server has BOTH naive and HY2 enabled. Pairing is single-server only (the tag is this server's id). OFF (default) = no pair tag.",
-                "Когда ВКЛ, naive- и HY2-ссылки этого узла получают общий тег `pair=<id сервера>`, чтобы клиент гнал UDP (который naive не умеет) через HY2 на том же узле. Действует только если на сервере включены И naive, И HY2. Пара — строго в рамках одного сервера (тег = id этого сервера). ВЫКЛ (по умолчанию) = без тега pair.",
-            )) {
-            (tr(lang, "UDP PAIRING (NAIVE ↔ HY2)", "UDP-ПАРА (NAIVE ↔ HY2)"))
+        div.ed-art-eyebrow {
+            (tr(lang, "Saved NaiveProxy and Hysteria2 UDP pairing", "Сохранённая UDP-пара NaiveProxy и Hysteria2"))
         }
-        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
-            @if enabled {
-                (tr(lang, "On — naive & HY2 on this node share a `pair` tag (a client routes UDP over the co-located HY2). No effect unless both run here.", "Вкл — naive и HY2 этого узла имеют общий тег `pair` (клиент гонит UDP через парный HY2). Без эффекта, если оба не подняты здесь."))
-            } @else {
-                (tr(lang, "Off — no pairing tag. Turn on for a node that runs BOTH naive and HY2.", "Выкл — без тега pair. Включи для узла, где есть И naive, И HY2."))
-            }
-        }
-        form method="post"
-             action=(format!("/admin/servers/{sid_enc}/udp-pair"))
-             style="display: inline;" {
-            input type="hidden" name="enabled" value=(if enabled { "false" } else { "true" });
-            button type="submit"
-                   style=(format!("padding: 4px 12px; border: 1px solid var(--ink); background: {btn_bg}; color: {btn_fg}; font-family: var(--mono); font-size: 11px; cursor: pointer;")) {
-                @if enabled {
-                    (icon("unlink")) (tr(lang, "turn off pairing", "выключить пару"))
-                } @else {
-                    (icon("link")) (tr(lang, "turn on pairing", "включить пару"))
-                }
-            }
+        p.ed-muted {
+            (tr(lang,
+                "This setting belongs to the legacy URI format. Hysteria2 is available through a subscription with a verified TLS pin.",
+                "Эта настройка относится к прежнему формату ссылок. Hysteria2 доступен по подписке с проверенным отпечатком TLS."))
         }
     }
 }

@@ -254,7 +254,7 @@ async fn server_deploy_locked(
         "protocols": server.enabled_protocols.iter().map(|p| &p.0).collect::<Vec<_>>(),
         "ssh_skip_reason": ssh_skip_reason,
         "ssh_kernels_pushed": ssh_kernels_pushed,
-        "ssh_errors": ssh_errors,
+        "ssh_errors": ssh_errors.iter().map(|error| crate::credential_redaction::redact_uuid_literals(error)).collect::<Vec<_>>(),
         "ssh_config_bytes_total": total_config_bytes,
         "configs_applied": configs_applied,
         "inputs_changed": false,

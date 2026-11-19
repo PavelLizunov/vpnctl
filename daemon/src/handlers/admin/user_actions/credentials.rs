@@ -1,9 +1,47 @@
 use crate::AppState;
 use crate::handlers::admin::helpers::{internal_error, user_not_found};
 use crate::handlers::admin::legacy::spawn_user_servers_redeploy;
-use crate::http_util::path_segment_encode;
+use crate::http_util::{form_field, path_segment_encode};
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
+
+pub(crate) async fn user_rotate_uuid(
+    State(state): State<AppState>,
+    Path(user_id_str): Path<String>,
+    body: String,
+) -> Response {
+    let Some(expected_sha256) = form_field(&body, "expected_sha256") else {
+        return (StatusCode::BAD_REQUEST, "expected_sha256 field is required").into_response();
+    };
+    let uid = vpnctl_core::UserId(user_id_str.clone());
+    let replacement = form_field(&body, "replacement").unwrap_or_else(vpnctl_crypto::gen_uuid);
+    let ids = match state
+        .inv
+        .rotate_user_uuid(&uid, &expected_sha256, &replacement, "admin")
+        .await
+    {
+        Ok(ids) => ids,
+        Err(vpnctl_inventory::SqliteInventoryError::Invalid(message)) => {
+            return match message.as_str() {
+                "no such user" => user_not_found(&user_id_str),
+                "current UUID has changed" => (StatusCode::CONFLICT, message).into_response(),
+                _ => (StatusCode::BAD_REQUEST, message).into_response(),
+            };
+        }
+        Err(error) => return internal_error(anyhow::Error::new(error)),
+    };
+    let servers = match state.inv.get_servers_batch(&ids).await {
+        Ok(servers) => servers,
+        Err(error) => return internal_error(anyhow::Error::new(error)),
+    };
+    spawn_user_servers_redeploy(&state, servers, user_id_str.clone(), "user.uuid.rotate");
+    Redirect::to(&format!(
+        "/admin/users/{}/overview",
+        path_segment_encode(&user_id_str)
+    ))
+    .into_response()
+}
 
 pub(crate) async fn user_regen_sub_token(
     State(state): State<AppState>,

@@ -12,6 +12,7 @@ pub mod corp_operator;
 pub mod corp_policy;
 pub mod corp_portal;
 pub mod corp_probe_runtime;
+mod credential_redaction;
 pub mod dns_resolver;
 pub mod exchange_rate_poller;
 pub mod geoip;

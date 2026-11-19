@@ -406,6 +406,10 @@ pub(crate) fn admin_router(state: AppState) -> Router {
             post(admin::user_regen_sub_token),
         )
         .route(
+            "/admin/users/{id}/uuid/rotate",
+            post(admin::user_rotate_uuid),
+        )
+        .route(
             "/admin/users/{id}/tuic-password/mint",
             post(admin::user_mint_tuic_password),
         )

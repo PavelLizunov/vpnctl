@@ -103,8 +103,7 @@ enum Cmd {
         #[arg(long)]
         key: Option<PathBuf>,
     },
-    /// Print share links (vless://, tuic://, ...) for every server×protocol
-    /// the user has been granted access to. Applies the same subscription
+    /// Print available share links for the servers and protocols granted to the user. Applies the same subscription
     /// policy as the live `/sub` endpoint (disabled user → empty;
     /// auto-suppressed servers + hidden / per-user-denied protocols
     /// filtered).

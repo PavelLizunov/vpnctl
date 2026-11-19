@@ -324,6 +324,7 @@ pub(crate) async fn collect_share_links(
             };
             match proto.share_link(&ctx, &per_server_user) {
                 Ok(link) => out.push((server.id.clone(), pid.clone(), link)),
+                Err(vpnctl_core::CoreError::ShareLinkUnavailable(_)) => continue,
                 Err(e) => {
                     tracing::warn!(
                         target = "vpnctld::admin",

@@ -1,5 +1,6 @@
 use crate::handlers::admin::icons::icon;
 use maud::{Markup, html};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use vpnctl_core::{Server, ServerId, User};
 use vpnctl_inventory::{SubAccessAggregates, UaCluster, UserLifecycle};
@@ -139,6 +140,19 @@ pub(crate) async fn render_overview_tab(
                                 }
                         }
                     }
+                }
+            }
+
+            div.ed-rule {}
+            form method="post"
+                 action=(format!("/admin/users/{}/uuid/rotate", path_segment_encode(&user.id.0)))
+                 data-confirm=(crate::i18n::tr(lang,
+                    "Reissue this user's VPN UUID? Active profiles that use this UUID need a refresh after the new config is applied.",
+                    "Перевыпустить VPN UUID пользователя? После применения конфигурации потребуется обновить использующие этот UUID профили.",
+                 )) {
+                input type="hidden" name="expected_sha256" value=(format!("{:x}", Sha256::digest(user.uuid.to_ascii_lowercase())));
+                button type="submit" class="ed-abtn ed-abtn--warning" {
+                    (icon("rotate-cw")) (crate::i18n::tr(lang, "Reissue VPN UUID", "Перевыпустить VPN UUID"))
                 }
             }
 

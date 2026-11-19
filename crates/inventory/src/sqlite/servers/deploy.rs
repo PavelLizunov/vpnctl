@@ -305,6 +305,7 @@ impl SqliteInventory {
                      OR action IN ('user.add',
                                    'user.set_vpn_router_device_id',
                                    'user.disable', 'user.enable',
+                                   'user.uuid.rotate',
                                    'user.wireguard.regen',
                                    'user.mint_tuic_password',
                                    'boosty.disable', 'boosty.enable')
@@ -347,7 +348,7 @@ impl SqliteInventory {
                                'server.vlessws.set', 'server.secret.set')
                     AND target = ?1)
                 OR (action IN ('user.add', 'user.set_vpn_router_device_id',
-                               'user.disable', 'user.enable', 'user.wireguard.regen',
+                               'user.disable', 'user.enable', 'user.uuid.rotate', 'user.wireguard.regen',
                                'user.mint_tuic_password', 'boosty.disable', 'boosty.enable')
                     AND target IN (SELECT user_id FROM grants WHERE server_id = ?1))",
         )

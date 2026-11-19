@@ -12,14 +12,15 @@ use vpnctl_core::{KernelId, ProtocolId, Registry, RenderCtx, Server, ServerId, U
 use vpnctl_inventory::{SqliteInventory, bootstrap_server_secrets};
 use vpnctl_kernels::SingBox;
 use vpnctl_protocols::{
-    AmneziaWg2, AmneziaWg3, Hysteria2, TuicV5, VlessReality, VlessXhttp, WireGuard,
+    AmneziaWg2, AmneziaWg3, Hysteria2, TuicV5, VlessReality, VlessWs, VlessXhttp, WireGuard,
 };
 use vpnctld::{AppState, router};
 
 const SERVER_ID: &str = "awg-compat";
-const LEGACY_PROTOCOLS: [&str; 5] = [
+const LEGACY_PROTOCOLS: [&str; 6] = [
     "vless+reality",
     "vless+xhttp",
+    "vless-ws",
     "hysteria2",
     "tuic-v5",
     "wireguard",
@@ -36,6 +37,9 @@ async fn seed(dir: &TempDir) -> (AppState, String, String) {
         .unwrap();
     registry
         .register_protocol(Box::new(VlessXhttp::new()))
+        .unwrap();
+    registry
+        .register_protocol(Box::new(VlessWs::new()))
         .unwrap();
     registry
         .register_protocol(Box::new(Hysteria2::new()))
@@ -67,6 +71,19 @@ async fn seed(dir: &TempDir) -> (AppState, String, String) {
         usage_coefficient: 1.0,
     };
     inv.add_server(&server).await.unwrap();
+    inv.set_server_secret(&server.id, "vlessws.domain", "ws.example.com")
+        .await
+        .unwrap();
+    inv.set_server_secret(&server.id, "tls.cert_sha256", &"ab".repeat(32))
+        .await
+        .unwrap();
+    inv.set_server_secret(
+        &server.id,
+        "observed.tls.cert_public_key_sha256",
+        &"cd".repeat(32),
+    )
+    .await
+    .unwrap();
 
     let (private, public) = vpnctl_crypto::gen_wireguard_keypair();
     let user = User {
@@ -162,14 +179,22 @@ async fn assert_legacy_bytes_unchanged(added: &[&str]) {
     let dir = TempDir::new().unwrap();
     let (state, token, device_id) = seed(&dir).await;
     let cases = [
-        (format!("/sub/{token}"), None, "application/json"),
+        (
+            format!("/sub/{token}"),
+            Some("SingBox/1.14.0"),
+            "application/json",
+        ),
         (
             format!("/sub/{token}?format=sing-box"),
             None,
             "application/json",
         ),
         (format!("/sub/{token}"), Some("v2rayN/6.62"), "text/plain"),
-        (format!("/sub/{token}?format=mihomo"), None, "text/yaml"),
+        (
+            format!("/sub/{token}?format=mihomo"),
+            Some("Mihomo/1.19.20"),
+            "text/yaml",
+        ),
         (
             format!("/api/v1/app/config/{device_id}"),
             Some("v2rayN/6.62"),
@@ -201,11 +226,25 @@ async fn assert_legacy_bytes_unchanged(added: &[&str]) {
     for index in [2, 4] {
         let decoded = STANDARD.decode(&before[index]).unwrap();
         let links = std::str::from_utf8(&decoded).unwrap();
-        assert!(links.contains("vless://"));
-        assert!(links.contains("@203.0.113.7:"));
         assert!(
-            links.lines().count() >= 2,
-            "must exercise a mixed legacy URI list"
+            links.lines().any(|link| link.starts_with("vless://")
+                && link.contains("@203.0.113.7:")
+                && link.contains("security=reality")),
+            "case {index} must exercise a VLESS+REALITY link"
+        );
+        assert!(
+            links.lines().any(|link| link.starts_with("vless://")
+                && link.contains("@ws.example.com:")
+                && link.contains("type=ws&security=tls")),
+            "case {index} must exercise a VLESS WebSocket TLS link"
+        );
+        assert!(
+            !links
+                .lines()
+                .any(|link| ["hysteria2://", "hy2://", "tuic://"]
+                    .into_iter()
+                    .any(|scheme| link.starts_with(scheme))),
+            "case {index} must omit generic QUIC links"
         );
     }
     let yaml: Value = serde_saphyr::from_str(std::str::from_utf8(&before[3]).unwrap()).unwrap();

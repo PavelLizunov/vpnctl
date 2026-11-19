@@ -189,12 +189,22 @@ async fn sub_unknown_token_returns_404() {
 async fn sub_valid_token_returns_full_envelope_with_tags() {
     let dir = TempDir::new().unwrap();
     let (state, token) = seed(&dir).await;
+    state
+        .inv
+        .set_server_secret(
+            &ServerId("srv".into()),
+            "observed.tls.cert_public_key_sha256",
+            &"cd".repeat(32),
+        )
+        .await
+        .unwrap();
     let app = router(state);
 
     let resp = app
         .oneshot(
             Request::builder()
                 .uri(format!("/sub/{token}"))
+                .header("user-agent", "SingBox/1.14.0")
                 .body(Body::empty())
                 .unwrap(),
         )

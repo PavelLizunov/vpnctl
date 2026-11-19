@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use vpnctl_core::{RenderCtx, ServerId, User, UserId};
 
-use super::handler::SubError;
+use super::handler::{SubError, supports_core_version, ua_product_version};
 use crate::app::AppState;
 
 #[derive(Clone, Copy, Debug)]
@@ -15,26 +15,42 @@ pub(super) async fn render_singbox(
     state: &AppState,
     user: &User,
     stock_only: bool,
+    user_agent: Option<&str>,
 ) -> Result<(UserId, Value), SubError> {
+    let quic_pinning = sing_box_supports_quic_pinning(user_agent, stock_only);
     let compatibility = if stock_only {
         Compatibility::Stock
     } else {
         Compatibility::Legacy
     };
-    render_singbox_with(state, user, compatibility).await
+    render_singbox_with(state, user, compatibility, quic_pinning).await
+}
+
+fn sing_box_supports_quic_pinning(user_agent: Option<&str>, explicit_native: bool) -> bool {
+    match ua_product_version(user_agent) {
+        Some((product, version))
+            if product.eq_ignore_ascii_case("sing-box")
+                || product.eq_ignore_ascii_case("singbox") =>
+        {
+            supports_core_version(version, (1, 13, 0))
+        }
+        _ => explicit_native,
+    }
 }
 
 pub(super) async fn render_singbox_for_mihomo(
     state: &AppState,
     user: &User,
+    quic_pinning: bool,
 ) -> Result<(UserId, Value), SubError> {
-    render_singbox_with(state, user, Compatibility::Mihomo).await
+    render_singbox_with(state, user, Compatibility::Mihomo, quic_pinning).await
 }
 
 async fn render_singbox_with(
     state: &AppState,
     user: &User,
     compatibility: Compatibility,
+    quic_pinning: bool,
 ) -> Result<(UserId, Value), SubError> {
     let user_id = user.id.clone();
 
@@ -114,13 +130,21 @@ async fn render_singbox_with(
                 );
                 continue;
             };
+            let requires_pin = matches!(pid.0.as_str(), "hysteria2" | "tuic-v5");
+            if requires_pin && !quic_pinning {
+                continue;
+            }
+            let fingerprint = secrets.get("tls.cert_sha256").filter(|pin| {
+                !requires_pin
+                    || (pin.len() == 64 && pin.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            });
             let compatible = match compatibility {
                 Compatibility::Legacy => proto.appears_in_sing_box_sub(),
                 Compatibility::Stock => proto.appears_in_stock_sing_box_sub(),
                 Compatibility::Mihomo => {
-                    matches!(pid.0.as_str(), "vless+reality" | "hysteria2")
-                        || (secrets.contains_key("tls.cert_sha256")
-                            && matches!(pid.0.as_str(), "trojan" | "anytls" | "tuic-v5"))
+                    pid.0 == "vless+reality"
+                        || (fingerprint.is_some()
+                            && (requires_pin || matches!(pid.0.as_str(), "trojan" | "anytls")))
                 }
             };
             if !compatible {
@@ -135,6 +159,14 @@ async fn render_singbox_with(
             }
             match proto.client_config(&ctx, &per_server_user) {
                 Ok(mut value) => {
+                    if requires_pin
+                        && !matches!(compatibility, Compatibility::Mihomo)
+                        && value
+                            .pointer("/tls/certificate_public_key_sha256")
+                            .is_none()
+                    {
+                        continue;
+                    }
                     let proto_display = protocol_display_name(&pid.0);
                     let tag = format!(
                         "{server_display} {proto_display} ~{user_id}",
@@ -148,7 +180,7 @@ async fn render_singbox_with(
                                 pid.0.as_str(),
                                 "trojan" | "anytls" | "hysteria2" | "tuic-v5"
                             )
-                            && let Some(pin) = secrets.get("tls.cert_sha256")
+                            && let Some(pin) = fingerprint
                         {
                             obj.insert("fingerprint".into(), json!(pin));
                         }
