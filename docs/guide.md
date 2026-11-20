@@ -215,13 +215,17 @@ vpnctl/
 
 ## Quickstart
 
+Run the compiling recipes below on the HomeLab Linux worker. The
+[agent workflow](specs/agent-workflow.md#remote-builds-and-tests) covers worker
+access and the GitHub Actions validation path.
+
 ```bash
 just check       # cargo check --workspace --all-targets
 just test        # cargo test --workspace
 just clippy      # cargo clippy --workspace --all-targets -- -D warnings
 just fmt         # rustfmt all crates
 just deny        # cargo deny check (no openssl-sys, no native-tls)
-just ci          # full local CI sweep before push
+just ci          # full validation on the worker
 
 just run uuid          # generate a fresh UUID v4
 just run registry      # list registered kernels & protocols
@@ -251,10 +255,10 @@ is included only when `VPNCTL_BUILD_SHA` is set at compile time, so two daemons
 that both report `version: 0.9.0` can be distinguished by their supplied build SHA.
 The same `<semver>+<sha>` stamp is shown in the admin UI footer/masthead and by
 `vpnctl --version`, giving one provenance string across the deployed daemon
-and CLI. The SHA is baked in at compile time: `scripts/deploy.sh` exports
-`VPNCTL_BUILD_SHA` before `cargo build`, and `vpnctl_core::build_version()`
-reads it via `option_env!` — no build script and no `git` at runtime
-(without that environment variable the stamp falls back to `+unknown`).
+and CLI. GitHub Actions sets `VPNCTL_BUILD_SHA` for the release build.
+In checkout-build mode, `scripts/deploy.sh` exports it before `cargo build`.
+`vpnctl_core::build_version()` reads it via `option_env!`. Without that
+environment variable the stamp falls back to `+unknown`.
 
 Use the deployment's public base URL instead of `127.0.0.1:18402` to verify
 the reverse-proxy path as well. This endpoint reports `vpnctld` process
@@ -355,6 +359,8 @@ binary's hash differs from the on-node copy — no manual on-node deletion neede
 An unchanged cache binary is a no-op (idempotent).
 
 ## SSH integration tests
+
+Run this test from the worker.
 
 ```bash
 VPNCTL_TEST_HOST=<your-test-host> \

@@ -17,8 +17,8 @@ esac
 
 if [[ "$cmd" == *'--no-verify'* ]]; then
     cat >&2 <<'BYPASS'
-⚠ vpnctl git-gate: --no-verify bypassed local gate.
-   GitHub CI will still run (cargo fmt + clippy + test + deny).
+⚠ vpnctl git-gate: --no-verify bypassed the local formatting check.
+   GitHub Actions still validates the PR.
 BYPASS
     exit 0
 fi
@@ -45,10 +45,7 @@ fi
 export PATH="$HOME/.cargo/bin:$PATH"
 if ! command -v cargo >/dev/null 2>&1; then
     cat >&2 <<'NOCARGO'
-⚠ vpnctl git-gate: cargo not on PATH; gate skipped.
-   Re-install with:
-     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
-       --default-toolchain stable --profile minimal --component rust-analyzer
+⚠ vpnctl git-gate: cargo not on PATH. The PR's GitHub Actions checks cover formatting.
 NOCARGO
     exit 0
 fi
@@ -72,18 +69,10 @@ EOF
 
 run_or_block "cargo fmt --check" cargo fmt --all -- --check
 
-run_or_block "cargo clippy --workspace --all-targets -- -D warnings" \
-    cargo clippy --workspace --all-targets -- -D warnings
-
-case "$cmd" in
-    *'git push'*)
-        run_or_block "cargo test --workspace" cargo test --workspace --all-targets
-        ;;
-esac
-
 cat >&2 <<GREEN
 
-🤖 vpnctl git-gate green (tree: $gate_root).
+🤖 vpnctl formatting check passed (tree: $gate_root).
+   Run builds and compiled tests on the HomeLab Linux worker or GitHub Actions.
    Reminders (AGENTS.md → Change review workflow):
   1. review-agent on the diff?              (Agent / general-purpose)
   2. test-writer-agent for new public APIs? (spec only, no impl)

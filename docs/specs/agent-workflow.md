@@ -15,7 +15,8 @@
 
 ## 2. Process contract
 
-Pre-commit, in order:
+Review and prepare the candidate before committing.
+
 1. **review-agent** — independent reviewer over the diff. Finds issues in
    priority order: (1) correctness — bugs, swallowed errors, races, command
    injection in exec, path traversal, unhandled panics; (2) architecture —
@@ -33,36 +34,53 @@ Pre-commit, in order:
    one expected-failure path, one boundary edge per function; no "call and
    assert no panic" tests; `#[allow(clippy::unwrap_used, clippy::expect_used)]`
    on the test module only.
-3. **Local gate** — `just ci` (gc + fmt-check + clippy + test + deny). Run
-   `cargo fmt --all` before testing. Docs-only changes may skip steps 1–2 but
-   NOT the fmt-check.
+3. **Validation** — run `cargo fmt --all` before committing. Push the task
+   branch and validate its exact SHA on a HomeLab worker with `just check` and
+   `just ci`, or publish a draft PR for the equivalent GitHub Actions checks.
+   Docs-only changes may skip steps 1–2 and still require fmt-check.
 
-### Publication from a control-plane host
+### Remote builds and tests
 
-When the host prohibits compilation, the following exception permits publishing
-work for validation without bypassing the host's resource safeguards:
+Run compilation, release packaging, and tests that compile Rust on a HomeLab
+worker or GitHub Actions. Keep the owner's workstation and `harness-test` for
+editing, formatting, non-compiling checks, and orchestration.
+
+1. Load the `homelab` skill through `harness-test` and follow the worker
+   runbook there at
+   `/var/lib/dsh/Project/homelab-infra-docs/docs/workers/permanent-workers.md`.
+   Acquire the pool lease for `linux-worker` (VM 101) and verify SSH, disk
+   capacity, and the required toolchain.
+2. Push the committed task branch to GitHub. Fetch it on the worker and
+   check out the candidate SHA as a detached `HEAD` in a clean task worktree.
+   Verify `git rev-parse HEAD` before building or testing.
+3. Save the lease ID, checked SHA, exit codes, and required artifacts before
+   releasing the lease. If the worker is unavailable or unsuitable, validate
+   the candidate through GitHub Actions as described below.
+
+### Publishing for GitHub Actions validation
+
+GitHub Actions is the required PR gate. A draft PR can run build and test
+checks that have not run on a HomeLab worker.
 
 1. Work in a dedicated task branch and worktree. Complete independent review
-   and write any required spec-tests before committing.
+   and write any required spec-tests before committing code.
 2. Run `cargo fmt --all`, `cargo fmt --all -- --check`, `git diff --check`,
    generated-file checks, and gitleaks on the diff. These must pass locally.
-   Record prohibited compilation and unavailable target checks as not-run,
-   including the actual reason; do not report them as passed.
+   Record deferred build and test checks with their reasons.
 3. Commit and push the candidate branch, create a **draft PR**, and link it to
-   the task. The draft's validation notes must identify the local checks that
-   were deferred. An unavailable external worker is not a publication blocker.
+   the task. The draft's validation notes must identify which checks ran and
+   which were deferred.
 4. GitHub Actions must pass all five canonical Cargo commands, generated-file
    checks and applicable target checks on the exact candidate. Dedicated jobs
-   cover the local `just ci` recipe without running it a second time. Keep the PR in draft until
-   this succeeds. Any code change invalidates the earlier results.
+   cover the build and test checks from `just ci`. Keep the PR in draft until
+   these checks pass. A new candidate requires fresh CI results.
 5. Fix red checks before adding unrelated commits. A pre-existing dependency
    failure is still a blocker to acceptance: investigate and remediate it,
    without suppressing advisories merely to make CI pass.
 
-This exception permits task-branch publication only. It does not permit pushing
-directly to `main`, bypassing review, weakening gates, merging a red candidate,
-or deploying. Persist progress in the linked PR rather than a worker's temporary
-directory. Resume that PR on later scheduled runs instead of creating duplicates.
+Publish through the task branch and keep the validation record in the linked PR.
+Review and green CI are required before merge. Resume that PR on later
+scheduled runs. Production releases follow the [deployment contract](deployment.md).
 
 Hotfix exception (ALL three must hold): ≤ 5 lines, exactly one surface touched,
 no output pinned by `*_byte_equal*` tests changes.
@@ -73,9 +91,9 @@ wait.
 
 ## 3. Verification Checklist
 
-- [ ] review-agent ran on the diff; `critical` + `important` findings fixed
-      (`minor` is opt-in).
+- [ ] Independent review ran for code and configuration changes. Critical and
+      important findings were fixed.
 - [ ] Spec-tests written for new public APIs and run in-session.
-- [ ] Local `just ci`, or its dedicated CI jobs under the publication exception,
-      plus the five canonical Cargo commands green with recorded exit codes.
+- [ ] The five canonical Cargo checks and applicable `just ci` checks pass on
+      the exact candidate in GitHub Actions. Record HomeLab results when run.
 - [ ] After push, CI watched to completion; green before the next commit.

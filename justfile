@@ -68,8 +68,7 @@ gc THRESHOLD_GB='8':
 clean:
     cargo clean
 
-# Full local CI sweep — run before pushing. `gc` runs first so a
-# bloated target/ is trimmed before the build gates rebuild it.
+# Run the CI checks on the HomeLab Linux worker after `just check`.
 ci: gc project-map-check bundle-css-check fmt-check ha-test clippy test deny
     @echo "✔ all CI gates passed"
 

@@ -22,9 +22,14 @@ operational history lives in git history, not in a memory file.
 
 ## Where work runs
 
-- There is NO dedicated build VM (`build-1` / `uap-build-1` are retired). The
-  required gate is GitHub Actions CI (`.github/workflows/ci.yml`,
-  `ubuntu-latest`).
+- Run project builds and compiled tests remotely. Use the existing HomeLab
+  `linux-worker` (VM 101) for on-demand builds and tests. Follow the
+  [worker and CI workflow](docs/specs/agent-workflow.md#remote-builds-and-tests)
+  to acquire the worker and check out the exact commit.
+- Keep the owner's workstation and `harness-test` for editing, formatting,
+  checks that do not compile code, and coordinating remote work. If a suitable
+  HomeLab worker is unavailable, use GitHub Actions. GitHub Actions CI
+  (`.github/workflows/ci.yml`, `ubuntu-latest`) is required for every PR.
 - `git push` publishes to GitHub (`origin`); fetch goes to GitHub only. Verify
   `git remote -v` before pushing; never assume where `origin` points.
 - Production daemon = VM 119 `vpnctld` (LAN `192.168.0.236`, Tailscale
@@ -49,9 +54,12 @@ operational history lives in git history, not in a memory file.
    additionally need spec-tests written by a test-writer-agent that sees ONLY
    the spec, never the implementation. Prompt templates and the full gate list:
    `docs/specs/agent-workflow.md`.
-2. Local gate: `just ci` (runs disk-hygiene `gc` first, then fmt-check +
-   clippy `-D warnings` + test + `cargo deny`). The five underlying cargo
-   commands are canonical and must pass with recorded exit codes:
+2. Push the committed task branch, then run `just check` and `just ci` on the
+   worker at the exact SHA. Record the five canonical Cargo check exit codes.
+   If a recipe fails, run individual checks as needed to record their status.
+   When the worker is unavailable, use the
+   [draft PR workflow](docs/specs/agent-workflow.md#publishing-for-github-actions-validation)
+   to run the checks in GitHub Actions.
 
    ```sh
    cargo check --workspace --all-targets
@@ -61,22 +69,14 @@ operational history lives in git history, not in a memory file.
    cargo deny check
    ```
 
-   Run `cargo fmt --all` BEFORE testing, not only `--check` — agent-written
-   tests and mass text-replaces are the most frequent fmt-only CI failures.
+   Run `cargo fmt --all` before committing.
 
-   On a control-plane host that prohibits compilation, use the publication
-   exception in `docs/specs/agent-workflow.md`: review, format, scan secrets,
-   and check generated files locally, then publish a draft PR. GitHub Actions
-   must run all five commands and generated-file checks on the candidate before
-   it becomes ready or merges. Dedicated CI jobs cover the local `just ci`
-   recipe without repeating it. Record unavailable local checks as not-run; never disable
-   the host's build guard or depend on a separate build VM.
 3. After push, watch CI to completion: `gh run watch <id> --exit-status`; red →
    `gh run view --log-failed` → fix. Never stack new commits on unresolved red
    CI — the next commit is either its hotfix or waits.
-4. Docs-only changes still require `just ci` (fmt-check). A hotfix may skip the
-   review-agent ONLY if all three hold: ≤ 5 lines, exactly one surface touched,
-   no output pinned by byte-equality tests changes.
+4. Docs-only changes still require fmt-check and the applicable CI gates. A
+   hotfix may skip the review-agent ONLY if all three hold: ≤ 5 lines, exactly
+   one surface touched, no output pinned by byte-equality tests changes.
 
 CI additionally runs gitleaks and three Docker-backed SSH suites:
 
@@ -127,8 +127,8 @@ also run `just mutants-protocols` when the mutation tooling is installed
 - Backups are critical: `inv.db` holds every subscription identity. Any
   destructive operation or migration needs a tested restore path — see
   `docs/specs/backup-restore.md`.
-- Deploy with `scripts/deploy.sh` (builds daemon + CLI from ONE revision,
-  embeds `VPNCTL_BUILD_SHA`, installs both atomically), then
+- Deploy verified prebuilt artifacts from one revision using
+  [the deployment contract](docs/specs/deployment.md), then
   `sudo systemctl restart vpnctld`. Code changes that affect production
   behavior are NOT live until deployed and verified on the affected surface.
 - Deploy-key invariant: every server visible in `/admin/servers` must have
