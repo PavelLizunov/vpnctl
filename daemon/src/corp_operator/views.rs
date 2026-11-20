@@ -1,8 +1,11 @@
 use super::{OperatorState, Result, unavailable};
 use axum::{
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
 };
+use maud::{DOCTYPE, html};
+
+use crate::handlers::admin::{helpers::theme_accent, ui::root_class};
 
 pub(super) fn escape(value: &str) -> String {
     value
@@ -89,7 +92,7 @@ fn actionable_form(
 }
 const CONFIRM: &str = "<label class=\"confirm\"><input type=\"checkbox\" name=\"confirm\" value=\"true\" required>Подтверждаю операцию</label>";
 
-pub(super) async fn page(state: &OperatorState) -> Result<Response> {
+pub(super) async fn page(state: &OperatorState, headers: &HeaderMap) -> Result<Response> {
     let companies = state
         .app
         .inv
@@ -99,14 +102,14 @@ pub(super) async fn page(state: &OperatorState) -> Result<Response> {
     if companies.len() == 1 {
         return page_for(state, &companies[0].company_id).await;
     }
-    company_list(state).await
+    company_list(state, headers).await
 }
 
 pub(super) fn company_url(company_id: &str) -> String {
     format!("/admin/corp/company/{company_id}")
 }
 
-pub(super) async fn company_list(state: &OperatorState) -> Result<Response> {
+pub(super) async fn company_list(state: &OperatorState, headers: &HeaderMap) -> Result<Response> {
     let config = &state.config;
     let csrf = config
         .auth
@@ -129,39 +132,96 @@ pub(super) async fn company_list(state: &OperatorState) -> Result<Response> {
         .list_users()
         .await
         .map_err(|_| unavailable())?;
-    let mut body = String::from(
-        "<section><h2>Компании</h2><p>У каждой компании свой username, пароль, правила и диагностика.</p><table aria-label=\"Корпоративные клиенты\"><thead><tr><th>Username</th><th>Доступ</th><th>Правила</th><th></th></tr></thead><tbody>",
-    );
-    for company in &companies {
-        body.push_str(&format!("<tr><td>{}</td><td>{}</td><td>Версия {}</td><td><a href=\"{}\">Настроить компанию</a></td></tr>", escape(&company.status.user_id.0), if company.status.enabled { "Включён" } else { "Выключен" }, company.status.revision, escape(&company_url(&company.company_id))));
-    }
-    body.push_str("</tbody></table></section><section><h2>Добавить компанию</h2><p>Выберите существующую корпоративную подписку. Пароль компании будет отдельным от пароля оператора.</p>");
-    if companies.is_empty() {
-        body.push_str("<p>Привязка отсутствует.</p>");
-    }
-    let mut options = String::new();
-    for user in users.iter().filter(|user| {
-        !user.disabled
-            && !companies
-                .iter()
-                .any(|company| company.status.user_id == user.id)
-    }) {
-        options.push_str(&format!(
-            "<option value=\"{}\">{}</option>",
-            escape(&user.id.0),
-            escape(&user.id.0)
-        ));
-    }
-    if options.is_empty() {
-        body.push_str("<p>Все доступные пользователи уже привязаны. Создайте подписку в разделе пользователей.</p>");
-    } else {
-        let fields = format!(
-            "<label>Username подписки<select name=\"user_id\" required>{options}</select></label><label class=\"confirm\"><input type=\"checkbox\" name=\"confirm_binding\" value=\"true\" required>Подтверждаю постоянную привязку компании к подписке</label>"
-        );
-        body.push_str(&form("", "setup", &csrf, None, &fields, "Создать компанию"));
-    }
-    body.push_str("</section>");
-    Ok(Html(document("Корпоративные клиенты", &body)).into_response())
+    let available_users: Vec<_> = users
+        .iter()
+        .filter(|user| {
+            !user.disabled
+                && !companies
+                    .iter()
+                    .any(|company| company.status.user_id == user.id)
+        })
+        .collect();
+    let (theme, accent) = theme_accent(headers);
+    let root = format!("{} corp-companies", root_class(&theme, &accent));
+    let title = "Корпоративные клиенты";
+    let body = html! {
+        (DOCTYPE)
+        html lang="ru" {
+            head {
+                meta charset="utf-8";
+                meta name="viewport" content="width=device-width, initial-scale=1";
+                title { (title) }
+                link rel="stylesheet" href="/admin/assets/css/theme.css";
+                link rel="stylesheet" href="/admin/assets/css/components.css";
+                link rel="stylesheet" href="/admin/corp/assets/operator.css";
+            }
+            body class=(root) {
+                header.ed-tb {
+                    a.ed-tb__logo href="/admin/" aria-label="Панель оператора" { "vpnctl" }
+                    nav.ed-tb__nav aria-label="Разделы админки" {
+                        a.on href="/admin/corp/companies" aria-current="page" { "Компании" }
+                    }
+                }
+                main.ed-main {
+                    h1.ed-art-h1 { (title) }
+                    p.ed-art-deck { "У каждой компании свой username, пароль, правила и диагностика." }
+                    section aria-label="Список компаний" {
+                        @if companies.is_empty() {
+                            p { "Компаний пока нет. " a href="#company-setup" { "Добавить компанию" } }
+                        } @else {
+                            table.ed-grid aria-label=(title) {
+                                thead {
+                                    tr {
+                                        th scope="col" { "Username" }
+                                        th scope="col" { "Доступ" }
+                                        th scope="col" { "Правила" }
+                                        th scope="col" { span.ed-sr-only { "Действие" } }
+                                    }
+                                }
+                                tbody {
+                                    @for company in &companies {
+                                        tr {
+                                            td { (company.status.user_id.0) }
+                                            td { (if company.status.enabled { "Включён" } else { "Выключен" }) }
+                                            td { "Версия " (company.status.revision) }
+                                            td { a href=(company_url(&company.company_id)) { "Настроить компанию" } }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    section id="company-setup" {
+                        div.ed-section-h { h2 { "Добавить компанию" } }
+                        p { "Выберите существующую корпоративную подписку. Пароль компании будет отдельным от пароля оператора." }
+                        @if available_users.is_empty() {
+                            p { "Все доступные пользователи уже привязаны. "
+                                a href="/admin/users" { "Создать подписку" }
+                            }
+                        } @else {
+                            form method="post" action="/admin/corp/setup" {
+                                input type="hidden" name="csrf" value=(csrf);
+                                label {
+                                    "Username подписки"
+                                    select name="user_id" required {
+                                        @for user in available_users {
+                                            option value=(user.id.0) { (user.id.0) }
+                                        }
+                                    }
+                                }
+                                label.confirm {
+                                    input type="checkbox" name="confirm_binding" value="true" required;
+                                    "Подтверждаю постоянную привязку компании к подписке"
+                                }
+                                button.ed-abtn.ed-abtn--primary type="submit" { "Создать компанию" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+    Ok(Html(body.into_string()).into_response())
 }
 
 pub(super) async fn page_for(state: &OperatorState, company_id: &str) -> Result<Response> {

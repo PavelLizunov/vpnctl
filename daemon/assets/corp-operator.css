@@ -37,3 +37,44 @@ th:last-child, td:last-child { padding-right: 0; }
   td:nth-child(3) { grid-column: 1; grid-row: 3; }
   td:last-child { grid-column: 2; grid-row: 1 / 4; align-self: center; }
 }
+
+.corp-companies.ed {
+  min-height: 100%;
+  height: auto;
+  overflow: visible;
+  color-scheme: light;
+}
+.corp-companies.ed-ink { color-scheme: dark; }
+.corp-companies .ed-tb__nav { margin: 0; }
+.corp-companies .ed-main {
+  width: min(100%, 1120px);
+  max-width: none;
+  padding: 32px clamp(16px, 4vw, 44px) 48px;
+  overflow: visible;
+}
+.corp-companies .ed-art-h1 { font-size: clamp(2rem, 5vw, 2.75rem); }
+.corp-companies section {
+  margin: 24px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.corp-companies #company-setup {
+  border-top: 1px solid var(--rule);
+  padding-top: 24px;
+}
+.corp-companies .ed-main a { color: var(--acc); text-underline-offset: 3px; }
+.corp-companies .ed-grid a { text-decoration: underline; }
+.corp-companies .ed-grid th:first-child { width: 32%; }
+.corp-companies .ed-grid th:last-child { width: 26%; }
+.corp-companies form { max-width: 32rem; }
+.corp-companies select { width: 100%; }
+.corp-companies button, .corp-companies select { border-radius: 0; }
+.corp-companies button { align-self: flex-start; }
+.corp-companies :focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+
+@media (max-width: 540px) {
+  .corp-companies .ed-grid tr { border-color: var(--rule); }
+  .corp-companies .ed-grid td { padding: 0; border: 0; }
+}

@@ -7,11 +7,16 @@ export async function verifyOperator(browser, expect, shot) {
   assert.equal(process.env.CI, "true", "Operator browser verification is CI-only");
   assert.ok(process.env.CORP_OPERATOR_UI_OUTPUT_DIR);
   const fixtures = path.resolve(process.env.CORP_OPERATOR_UI_OUTPUT_DIR);
-  const source = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../daemon/assets/corp-operator.css");
-  const css = await readFile(source, "utf8");
+  const assets = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../daemon/assets");
+  const css = await readFile(path.join(assets, "corp-operator.css"), "utf8");
   assert.equal(await readFile(path.join(fixtures, "assets/operator.css"), "utf8"), css);
+  const styles = new Map([
+    ["/admin/corp/assets/operator.css", css],
+    ["/admin/assets/css/theme.css", await readFile(path.join(assets, "css/theme.css"), "utf8")],
+    ["/admin/assets/css/components.css", await readFile(path.join(assets, "css/components.css"), "utf8")],
+  ]);
   const pages = {};
-  for (const name of ["setup", "status", "password-result", "conflict", "egress-ready", "egress-running", "egress-failed", "egress-enabled", "company-list", "company-selected"]) {
+  for (const name of ["setup", "status", "password-result", "conflict", "egress-ready", "egress-running", "egress-failed", "egress-enabled", "company-list", "company-list-ink", "company-selected"]) {
     const metadata = JSON.parse(await readFile(path.join(fixtures, `${name}.json`), "utf8"));
     assert.equal(metadata.status, name === "conflict" ? 409 : 200);
     assert.equal(metadata.headers["cache-control"], "no-store");
@@ -26,6 +31,8 @@ export async function verifyOperator(browser, expect, shot) {
   const completed = [];
   for (const width of [320, 390, 800, 1280]) {
     for (const name of Object.keys(pages)) {
+      const companyList = name.startsWith("company-list");
+      const pathname = companyList ? "/admin/corp/companies" : "/admin/corp";
       const context = await browser.newContext({
         offline: true,
         viewport: { width, height: 900 }, locale: "ru-RU", timezoneId: "UTC",
@@ -43,10 +50,10 @@ export async function verifyOperator(browser, expect, shot) {
           const url = new URL(request.url());
           assert.equal(url.origin, origin);
           assert.equal(url.search, "");
-          if (request.method() === "GET" && (url.pathname === "/admin/corp" || /^\/admin\/corp\/company\/[A-Za-z0-9_.-]+$/.test(url.pathname))) {
+          if (request.method() === "GET" && (url.pathname === pathname || /^\/admin\/corp\/company\/[A-Za-z0-9_.-]+$/.test(url.pathname))) {
             await route.fulfill(pages[name]);
-          } else if (request.method() === "GET" && url.pathname === "/admin/corp/assets/operator.css") {
-            await route.fulfill({ status: 200, contentType: "text/css", body: css });
+          } else if (request.method() === "GET" && styles.has(url.pathname)) {
+            await route.fulfill({ status: 200, contentType: "text/css", body: styles.get(url.pathname) });
           } else if (request.method() === "POST") {
             const action = { setup: "setup", status: "password/rotate", "egress-ready": "enabled", "egress-failed": "probe" }[name];
             assert.ok(action, `Unexpected submission from ${name}`);
@@ -81,12 +88,23 @@ export async function verifyOperator(browser, expect, shot) {
         if (/content security policy|refused to (?:load|execute|connect)/i.test(message.text())) errors.push(message.text());
       });
       try {
-        const response = await page.goto(`${origin}/admin/corp`);
+        const response = await page.goto(`${origin}${pathname}`);
         assert.equal(response.status(), pages[name].status);
         await page.evaluate(() => document.fonts.ready);
         await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
         await shot(page, `operator-${name}`, width);
-        if (name === "company-list") {
+        if (companyList) {
+          const dark = name === "company-list-ink";
+          await expect(page.locator("body")).toHaveClass(dark ? /\bed-ink ed-acc-forest\b/ : /^ed corp-companies$/);
+          await expect(page.locator("body")).toHaveCSS("color-scheme", dark ? "dark" : "light");
+          await expect(page.getByRole("link", {name: "Панель оператора"})).toHaveAttribute("href", "/admin/");
+          await expect(page.locator("script")).toHaveCount(0);
+          const palette = await page.locator("body").evaluate((body) => {
+            const style = getComputedStyle(body);
+            return { paper: style.getPropertyValue("--paper").trim(), background: style.backgroundColor };
+          });
+          assert.ok(palette.paper);
+          assert.equal(palette.background, palette.paper);
           await expect(page.getByRole("table", {name: "Корпоративные клиенты"})).toBeVisible();
           await expect(page.getByRole("link", {name: "Настроить компанию"})).toHaveAttribute("href", resultLink[1]);
           await expect(page.locator("tbody")).toContainText("synthetic-user");
