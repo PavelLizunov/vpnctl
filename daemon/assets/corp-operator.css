@@ -39,7 +39,7 @@ th:last-child, td:last-child { padding-right: 0; }
 }
 
 .corp-companies.ed {
-  min-height: 100%;
+  min-height: 100vh;
   height: auto;
   overflow: visible;
   color-scheme: light;

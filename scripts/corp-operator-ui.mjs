@@ -105,6 +105,7 @@ export async function verifyOperator(browser, expect, shot) {
           });
           assert.ok(palette.paper);
           assert.equal(palette.background, palette.paper);
+          assert.ok(await page.locator("body").evaluate((body) => body.getBoundingClientRect().height >= innerHeight), "Company list must fill the viewport");
           await expect(page.getByRole("table", {name: "Корпоративные клиенты"})).toBeVisible();
           await expect(page.getByRole("link", {name: "Настроить компанию"})).toHaveAttribute("href", resultLink[1]);
           await expect(page.locator("tbody")).toContainText("synthetic-user");
