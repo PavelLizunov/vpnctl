@@ -1460,6 +1460,20 @@ async fn optional_synthetic_ui_capture_contains_actual_router_responses() {
         .await;
     assert_eq!(companies.status, StatusCode::OK);
     save(&output, "company-list", &companies);
+    let companies_ink = f
+        .send(
+            Method::GET,
+            "/admin/corp/companies",
+            "",
+            &[
+                ("host", HOST),
+                ("authorization", &auth()),
+                ("cookie", "vpnctl_theme=ink; vpnctl_accent=forest"),
+            ],
+        )
+        .await;
+    assert_eq!(companies_ink.status, StatusCode::OK);
+    save(&output, "company-list-ink", &companies_ink);
     let selected = f
         .send(
             Method::GET,

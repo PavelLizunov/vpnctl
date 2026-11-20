@@ -6,7 +6,7 @@
 
 - **Workspace Crates:** 10
 - **Tracked Rust Files:** 538 (343 prod / 195 test)
-- **Total Rust LOC:** 197,689 (103,531 prod / 94,158 test)
+- **Total Rust LOC:** 197,763 (103,591 prod / 94,172 test)
 - **Database Migrations:** 76
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 151
 
@@ -23,8 +23,8 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 5 tests, 1 examples | 7,342 (16) | 1,709 (7) | **9,051** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,371 (22) | 4,615 (12) | **8,986** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,825 (5) | 1,191 (5) | **4,016** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 30 tests | 60,177 (195) | 55,345 (97) | **115,522** |
-| **Total** | | | | **103,531 (343)** | **94,158 (195)** | **197,689** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 30 tests | 60,237 (195) | 55,359 (97) | **115,596** |
+| **Total** | | | | **103,591 (343)** | **94,172 (195)** | **197,763** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -33,8 +33,8 @@
 | `daemon/tests/admin_smoke/settings_integrations.rs` | 2,575 | `daemon` | Test |
 | `crates/inventory/tests/spec_corp_policy.rs` | 2,574 | `crates/inventory` | Test |
 | `daemon/tests/spec_corp_policy_http.rs` | 2,338 | `daemon` | Test |
+| `daemon/tests/spec_corp_operator.rs` | 2,071 | `daemon` | Test |
 | `crates/inventory/src/sqlite/tests.rs` | 2,065 | `crates/inventory` | Prod |
-| `daemon/tests/spec_corp_operator.rs` | 2,057 | `daemon` | Test |
 | `crates/kernels/src/sing_box/tests.rs` | 1,900 | `crates/kernels` | Prod |
 | `daemon/src/health_monitor/tests.rs` | 1,845 | `daemon` | Prod |
 | `crates/kernels/src/caddy/tests.rs` | 1,800 | `crates/kernels` | Prod |

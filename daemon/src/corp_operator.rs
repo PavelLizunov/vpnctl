@@ -238,8 +238,8 @@ async fn process(state: &OperatorState, request: Request) -> Result<Response> {
     let method = request.method().clone();
     if method == Method::GET {
         return match path.as_str() {
-            "/admin/corp" => views::page(state).await,
-            "/admin/corp/companies" => views::company_list(state).await,
+            "/admin/corp" => views::page(state, headers).await,
+            "/admin/corp/companies" => views::company_list(state, headers).await,
             path if path.starts_with("/admin/corp/company/") => {
                 let id = path.trim_start_matches("/admin/corp/company/");
                 if id.is_empty()
