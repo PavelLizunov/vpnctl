@@ -306,10 +306,8 @@ async fn people(
 ) -> Result<Markup, AuthorIssue> {
     let bindings = state.inv.list_boosty_links();
     if let Some(id) = &query.person {
-        let (person, links) = tokio::join!(
-            client.get::<PersonDetail>(&["users", id], &NO_QUERY),
-            bindings
-        );
+        let path = ["users", id.as_str()];
+        let (person, links) = tokio::join!(client.get::<PersonDetail>(&path, &NO_QUERY), bindings);
         let person = person?;
         let links = account_links(links.map_err(|_| AuthorIssue::Unavailable)?);
         return Ok(html! {
