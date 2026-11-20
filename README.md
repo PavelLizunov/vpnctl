@@ -77,9 +77,9 @@ stateless; the inventory owns mutable state and server secrets.
 ## Development
 
 [AGENTS.md](AGENTS.md) is the project instruction file. The
-[agent workflow](docs/specs/agent-workflow.md) defines review and verification.
-Run `just ci` for the canonical checks. See the
-[SSH integration tests](docs/guide.md#ssh-integration-tests) for target checks.
+[agent workflow](docs/specs/agent-workflow.md#remote-builds-and-tests) covers
+builds and `just ci` on a HomeLab worker and PR validation in GitHub Actions.
+See the [SSH integration tests](docs/guide.md#ssh-integration-tests) for target checks.
 Historical investigations are recoverable from Git history.
 
 ## License

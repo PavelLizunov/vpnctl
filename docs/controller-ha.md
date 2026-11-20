@@ -19,7 +19,8 @@ on all three services. Python 3.11+, unified cgroup v2, systemd with service wat
 controllers need permission to manage their dedicated transient worker unit.
 The gateways run separately from their workers; followers never open inventory.
 
-1. Build the reviewed revision with `just build-release`. Inspect
+1. Build the reviewed revision with `just build-release` on a [HomeLab worker](specs/agent-workflow.md#remote-builds-and-tests)
+   or use the matching [CI artifacts](specs/deployment.md#2-production-facts). Inspect
    `vpnctld --ha-artifact`; copy its `executable_sha256` and `schema` into all
    configs. Migration checksums are checked independently at snapshot publication
    and promotion. Package `scripts/ha/{common,controller_ha,executor,gateway,lifecycle,observations,replica,transfer_pins,worker,worker_guard}.py`

@@ -26,18 +26,24 @@
 | Deploy key | `/var/lib/vpnctl/.ssh/id_ed25519{,.pub}` |
 | Firewall | hand-rolled iptables, INPUT policy DROP; new ports must be opened + persisted to `/etc/iptables/rules.v4` |
 
-Build: static musl — `just build-release`
-(`cargo build --release --target x86_64-unknown-linux-musl`). The historical
-`cargo zigbuild …gnu.2.36` path is retired. Musl verified 2026-08-23 on a
-bookworm build host with `musl-tools` + `cmake` installed and
-`rustup target add x86_64-unknown-linux-musl` (output: `static-pie`); those
-build-host prerequisites are NOT yet covered by CI (see BACKLOG.md).
+Build static musl binaries with `just build-release` on a
+[HomeLab worker](agent-workflow.md#remote-builds-and-tests) or in GitHub Actions.
+The CI job installs `musl-tools`, `cmake`, and the Rust
+`x86_64-unknown-linux-musl` target. Set `VPNCTL_BUILD_SHA` at compile time
+so the daemon and CLI report the source revision.
 
-Deploy: `scripts/deploy.sh` on the prod host — builds (or accepts prebuilt)
-daemon + CLI + managed sing-box + node-side stats helper, exports
-`VPNCTL_BUILD_SHA` before the Rust build so binaries report `<semver>+<sha>`
-(`vpnctl_core::build_version`, `option_env!`, no git at runtime), validates all
-four sources before installing any, stages all four, installs node artifacts
+For production, select an accepted `main` commit with green CI. Use its
+`vpnctl-daemon-<sha>` and `vpnctl-node-<sha>` artifacts. GitHub Actions
+retains these artifacts for seven days. If they have expired, rebuild both
+sets at the same SHA on the HomeLab worker using the `static-musl` and
+`managed-node-artifacts` jobs in [CI](../../.github/workflows/ci.yml) as the
+build recipe. Before installation, verify both `source-sha.txt` files against
+the intended commit and run `sha256sum -c SHA256SUMS` in each artifact directory.
+
+On the production host, use the four-argument form of `scripts/deploy.sh`
+with the prebuilt daemon, CLI, managed sing-box, and stats helper. Set
+`VPNCTL_ASSETS_SRC` to the matching assets directory from the daemon artifact.
+The script validates the sources before staging them, installs node artifacts
 first and daemon last, and rolls every prior path back on an interrupted swap.
 An inter-run `flock` on `${VPNCTL_DAEMON_DST}.deploy.lock` (override with
 `VPNCTL_DEPLOY_LOCK`) covers builds, staging, swaps and rollback; the lock file
@@ -176,6 +182,8 @@ configs containing private or preshared keys.
 - [ ] Incomplete HTTP/1 headers expire without invoking a handler; excess
       connections close, completed connections release their slots, and
       graceful shutdown preserves in-flight responses and peer metadata.
+- [ ] Both artifact sets report the intended SHA in `source-sha.txt` and pass
+      `sha256sum -c SHA256SUMS`.
 - [ ] `objdump`/provenance: build stamp `<semver>+<sha>` matches the deployed
       commit.
 - [ ] `systemctl is-active vpnctld`; health endpoint 200 with expected version.
