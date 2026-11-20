@@ -6,7 +6,7 @@
 
 - **Workspace Crates:** 10
 - **Tracked Rust Files:** 538 (343 prod / 195 test)
-- **Total Rust LOC:** 197,763 (103,591 prod / 94,172 test)
+- **Total Rust LOC:** 198,106 (103,796 prod / 94,310 test)
 - **Database Migrations:** 76
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 151
 
@@ -23,8 +23,8 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 5 tests, 1 examples | 7,342 (16) | 1,709 (7) | **9,051** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,371 (22) | 4,615 (12) | **8,986** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,825 (5) | 1,191 (5) | **4,016** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 30 tests | 60,237 (195) | 55,359 (97) | **115,596** |
-| **Total** | | | | **103,591 (343)** | **94,172 (195)** | **197,763** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 30 tests | 60,442 (195) | 55,497 (97) | **115,939** |
+| **Total** | | | | **103,796 (343)** | **94,310 (195)** | **198,106** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -46,13 +46,13 @@
 | `daemon/tests/sub_endpoint/mihomo.rs` | 1,398 | `daemon` | Test |
 | `crates/ssh/src/subprocess.rs` | 1,380 | `crates/ssh` | Prod |
 | `daemon/tests/admin_smoke/server_detail/setup_config.rs` | 1,318 | `daemon` | Test |
+| `daemon/src/handlers/admin/boosty.rs` | 1,314 | `daemon` | Prod |
 | `crates/inventory/tests/spec_full_node_traffic.rs` | 1,313 | `crates/inventory` | Test |
 | `daemon/src/handlers/auth.rs` | 1,288 | `daemon` | Prod |
 | `crates/boosty-bridge/tests/sync_integration.rs` | 1,285 | `crates/boosty-bridge` | Test |
 | `daemon/tests/admin_smoke/dashboard.rs` | 1,217 | `daemon` | Test |
 | `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,200 | `daemon` | Test |
 | `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,184 | `daemon` | Test |
-| `daemon/src/handlers/admin/boosty.rs` | 1,170 | `daemon` | Prod |
 | `daemon/tests/spec_corp_probe_runtime.rs` | 1,166 | `daemon` | Test |
 | `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,118 | `daemon` | Prod |
 

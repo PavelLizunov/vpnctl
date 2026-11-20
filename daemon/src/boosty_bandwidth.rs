@@ -21,6 +21,7 @@ pub(crate) struct TierPolicy {
 #[serde(rename_all = "camelCase")]
 struct Subscriber {
     id: String,
+    name: Option<String>,
     active: bool,
     paid: bool,
     level_id: Option<String>,
@@ -44,7 +45,12 @@ pub(crate) struct Roster {
     pub blog: String,
     pub captured_at: String,
     pub levels: BTreeMap<i64, String>,
-    subscribers: BTreeMap<i64, i64>,
+    subscribers: BTreeMap<i64, ActiveSubscriber>,
+}
+
+pub(crate) struct ActiveSubscriber {
+    pub name: Option<String>,
+    pub level: i64,
 }
 
 #[derive(Clone, Copy, Debug, thiserror::Error)]
@@ -142,7 +148,13 @@ impl Roster {
                     {
                         label.clone_from(name);
                     }
-                    roster.subscribers.insert(id, level);
+                    roster.subscribers.insert(
+                        id,
+                        ActiveSubscriber {
+                            name: row.name.clone(),
+                            level,
+                        },
+                    );
                 }
             }
         }
@@ -150,6 +162,10 @@ impl Roster {
             return Err(RosterIssue::Invalid);
         }
         Ok(roster)
+    }
+
+    pub(crate) fn active_subscribers(&self) -> &BTreeMap<i64, ActiveSubscriber> {
+        &self.subscribers
     }
 
     pub(crate) fn overrides(
@@ -166,15 +182,15 @@ impl Roster {
         let mut overrides: BTreeMap<String, u32> = links
             .iter()
             .filter_map(|(user, subscriber)| {
-                let level = self.subscribers.get(subscriber)?;
-                let rate = *policy.levels.get(level)?;
+                let level = self.subscribers.get(subscriber)?.level;
+                let rate = *policy.levels.get(&level)?;
                 (rate != base).then(|| (user.0.clone(), rate))
             })
             .collect();
-        for (subscriber, level) in &self.subscribers {
+        for (subscriber, account) in &self.subscribers {
             if let Some(rate) = policy
                 .levels
-                .get(level)
+                .get(&account.level)
                 .copied()
                 .filter(|rate| *rate != base)
                 && !explicitly_linked_subscribers.contains(subscriber)
@@ -236,6 +252,7 @@ mod tests {
     fn row(id: i64, level_id: i64, active: bool, paid: bool) -> Subscriber {
         Subscriber {
             id: id.to_string(),
+            name: None,
             active,
             paid,
             level_id: Some(level_id.to_string()),

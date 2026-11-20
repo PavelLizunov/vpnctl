@@ -33,6 +33,7 @@ pub struct AppState {
     pub(crate) private_checks: Arc<crate::handlers::admin::private_checks::PrivateChecks>,
     pub(crate) cheburcheck: Arc<crate::handlers::admin::cheburcheck_checks::ExternalChecks>,
     pub(crate) boosty_roster_url: Arc<str>,
+    pub(crate) boosty_dashboard_url: Option<reqwest::Url>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -56,7 +57,33 @@ pub fn deploy_key_path() -> std::path::PathBuf {
 
 pub const DEFAULT_BACKUP_DIR: &str = vpnctl_inventory::DEFAULT_BACKUP_DIR;
 
+fn boosty_dashboard_url(value: &str) -> anyhow::Result<reqwest::Url> {
+    match reqwest::Url::parse(value) {
+        Ok(url)
+            if url.scheme() == "https"
+                && url.domain().is_some_and(|host| {
+                    host.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+                })
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.path() == "/"
+                && url.query().is_none()
+                && url.fragment().is_none() =>
+        {
+            Ok(url)
+        }
+        _ => anyhow::bail!("VPNCTLD_BOOSTY_DASHBOARD_URL must be a root HTTPS URL with a DNS name"),
+    }
+}
+
 pub async fn build(config: DaemonConfig) -> anyhow::Result<(Router, tokio::task::JoinHandle<()>)> {
+    let boosty_dashboard_url = std::env::var("VPNCTLD_BOOSTY_DASHBOARD_URL")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .as_deref()
+        .map(boosty_dashboard_url)
+        .transpose()?;
     crate::real_ip::init_trusted_proxies()?;
     super::routes::validate_admin_assets(&super::routes::admin_assets_dir())?;
     let inv = SqliteInventory::open(&config.db_path).await?;
@@ -187,6 +214,7 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<(Router, tokio::task:
         private_checks: Arc::default(),
         cheburcheck: Arc::default(),
         boosty_roster_url: Arc::from(crate::boosty_bandwidth::ROSTER_URL),
+        boosty_dashboard_url,
     };
     drop(crate::corp_egress::spawn_refresh(state.clone()));
     Ok((router(state), writer_handle))
@@ -220,6 +248,7 @@ pub fn make_app_state_with_rate_limiter(
             private_checks: Arc::default(),
             cheburcheck: Arc::default(),
             boosty_roster_url: Arc::from("http://127.0.0.1:0/api/v1/roster"),
+            boosty_dashboard_url: None,
         },
         handle,
     )
@@ -229,6 +258,21 @@ pub fn make_app_state_with_rate_limiter(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn author_dashboard_url_requires_a_bare_https_dns_origin() {
+        assert!(boosty_dashboard_url("https://panel.example.test:9443/").is_ok());
+        for value in [
+            "/dashboard",
+            "http://panel.example.test:9443/",
+            "https://operator@panel.example.test:9443/",
+            "https://panel.example.test:9443/dashboard",
+            "https://panel.example.test:9443/?q=1",
+            "https://panel.example.test:9443/#fragment",
+        ] {
+            assert!(boosty_dashboard_url(value).is_err(), "{value}");
+        }
+    }
 
     #[test]
     fn resolve_deploy_key_path_defaults_when_unset() {

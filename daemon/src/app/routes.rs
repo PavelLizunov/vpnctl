@@ -17,6 +17,17 @@ use crate::handlers::auth::BasicAuth;
 
 use super::state::AppState;
 
+pub(crate) const ADMIN_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
+    script-src 'self'; \
+    style-src 'self' 'unsafe-inline'; \
+    img-src 'self' data:; \
+    font-src 'self' https://fonts.gstatic.com; \
+    connect-src 'self'; \
+    frame-ancestors 'none'; \
+    object-src 'none'; \
+    base-uri 'self'; \
+    form-action 'self'";
+
 pub fn router(state: AppState) -> Router {
     let config = crate::corp_operator::OperatorConfig::from_parts(
         std::env::var("VPNCTLD_ADMIN_USER").ok(),
@@ -556,18 +567,7 @@ pub(crate) fn admin_router(state: AppState) -> Router {
         .route_layer(
             tower_http::set_header::SetResponseHeaderLayer::if_not_present(
                 axum::http::header::CONTENT_SECURITY_POLICY,
-                axum::http::HeaderValue::from_static(
-                    "default-src 'self'; \
-                 script-src 'self'; \
-                 style-src 'self' 'unsafe-inline'; \
-                 img-src 'self' data:; \
-                 font-src 'self' https://fonts.gstatic.com; \
-                 connect-src 'self'; \
-                 frame-ancestors 'none'; \
-                 object-src 'none'; \
-                 base-uri 'self'; \
-                 form-action 'self'",
-                ),
+                axum::http::HeaderValue::from_static(ADMIN_CONTENT_SECURITY_POLICY),
             ),
         )
         .route_layer(

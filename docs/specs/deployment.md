@@ -26,6 +26,12 @@
 | Deploy key | `/var/lib/vpnctl/.ssh/id_ed25519{,.pub}` |
 | Firewall | hand-rolled iptables, INPUT policy DROP; new ports must be opened + persisted to `/etc/iptables/rules.v4` |
 
+The [Boosty author dashboard](boosty-author-dashboard.md) is available on the
+HTTPS admin at `https://vpnctld.tail9fd337.ts.net/admin/boosty`. Set
+`VPNCTLD_BOOSTY_DASHBOARD_URL` to the dashboard's HTTPS origin on port 9443.
+Publish that port through an ingress that removes browser credentials before
+the request reaches the dashboard. The HTTP admin still provides the bridge.
+
 Build static musl binaries with `just build-release` on a
 [HomeLab worker](agent-workflow.md#remote-builds-and-tests) or in GitHub Actions.
 The CI job installs `musl-tools`, `cmake`, and the Rust

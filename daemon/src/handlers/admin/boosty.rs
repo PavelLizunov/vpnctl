@@ -2,16 +2,66 @@ use crate::handlers::admin::icons::icon;
 use std::net::SocketAddr;
 
 use axum::extract::{ConnectInfo, Path, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use maud::{Markup, html};
 
 use super::audit::{action_kind, redact_audit_payload, summarize_audit_payload};
 use super::helpers::{
-    bad_request, format_msk_iso, internal_error, render_page, theme_accent_lang, user_not_found,
+    bad_request, error_resp, format_msk_iso, internal_error, render_page, theme_accent_lang,
+    user_not_found,
 };
 use crate::AppState;
+use crate::app::routes::ADMIN_CONTENT_SECURITY_POLICY;
+use crate::boosty_bandwidth::{Roster, RosterIssue};
 use crate::http_util::{form_field, path_segment_encode};
+use crate::i18n::tr;
+
+const DASHBOARD_PATH: &str = "/admin/boosty";
+const SYNC_PATH: &str = "/admin/boosty?view=sync";
+
+fn sync_redirect(state: &AppState) -> Response {
+    Redirect::to(if state.boosty_dashboard_url.is_some() {
+        SYNC_PATH
+    } else {
+        DASHBOARD_PATH
+    })
+    .into_response()
+}
+
+async fn author_dashboard(
+    state: &AppState,
+    headers: &HeaderMap,
+    url: &reqwest::Url,
+) -> Result<Response, Response> {
+    let (theme, accent, lang) = theme_accent_lang(headers);
+    let origin = url.origin().ascii_serialization();
+    let policy = HeaderValue::try_from(format!(
+        "{ADMIN_CONTENT_SECURITY_POLICY}; frame-src {origin}"
+    ))
+    .map_err(|error| internal_error(anyhow::Error::new(error)))?;
+    let body = html! {
+        section.ed-boosty-embed aria-label=(tr(lang, "Boosty author dashboard", "Панель автора Boosty")) {
+            div.ed-boosty-embed__actions {
+                a.ed-abtn href=(SYNC_PATH) { (tr(lang, "VPN accounts and sync", "Связи с VPN и синхронизация")) }
+                a.ed-abtn.ed-abtn--secondary href=(url.as_str()) target="_blank" rel="noopener noreferrer" {
+                    (tr(lang, "Open in a new tab", "Открыть в новой вкладке"))
+                }
+            }
+            iframe.ed-boosty-embed__frame id="boosty-author-dashboard"
+                title=(tr(lang, "Boosty author dashboard", "Панель автора Boosty"))
+                data-src=(url.as_str()) referrerpolicy="no-referrer" allow="clipboard-write"
+                sandbox="allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts" {}
+        }
+    };
+    let mut response = render_page(state, "boosty", &theme, &accent, lang, body)
+        .await
+        .into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_SECURITY_POLICY, policy);
+    Ok(response)
+}
 
 fn boosty_mask_secret(secret: Option<&str>) -> String {
     match secret {
@@ -35,8 +85,8 @@ fn boosty_time(ts: Option<i64>) -> String {
         .unwrap_or_else(|| "—".into())
 }
 
-fn boosty_admin_origin(headers: &HeaderMap, trusted_proto: Option<&str>) -> String {
-    let host = headers
+fn boosty_admin_host(headers: &HeaderMap) -> Option<&str> {
+    headers
         .get(axum::http::header::HOST)
         .and_then(|h| h.to_str().ok())
         .filter(|host| {
@@ -48,7 +98,10 @@ fn boosty_admin_origin(headers: &HeaderMap, trusted_proto: Option<&str>) -> Stri
                 })
                 && reqwest::Url::parse(&format!("http://{host}")).is_ok()
         })
-        .unwrap_or("vpnctld");
+}
+
+fn boosty_admin_origin(headers: &HeaderMap, trusted_proto: Option<&str>) -> String {
+    let host = boosty_admin_host(headers).unwrap_or("vpnctld");
     let proto = match trusted_proto {
         Some("https") => "https",
         _ => "http",
@@ -60,7 +113,23 @@ pub(crate) async fn boosty_page(
     headers: HeaderMap,
     State(state): State<AppState>,
     req: axum::extract::Request,
-) -> Result<Markup, Response> {
+) -> Result<Response, Response> {
+    let sync_view = req
+        .uri()
+        .query()
+        .is_some_and(|query| query.split('&').any(|field| field == "view=sync"));
+    let dashboard_url = state.boosty_dashboard_url.as_ref().filter(|url| {
+        boosty_admin_host(&headers)
+            .and_then(|host| reqwest::Url::parse(&format!("https://{host}")).ok())
+            .is_some_and(|admin| {
+                admin.domain() == url.domain()
+                    && admin.port().is_none()
+                    && admin.origin() != url.origin()
+            })
+    });
+    if !sync_view && let Some(url) = dashboard_url {
+        return author_dashboard(&state, &headers, url).await;
+    }
     let (theme, accent, lang) = theme_accent_lang(&headers);
 
     let settings = state
@@ -86,6 +155,18 @@ pub(crate) async fn boosty_page(
         .map(|u| u.id.0.as_str())
         .filter(|id| !linked_ids.contains(id))
         .collect();
+    let author_roster = if state.boosty_dashboard_url.is_some() {
+        Some(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                Roster::fetch(&state.boosty_roster_url),
+            )
+            .await
+            .unwrap_or(Err(RosterIssue::Unavailable)),
+        )
+    } else {
+        None
+    };
     let linked_sub_ids: std::collections::HashSet<i64> =
         links.iter().map(|(_, sid)| *sid).collect();
 
@@ -102,7 +183,6 @@ pub(crate) async fn boosty_page(
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
-    use crate::i18n::tr;
     let configured = settings.blog_url.as_deref().is_some_and(|v| !v.is_empty())
         && (settings
             .access_token
@@ -151,6 +231,11 @@ pub(crate) async fn boosty_page(
                 }
             }
             div.ed-headrow__actions {
+                @if let Some(host) = dashboard_url.and_then(reqwest::Url::domain) {
+                    a.ed-abtn.ed-abtn--secondary.ed-abtn--sm href=(format!("https://{host}{DASHBOARD_PATH}")) {
+                        (tr(lang, "Author dashboard", "Панель автора"))
+                    }
+                }
                 form method="post" action="/admin/boosty/sync" style="margin: 0;" {
                     button type="submit"
                            title=(tr(
@@ -396,11 +481,18 @@ pub(crate) async fn boosty_page(
 
         div.ed-rule {}
         div.ed-art-eyebrow { (tr(lang, "Linked users", "Привязанные пользователи")) }
+        @if let Some(result) = &author_roster {
+            (roster_link_form(result.as_ref().ok(), &unlinked_users, lang))
+        }
         @if links.is_empty() {
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 0;" {
-                (tr(lang,
-                    "No Boosty links yet. Configure the bridge below, run a sync, then bind new subscribers to users.",
-                    "Привязок Boosty пока нет. Настрой мост ниже, запусти синк, затем привяжи новых подписчиков к юзерам."))
+                @if author_roster.is_some() {
+                    (tr(lang, "No Boosty links yet.", "Привязок Boosty пока нет."))
+                } @else {
+                    (tr(lang,
+                        "No Boosty links yet. Configure the bridge below, run a sync, then bind new subscribers to users.",
+                        "Привязок Boosty пока нет. Настрой мост ниже, запусти синк, затем привяжи новых подписчиков к юзерам."))
+                }
             }
         } @else {
             table.ed-grid style="margin-top: 8px;" {
@@ -709,7 +801,48 @@ pub(crate) async fn boosty_page(
         }
     };
 
-    Ok(render_page(&state, "boosty", &theme, &accent, lang, body).await)
+    Ok(render_page(&state, "boosty", &theme, &accent, lang, body)
+        .await
+        .into_response())
+}
+
+fn roster_link_form(roster: Option<&Roster>, users: &[&str], lang: crate::i18n::Locale) -> Markup {
+    let Some(roster) = roster else {
+        return html! {
+            p { (tr(lang, "Refresh the subscriber list in the author dashboard to link a VPN account.", "Обновите список подписчиков в панели автора, чтобы привязать VPN-аккаунт.")) }
+        };
+    };
+    if roster.active_subscribers().is_empty() || users.is_empty() {
+        return html! {
+            p { (tr(lang, "Linking requires an active paid subscriber and an unlinked VPN account.", "Для привязки нужны активный платный подписчик и свободный VPN-аккаунт.")) }
+        };
+    }
+    html! {
+        form.ed-boosty-link method="post" action="/admin/boosty/link" {
+            input type="hidden" name="boosty_blog" value=(roster.blog);
+            label {
+                (tr(lang, "Boosty subscriber", "Подписчик Boosty"))
+                select name="subscriber_id" required {
+                    option value="" {}
+                    @for (id, subscriber) in roster.active_subscribers() {
+                        option value=(id) {
+                            @if let Some(name) = &subscriber.name { (name) " · " }
+                            "#" (id)
+                            @if let Some(tier) = roster.levels.get(&subscriber.level) { " · " (tier) }
+                        }
+                    }
+                }
+            }
+            label {
+                (tr(lang, "VPN account", "VPN-аккаунт"))
+                select name="user" required {
+                    option value="" {}
+                    @for id in users { option value=(id) { (id) } }
+                }
+            }
+            button.ed-abtn type="submit" { (tr(lang, "Link account", "Привязать аккаунт")) }
+        }
+    }
 }
 
 pub(crate) async fn boosty_settings_save(State(state): State<AppState>, body: String) -> Response {
@@ -776,7 +909,7 @@ pub(crate) async fn boosty_settings_save(State(state): State<AppState>, body: St
         return resp;
     }
 
-    Redirect::to("/admin/boosty").into_response()
+    sync_redirect(&state)
 }
 
 async fn run_boosty_sync_and_deploy(
@@ -869,7 +1002,7 @@ pub(crate) async fn boosty_sync_now(State(state): State<AppState>) -> Response {
     {
         return resp;
     }
-    Redirect::to("/admin/boosty").into_response()
+    sync_redirect(&state)
 }
 
 pub(crate) async fn boosty_link(State(state): State<AppState>, body: String) -> Response {
@@ -882,6 +1015,17 @@ pub(crate) async fn boosty_link(State(state): State<AppState>, body: String) -> 
         Some(id) => id,
         None => return bad_request("missing or invalid `subscriber_id`"),
     };
+    if let Some(blog) = form_field(&body, "boosty_blog") {
+        let roster = match Roster::fetch(&state.boosty_roster_url).await {
+            Ok(roster) => roster,
+            Err(issue) => return error_resp(StatusCode::SERVICE_UNAVAILABLE, &issue.to_string()),
+        };
+        if blog != roster.blog || !roster.active_subscribers().contains_key(&subscriber_id) {
+            return bad_request(
+                "The subscriber is no longer eligible. Reload the Boosty accounts page and select a current paid subscriber.",
+            );
+        }
+    }
 
     let uid = vpnctl_core::UserId(user.clone());
     match state.inv.get_user(&uid).await {
@@ -906,7 +1050,7 @@ pub(crate) async fn boosty_link(State(state): State<AppState>, body: String) -> 
     {
         tracing::warn!(target = "vpnctld::boosty", error = %e, "audit boosty.link failed");
     }
-    Redirect::to("/admin/boosty").into_response()
+    sync_redirect(&state)
 }
 
 pub(crate) async fn boosty_unlink(
@@ -929,7 +1073,7 @@ pub(crate) async fn boosty_unlink(
     {
         tracing::warn!(target = "vpnctld::boosty", error = %e, "audit boosty.unlink failed");
     }
-    Redirect::to("/admin/boosty").into_response()
+    sync_redirect(&state)
 }
 
 pub(crate) async fn boosty_disable(
@@ -974,7 +1118,7 @@ pub(crate) async fn boosty_disable(
             .await;
         });
     }
-    Redirect::to("/admin/boosty").into_response()
+    sync_redirect(&state)
 }
 
 #[cfg(test)]
