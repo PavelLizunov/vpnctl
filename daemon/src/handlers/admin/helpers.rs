@@ -116,7 +116,7 @@ const PRELOADED_FONTS: [&str; 6] = [
 const VERSIONED_ASSET: &str = "private, max-age=31536000, immutable";
 const FONT_ASSET: &str = "private, max-age=604800";
 
-fn versioned_asset(name: &str) -> String {
+pub(crate) fn versioned_asset(name: &str) -> String {
     let stamp = std::fs::metadata(crate::app::routes::admin_assets_dir().join(name))
         .ok()
         .and_then(|meta| {

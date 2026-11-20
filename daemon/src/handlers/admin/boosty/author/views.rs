@@ -80,7 +80,6 @@ impl View {
 
     pub(super) fn standalone_fragment(self) -> Option<&'static str> {
         match self {
-            Self::Messages => Some("messages"),
             Self::Automation => Some("delivery"),
             _ => None,
         }
@@ -88,11 +87,6 @@ impl View {
 
     pub(super) fn standalone_label(self, lang: Locale) -> &'static str {
         match self {
-            Self::Messages => tr(
-                lang,
-                "Manage replies in Boosty",
-                "Управление ответами в Boosty",
-            ),
             Self::Automation => tr(
                 lang,
                 "Manage delivery in Boosty",
@@ -129,7 +123,7 @@ impl View {
 #[serde(default)]
 pub(super) struct Query {
     pub view: View,
-    search: String,
+    pub search: String,
     status: String,
     source: String,
     from: String,
@@ -137,7 +131,10 @@ pub(super) struct Query {
     pub offset: usize,
     person: Option<String>,
     pub dialog: Option<String>,
+    pub blog: Option<String>,
     pub before: Option<String>,
+    pub unread: String,
+    pub handoff: String,
 }
 
 impl Query {
@@ -186,7 +183,7 @@ impl Query {
         }
     }
 
-    fn at(&self, offset: usize) -> String {
+    pub(super) fn at(&self, offset: usize) -> String {
         let mut query = url::form_urlencoded::Serializer::new(String::new());
         query.append_pair("view", self.view.key());
         for (name, value) in [
@@ -201,6 +198,12 @@ impl Query {
             }
         }
         query.append_pair("offset", &offset.to_string());
+        if self.unread == "1" {
+            query.append_pair("unread", "1");
+        }
+        if self.handoff == "1" {
+            query.append_pair("handoff", "1");
+        }
         format!("{DASHBOARD_PATH}?{}", query.finish())
     }
 }
@@ -279,7 +282,7 @@ pub(super) async fn content(
             lang,
         )),
         View::People => people(client, state, query, lang).await,
-        View::Messages => super::workflows::inbox(client, query, lang).await,
+        View::Messages => super::inbox::page(client, query, lang).await,
         View::Automation => super::workflows::automation(client, query, lang).await,
         View::Sources => Ok(sources(
             &client.get::<Vec<Source>>(&["sources"], &NO_QUERY).await?,

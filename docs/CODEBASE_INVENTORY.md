@@ -5,10 +5,10 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 542 (347 prod / 195 test)
-- **Total Rust LOC:** 199,483 (105,004 prod / 94,479 test)
+- **Tracked Rust Files:** 544 (349 prod / 195 test)
+- **Total Rust LOC:** 200,213 (105,530 prod / 94,683 test)
 - **Database Migrations:** 76
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 153
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 154
 
 ## Workspace Crates & Targets
 
@@ -23,8 +23,8 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 5 tests, 1 examples | 7,342 (16) | 1,709 (7) | **9,051** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,371 (22) | 4,615 (12) | **8,986** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,825 (5) | 1,191 (5) | **4,016** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 30 tests | 61,650 (199) | 55,666 (97) | **117,316** |
-| **Total** | | | | **105,004 (347)** | **94,479 (195)** | **199,483** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 30 tests | 62,176 (201) | 55,870 (97) | **118,046** |
+| **Total** | | | | **105,530 (349)** | **94,683 (195)** | **200,213** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -49,7 +49,7 @@
 | `crates/inventory/tests/spec_full_node_traffic.rs` | 1,313 | `crates/inventory` | Test |
 | `daemon/src/handlers/auth.rs` | 1,288 | `daemon` | Prod |
 | `crates/boosty-bridge/tests/sync_integration.rs` | 1,285 | `crates/boosty-bridge` | Test |
-| `daemon/src/handlers/admin/boosty.rs` | 1,279 | `daemon` | Prod |
+| `daemon/src/handlers/admin/boosty.rs` | 1,283 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/dashboard.rs` | 1,217 | `daemon` | Test |
 | `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,200 | `daemon` | Test |
 | `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,184 | `daemon` | Test |
@@ -137,7 +137,7 @@
 | `0075` | corp companies | `crates/inventory/migrations/0075_corp_companies.sql` | 97 |
 | `0076` | server security reports | `crates/inventory/migrations/0076_server_security_reports.sql` | 6 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (153)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (154)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -159,6 +159,7 @@
 | `POST` | `/admin/boosty/author/refresh` | `admin::boosty_author_refresh` |
 | `POST` | `/admin/boosty/author/refresh-conversation` | `admin::boosty_author_refresh_conversation` |
 | `POST` | `/admin/boosty/disable/{user}` | `admin::boosty_disable` |
+| `POST` | `/admin/boosty/inbox/action` | `admin::boosty_inbox_action` |
 | `POST` | `/admin/boosty/link` | `admin::boosty_link` |
 | `POST` | `/admin/boosty/settings` | `admin::boosty_settings_save` |
 | `POST` | `/admin/boosty/sync` | `admin::boosty_sync_now` |
