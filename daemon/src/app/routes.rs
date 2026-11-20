@@ -17,7 +17,7 @@ use crate::handlers::auth::BasicAuth;
 
 use super::state::AppState;
 
-pub(crate) const ADMIN_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
+const ADMIN_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
     script-src 'self'; \
     style-src 'self' 'unsafe-inline'; \
     img-src 'self' data:; \
@@ -496,6 +496,14 @@ pub(crate) fn admin_router(state: AppState) -> Router {
         )
         .route("/admin/settings/system", get(admin::settings_system))
         .route("/admin/boosty", get(admin::boosty_page))
+        .route(
+            "/admin/boosty/author/refresh",
+            post(admin::boosty_author_refresh),
+        )
+        .route(
+            "/admin/boosty/author/refresh-conversation",
+            post(admin::boosty_author_refresh_conversation),
+        )
         .route("/admin/boosty/settings", post(admin::boosty_settings_save))
         .route("/admin/boosty/sync", post(admin::boosty_sync_now))
         .route("/admin/boosty/link", post(admin::boosty_link))

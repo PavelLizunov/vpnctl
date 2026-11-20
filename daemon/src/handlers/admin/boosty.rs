@@ -2,7 +2,7 @@ use crate::handlers::admin::icons::icon;
 use std::net::SocketAddr;
 
 use axum::extract::{ConnectInfo, Path, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use maud::{Markup, html};
 
@@ -12,10 +12,11 @@ use super::helpers::{
     user_not_found,
 };
 use crate::AppState;
-use crate::app::routes::ADMIN_CONTENT_SECURITY_POLICY;
 use crate::boosty_bandwidth::{Roster, RosterIssue};
 use crate::http_util::{form_field, path_segment_encode};
 use crate::i18n::tr;
+
+mod author;
 
 const DASHBOARD_PATH: &str = "/admin/boosty";
 const SYNC_PATH: &str = "/admin/boosty?view=sync";
@@ -29,38 +30,15 @@ fn sync_redirect(state: &AppState) -> Response {
     .into_response()
 }
 
-async fn author_dashboard(
-    state: &AppState,
-    headers: &HeaderMap,
-    url: &reqwest::Url,
-) -> Result<Response, Response> {
-    let (theme, accent, lang) = theme_accent_lang(headers);
-    let origin = url.origin().ascii_serialization();
-    let policy = HeaderValue::try_from(format!(
-        "{ADMIN_CONTENT_SECURITY_POLICY}; frame-src {origin}"
-    ))
-    .map_err(|error| internal_error(anyhow::Error::new(error)))?;
-    let body = html! {
-        section.ed-boosty-embed aria-label=(tr(lang, "Boosty author dashboard", "Панель автора Boosty")) {
-            div.ed-boosty-embed__actions {
-                a.ed-abtn href=(SYNC_PATH) { (tr(lang, "VPN accounts and sync", "Связи с VPN и синхронизация")) }
-                a.ed-abtn.ed-abtn--secondary href=(url.as_str()) target="_blank" rel="noopener noreferrer" {
-                    (tr(lang, "Open in a new tab", "Открыть в новой вкладке"))
-                }
-            }
-            iframe.ed-boosty-embed__frame id="boosty-author-dashboard"
-                title=(tr(lang, "Boosty author dashboard", "Панель автора Boosty"))
-                data-src=(url.as_str()) referrerpolicy="no-referrer" allow="clipboard-write"
-                sandbox="allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts" {}
-        }
-    };
-    let mut response = render_page(state, "boosty", &theme, &accent, lang, body)
-        .await
-        .into_response();
-    response
-        .headers_mut()
-        .insert(header::CONTENT_SECURITY_POLICY, policy);
-    Ok(response)
+pub(crate) async fn boosty_author_refresh(State(state): State<AppState>) -> Response {
+    author::refresh(&state).await
+}
+
+pub(crate) async fn boosty_author_refresh_conversation(
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    author::refresh_conversation(&state, &body).await
 }
 
 fn boosty_mask_secret(secret: Option<&str>) -> String {
@@ -118,17 +96,8 @@ pub(crate) async fn boosty_page(
         .uri()
         .query()
         .is_some_and(|query| query.split('&').any(|field| field == "view=sync"));
-    let dashboard_url = state.boosty_dashboard_url.as_ref().filter(|url| {
-        boosty_admin_host(&headers)
-            .and_then(|host| reqwest::Url::parse(&format!("https://{host}")).ok())
-            .is_some_and(|admin| {
-                admin.domain() == url.domain()
-                    && admin.port().is_none()
-                    && admin.origin() != url.origin()
-            })
-    });
-    if !sync_view && let Some(url) = dashboard_url {
-        return author_dashboard(&state, &headers, url).await;
+    if !sync_view && let Some(url) = &state.boosty_dashboard_url {
+        return Ok(author::page(&state, &headers, url, req.uri()).await);
     }
     let (theme, accent, lang) = theme_accent_lang(&headers);
 
@@ -155,18 +124,14 @@ pub(crate) async fn boosty_page(
         .map(|u| u.id.0.as_str())
         .filter(|id| !linked_ids.contains(id))
         .collect();
-    let author_roster = if state.boosty_dashboard_url.is_some() {
-        Some(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                Roster::fetch(&state.boosty_roster_url),
-            )
-            .await
-            .unwrap_or(Err(RosterIssue::Unavailable)),
-        )
-    } else {
-        None
-    };
+    let author_roster = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        Roster::fetch(&state.boosty_roster_url),
+    )
+    .await
+    .unwrap_or(Err(RosterIssue::Unavailable));
+    let author_roster =
+        (state.boosty_dashboard_url.is_some() || author_roster.is_ok()).then_some(author_roster);
     let linked_sub_ids: std::collections::HashSet<i64> =
         links.iter().map(|(_, sid)| *sid).collect();
 
@@ -231,8 +196,8 @@ pub(crate) async fn boosty_page(
                 }
             }
             div.ed-headrow__actions {
-                @if let Some(host) = dashboard_url.and_then(reqwest::Url::domain) {
-                    a.ed-abtn.ed-abtn--secondary.ed-abtn--sm href=(format!("https://{host}{DASHBOARD_PATH}")) {
+                @if state.boosty_dashboard_url.is_some() {
+                    a.ed-abtn.ed-abtn--secondary.ed-abtn--sm href=(DASHBOARD_PATH) {
                         (tr(lang, "Author dashboard", "Панель автора"))
                     }
                 }

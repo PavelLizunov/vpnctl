@@ -434,14 +434,22 @@
 .ed-headrow { display: flex; align-items: center; gap: 12px; margin: 0 0 4px; flex-wrap: wrap; }
 .ed-headrow__actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
 
-.ed-boosty-embed__actions { display: flex; flex-wrap: wrap; gap: 8px; margin-block-end: 12px; }
-.ed-boosty-embed__frame {
-  display: block;
-  width: 100%;
-  height: max(70dvh, calc(100dvh - 10rem));
-  border: 1px solid var(--rule-s);
-  background: var(--paper);
+.ed-boosty-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(10rem, 100%), 1fr));
+  gap: 12px 20px;
+  border-block: 1px solid var(--rule-s);
+  padding-block: 12px;
+  margin-block: 16px 24px;
 }
+.ed-boosty-summary dt { color: var(--soft); }
+.ed-boosty-summary dd { margin: 4px 0 0; color: var(--ink); font-variant-numeric: tabular-nums; }
+.ed-boosty-tabs { flex-wrap: wrap; gap: 8px 24px; }
+.ed-boosty-tabs .ed-tab { cursor: pointer; text-decoration: none; }
+.ed-boosty-filters { display: flex; flex-wrap: wrap; align-items: end; gap: 8px 12px; margin-block: 12px; }
+.ed-boosty-filters label { display: grid; gap: 4px; min-width: 0; }
+.ed-boosty-pager { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-block: 12px; }
+.ed-boosty-message { white-space: pre-wrap; overflow-wrap: anywhere; }
 .ed-boosty-link { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin-block: 12px; }
 .ed-boosty-link label { display: grid; gap: 4px; min-width: 0; }
 .ed-boosty-link select { max-width: 100%; }

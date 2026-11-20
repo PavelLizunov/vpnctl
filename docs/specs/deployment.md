@@ -28,9 +28,9 @@
 
 The [Boosty author dashboard](boosty-author-dashboard.md) is available on the
 HTTPS admin at `https://vpnctld.tail9fd337.ts.net/admin/boosty`. Set
-`VPNCTLD_BOOSTY_DASHBOARD_URL` to the dashboard's HTTPS origin on port 9443.
-Publish that port through an ingress that removes browser credentials before
-the request reaches the dashboard. The HTTP admin still provides the bridge.
+`VPNCTLD_BOOSTY_DASHBOARD_URL` to enable the native views and provide the
+standalone URL on port 9443. vpnctl reads the service on loopback port 3001.
+Keep the credential-stripping ingress on port 9443 for standalone access.
 
 Build static musl binaries with `just build-release` on a
 [HomeLab worker](agent-workflow.md#remote-builds-and-tests) or in GitHub Actions.

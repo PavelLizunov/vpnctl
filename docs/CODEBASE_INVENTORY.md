@@ -5,10 +5,10 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 538 (343 prod / 195 test)
-- **Total Rust LOC:** 198,106 (103,796 prod / 94,310 test)
+- **Tracked Rust Files:** 542 (347 prod / 195 test)
+- **Total Rust LOC:** 199,483 (105,004 prod / 94,479 test)
 - **Database Migrations:** 76
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 151
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 153
 
 ## Workspace Crates & Targets
 
@@ -23,8 +23,8 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 5 tests, 1 examples | 7,342 (16) | 1,709 (7) | **9,051** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,371 (22) | 4,615 (12) | **8,986** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,825 (5) | 1,191 (5) | **4,016** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 30 tests | 60,442 (195) | 55,497 (97) | **115,939** |
-| **Total** | | | | **103,796 (343)** | **94,310 (195)** | **198,106** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 30 tests | 61,650 (199) | 55,666 (97) | **117,316** |
+| **Total** | | | | **105,004 (347)** | **94,479 (195)** | **199,483** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -46,10 +46,10 @@
 | `daemon/tests/sub_endpoint/mihomo.rs` | 1,398 | `daemon` | Test |
 | `crates/ssh/src/subprocess.rs` | 1,380 | `crates/ssh` | Prod |
 | `daemon/tests/admin_smoke/server_detail/setup_config.rs` | 1,318 | `daemon` | Test |
-| `daemon/src/handlers/admin/boosty.rs` | 1,314 | `daemon` | Prod |
 | `crates/inventory/tests/spec_full_node_traffic.rs` | 1,313 | `crates/inventory` | Test |
 | `daemon/src/handlers/auth.rs` | 1,288 | `daemon` | Prod |
 | `crates/boosty-bridge/tests/sync_integration.rs` | 1,285 | `crates/boosty-bridge` | Test |
+| `daemon/src/handlers/admin/boosty.rs` | 1,279 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/dashboard.rs` | 1,217 | `daemon` | Test |
 | `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,200 | `daemon` | Test |
 | `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,184 | `daemon` | Test |
@@ -137,7 +137,7 @@
 | `0075` | corp companies | `crates/inventory/migrations/0075_corp_companies.sql` | 97 |
 | `0076` | server security reports | `crates/inventory/migrations/0076_server_security_reports.sql` | 6 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (151)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (153)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -156,6 +156,8 @@
 | `POST` | `/admin/backup/self-test` | `admin::backup_self_test` |
 | `POST` | `/admin/backup/snapshot` | `admin::backup_snapshot_now` |
 | `GET` | `/admin/boosty` | `admin::boosty_page` |
+| `POST` | `/admin/boosty/author/refresh` | `admin::boosty_author_refresh` |
+| `POST` | `/admin/boosty/author/refresh-conversation` | `admin::boosty_author_refresh_conversation` |
 | `POST` | `/admin/boosty/disable/{user}` | `admin::boosty_disable` |
 | `POST` | `/admin/boosty/link` | `admin::boosty_link` |
 | `POST` | `/admin/boosty/settings` | `admin::boosty_settings_save` |
