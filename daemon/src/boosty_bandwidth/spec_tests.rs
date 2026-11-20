@@ -137,7 +137,7 @@ impl MockServer {
             .route("/api/inbox/reply", post_route(serve_inbox_reply))
             .route("/api/inbox/reconcile", post_route(serve_inbox_reconcile))
             .route("/api/inbox/abandon", post_route(serve_inbox_abandon))
-            .layer(Extension(reply_requests.clone()))
+            .layer(Extension(Arc::clone(&reply_requests)))
             .with_state(Arc::new(roster));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
