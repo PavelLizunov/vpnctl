@@ -1735,3 +1735,72 @@ fn firewall_script_fails_when_ufw_status_fails() {
         );
     }
 }
+
+#[test]
+fn per_user_speed_renders_bits_and_exact_amnezia_peer_addresses() {
+    let users = [User {
+        id: UserId("sample-user".into()),
+        uuid: String::new(),
+        tuic_password: None,
+        wireguard_pubkey: Some("fixture-public-key".into()),
+        wireguard_private: None,
+        sub_token: None,
+        vpn_router_device_id: None,
+        disabled: false,
+    }];
+    let endpoints = [json!({
+        "tag": "awg3-in",
+        "peers": [{
+            "public_key": "fixture-public-key",
+            "allowed_ips": ["10.73.0.2/32", "fd73:73::2/128"],
+        }],
+    })];
+
+    let secrets = HashMap::from([(USER_BANDWIDTH_KEY.into(), "40".into())]);
+    let config = bandwidth::render_user_bandwidth(&secrets, &endpoints, &users)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        config,
+        json!({
+            "bits_per_second": 40_000_000,
+            "wireguard_peers": {"awg3-in": {"10.73.0.2": "sample-user", "fd73:73::2": "sample-user"}},
+        })
+    );
+    assert!(bandwidth::render_user_bandwidth(&secrets, &endpoints, &[]).is_err());
+
+    let invalid = HashMap::from([(USER_BANDWIDTH_KEY.into(), "4001".into())]);
+    assert!(bandwidth::render_user_bandwidth(&invalid, &[], &[]).is_err());
+    let unlimited = HashMap::from([(USER_BANDWIDTH_KEY.into(), "0".into())]);
+    assert!(
+        bandwidth::render_user_bandwidth(&unlimited, &[], &[])
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn per_user_speed_requires_a_compatible_node_before_staging() {
+    let ssh = vpnctl_ssh::MockTransport::new();
+    let kernel = SingBox::new();
+    let server = dummy_server();
+    let secrets = HashMap::from([(USER_BANDWIDTH_KEY.into(), "40".into())]);
+    let config = kernel
+        .render_config(&dummy_ctx(&server, &secrets), &[], &[])
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&config).unwrap()["route"]["vpnctl_user_bandwidth"]["bits_per_second"],
+        40_000_000
+    );
+    let err = kernel.apply_config(&ssh, &config).await.unwrap_err();
+    assert!(err.to_string().contains("Update the managed kernel"));
+    assert_eq!(ssh.uploaded("/etc/sing-box/config.json.new"), None);
+
+    ssh.expect(
+        bandwidth::VERIFY_USER_BANDWIDTH_SUPPORT,
+        "vpnctl-user-bandwidth-supported\n",
+    );
+    ssh.expect(sing_box_apply_script(), "");
+    kernel.apply_config(&ssh, &config).await.unwrap();
+    assert_eq!(ssh.uploaded("/etc/sing-box/config.json.new"), Some(config));
+}

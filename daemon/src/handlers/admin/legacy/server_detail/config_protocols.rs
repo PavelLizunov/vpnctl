@@ -201,6 +201,39 @@ pub(crate) fn server_detail_reality_config_section(
     }
 }
 
+pub(crate) fn server_detail_user_bandwidth_section(
+    server: &vpnctl_core::Server,
+    secrets: &std::collections::HashMap<String, String>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    use vpnctl_kernels::{USER_BANDWIDTH_KEY, USER_BANDWIDTH_MAX_MBPS};
+
+    if !server.kernels.iter().any(|kernel| kernel.0 == "sing-box") {
+        return html! {};
+    }
+    let sid = path_segment_encode(&server.id.0);
+    let rate = secrets.get(USER_BANDWIDTH_KEY).map_or("0", String::as_str);
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow id="user-bandwidth" {
+            (tr(lang, "Speed per user", "Скорость на пользователя"))
+        }
+        p.ed-grid__mut {
+            (tr(lang, "Each user's sing-box connections share this upload and download budget on this node. Zero means unlimited. Check deploy status to confirm that the kernel applied the setting.",
+                "Все соединения sing-box одного пользователя на этом узле делят этот лимит на приём и отдачу. Ноль означает без ограничения. Результат применения видно в статусе деплоя."))
+        }
+        form method="post" action=(format!("/admin/servers/{sid}/user-bandwidth")) {
+            label for="user-bandwidth-mbps" { (tr(lang, "Mbit/s", "Мбит/с")) }
+            " "
+            input.ed-inp id="user-bandwidth-mbps" name="mbps" type="number" min="0"
+                max=(USER_BANDWIDTH_MAX_MBPS) value=(rate) required;
+            " "
+            button.ed-abtn type="submit" { (tr(lang, "Save and deploy", "Сохранить и применить")) }
+        }
+    }
+}
+
 pub(crate) fn server_detail_hysteria2_obfs_section(
     server: &vpnctl_core::Server,
     lang: crate::i18n::Locale,

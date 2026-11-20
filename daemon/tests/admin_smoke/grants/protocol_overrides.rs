@@ -688,12 +688,12 @@ async fn nm12_server_detail_renders_dpi_chip_for_every_known_protocol() {
         "expected 4 Strong chips (vless+reality, naive, vless-ws, vless+xhttp), got {strong_count}"
     );
     assert_eq!(
-        moderate_count, 4,
-        "expected 4 Moderate chips (tuic-v5, anytls, amneziawg2, amneziawg3), got {moderate_count}"
+        moderate_count, 2,
+        "expected 2 Moderate chips (tuic-v5, amneziawg3), got {moderate_count}"
     );
     assert_eq!(
-        weak_count, 4,
-        "expected 4 Weak chips (shadowsocks-2022, wireguard, trojan, hysteria2), got {weak_count}"
+        weak_count, 2,
+        "expected 2 Weak chips (wireguard, hysteria2), got {weak_count}"
     );
 }
 
@@ -792,7 +792,7 @@ async fn nm12_unknown_protocol_in_server_renders_no_chip_defensively() {
             ssh_port: 22,
             ssh_user: "root".into(),
             kernels: vec![KernelId("sing-box".into())],
-            enabled_protocols: vec![],
+            enabled_protocols: vec![ProtocolId("unknown-fixture-protocol".into())],
             trusted_host_fingerprint: None,
             hoster: "generic".into(),
             jump_via: None,
@@ -805,8 +805,8 @@ async fn nm12_unknown_protocol_in_server_renders_no_chip_defensively() {
         + html.matches("DPI: moderate").count()
         + html.matches("DPI: weak").count();
     assert_eq!(
-        total_chips, 12,
-        "12 registered protocols must each carry exactly one chip on a server with all kernels — got {total_chips}"
+        total_chips, 8,
+        "the active protocol picker must show exactly one chip for each of its eight entries — got {total_chips}"
     );
 }
 
@@ -1183,7 +1183,7 @@ async fn nm12_followup_legacy_server_enable_protocol_also_carries_fragment() {
             add_same_origin(
                 Request::builder()
                     .method("POST")
-                    .uri("/admin/servers/esrv2/protocols/anytls/enable"),
+                    .uri("/admin/servers/esrv2/protocols/hysteria2/enable"),
             )
             .body(Body::empty())
             .unwrap(),

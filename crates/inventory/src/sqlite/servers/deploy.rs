@@ -345,7 +345,8 @@ impl SqliteInventory {
                                'server.kernel.enable', 'server.kernel.disable',
                                'server.reserved_ports.set', 'server.udp_pair.set',
                                'server.reality.set', 'server.naive.set',
-                               'server.vlessws.set', 'server.secret.set')
+                               'server.vlessws.set', 'server.secret.set',
+                               'server.user_bandwidth.set')
                     AND target = ?1)
                 OR (action IN ('user.add', 'user.set_vpn_router_device_id',
                                'user.disable', 'user.enable', 'user.uuid.rotate', 'user.wireguard.regen',

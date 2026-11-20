@@ -5,26 +5,26 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 533 (341 prod / 192 test)
-- **Total Rust LOC:** 195,800 (102,591 prod / 93,209 test)
+- **Tracked Rust Files:** 536 (342 prod / 194 test)
+- **Total Rust LOC:** 196,640 (102,926 prod / 93,714 test)
 - **Database Migrations:** 76
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 150
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 151
 
 ## Workspace Crates & Targets
 
 | Crate | Path | Version | Targets | Prod LOC (Files) | Test LOC (Files) | Total LOC |
 |---|---|---|---|---|---|---|
-| `vpnctl` | `cli` | 0.9.0 | bin, 2 tests | 6,421 (20) | 1,586 (3) | **8,007** |
+| `vpnctl` | `cli` | 0.9.0 | bin, 2 tests | 6,438 (20) | 1,617 (3) | **8,055** |
 | `vpnctl-boosty-bridge` | `crates/boosty-bridge` | 0.9.0 | lib, 2 tests | 1,494 (6) | 1,345 (2) | **2,839** |
-| `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,421 (13) | 0 (0) | **1,421** |
+| `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,431 (13) | 0 (0) | **1,431** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 318 (1) | 125 (1) | **443** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 193 (1) | 454 (2) | **647** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 60 tests | 18,941 (64) | 27,757 (66) | **46,698** |
-| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 4 tests, 1 examples | 7,030 (15) | 1,554 (6) | **8,584** |
-| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,355 (22) | 4,615 (12) | **8,970** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 60 tests | 18,942 (64) | 27,757 (66) | **46,699** |
+| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 5 tests, 1 examples | 7,209 (16) | 1,709 (7) | **8,918** |
+| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,371 (22) | 4,615 (12) | **8,986** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,825 (5) | 1,191 (5) | **4,016** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 30 tests | 59,593 (194) | 54,582 (95) | **114,175** |
-| **Total** | | | | **102,591 (341)** | **93,209 (192)** | **195,800** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 30 tests | 59,705 (194) | 54,901 (96) | **114,606** |
+| **Total** | | | | **102,926 (342)** | **93,714 (194)** | **196,640** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -36,9 +36,9 @@
 | `crates/inventory/src/sqlite/tests.rs` | 2,065 | `crates/inventory` | Prod |
 | `daemon/tests/spec_corp_operator.rs` | 2,057 | `daemon` | Test |
 | `daemon/src/health_monitor/tests.rs` | 1,845 | `daemon` | Prod |
+| `crates/kernels/src/sing_box/tests.rs` | 1,806 | `crates/kernels` | Prod |
 | `crates/kernels/src/caddy/tests.rs` | 1,800 | `crates/kernels` | Prod |
 | `vendor/sqlx-sqlite/src/connection/explain.rs` | 1,779 | `other` | Prod |
-| `crates/kernels/src/sing_box/tests.rs` | 1,737 | `crates/kernels` | Prod |
 | `daemon/tests/spec_corp_egress.rs` | 1,531 | `daemon` | Test |
 | `daemon/tests/admin_smoke/alerts_health.rs` | 1,514 | `daemon` | Test |
 | `daemon/tests/admin_smoke/servers.rs` | 1,452 | `daemon` | Test |
@@ -137,7 +137,7 @@
 | `0075` | corp companies | `crates/inventory/migrations/0075_corp_companies.sql` | 97 |
 | `0076` | server security reports | `crates/inventory/migrations/0076_server_security_reports.sql` | 6 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (150)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (151)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -228,6 +228,7 @@
 | `POST` | `/admin/servers/{id}/traffic-limit` | `admin::server_set_traffic_limit` |
 | `POST` | `/admin/servers/{id}/udp-pair` | `admin::server_set_udp_pair` |
 | `GET` | `/admin/servers/{id}/update-kernels/sse` | `admin::server_update_kernels_sse` |
+| `POST` | `/admin/servers/{id}/user-bandwidth` | `admin::server_set_user_bandwidth` |
 | `POST` | `/admin/servers/{id}/vlessws-config` | `admin::server_set_vlessws_config` |
 | `POST` | `/admin/servers/{sid}/grants/{uid}` | `admin::server_grant_user` |
 | `POST` | `/admin/servers/{sid}/grants/{uid}/revoke` | `admin::server_revoke_user` |

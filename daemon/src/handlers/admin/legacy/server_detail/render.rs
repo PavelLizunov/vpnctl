@@ -692,6 +692,7 @@ pub(super) async fn server_detail_render(
             (server_detail_vlessws_config_section(&server, &server_secrets, lang))
             (server_detail_reality_config_section(&server, &server_secrets, lang))
             (server_detail_hysteria2_obfs_section(&server, lang))
+            (server_detail_user_bandwidth_section(&server, &server_secrets, lang))
             (server_detail_ss2022_mode_section(&server, &server_secrets, lang))
             (server_detail_dnstt_section(&server, &server_secrets, latest.as_ref(), lang))
             @if udp_pair_enabled { (server_detail_udp_pair_section(lang)) }

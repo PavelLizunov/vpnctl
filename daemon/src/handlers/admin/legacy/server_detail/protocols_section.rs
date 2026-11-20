@@ -12,7 +12,18 @@ pub(crate) fn server_detail_protocols_section(
 ) -> Markup {
     use crate::i18n::{K, t, tr};
     let enabled: HashSet<&vpnctl_core::ProtocolId> = server.enabled_protocols.iter().collect();
-    let all_protocols = registry.protocol_ids();
+    let mut all_protocols = registry.protocol_ids();
+    all_protocols.extend(
+        server
+            .enabled_protocols
+            .iter()
+            .filter(|pid| {
+                registry
+                    .protocol(pid)
+                    .is_some_and(|protocol| protocol.is_retired())
+            })
+            .cloned(),
+    );
     let kernel_supports_map: Vec<(vpnctl_core::KernelId, HashSet<vpnctl_core::ProtocolId>)> =
         server
             .kernels
@@ -57,6 +68,9 @@ pub(crate) fn server_detail_protocols_section(
                         if pid_is_weak { "11px" } else { "12px" },
                     )) {
                         (pid.0)
+                        @if registry.protocol(pid).is_some_and(|protocol| protocol.is_retired()) {
+                            " " (tr(lang, "(retired)", "(выведен из новых подключений)"))
+                        }
                         @if let Some(r) = risk {
                             " "
                             span title=(r.tooltip())

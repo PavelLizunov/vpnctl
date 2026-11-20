@@ -183,7 +183,7 @@ pub(crate) async fn run(
                 jump_via: jump_via.map(ServerId),
                 usage_coefficient,
             };
-            reg.validate_server_support(&server)?;
+            crate::registry::validate_new_server(&reg, &server)?;
             if let Some(existing) = inv.server_id_for_address(&server.address).await? {
                 anyhow::bail!(
                     "address '{}' is already registered to server '{existing}' — one node = one server record; edit '{existing}' instead of adding a duplicate",

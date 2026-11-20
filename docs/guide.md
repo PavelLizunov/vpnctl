@@ -37,7 +37,7 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 
 | Aspect | Value |
 |---|---|
-| Protocols × Kernels | **13 protocols** × **5 kernels**, fully orthogonal (see [Architecture](#architecture)) |
+| Protocols × Kernels | **9 protocols** × **5 kernels**, fully orthogonal (see [Architecture](#architecture)) |
 | Inventory | SQLite via `sqlx`, audit-on-mutation |
 | Toolchain | Rust **1.89+**, edition **2024** · static musl Linux x86_64 binaries (`x86_64-unknown-linux-musl`) |
 
@@ -51,7 +51,7 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 | `vpnctld` daemon — REST API + `/sub/<token>` + Admin UI + per-IP rate-limit + persistent bans | ✅ |
 | Inventory — sqlx + SQLite, migrations, audit_log, retention scheduler | ✅ |
 | Kernels — `sing-box`, `amneziawg`, `caddy` (naive / vless-ws cover site), `xray` | ✅ |
-| Protocols — `vless+reality`, `tuic-v5`, `hysteria2`, `shadowsocks-2022`, `wireguard`, `amneziawg2`, `amneziawg3`, `anytls`, `trojan`, `naive`, `vless-ws`, `vless+xhttp`, `dnstt` | ✅ (13 across 5 kernels) |
+| Protocols — `vless+reality`, `tuic-v5`, `hysteria2`, `wireguard`, `amneziawg3`, `naive`, `vless-ws`, `vless+xhttp`, `dnstt` | ✅ (9 across 5 kernels) |
 | Hosters — DigitalOcean / Cloudzy / Generic (SSH port quirks) | ✅ |
 | Add-server **wizard** (Phase E) — paste IP+root password, SSE-streamed bootstrap | ✅ |
 | Backups — [hourly SQLite snapshots and daily encrypted DR bundles](specs/backup-restore.md), restore CLI/web self-test + CI-protected byte-equality (`restore_e2e`) + in-product Disaster Recovery section | ✅ |
@@ -59,7 +59,7 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 | Chain-capable subscriptions — stock sing-box JSON plus capability-gated VPNRouter app-config metadata, both with fail-closed entry filtering | ✅ |
 | Boosty subscription bridge — optionally auto-creates complete users for new eligible paid subscribers, grants current VPN-exit servers at creation, preserves existing users’ grants, and supports a configurable disable grace period | ✅ |
 | Protocol visibility — per-(server, protocol) hide + per-(user, server, protocol) deny with OR-semantics | ✅ |
-| DPI-risk tiers — Strong: `naive`, `vless+reality`, `vless+xhttp`, `vless-ws`; Moderate: `amneziawg2`, `amneziawg3`, `anytls`, `tuic-v5`; Weak: `dnstt`, `hysteria2`, `shadowsocks-2022`, `trojan`, `wireguard` | ✅ |
+| DPI-risk tiers — Strong: `naive`, `vless+reality`, `vless+xhttp`, `vless-ws`; Moderate: `amneziawg3`, `tuic-v5`; Weak: `dnstt`, `hysteria2`, `wireguard` | ✅ |
 | Monitoring — 24h sub-fetch sparkline + heavy-users heatmap + filtered `/admin/sharing` risk page + per-user UA fingerprint heuristic | ✅ |
 | Traffic accounting — cumulative per-user sing-box V2Ray Stats (Clash for live metadata; AmneziaWG independent) | ✅ |
 | Audit timeline — paginated + filtered + CSV export | ✅ |
@@ -68,7 +68,7 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 | Bilingual EN/RU shell + nav + body copy (wave 2 shipped; wave 3 in flight) | ✅ |
 | Workspace test suite, GitHub Actions CI green | ✅ |
 
-SS2022 defaults to the legacy shared key. The server's **Protocols** tab can
+For nodes with retired Shadowsocks 2022 enabled, the default is the legacy shared key. The server's **Protocols** tab can
 switch AES methods to per-user keys for revocation on deploy, or back to shared
 mode. After switching and deploying, every SS2022 user must re-import their
 profile. See the [compatibility contract](specs/migration-compatibility.md#shadowsocks-2022-per-user-keys-d7-01).
@@ -117,7 +117,7 @@ with IPv6 pools fd72:72::/64 / fd73:73::/64. Client files route both IP families
 AWG server deployment requires a literal server IP so private destinations and
 the configured node address can be rejected for VPN peers.
 They do not change the legacy `wireguard` protocol or `amneziawg` kernel.
-The operator enables each version on the server page and downloads its native
+The operator can enable 3.1 on the server page. For an enabled version, download its native
 `.conf` from the user's **Delivery** tab. These files require a client supporting
 the specified AmneziaWG version; they are deliberately excluded from generic
 sing-box subscriptions and share links.
@@ -164,7 +164,7 @@ the other:
 | Trait | Meaning | Examples |
 |---|---|---|
 | `Kernel` | Node-side daemon that holds the connections | `sing-box`, `amneziawg`, `caddy`, `xray` |
-| `Protocol` | Wire format presented to the client | `vless+reality`, `tuic-v5`, `hysteria2`, `shadowsocks-2022`, `wireguard`, `amneziawg2`, `amneziawg3`, `anytls`, `trojan`, `naive`, `vless-ws`, `vless+xhttp` |
+| `Protocol` | Wire format presented to the client | `vless+reality`, `tuic-v5`, `hysteria2`, `wireguard`, `amneziawg3`, `naive`, `vless-ws`, `vless+xhttp` |
 
 A `Kernel` declares which `Protocol`s it can host (`Kernel::supported_protocols()`).
 `Registry::validate_server` catches incompatible combinations **before** an

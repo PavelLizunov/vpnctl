@@ -330,6 +330,59 @@ pub(crate) async fn server_rotate_hysteria2_obfs(
     .into_response()
 }
 
+pub(crate) async fn server_set_user_bandwidth(
+    Path(server_id): Path<String>,
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    use vpnctl_kernels::{USER_BANDWIDTH_KEY, USER_BANDWIDTH_MAX_MBPS};
+
+    let Some(rate) = form_field(&body, "mbps")
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|rate| *rate <= USER_BANDWIDTH_MAX_MBPS)
+    else {
+        return bad_request(&format!(
+            "speed must be an integer in 0..={USER_BANDWIDTH_MAX_MBPS} Mbit/s"
+        ));
+    };
+    let sid = vpnctl_core::ServerId(server_id.clone());
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(server)) => server,
+        Ok(None) => return not_found(&format!("no such server '{server_id}'")),
+        Err(error) => return internal_error(anyhow::Error::new(error)),
+    };
+    if !server.kernels.iter().any(|kernel| kernel.0 == "sing-box") {
+        return bad_request("per-user speed requires the sing-box kernel on this server");
+    }
+    let value = rate.to_string();
+    let changed = match state
+        .inv
+        .set_server_secrets_audited(
+            &sid,
+            "admin",
+            "server.user_bandwidth.set",
+            &[(USER_BANDWIDTH_KEY, value.as_str())],
+        )
+        .await
+    {
+        Ok(changed) => changed,
+        Err(error) => return internal_error(anyhow::Error::new(error)),
+    };
+    if changed {
+        super::super::legacy::spawn_user_servers_redeploy(
+            &state,
+            vec![server],
+            server_id.clone(),
+            "server.user_bandwidth.set",
+        );
+    }
+    Redirect::to(&format!(
+        "/admin/servers/{}/protocols#user-bandwidth",
+        path_segment_encode(&server_id)
+    ))
+    .into_response()
+}
+
 pub(crate) async fn server_set_ss2022_mode(
     Path(server_id): Path<String>,
     State(state): State<AppState>,

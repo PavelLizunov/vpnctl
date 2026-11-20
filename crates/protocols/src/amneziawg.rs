@@ -52,6 +52,10 @@ macro_rules! impl_protocol {
                 ProtocolId($version.id.into())
             }
 
+            fn is_retired(&self) -> bool {
+                $version.number == 2
+            }
+
             fn listen_ports(&self) -> &'static [(&'static str, u16)] {
                 &[("udp", $version.port)]
             }

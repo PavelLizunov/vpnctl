@@ -1,4 +1,6 @@
 mod arch;
+mod bandwidth;
+pub use bandwidth::{USER_BANDWIDTH_KEY, USER_BANDWIDTH_MAX_MBPS};
 mod guards;
 mod scripts;
 #[cfg(test)]
@@ -215,6 +217,12 @@ impl Kernel for SingBox {
             }));
             cfg["route"] = json!({ "rules": rules, "final": "direct" });
         }
+        if let Some(bandwidth) = bandwidth::render_user_bandwidth(ctx.secrets, &endpoints, users)? {
+            if !cfg["route"].is_object() {
+                cfg["route"] = json!({});
+            }
+            cfg["route"]["vpnctl_user_bandwidth"] = bandwidth;
+        }
         if !endpoints.is_empty() {
             cfg["endpoints"] = json!(endpoints);
         }
@@ -260,6 +268,16 @@ impl Kernel for SingBox {
             }
         }
 
+        if bandwidth::config_requests_user_bandwidth(config)
+            && !ssh
+                .exec(bandwidth::VERIFY_USER_BANDWIDTH_SUPPORT)
+                .await
+                .is_ok_and(|output| output.trim() == "vpnctl-user-bandwidth-supported")
+        {
+            return Err(CoreError::Render(
+                "Could not confirm per-user speed support in the installed sing-box kernel. Update the managed kernel from the admin UI and redeploy.".into(),
+            ));
+        }
         crate::apply_staged_config(
             ssh,
             "/etc/sing-box/config.json.new",

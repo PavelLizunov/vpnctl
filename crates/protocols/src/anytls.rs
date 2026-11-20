@@ -20,6 +20,10 @@ impl Protocol for AnyTls {
         ProtocolId("anytls".to_string())
     }
 
+    fn is_retired(&self) -> bool {
+        true
+    }
+
     fn listen_ports(&self) -> &'static [(&'static str, u16)] {
         &[("tcp", ANYTLS_PORT)]
     }

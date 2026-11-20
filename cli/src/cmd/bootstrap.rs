@@ -82,6 +82,21 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
         ));
     }
 
+    let registry = crate::registry::build()?;
+    let mut server = Server {
+        id: ServerId(args.id.clone()),
+        address: args.address.clone(),
+        ssh_port: args.ssh_port,
+        ssh_user: args.ssh_user.clone(),
+        kernels: vec![KernelId(args.kernel.clone())],
+        enabled_protocols: args.protocols.iter().cloned().map(ProtocolId).collect(),
+        trusted_host_fingerprint: None,
+        hoster: args.hoster.clone(),
+        jump_via: None,
+        usage_coefficient: args.usage_coefficient,
+    };
+    crate::registry::validate_new_server(&registry, &server)?;
+
     let pub_path = match args.pubkey {
         Some(p) => p,
         None => {
@@ -117,8 +132,6 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
     };
 
     let priv_key_path = crate::cmd::deploy::resolve_key_path(args.key)?;
-
-    let registry = crate::registry::build()?;
 
     println!(
         "→ connecting (password fallback) {}@{}:{}",
@@ -159,19 +172,7 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
         .map_err(|e| anyhow::anyhow!("deploy-key verification failed: {e}"))?;
     key_ssh.exec_unprivileged("true").await?;
 
-    let server = Server {
-        id: ServerId(args.id.clone()),
-        address: args.address.clone(),
-        ssh_port: args.ssh_port,
-        ssh_user: args.ssh_user.clone(),
-        kernels: vec![KernelId(args.kernel.clone())],
-        enabled_protocols: args.protocols.iter().cloned().map(ProtocolId).collect(),
-        trusted_host_fingerprint: Some(observed_fp.clone()),
-        hoster: args.hoster.clone(),
-        jump_via: None,
-        usage_coefficient: args.usage_coefficient,
-    };
-    registry.validate_server_support(&server)?;
+    server.trusted_host_fingerprint = Some(observed_fp.clone());
     inv.register_server(&server, "cli").await?;
 
     inv.audit(

@@ -34,6 +34,13 @@ pub(crate) async fn server_enable_protocol(
     }
 
     if !server.enabled_protocols.contains(&pid) {
+        if state
+            .registry
+            .protocol(&pid)
+            .is_some_and(|protocol| protocol.is_retired())
+        {
+            return bad_request(&format!("protocol '{protocol_id_str}' is retired"));
+        }
         if pid.0 == "dnstt" {
             let secrets = match state.inv.list_server_secrets(&sid).await {
                 Ok(secrets) => secrets,
