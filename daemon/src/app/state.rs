@@ -32,6 +32,7 @@ pub struct AppState {
     pub geo: crate::geoip::GeoLookup,
     pub(crate) private_checks: Arc<crate::handlers::admin::private_checks::PrivateChecks>,
     pub(crate) cheburcheck: Arc<crate::handlers::admin::cheburcheck_checks::ExternalChecks>,
+    pub(crate) boosty_roster_url: Arc<str>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -185,6 +186,7 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<(Router, tokio::task:
         geo,
         private_checks: Arc::default(),
         cheburcheck: Arc::default(),
+        boosty_roster_url: Arc::from(crate::boosty_bandwidth::ROSTER_URL),
     };
     drop(crate::corp_egress::spawn_refresh(state.clone()));
     Ok((router(state), writer_handle))
@@ -217,6 +219,7 @@ pub fn make_app_state_with_rate_limiter(
             geo: crate::geoip::GeoLookup::disabled(),
             private_checks: Arc::default(),
             cheburcheck: Arc::default(),
+            boosty_roster_url: Arc::from("http://127.0.0.1:0/api/v1/roster"),
         },
         handle,
     )

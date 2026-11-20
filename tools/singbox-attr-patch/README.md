@@ -34,14 +34,13 @@ TARGET_ARCH=arm64 OUT=/tmp/sing-box-arm64 ./build.sh
 ```
 
 Supported target architectures via `TARGET_ARCH`:
-- `x86_64` (default): `sing-box-1.14.2-vpnctl.2-linux-amd64.tar.gz` (SHA256: `095a575fb412e5520b5c16449002073a5ba587646b96e3dddd2c59473d5be2d8`)
-- `aarch64` / `arm64`: `sing-box-1.14.2-vpnctl.2-linux-arm64.tar.gz` (SHA256: `2758b44eda76465281e3c6d14b91dd5e6b5e9d50f549f8e3205cdc0a31c577d3`)
-- `armv7`: `sing-box-1.14.2-vpnctl.2-linux-armv7.tar.gz` (SHA256: `85567a8809bed3abc0b385faa04c51c3edf976445f30dc0ef935bd4cb1f08c6f`)
+- `x86_64` (default): `sing-box-1.14.4-vpnctl.3-linux-amd64.tar.gz` (SHA256: `62c7d4ab2ec93fc6a51790facbcc50436d1183d8bf6f9c84b07d1d75e1618eae`)
+- `aarch64` / `arm64`: `sing-box-1.14.4-vpnctl.3-linux-arm64.tar.gz` (SHA256: `917e2a7b392ab2113168ee9193552f0b515755323ac65aed96eef669492fffb5`)
+- `armv7`: `sing-box-1.14.4-vpnctl.3-linux-armv7.tar.gz` (SHA256: `3d589fc44dcab9f62675c41c343b4e5d8ae92201193643dd5c001731c6bef17a`)
 
-The result is a static Linux binary (`x86_64`, `arm64`, or `armv7`) with version `1.14.2-vpnctl.2`.
-This release updates sing-box to 1.14.2 and fixes reachable gRPC/SSH dependency vulnerabilities.
-It retains CPS packet bounds, CRLF-safe AWG UAPI, cryptographic XHTTP session IDs and upload rejection teardown.
-Release source: `f62085aa7cc0f3ee665ac3043d35698760a386e9`.
+The result is a static Linux binary (`x86_64`, `arm64`, or `armv7`) with version `1.14.4-vpnctl.3`.
+This release uses sing-box 1.14.4 and supports per-user bandwidth overrides.
+Release source: `fe24739a8b8c1ebd573269e50b124366310e4d3e`.
 `1.14.0-vpnctl.3` must not be used for AWG3 client delivery.
 Feature tags include `with_v2ray_api`, `with_clash_api`, `with_xhttp`, and `with_awg`.
 

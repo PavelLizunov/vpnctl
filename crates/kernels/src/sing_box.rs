@@ -1,6 +1,6 @@
 mod arch;
 mod bandwidth;
-pub use bandwidth::{USER_BANDWIDTH_KEY, USER_BANDWIDTH_MAX_MBPS};
+pub use bandwidth::{USER_BANDWIDTH_KEY, USER_BANDWIDTH_MAX_MBPS, USER_BANDWIDTH_OVERRIDES_KEY};
 mod guards;
 mod scripts;
 #[cfg(test)]
@@ -268,9 +268,9 @@ impl Kernel for SingBox {
             }
         }
 
-        if bandwidth::config_requests_user_bandwidth(config)
+        if let Some(probe) = bandwidth::user_bandwidth_support_probe(config)
             && !ssh
-                .exec(bandwidth::VERIFY_USER_BANDWIDTH_SUPPORT)
+                .exec(probe)
                 .await
                 .is_ok_and(|output| output.trim() == "vpnctl-user-bandwidth-supported")
         {
