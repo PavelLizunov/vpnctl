@@ -12,8 +12,8 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::extract::{Query, State};
-use axum::http::{Request, StatusCode};
-use axum::response::Json;
+use axum::http::{Request, StatusCode, header};
+use axum::response::{Json, Response};
 use axum::routing::get;
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -99,6 +99,7 @@ fn fixture_items() -> Vec<Value> {
 fn roster_item(id: &str, level_id: &str, level_name: &str, active: bool, price: u32) -> Value {
     json!({
         "id": id,
+        "name": format!("Subscriber <{id}>"),
         "levelId": level_id,
         "level": level_name,
         "priceMinor": price,
@@ -251,33 +252,170 @@ fn closed_port() -> u16 {
         .port()
 }
 
-async fn post(state: &AppState, body: &str) -> (StatusCode, String) {
+async fn post_form(state: &AppState, path: &str, body: &str) -> Response {
     let request = Request::builder()
         .method("POST")
-        .uri("/admin/servers/s0/user-bandwidth")
+        .uri(path)
         .header("host", "test.example")
         .header("origin", "http://test.example")
         .header("content-type", "application/x-www-form-urlencoded")
         .body(Body::from(body.to_owned()))
         .unwrap();
-    let response = crate::app::router(state.clone())
+    crate::app::router(state.clone())
         .oneshot(request)
         .await
-        .unwrap();
+        .unwrap()
+}
+
+async fn post(state: &AppState, body: &str) -> (StatusCode, String) {
+    let response = post_form(state, "/admin/servers/s0/user-bandwidth", body).await;
     let status = response.status();
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
 async fn get_html(state: &AppState, path: &str) -> String {
-    let request = Request::builder().uri(path).body(Body::empty()).unwrap();
-    let response = crate::app::router(state.clone())
-        .oneshot(request)
-        .await
-        .unwrap();
+    let response = get_page(state, path, "test.example").await;
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+async fn get_page(state: &AppState, path: &str, host: &str) -> Response {
+    let request = Request::builder()
+        .uri(path)
+        .header(header::HOST, host)
+        .body(Body::empty())
+        .unwrap();
+    crate::app::router(state.clone())
+        .oneshot(request)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn boosty_admin_frames_only_the_configured_panel_and_keeps_the_legacy_view() {
+    let mut f = fixture("http://127.0.0.1:1/api/v1/roster").await;
+    let legacy = get_html(&f.state, "/admin/boosty").await;
+    assert!(legacy.contains("boosty-settings-form"));
+
+    let url = "https://test.example:9443/";
+    f.state.boosty_dashboard_url = Some(url.parse().unwrap());
+    let response = get_page(&f.state, "/admin/boosty", "test.example").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let csp = response.headers()[header::CONTENT_SECURITY_POLICY]
+        .to_str()
+        .unwrap();
+    assert!(csp.contains("frame-ancestors 'none';"));
+    assert!(csp.ends_with("; frame-src https://test.example:9443"));
+    let html = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = std::str::from_utf8(&html).unwrap();
+    for needle in [
+        "id=\"boosty-author-dashboard\"",
+        "data-src=\"https://test.example:9443/\"",
+        "referrerpolicy=\"no-referrer\"",
+        "href=\"/admin/boosty?view=sync\"",
+        "VPN accounts and sync",
+    ] {
+        assert!(html.contains(needle), "{needle}");
+    }
+    assert!(!html.contains("boosty-settings-form"));
+
+    for (path, host) in [
+        ("/admin/boosty?view=sync", "test.example"),
+        ("/admin/boosty", "test.example:9443"),
+        ("/admin/boosty", "vpnctld"),
+    ] {
+        let response = get_page(&f.state, path, host).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            !response.headers()[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap()
+                .contains("frame-src")
+        );
+        let html = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(
+            std::str::from_utf8(&html)
+                .unwrap()
+                .contains("boosty-settings-form")
+        );
+    }
+}
+
+#[tokio::test]
+async fn dashboard_roster_links_an_existing_vpn_account_for_tier_application() {
+    let mock = MockServer::start(RosterMock::valid()).await;
+    let mut f = fixture(mock.url.clone()).await;
+    f.state.boosty_dashboard_url = Some("https://test.example:9443/".parse().unwrap());
+    let uid = UserId("existing-vpn-account".into());
+    f.state
+        .inv
+        .add_user(&User {
+            id: uid.clone(),
+            uuid: "00000000-0000-0000-0000-000000000303".into(),
+            tuic_password: None,
+            wireguard_pubkey: None,
+            wireguard_private: None,
+            sub_token: None,
+            vpn_router_device_id: None,
+            disabled: false,
+        })
+        .await
+        .unwrap();
+    f.state
+        .inv
+        .grant(&uid, &ServerId("s0".into()))
+        .await
+        .unwrap();
+    let sync = get_html(&f.state, "/admin/boosty?view=sync").await;
+    assert!(sync.contains("Subscriber &lt;303&gt;"));
+    assert!(sync.contains("existing-vpn-account"));
+    assert!(!sync.contains("Subscriber &lt;404&gt;"));
+    let path = "/admin/boosty/link";
+    for bad_form in [
+        "user=existing-vpn-account&subscriber_id=404&boosty_blog=fixture",
+        "user=existing-vpn-account&subscriber_id=303&boosty_blog=other",
+    ] {
+        let response = post_form(&f.state, path, bad_form).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    let stale = MockServer::start(RosterMock::stale()).await;
+    f.state.boosty_roster_url = stale.url.clone().into();
+    let form = "user=existing-vpn-account&subscriber_id=303&boosty_blog=fixture";
+    let response = post_form(&f.state, path, form).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        f.state
+            .inv
+            .list_boosty_links()
+            .await
+            .unwrap()
+            .iter()
+            .all(|(id, _)| id != &uid)
+    );
+    f.state.boosty_roster_url = mock.url.clone().into();
+    let response = post_form(&f.state, path, form).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response.headers()[header::LOCATION],
+        "/admin/boosty?view=sync"
+    );
+    assert!(
+        f.state
+            .inv
+            .list_boosty_links()
+            .await
+            .unwrap()
+            .contains(&(uid, 303))
+    );
+    let (status, body) = post(&f.state, FORM).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+    let raw = secret(&f.state, OVERRIDES_KEY).await.unwrap();
+    assert_eq!(
+        overrides(&raw),
+        json!({"u101": 80, "u202": 160, "existing-vpn-account": 80})
+    );
 }
 
 async fn secret(state: &AppState, key: &str) -> Option<String> {

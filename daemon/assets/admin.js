@@ -291,6 +291,23 @@
   }
 
   function wireBoostyQuickConnect() {
+    var dashboard = document.getElementById("boosty-author-dashboard");
+    if (dashboard) {
+      function openSyncView() {
+        var hash = window.location.hash;
+        if (window.location.protocol !== "https:" || hash.indexOf("#quick_connect=") === 0) {
+          window.location.replace("/admin/boosty?view=sync" + hash);
+          return true;
+        }
+        return false;
+      }
+      if (!openSyncView()) {
+        dashboard.src = dashboard.dataset.src;
+        window.addEventListener("hashchange", openSyncView);
+      }
+      return;
+    }
+
     var bmlLink = document.querySelector("[data-bookmarklet-link]");
     var modal = document.getElementById("bookmarklet-help-modal");
     if (bmlLink && modal) {
