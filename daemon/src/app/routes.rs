@@ -565,10 +565,10 @@ pub(crate) fn admin_router(state: AppState) -> Router {
         .nest_service(
             "/admin/assets",
             tower::ServiceBuilder::new()
-                .layer(RequestBodyLimitLayer::new(8 * 1024))
                 .layer(axum::middleware::from_fn(
                     crate::handlers::admin::asset_cache_control,
                 ))
+                .layer(RequestBodyLimitLayer::new(8 * 1024))
                 .service(ServeDir::new(assets_dir)),
         )
         .with_state(state);
