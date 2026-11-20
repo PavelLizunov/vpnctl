@@ -12,9 +12,9 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::extract::{Query, State};
-use axum::http::{Request, StatusCode, header};
-use axum::response::{Json, Response};
-use axum::routing::get;
+use axum::http::{HeaderMap, Request, StatusCode, header};
+use axum::response::{IntoResponse, Json, Response};
+use axum::routing::{get, post as post_route};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -121,6 +121,14 @@ impl MockServer {
         let captured_at = roster.captured_at.clone();
         let app = Router::new()
             .route("/api/v1/roster", get(serve_roster))
+            .route("/api/v1/overview", get(serve_overview))
+            .route("/api/v1/users", get(serve_people))
+            .route("/api/v1/records", get(serve_records))
+            .route("/api/v1/inbox", get(serve_dialogs))
+            .route("/api/v1/inbox/dialogs/12", get(serve_conversation))
+            .route("/api/v1/automation", get(serve_delivery))
+            .route("/api/sync", post_route(serve_author_refresh))
+            .route("/api/inbox/sync", post_route(serve_conversation_refresh))
             .with_state(Arc::new(roster));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -133,6 +141,101 @@ impl MockServer {
             task,
         }
     }
+}
+
+async fn serve_overview() -> Json<Value> {
+    Json(json!({
+        "roster": {
+            "total": 42, "paidCount": 12, "freeCount": 24,
+            "estimatedMonthlyMinor": 120000, "currency": "RUB",
+            "capturedAt": "2026-11-20T12:00:00Z"
+        },
+        "summaries": [{
+            "currency": "RUB", "details": {
+                "balanceMinor": 250000, "providerPrivate": "fixture-overview-private"
+            }
+        }],
+        "moneyTotals": [], "sources": []
+    }))
+}
+
+async fn serve_people(
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    if query.contains_key("view") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(Json(json!({"items":[{
+        "id":"101", "name":"Example <person>", "level":"Fixture 1",
+        "active":true, "paid":true, "present":true,
+        "raw":{"token":"fixture-people-private"}
+    }], "total":1})))
+}
+
+async fn serve_records(
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    if query.get("view").map(String::as_str) != Some("money")
+        || query.get("source").map(String::as_str) != Some("donations")
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(Json(json!({"items":[{
+        "source":"donations", "title":"Fixture donation", "currency":"RUB",
+        "amountMinor":12550, "details":{"transfer":"fixture-record-private"}
+    }], "total":1})))
+}
+
+async fn serve_dialogs() -> Json<Value> {
+    Json(json!({"items":[{"id":"12","name":"Fixture conversation","unreadCount":2}], "total":1}))
+}
+
+async fn serve_conversation(
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    if query.get("cached").map(String::as_str) != Some("1") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(Json(json!({
+        "dialog":{"id":"12","name":"Fixture conversation"},
+        "messages":[{"direction":"incoming","text":"Fixture message <body>"}],
+        "beforeCursor":"11", "pendingReply":{"text":"fixture-pending-reply-private"}
+    })))
+}
+
+async fn serve_delivery(
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    if query.get("cached").map(String::as_str) != Some("1") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(Json(json!({
+        "enabled":true, "autoDeliver":false, "telegramConfigured":true,
+        "vpnConfigured":true, "jobs":{"items":[{
+            "name":"Fixture delivery", "deliveryState":"prepared", "telegramState":"sent",
+            "privateMessage":"fixture-delivery-private"
+        }], "total":1}
+    })))
+}
+
+async fn serve_conversation_refresh(headers: HeaderMap, Json(body): Json<Value>) -> Response {
+    if body != json!({"dialogId":"12"}) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    serve_author_refresh(headers).await
+}
+
+async fn serve_author_refresh(headers: HeaderMap) -> Response {
+    if headers
+        .get("x-boosty-request")
+        .is_none_or(|value| value != "1")
+        || headers.contains_key(header::COOKIE)
+        || headers.contains_key(header::AUTHORIZATION)
+        || headers.contains_key(header::ORIGIN)
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    Json(json!({"ok":true})).into_response()
 }
 
 impl Drop for MockServer {
@@ -294,10 +397,14 @@ async fn get_page(state: &AppState, path: &str, host: &str) -> Response {
 }
 
 #[tokio::test]
-async fn boosty_admin_frames_only_the_configured_panel_and_keeps_the_legacy_view() {
-    let mut f = fixture("http://127.0.0.1:1/api/v1/roster").await;
+async fn boosty_admin_renders_native_data_and_keeps_the_legacy_view() {
+    let mock = MockServer::start(RosterMock::valid()).await;
+    let mut f = fixture(mock.url.clone()).await;
     let legacy = get_html(&f.state, "/admin/boosty").await;
     assert!(legacy.contains("boosty-settings-form"));
+    assert!(
+        legacy.contains("Linking requires an active paid subscriber and an unlinked VPN account.")
+    );
 
     let url = "https://test.example:9443/";
     f.state.boosty_dashboard_url = Some(url.parse().unwrap());
@@ -307,39 +414,101 @@ async fn boosty_admin_frames_only_the_configured_panel_and_keeps_the_legacy_view
         .to_str()
         .unwrap();
     assert!(csp.contains("frame-ancestors 'none';"));
-    assert!(csp.ends_with("; frame-src https://test.example:9443"));
+    assert!(!csp.contains("frame-src"));
     let html = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let html = std::str::from_utf8(&html).unwrap();
     for needle in [
         "id=\"boosty-author-dashboard\"",
-        "data-src=\"https://test.example:9443/\"",
-        "referrerpolicy=\"no-referrer\"",
+        "href=\"https://test.example:9443/\"",
         "href=\"/admin/boosty?view=sync\"",
         "VPN accounts and sync",
+        "Estimated monthly subscriptions",
+        "1200.00 RUB",
     ] {
         assert!(html.contains(needle), "{needle}");
     }
     assert!(!html.contains("boosty-settings-form"));
+    assert!(!html.contains("<iframe"));
+    assert!(!html.contains("fixture-overview-private"));
 
-    for (path, host) in [
-        ("/admin/boosty?view=sync", "test.example"),
-        ("/admin/boosty", "test.example:9443"),
-        ("/admin/boosty", "vpnctld"),
+    let people = get_html(&f.state, "/admin/boosty?view=people").await;
+    assert!(people.contains("Example &lt;person&gt;"));
+    assert!(people.contains("/admin/users/u101"));
+    assert!(!people.contains("fixture-people-private"));
+    assert!(!people.contains("<iframe"));
+    assert!(
+        get_html(&f.state, "/admin/boosty?view=sync")
+            .await
+            .contains("boosty-settings-form")
+    );
+}
+
+#[tokio::test]
+async fn author_refresh_requires_the_admin_origin_and_uses_the_loopback_service() {
+    let mock = MockServer::start(RosterMock::valid()).await;
+    let mut f = fixture(mock.url.clone()).await;
+    f.state.boosty_dashboard_url = Some("https://test.example:9443/".parse().unwrap());
+    let path = "/admin/boosty/author/refresh";
+    let response = post_form(&f.state, path, "").await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()[header::LOCATION], "/admin/boosty");
+    let request = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(header::HOST, "test.example")
+        .header(header::ORIGIN, "https://foreign.example")
+        .body(Body::empty())
+        .unwrap();
+    let response = crate::app::router(f.state.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let conversation_path = "/admin/boosty/author/refresh-conversation";
+    let response = post_form(&f.state, conversation_path, "dialog_id=12").await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response.headers()[header::LOCATION],
+        "/admin/boosty?view=messages&dialog=12"
+    );
+    let response = post_form(&f.state, conversation_path, "dialog_id=..%2Fsync").await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn author_views_render_filtered_data_and_omit_fields_outside_their_contract() {
+    let mock = MockServer::start(RosterMock::valid()).await;
+    let mut f = fixture(mock.url.clone()).await;
+    f.state.boosty_dashboard_url = Some("https://test.example:9443/".parse().unwrap());
+    for (path, needed, excluded) in [
+        (
+            "/admin/boosty?view=money&source=donations",
+            "125.50 RUB",
+            "fixture-record-private",
+        ),
+        (
+            "/admin/boosty?view=messages",
+            "Fixture conversation",
+            "fixture-pending-reply-private",
+        ),
+        (
+            "/admin/boosty?view=messages&dialog=12",
+            "Fixture message &lt;body&gt;",
+            "fixture-pending-reply-private",
+        ),
+        (
+            "/admin/boosty?view=automation",
+            "Fixture delivery",
+            "fixture-delivery-private",
+        ),
     ] {
-        let response = get_page(&f.state, path, host).await;
-        assert_eq!(response.status(), StatusCode::OK);
+        let html = get_html(&f.state, path).await;
+        assert!(html.contains(needed), "{path}: missing {needed}");
         assert!(
-            !response.headers()[header::CONTENT_SECURITY_POLICY]
-                .to_str()
-                .unwrap()
-                .contains("frame-src")
+            !html.contains(excluded),
+            "{path}: exposed fields outside the contract"
         );
-        let html = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert!(
-            std::str::from_utf8(&html)
-                .unwrap()
-                .contains("boosty-settings-form")
-        );
+        assert!(!html.contains("<iframe"), "{path}: native author view");
     }
 }
 

@@ -291,20 +291,15 @@
   }
 
   function wireBoostyQuickConnect() {
-    var dashboard = document.getElementById("boosty-author-dashboard");
-    if (dashboard) {
+    if (document.getElementById("boosty-author-dashboard")) {
       function openSyncView() {
         var hash = window.location.hash;
-        if (window.location.protocol !== "https:" || hash.indexOf("#quick_connect=") === 0) {
+        if (hash.indexOf("#quick_connect=") === 0) {
           window.location.replace("/admin/boosty?view=sync" + hash);
-          return true;
         }
-        return false;
       }
-      if (!openSyncView()) {
-        dashboard.src = dashboard.dataset.src;
-        window.addEventListener("hashchange", openSyncView);
-      }
+      openSyncView();
+      window.addEventListener("hashchange", openSyncView);
       return;
     }
 
