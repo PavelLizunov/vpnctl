@@ -130,7 +130,7 @@ stable across deploys; a partially stored server keypair is rejected rather than
 silently replaced. Client addresses are derived from the user public key;
 unrelated grant changes do not renumber them, and collisions fail closed.
 
-**Kernel requirement:** use the pinned `1.14.2-vpnctl.2` security release.
+**Kernel requirement:** use the pinned `1.14.4-vpnctl.3` security release.
 Its predecessor `1.14.0-vpnctl.5` was verified against official AmneziaWG 3.1
 with real TCP/UDP transfers; that historical result does not certify a new release.
 `1.14.0-vpnctl.3` accepts

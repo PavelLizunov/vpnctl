@@ -2,6 +2,7 @@ pub mod access_log;
 pub mod alert_sink;
 pub mod alert_text;
 pub mod app;
+mod boosty_bandwidth;
 pub mod boosty_sync_poller;
 pub mod cheburcheck;
 pub mod clash_api;

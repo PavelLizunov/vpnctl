@@ -282,6 +282,25 @@ pub(super) async fn server_detail_render(
         .list_server_secrets(&sid)
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let boosty_roster = if tab == ServerTab::Protocols
+        && server.kernels.iter().any(|kernel| kernel.0 == "sing-box")
+    {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            crate::boosty_bandwidth::Roster::fetch(&state.boosty_roster_url),
+        )
+        .await
+        .unwrap_or(Err(crate::boosty_bandwidth::RosterIssue::Unavailable));
+        match result {
+            Ok(roster) => Some(roster),
+            Err(issue) => {
+                tracing::warn!(target: "vpnctld::boosty_bandwidth", ?issue, "could not display Boosty tiers");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let hidden_map = state
         .inv
@@ -692,7 +711,7 @@ pub(super) async fn server_detail_render(
             (server_detail_vlessws_config_section(&server, &server_secrets, lang))
             (server_detail_reality_config_section(&server, &server_secrets, lang))
             (server_detail_hysteria2_obfs_section(&server, lang))
-            (server_detail_user_bandwidth_section(&server, &server_secrets, lang))
+            (server_detail_user_bandwidth_section(&server, &server_secrets, boosty_roster.as_ref(), lang))
             (server_detail_ss2022_mode_section(&server, &server_secrets, lang))
             (server_detail_dnstt_section(&server, &server_secrets, latest.as_ref(), lang))
             @if udp_pair_enabled { (server_detail_udp_pair_section(lang)) }

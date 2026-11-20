@@ -211,7 +211,7 @@ fn sing_box_vpnctl_release_artifacts_and_sha256_constants_are_pinned() {
         SING_BOX_AMD64_SHA256, SING_BOX_ARM64_SHA256, SING_BOX_ARMV7_SHA256,
         SING_BOX_VPNCTL_VERSION,
     };
-    assert_eq!(SING_BOX_VPNCTL_VERSION, "1.14.2-vpnctl.2");
+    assert_eq!(SING_BOX_VPNCTL_VERSION, "1.14.4-vpnctl.3");
     let acquisition_script = include_str!("../../../../tools/singbox-attr-patch/build.sh");
     assert!(acquisition_script.contains(&format!("SINGBOX_VERSION:-{SING_BOX_VPNCTL_VERSION}")));
     let acquisition_readme = include_str!("../../../../tools/singbox-attr-patch/README.md");
@@ -231,15 +231,15 @@ fn sing_box_vpnctl_release_artifacts_and_sha256_constants_are_pinned() {
     }
     assert_eq!(
         SING_BOX_AMD64_SHA256,
-        "095a575fb412e5520b5c16449002073a5ba587646b96e3dddd2c59473d5be2d8"
+        "62c7d4ab2ec93fc6a51790facbcc50436d1183d8bf6f9c84b07d1d75e1618eae"
     );
     assert_eq!(
         SING_BOX_ARM64_SHA256,
-        "2758b44eda76465281e3c6d14b91dd5e6b5e9d50f549f8e3205cdc0a31c577d3"
+        "917e2a7b392ab2113168ee9193552f0b515755323ac65aed96eef669492fffb5"
     );
     assert_eq!(
         SING_BOX_ARMV7_SHA256,
-        "85567a8809bed3abc0b385faa04c51c3edf976445f30dc0ef935bd4cb1f08c6f"
+        "3d589fc44dcab9f62675c41c343b4e5d8ae92201193643dd5c001731c6bef17a"
     );
 }
 
@@ -1382,7 +1382,7 @@ async fn open_firewall_uses_effective_listen_ports() {
 fn is_artifact_up_to_date_detects_matching_and_mismatching_node_state() {
     use super::is_artifact_up_to_date;
 
-    let sb = "095a575fb412e5520b5c16449002073a5ba587646b96e3dddd2c59473d5be2d8";
+    let sb = "62c7d4ab2ec93fc6a51790facbcc50436d1183d8bf6f9c84b07d1d75e1618eae";
     let sh = "adfcc59728309f6e5bda548d402b3284fe97bdd9216b04933d1b97b4a2531ddc";
 
     let valid_output = format!(
@@ -1769,6 +1769,20 @@ fn per_user_speed_renders_bits_and_exact_amnezia_peer_addresses() {
     );
     assert!(bandwidth::render_user_bandwidth(&secrets, &endpoints, &[]).is_err());
 
+    let mut tiered = secrets.clone();
+    tiered.insert(
+        USER_BANDWIDTH_OVERRIDES_KEY.into(),
+        r#"{"sample-user":80,"ungranted":160}"#.into(),
+    );
+    let config = bandwidth::render_user_bandwidth(&tiered, &endpoints, &users)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        config["user_bits_per_second"],
+        json!({"sample-user": 80_000_000})
+    );
+    assert_eq!(config["bits_per_second"], 40_000_000);
+
     let invalid = HashMap::from([(USER_BANDWIDTH_KEY.into(), "4001".into())]);
     assert!(bandwidth::render_user_bandwidth(&invalid, &[], &[]).is_err());
     let unlimited = HashMap::from([(USER_BANDWIDTH_KEY.into(), "0".into())]);
@@ -1803,4 +1817,84 @@ async fn per_user_speed_requires_a_compatible_node_before_staging() {
     ssh.expect(sing_box_apply_script(), "");
     kernel.apply_config(&ssh, &config).await.unwrap();
     assert_eq!(ssh.uploaded("/etc/sing-box/config.json.new"), Some(config));
+}
+
+#[tokio::test]
+async fn tier_speed_refuses_a_kernel_that_only_supports_the_uniform_limit() {
+    let ssh = vpnctl_ssh::MockTransport::new();
+    let config = br#"{"route":{"vpnctl_user_bandwidth":{"bits_per_second":40000000,"user_bits_per_second":{"fixture":80000000}}}}"#;
+    ssh.expect(
+        bandwidth::VERIFY_USER_BANDWIDTH_SUPPORT,
+        "vpnctl-user-bandwidth-supported\n",
+    );
+    let kernel = SingBox::new();
+    assert!(kernel.apply_config(&ssh, config).await.is_err());
+    assert_eq!(ssh.uploaded("/etc/sing-box/config.json.new"), None);
+
+    ssh.expect(
+        bandwidth::VERIFY_USER_BANDWIDTH_OVERRIDES_SUPPORT,
+        "vpnctl-user-bandwidth-supported\n",
+    );
+    ssh.expect(sing_box_apply_script(), "");
+    kernel.apply_config(&ssh, config).await.unwrap();
+    assert_eq!(
+        ssh.uploaded("/etc/sing-box/config.json.new"),
+        Some(config.to_vec())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn tier_probe_requires_enforcement_not_just_config_acceptance() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("fixture-sing-box");
+    std::fs::write(
+        &binary,
+        r#"#!/bin/sh
+config=$(cat)
+case "$VPNCTL_TEST_KERNEL_MODE" in
+    legacy-ignores) exit 0 ;;
+    legacy-strict) exit 1 ;;
+esac
+case "$config" in
+    *'"fixture":1}'*)
+        if [ "$VPNCTL_TEST_KERNEL_MODE" = current ]; then
+            printf '%s\n' 'vpnctl_user_bandwidth.user_bits_per_second must be at least 8' >&2
+        else
+            printf '%s\n' 'unrelated validation error' >&2
+        fi
+        exit 1 ;;
+    *) exit 0 ;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let script = bandwidth::VERIFY_USER_BANDWIDTH_OVERRIDES_SUPPORT
+        .replace("/usr/bin/sing-box", "\"$VPNCTL_TEST_SING_BOX\"");
+    for (mode, supported) in [
+        ("legacy-ignores", false),
+        ("legacy-strict", false),
+        ("wrong-error", false),
+        ("current", true),
+    ] {
+        let result = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .env("VPNCTL_TEST_SING_BOX", &binary)
+            .env("VPNCTL_TEST_KERNEL_MODE", mode)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.success(), supported, "{mode}");
+        assert_eq!(
+            result.stdout,
+            if supported {
+                b"vpnctl-user-bandwidth-supported\n".as_slice()
+            } else {
+                b""
+            },
+            "{mode}"
+        );
+    }
 }

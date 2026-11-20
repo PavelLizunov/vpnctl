@@ -335,7 +335,10 @@ pub(crate) async fn server_set_user_bandwidth(
     State(state): State<AppState>,
     body: String,
 ) -> Response {
-    use vpnctl_kernels::{USER_BANDWIDTH_KEY, USER_BANDWIDTH_MAX_MBPS};
+    use crate::boosty_bandwidth::{POLICY_KEY, Roster, TierPolicy};
+    use vpnctl_kernels::{
+        USER_BANDWIDTH_KEY, USER_BANDWIDTH_MAX_MBPS, USER_BANDWIDTH_OVERRIDES_KEY,
+    };
 
     let Some(rate) = form_field(&body, "mbps")
         .and_then(|value| value.trim().parse::<u32>().ok())
@@ -354,15 +357,74 @@ pub(crate) async fn server_set_user_bandwidth(
     if !server.kernels.iter().any(|kernel| kernel.0 == "sing-box") {
         return bad_request("per-user speed requires the sing-box kernel on this server");
     }
+    let mut policy = TierPolicy::default();
+    let mut overrides = std::collections::BTreeMap::new();
+    if let Some(expected_blog) = form_field(&body, "boosty_blog") {
+        if rate == 0 {
+            return bad_request("Boosty tiers require a positive default speed");
+        }
+        for field in body
+            .split('&')
+            .filter_map(|field| field.strip_prefix("tier_"))
+        {
+            let Some((id, value)) = field.split_once('=') else {
+                return bad_request("invalid Boosty tier setting");
+            };
+            let value = crate::http_util::decode_form_value(value);
+            if value.trim().is_empty() {
+                continue;
+            }
+            let (Ok(id), Ok(mbps)) = (id.parse::<i64>(), value.trim().parse::<u32>()) else {
+                return bad_request("invalid Boosty tier speed");
+            };
+            if id <= 0
+                || !(1..=USER_BANDWIDTH_MAX_MBPS).contains(&mbps)
+                || policy.levels.insert(id, mbps).is_some()
+            {
+                return bad_request("invalid Boosty tier speed");
+            }
+        }
+        let roster = match Roster::fetch(&state.boosty_roster_url).await {
+            Ok(roster) => roster,
+            Err(issue) => {
+                tracing::warn!(target: "vpnctld::boosty_bandwidth", ?issue, "could not apply Boosty rates");
+                return error_resp(StatusCode::SERVICE_UNAVAILABLE, &issue.to_string());
+            }
+        };
+        if roster.blog != expected_blog {
+            return bad_request(
+                "The active Boosty account changed. Reload the Protocols tab and verify the levels.",
+            );
+        }
+        let links = match state.inv.list_boosty_links().await {
+            Ok(links) => links,
+            Err(error) => return internal_error(anyhow::Error::new(error)),
+        };
+        let users = match state.inv.list_users().await {
+            Ok(users) => users,
+            Err(error) => return internal_error(anyhow::Error::new(error)),
+        };
+        let account_ids = users.iter().map(|user| user.id.0.as_str()).collect();
+        policy.blog = roster.blog.clone();
+        overrides = roster.overrides(&policy, rate, &links, &account_ids);
+    }
     let value = rate.to_string();
+    let policy = match serde_json::to_string(&policy) {
+        Ok(policy) => policy,
+        Err(error) => return internal_error(anyhow::Error::new(error)),
+    };
+    let overrides = match serde_json::to_string(&overrides) {
+        Ok(overrides) => overrides,
+        Err(error) => return internal_error(anyhow::Error::new(error)),
+    };
+    let values = [
+        (USER_BANDWIDTH_KEY, value.as_str()),
+        (POLICY_KEY, policy.as_str()),
+        (USER_BANDWIDTH_OVERRIDES_KEY, overrides.as_str()),
+    ];
     let changed = match state
         .inv
-        .set_server_secrets_audited(
-            &sid,
-            "admin",
-            "server.user_bandwidth.set",
-            &[(USER_BANDWIDTH_KEY, value.as_str())],
-        )
+        .set_server_secrets_audited(&sid, "admin", "server.user_bandwidth.set", &values)
         .await
     {
         Ok(changed) => changed,

@@ -204,8 +204,10 @@ pub(crate) fn server_detail_reality_config_section(
 pub(crate) fn server_detail_user_bandwidth_section(
     server: &vpnctl_core::Server,
     secrets: &std::collections::HashMap<String, String>,
+    roster: Option<&crate::boosty_bandwidth::Roster>,
     lang: crate::i18n::Locale,
 ) -> Markup {
+    use crate::boosty_bandwidth::{POLICY_KEY, TierPolicy};
     use crate::i18n::tr;
     use vpnctl_kernels::{USER_BANDWIDTH_KEY, USER_BANDWIDTH_MAX_MBPS};
 
@@ -214,6 +216,21 @@ pub(crate) fn server_detail_user_bandwidth_section(
     }
     let sid = path_segment_encode(&server.id.0);
     let rate = secrets.get(USER_BANDWIDTH_KEY).map_or("0", String::as_str);
+    let saved_policy = secrets
+        .get(POLICY_KEY)
+        .and_then(|json| serde_json::from_str::<TierPolicy>(json).ok())
+        .filter(|policy| !policy.blog.is_empty());
+    let saved = saved_policy
+        .as_ref()
+        .filter(|policy| roster.is_some_and(|roster| policy.blog == roster.blog));
+    let mut levels = roster
+        .map(|roster| roster.levels.clone())
+        .unwrap_or_default();
+    if let Some(policy) = saved {
+        for id in policy.levels.keys() {
+            levels.entry(*id).or_default();
+        }
+    }
     html! {
         div.ed-rule {}
         div.ed-art-eyebrow id="user-bandwidth" {
@@ -229,7 +246,45 @@ pub(crate) fn server_detail_user_bandwidth_section(
             input.ed-inp id="user-bandwidth-mbps" name="mbps" type="number" min="0"
                 max=(USER_BANDWIDTH_MAX_MBPS) value=(rate) required;
             " "
-            button.ed-abtn type="submit" { (tr(lang, "Save and deploy", "Сохранить и применить")) }
+            button.ed-abtn type="submit" { (tr(lang, "Apply uniform speed", "Применить единый лимит")) }
+        }
+        details.ed-spoiler {
+            summary { (tr(lang, "Speed by Boosty tier", "Скорость по уровням Boosty")) }
+            @if let Some(roster) = roster {
+                p.ed-grid__mut {
+                    (tr(lang, "Boosty account", "Аккаунт Boosty")) " " (&roster.blog)
+                    " · " time datetime=(&roster.captured_at) { (&roster.captured_at) }
+                }
+                p.ed-grid__mut {
+                    (tr(lang, "Blank tiers use the default. Apply again to refresh after subscription changes.",
+                        "Пустое поле означает базовый лимит. Примените повторно после изменения подписок."))
+                }
+                @if saved_policy.is_some() && saved.is_none() {
+                    p.ed-grid__mut { (tr(lang, "The active Boosty account has changed.", "Активный аккаунт Boosty сменился.")) }
+                }
+                form method="post" action=(format!("/admin/servers/{sid}/user-bandwidth")) {
+                    input type="hidden" name="boosty_blog" value=(roster.blog);
+                    p {
+                        label for="boosty-base-speed" { (tr(lang, "Default (Mbit/s)", "Базовый лимит (Мбит/с)")) }
+                        " "
+                        input.ed-inp id="boosty-base-speed" name="mbps" type="number" min="1"
+                            max=(USER_BANDWIDTH_MAX_MBPS) value=(if rate == "0" { "" } else { rate }) placeholder="40" required;
+                    }
+                    @for (id, label) in &levels {
+                        @let input_id = format!("boosty-speed-{id}");
+                        @let mbps = saved.and_then(|policy| policy.levels.get(id)).map(u32::to_string).unwrap_or_default();
+                        p {
+                            label for=(&input_id) { (label) " #" (id) }
+                            " "
+                            input.ed-inp id=(&input_id) name=(format!("tier_{id}")) type="number"
+                                min="1" max=(USER_BANDWIDTH_MAX_MBPS) value=(mbps);
+                        }
+                    }
+                    button.ed-abtn type="submit" { (tr(lang, "Apply Boosty rates", "Применить лимиты Boosty")) }
+                }
+            } @else {
+                p.ed-grid__mut { (tr(lang, "Waiting for a fresh roster from the Boosty dashboard.", "Ожидается свежий список подписчиков из панели Boosty.")) }
+            }
         }
     }
 }

@@ -84,7 +84,7 @@ explicit `USER_TRAFFIC_DENIED_CIDRS` list (`ip_is_private` misses CGNAT
 `100.64.0.0/10`, which Tailscale uses) and the server `/32` or `/128` rejection to every user inbound and AWG endpoint. Direct
 egress uses those resolved addresses; the existing AWG-only rules are unchanged.
 This uses the documented [resolve action](https://sing-box.sagernet.org/configuration/route/rule_action/#resolve),
-supported by the managed `1.14.2-vpnctl.2` release. Xray `26.3.27` uses a default
+supported by the managed `1.14.4-vpnctl.3` release. Xray `26.3.27` uses a default
 [loopback outbound](https://xtls.github.io/en/config/outbounds/loopback.html)
 with `targetStrategy: ForceIPv4v6` (IPv4 first, for nodes without IPv6 egress) to resolve once and re-enter routing with the
 actual destination IP. Explicit IPv4/IPv6 CIDRs and the server IP route to a

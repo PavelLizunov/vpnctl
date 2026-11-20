@@ -5,8 +5,8 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 536 (342 prod / 194 test)
-- **Total Rust LOC:** 196,640 (102,926 prod / 93,714 test)
+- **Tracked Rust Files:** 538 (343 prod / 195 test)
+- **Total Rust LOC:** 197,689 (103,531 prod / 94,158 test)
 - **Database Migrations:** 76
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 151
 
@@ -20,11 +20,11 @@
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 318 (1) | 125 (1) | **443** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 193 (1) | 454 (2) | **647** |
 | `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 60 tests | 18,942 (64) | 27,757 (66) | **46,699** |
-| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 5 tests, 1 examples | 7,209 (16) | 1,709 (7) | **8,918** |
+| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 5 tests, 1 examples | 7,342 (16) | 1,709 (7) | **9,051** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,371 (22) | 4,615 (12) | **8,986** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,825 (5) | 1,191 (5) | **4,016** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 30 tests | 59,705 (194) | 54,901 (96) | **114,606** |
-| **Total** | | | | **102,926 (342)** | **93,714 (194)** | **196,640** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 30 tests | 60,177 (195) | 55,345 (97) | **115,522** |
+| **Total** | | | | **103,531 (343)** | **94,158 (195)** | **197,689** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -35,8 +35,8 @@
 | `daemon/tests/spec_corp_policy_http.rs` | 2,338 | `daemon` | Test |
 | `crates/inventory/src/sqlite/tests.rs` | 2,065 | `crates/inventory` | Prod |
 | `daemon/tests/spec_corp_operator.rs` | 2,057 | `daemon` | Test |
+| `crates/kernels/src/sing_box/tests.rs` | 1,900 | `crates/kernels` | Prod |
 | `daemon/src/health_monitor/tests.rs` | 1,845 | `daemon` | Prod |
-| `crates/kernels/src/sing_box/tests.rs` | 1,806 | `crates/kernels` | Prod |
 | `crates/kernels/src/caddy/tests.rs` | 1,800 | `crates/kernels` | Prod |
 | `vendor/sqlx-sqlite/src/connection/explain.rs` | 1,779 | `other` | Prod |
 | `daemon/tests/spec_corp_egress.rs` | 1,531 | `daemon` | Test |
@@ -54,7 +54,7 @@
 | `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,184 | `daemon` | Test |
 | `daemon/src/handlers/admin/boosty.rs` | 1,170 | `daemon` | Prod |
 | `daemon/tests/spec_corp_probe_runtime.rs` | 1,166 | `daemon` | Test |
-| `daemon/src/protocol_assurance_poller.rs` | 1,112 | `daemon` | Prod |
+| `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,118 | `daemon` | Prod |
 
 ## Database Migrations (76)
 
