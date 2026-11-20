@@ -20,6 +20,10 @@ impl Protocol for Trojan {
         ProtocolId("trojan".to_string())
     }
 
+    fn is_retired(&self) -> bool {
+        true
+    }
+
     fn listen_ports(&self) -> &'static [(&'static str, u16)] {
         &[("tcp", TROJAN_PORT)]
     }

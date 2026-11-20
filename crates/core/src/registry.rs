@@ -52,8 +52,13 @@ impl Registry {
             .map(|p| p.as_ref())
     }
 
+    /// Protocols available for new deployments, in registration order.
     pub fn protocol_ids(&self) -> Vec<ProtocolId> {
-        self.protocols.iter().map(|p| p.id()).collect()
+        self.protocols
+            .iter()
+            .filter(|p| !p.is_retired())
+            .map(|p| p.id())
+            .collect()
     }
 
     pub fn kernel_ids(&self) -> Vec<KernelId> {

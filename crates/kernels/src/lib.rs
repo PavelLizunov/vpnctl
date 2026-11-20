@@ -40,6 +40,7 @@ pub const USER_TRAFFIC_DENIED_CIDRS: &[&str] = &[
 pub use sing_box::validate_config_excludes_ports;
 
 pub use sing_box::live_config_user_uuids;
+pub use sing_box::{USER_BANDWIDTH_KEY, USER_BANDWIDTH_MAX_MBPS};
 
 async fn apply_staged_config(
     ssh: &dyn vpnctl_core::SshTransport,

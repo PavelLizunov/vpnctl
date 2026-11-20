@@ -8,6 +8,11 @@ use crate::models::{RenderCtx, User};
 pub trait Protocol: fmt::Debug + Send + Sync {
     fn id(&self) -> ProtocolId;
 
+    /// Retired protocols remain usable by servers which already have them enabled.
+    fn is_retired(&self) -> bool {
+        false
+    }
+
     fn server_inbound(&self, ctx: &RenderCtx<'_>, users: &[User]) -> Result<serde_json::Value>;
 
     fn client_config(&self, ctx: &RenderCtx<'_>, user: &User) -> Result<serde_json::Value>;

@@ -565,3 +565,34 @@ async fn successful_subscription_output_stays_byte_equal() {
             .as_bytes()
     );
 }
+
+#[test]
+fn cli_registration_rejects_retired_protocols_before_accessing_keys() {
+    assert_cli_rejected(
+        &[
+            "server",
+            "add",
+            "test-new",
+            "--address",
+            "192.0.2.1",
+            "--protocols",
+            "trojan",
+        ],
+        &["protocol 'trojan' is retired"],
+    );
+    assert_cli_rejected(
+        &[
+            "bootstrap",
+            "test-new",
+            "--address",
+            "192.0.2.1",
+            "--root-password",
+            "fixture",
+            "--pubkey",
+            "absent-fixture.pub",
+            "--protocols",
+            "amneziawg2",
+        ],
+        &["protocol 'amneziawg2' is retired"],
+    );
+}

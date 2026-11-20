@@ -104,6 +104,10 @@ impl Protocol for Shadowsocks2022 {
         ProtocolId("shadowsocks-2022".to_string())
     }
 
+    fn is_retired(&self) -> bool {
+        true
+    }
+
     fn listen_ports(&self) -> &'static [(&'static str, u16)] {
         &[("tcp", SS_2022_PORT), ("udp", SS_2022_PORT)]
     }

@@ -8,7 +8,7 @@ WHO does what + HOW MUCH TIME each layer costs.
 **Why this exists.** Adding a VPN protocol to a Rust workspace looks
 small in code (one file, ~200 LOC, copy-paste from a sibling). The
 real cost is **proving it works** — handshake against a real client,
-survives DPI, survives 24h of traffic. The registry now ships 13 protocols;
+survives DPI, survives 24h of traffic. The registry now offers 9 protocols for new provisioning;
 this is what verification takes per protocol, distilled.
 
 ---
@@ -209,8 +209,8 @@ only at this layer.
 
 ## The matrix — shipped protocols and inbound candidates
 
-The shared registry in `crates/kernels/src/registry.rs` ships 12 protocols
-across four kernels. Canonical protocol IDs are used below; some are endpoints
+The shared registry in `crates/kernels/src/registry.rs` offers nine protocols
+for new deployments across five kernels. Canonical protocol IDs are used below; some are endpoints
 or use kernels other than sing-box. **Shipped** means registered and implemented,
 not that live-client or anti-censorship validation has passed on every node.
 DPI tiers mirror each implementation's `dpi_risk()`.
@@ -221,12 +221,12 @@ DPI tiers mirror each implementation's `dpi_risk()`.
 | `vless+reality` | TCP | Strong | Censorship-circumvention primary | ✅ shipped | `sing-box`; default |
 | `tuic-v5` | UDP | Moderate | Low-latency UDP-friendly net | ✅ shipped | `sing-box`; secondary |
 | `hysteria2` | UDP/QUIC | Weak | LTE/satellite; optional Salamander and Realm | ✅ shipped | `sing-box`; validate Realm across distinct networks |
-| `shadowsocks-2022` | TCP/UDP | Weak | Fallback channel | ✅ shipped (single-user) | `sing-box`; shared server PSK |
+| `shadowsocks-2022` | TCP/UDP | Weak | Fallback channel | Retired | `sing-box`; shared server PSK |
 | `wireguard` | UDP | Weak | Native WireGuard delivery | ✅ shipped | `amneziawg`; legacy protocol |
-| `amneziawg2` | UDP | Moderate | AmneziaWG 2.0 native client | ✅ shipped | `sing-box`; native `.conf` delivery |
+| `amneziawg2` | UDP | Moderate | AmneziaWG 2.0 native client | Retired | `sing-box`; native `.conf` delivery |
 | `amneziawg3` | UDP | Moderate | AmneziaWG 3.1 native client | ✅ shipped | `sing-box`; native `.conf` delivery |
-| `anytls` | TCP/TLS | Moderate | Alternative TLS transport | ✅ shipped | `sing-box` |
-| `trojan` | TCP/TLS | Weak | Backup channel | ✅ shipped | `sing-box` |
+| `anytls` | TCP/TLS | Moderate | Alternative TLS transport | Retired | `sing-box` |
+| `trojan` | TCP/TLS | Weak | Backup channel | Retired | `sing-box` |
 | `naive` | HTTPS | Strong | Browser-like HTTPS transport | ✅ shipped | `caddy` |
 | `vless-ws` | WebSocket/TLS | Strong | VLESS behind an HTTPS cover site | ✅ shipped | `caddy` + `sing-box` |
 | `vless+xhttp` | XHTTP/TLS | Strong | XHTTP transport | ✅ shipped | `xray`; requires a compatible client |

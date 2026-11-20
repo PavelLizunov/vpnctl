@@ -291,6 +291,10 @@ pub(crate) fn admin_router(state: AppState) -> Router {
             post(admin::server_set_dnstt_config),
         )
         .route(
+            "/admin/servers/{id}/user-bandwidth",
+            post(admin::server_set_user_bandwidth),
+        )
+        .route(
             "/admin/servers/{id}/ss2022-mode",
             post(admin::server_set_ss2022_mode),
         )

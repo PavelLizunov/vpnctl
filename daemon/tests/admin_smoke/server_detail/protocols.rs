@@ -181,13 +181,14 @@ async fn admin_server_detail_protocols_section_shows_every_registered_protocol()
     let app = router(s);
     let html = fetch_html(app, "/admin/servers/nowg/protocols").await;
     assert!(html.contains("Enabled protocols"), "section heading");
+    for pid in ["shadowsocks-2022", "anytls", "trojan", "amneziawg2"] {
+        assert!(!html.contains(&format!("protocols/{pid}/enable")));
+    }
     for pid in [
         "vless+reality",
         "tuic-v5",
         "hysteria2",
-        "shadowsocks-2022",
-        "anytls",
-        "trojan",
+        "amneziawg3",
         "wireguard",
     ] {
         assert!(
@@ -289,7 +290,7 @@ async fn admin_server_enable_protocol_persists_and_audits() {
 }
 
 #[tokio::test]
-async fn admin_server_enable_awg2_and_awg3_dispatches_only_for_real_mutations() {
+async fn admin_server_rejects_retired_protocols_and_enables_awg3() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
@@ -317,14 +318,16 @@ async fn admin_server_enable_awg2_and_awg3_dispatches_only_for_real_mutations() 
         .unwrap()
     };
 
-    let awg2 = app.clone().oneshot(post("amneziawg2")).await.unwrap();
-    assert_eq!(awg2.status(), StatusCode::SEE_OTHER);
-    wait_for_autodeploy_rows(&inv, 1).await;
+    for protocol in ["shadowsocks-2022", "anytls", "trojan", "amneziawg2"] {
+        let response = app.clone().oneshot(post(protocol)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(count_autodeploy_rows(&inv).await, 0);
 
     let awg3 = app.clone().oneshot(post("amneziawg3")).await.unwrap();
     assert_eq!(awg3.status(), StatusCode::SEE_OTHER);
-    let auto_rows = wait_for_autodeploy_rows(&inv, 2).await;
-    assert_eq!(auto_rows.len(), 2);
+    let auto_rows = wait_for_autodeploy_rows(&inv, 1).await;
+    assert_eq!(auto_rows.len(), 1);
     for row in &auto_rows {
         assert_eq!(row.action, "server.autodeploy");
         assert_eq!(row.target.as_deref(), Some("awg-toggle"));
@@ -342,15 +345,9 @@ async fn admin_server_enable_awg2_and_awg3_dispatches_only_for_real_mutations() 
         .await
         .unwrap()
         .unwrap();
-    assert!(
-        server
-            .enabled_protocols
-            .contains(&ProtocolId("amneziawg2".into()))
-    );
-    assert!(
-        server
-            .enabled_protocols
-            .contains(&ProtocolId("amneziawg3".into()))
+    assert_eq!(
+        server.enabled_protocols,
+        vec![ProtocolId("amneziawg3".into())]
     );
     let mutation_rows = inv
         .recent_audit(20)
@@ -359,16 +356,14 @@ async fn admin_server_enable_awg2_and_awg3_dispatches_only_for_real_mutations() 
         .into_iter()
         .filter(|row| row.action == "server.protocol.enable")
         .count();
-    assert_eq!(mutation_rows, 2, "each AWG toggle is one real mutation");
+    assert_eq!(mutation_rows, 1);
 
-    for protocol in ["amneziawg2", "amneziawg3"] {
-        let response = app.clone().oneshot(post(protocol)).await.unwrap();
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    }
+    let response = app.oneshot(post("amneziawg3")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert_eq!(
         count_autodeploy_rows(&inv).await,
-        2,
+        1,
         "no-op AWG re-enables must not dispatch more auto-deploys"
     );
     let mutation_rows_after_reposts = inv
@@ -379,7 +374,7 @@ async fn admin_server_enable_awg2_and_awg3_dispatches_only_for_real_mutations() 
         .filter(|row| row.action == "server.protocol.enable")
         .count();
     assert_eq!(
-        mutation_rows_after_reposts, 2,
+        mutation_rows_after_reposts, 1,
         "no-op AWG re-enables must not add mutation audit rows"
     );
 }
@@ -476,5 +471,70 @@ async fn admin_server_disable_protocol_removes_row_and_audits() {
             .enabled_protocols
             .contains(&ProtocolId("vless+reality".into())),
         "other protocols must stay untouched"
+    );
+}
+
+#[tokio::test]
+async fn enabled_retired_protocol_remains_visible_and_can_be_disabled() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let inv = s.inv.clone();
+    let sid = ServerId("legacy-toggle".into());
+    inv.add_server(&Server {
+        id: sid.clone(),
+        address: "198.51.100.42".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into())],
+        enabled_protocols: vec![
+            ProtocolId("vless+reality".into()),
+            ProtocolId("amneziawg2".into()),
+        ],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    })
+    .await
+    .unwrap();
+    let app = router(s);
+    let page = "/admin/servers/legacy-toggle/protocols";
+    let action = format!("{page}/amneziawg2/disable");
+    let html = fetch_html(app.clone(), page).await;
+    let row = html
+        .split("</li>")
+        .find_map(|item| {
+            item.rsplit("<li ")
+                .next()
+                .filter(|row| row.contains(&action))
+        })
+        .expect("retired AWG2 row must offer Disable");
+    assert!(row.contains("(retired)"));
+    assert!(row.contains("/amneziawg2/hide"));
+    let response = app
+        .oneshot(
+            add_same_origin(Request::builder().method("POST").uri(action))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        inv.get_server(&sid)
+            .await
+            .unwrap()
+            .unwrap()
+            .enabled_protocols,
+        vec![ProtocolId("vless+reality".into())]
+    );
+    assert_eq!(
+        inv.recent_audit(10)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|row| row.action == "server.protocol.disable")
+            .count(),
+        1
     );
 }
