@@ -34,6 +34,10 @@ pub(crate) async fn boosty_author_refresh(State(state): State<AppState>) -> Resp
     author::refresh(&state).await
 }
 
+pub(crate) async fn boosty_inbox_action(State(state): State<AppState>, body: String) -> Response {
+    author::inbox_action(&state, &body)
+}
+
 pub(crate) async fn boosty_author_refresh_conversation(
     State(state): State<AppState>,
     body: String,

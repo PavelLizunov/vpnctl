@@ -129,8 +129,8 @@ pub fn router_with_corp_operator(
 
     let legacy = public_router
         .with_state(state.clone())
-        .merge(admin_router)
         .layer(RequestBodyLimitLayer::new(8 * 1024))
+        .merge(admin_router)
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(15),
@@ -547,6 +547,11 @@ pub(crate) fn admin_router(state: AppState) -> Router {
             post(admin::server_set_traffic_limit),
         )
         .route("/admin/logout", post(admin::logout))
+        .route_layer(RequestBodyLimitLayer::new(8 * 1024))
+        .route(
+            "/admin/boosty/inbox/action",
+            post(admin::boosty_inbox_action).layer(RequestBodyLimitLayer::new(64 * 1024)),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin::html_error_pages,
@@ -563,6 +568,7 @@ pub(crate) fn admin_router(state: AppState) -> Router {
                 .layer(axum::middleware::from_fn(
                     crate::handlers::admin::asset_cache_control,
                 ))
+                .layer(RequestBodyLimitLayer::new(8 * 1024))
                 .service(ServeDir::new(assets_dir)),
         )
         .with_state(state);

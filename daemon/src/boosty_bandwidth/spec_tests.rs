@@ -8,13 +8,14 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use axum::Router;
 use axum::body::{Body, to_bytes};
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Request, StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post as post_route};
+use axum::{Extension, Router};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -113,22 +114,30 @@ fn roster_item(id: &str, level_id: &str, level_name: &str, active: bool, price: 
 struct MockServer {
     url: String,
     captured_at: String,
+    reply_requests: Arc<AtomicUsize>,
     task: JoinHandle<()>,
 }
 
 impl MockServer {
     async fn start(roster: RosterMock) -> Self {
         let captured_at = roster.captured_at.clone();
+        let reply_requests = Arc::new(AtomicUsize::new(0));
         let app = Router::new()
             .route("/api/v1/roster", get(serve_roster))
             .route("/api/v1/overview", get(serve_overview))
             .route("/api/v1/users", get(serve_people))
             .route("/api/v1/records", get(serve_records))
             .route("/api/v1/inbox", get(serve_dialogs))
-            .route("/api/v1/inbox/dialogs/12", get(serve_conversation))
+            .route("/api/v1/inbox/dialogs/{id}", get(serve_conversation))
+            .route("/api/v1/inbox/replies/{id}", get(serve_inbox_check))
             .route("/api/v1/automation", get(serve_delivery))
             .route("/api/sync", post_route(serve_author_refresh))
             .route("/api/inbox/sync", post_route(serve_conversation_refresh))
+            .route("/api/inbox/draft", post_route(serve_inbox_draft))
+            .route("/api/inbox/reply", post_route(serve_inbox_reply))
+            .route("/api/inbox/reconcile", post_route(serve_inbox_reconcile))
+            .route("/api/inbox/abandon", post_route(serve_inbox_abandon))
+            .layer(Extension(Arc::clone(&reply_requests)))
             .with_state(Arc::new(roster));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -138,6 +147,7 @@ impl MockServer {
         Self {
             url: format!("http://{addr}/api/v1/roster"),
             captured_at,
+            reply_requests,
             task,
         }
     }
@@ -186,21 +196,112 @@ async fn serve_records(
     }], "total":1})))
 }
 
-async fn serve_dialogs() -> Json<Value> {
-    Json(json!({"items":[{"id":"12","name":"Fixture conversation","unreadCount":2}], "total":1}))
+async fn serve_dialogs(
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    if query.contains_key("handoff") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(Json(
+        json!({"blog":"fixture","items":[{"id":"12","name":"Fixture conversation","unreadCount":2,"needsOwner":true}], "total":1}),
+    ))
 }
 
 async fn serve_conversation(
+    Path(id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     if query.get("cached").map(String::as_str) != Some("1") {
         return Err(StatusCode::BAD_REQUEST);
     }
+    let pending = (id == "13").then(|| json!({
+        "requestId":"auto-fixture-1","dialogId":"13","status":"unknown","text":"Fixture automatic reply"
+    }));
     Ok(Json(json!({
-        "dialog":{"id":"12","name":"Fixture conversation"},
-        "messages":[{"direction":"incoming","text":"Fixture message <body>"}],
-        "beforeCursor":"11", "pendingReply":{"text":"fixture-pending-reply-private"}
+        "blog":"fixture", "dialog":{"id":id,"name":"Fixture conversation","canWrite":true},
+        "messages":[{"id":"11","direction":"incoming","text":"Fixture message <body>"}],
+        "beforeCursor":"11", "pendingReply":pending,
+        "providerPrivate":{"text":"fixture-pending-reply-private"}
     })))
+}
+
+async fn serve_inbox_draft(Json(body): Json<Value>) -> Response {
+    if body != json!({"blog":"fixture","dialogId":"12","topic":"android"}) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    Json(json!({"text":"Fixture draft","raw":"fixture-private-draft"})).into_response()
+}
+
+async fn serve_inbox_reply(
+    Extension(reply_requests): Extension<Arc<AtomicUsize>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    reply_requests.fetch_add(1, Ordering::Relaxed);
+    let expected_text = if body["requestId"] == "fixture-send-long" {
+        "я".repeat(8_000)
+    } else {
+        "Fixture answer".into()
+    };
+    if body["blog"] != "fixture"
+        || body["dialogId"] != "12"
+        || body["text"].as_str() != Some(expected_text.as_str())
+        || !matches!(
+            body["requestId"].as_str(),
+            Some("fixture-send-1" | "fixture-send-long" | "fixture-send-rejected")
+        )
+        || headers
+            .get("x-boosty-request")
+            .is_none_or(|value| value != "1")
+        || headers.contains_key(header::COOKIE)
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    if body["requestId"] == "fixture-send-rejected" {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error":{"notDispatched":true,"message":"fixture-private-rejection"}})),
+        )
+            .into_response();
+    }
+    Json(json!({"reply":{"requestId":body["requestId"],"dialogId":"12","status":"unknown","text":"fixture-private-receipt"}})).into_response()
+}
+
+async fn serve_inbox_check(
+    Path(id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    if id != "auto-fixture-1"
+        || query.len() != 3
+        || query.get("cached").map(String::as_str) != Some("1")
+        || query.get("blog").map(String::as_str) != Some("fixture")
+        || query.get("dialogId").map(String::as_str) != Some("13")
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    automatic_receipt("sending")
+}
+
+async fn serve_inbox_reconcile(Json(body): Json<Value>) -> Response {
+    automatic_action(&body, "unknown")
+}
+
+async fn serve_inbox_abandon(Json(body): Json<Value>) -> Response {
+    automatic_action(&body, "cancelled")
+}
+
+fn automatic_action(body: &Value, status: &str) -> Response {
+    if body["blog"] != "fixture"
+        || body["dialogId"] != "13"
+        || body["requestId"] != "auto-fixture-1"
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    automatic_receipt(status)
+}
+
+fn automatic_receipt(status: &str) -> Response {
+    Json(json!({"reply":{"requestId":"auto-fixture-1","dialogId":"13","status":status,"text":"fixture-private-auto-receipt"}})).into_response()
 }
 
 async fn serve_delivery(
@@ -510,6 +611,109 @@ async fn author_views_render_filtered_data_and_omit_fields_outside_their_contrac
         );
         assert!(!html.contains("<iframe"), "{path}: native author view");
     }
+}
+
+#[tokio::test]
+async fn native_inbox_renders_the_composer_and_streams_only_explicit_same_origin_actions() {
+    let mock = MockServer::start(RosterMock::valid()).await;
+    let mut f = fixture(mock.url.clone()).await;
+    f.state.boosty_dashboard_url = Some("https://test.example:9443/".parse().unwrap());
+    let html = get_html(&f.state, "/admin/boosty?view=messages&dialog=12&handoff=1").await;
+    for control in [
+        "boosty-inbox-compose",
+        "Prepare draft",
+        "boosty-inbox.js",
+        "Needs your reply",
+    ] {
+        assert!(html.contains(control), "missing {control}");
+    }
+    assert!(!html.contains(":9443/#messages"));
+    let stale = get_html(
+        &f.state,
+        "/admin/boosty?view=messages&dialog=12&blog=previous",
+    )
+    .await;
+    assert!(stale.contains("This link points to a different Boosty account."));
+    assert!(!stale.contains("boosty-inbox-compose"));
+    let automatic = get_html(&f.state, "/admin/boosty?view=messages&dialog=13").await;
+    assert!(automatic.contains("data-request-id=\"auto-fixture-1\""));
+    assert!(automatic.contains("id=\"boosty-inbox-pending\">"));
+
+    let app = crate::app::router(f.state.clone());
+    let endpoint = "/admin/boosty/inbox/action";
+    let draft = json!({"operation":"draft","blog":"fixture","dialogId":"12","topic":"android"});
+    let send = json!({"operation":"send","blog":"fixture","dialogId":"12","requestId":"fixture-send-1","text":"Fixture answer"});
+    let long = json!({"operation":"send","blog":"fixture","dialogId":"12","requestId":"fixture-send-long","text":"я".repeat(8_000)});
+    let failed = json!({"operation":"send","blog":"fixture","dialogId":"12","requestId":"fixture-send-rejected","text":"Fixture answer"});
+    let request = |value: &Value, origin: &str| {
+        Request::builder()
+            .method("POST")
+            .uri(endpoint)
+            .header(header::HOST, "test.example")
+            .header(header::ORIGIN, origin)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::COOKIE, "other-fixture-cookie=present")
+            .body(Body::from(value.to_string()))
+            .unwrap()
+    };
+    let rejected = app
+        .clone()
+        .oneshot(request(&send, "https://foreign.example"))
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    let auto = json!({"operation":"send","blog":"fixture","dialogId":"13","requestId":"auto-fixture-1","text":"Fixture answer"});
+    let rejected = app
+        .clone()
+        .oneshot(request(&auto, "https://test.example"))
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    let auto_action = |operation: &str| json!({"operation":operation,"blog":"fixture","dialogId":"13","requestId":"auto-fixture-1"});
+    let check = auto_action("check");
+    let reconcile = auto_action("reconcile");
+    let close = auto_action("abandon");
+    for (action, expected, private) in [
+        (
+            &check,
+            "\"status\":\"sending\"",
+            "fixture-private-auto-receipt",
+        ),
+        (
+            &reconcile,
+            "\"status\":\"unknown\"",
+            "fixture-private-auto-receipt",
+        ),
+        (
+            &close,
+            "\"status\":\"cancelled\"",
+            "fixture-private-auto-receipt",
+        ),
+        (&draft, "Fixture draft", "fixture-private-draft"),
+        (&send, "\"status\":\"unknown\"", "fixture-private-receipt"),
+        (&long, "\"status\":\"unknown\"", "fixture-private-receipt"),
+        (
+            &failed,
+            "\"status\":409,\"not_dispatched\":true",
+            "fixture-private-rejection",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(action, "https://test.example"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/event-stream"
+        );
+        let stream = to_bytes(response.into_body(), 65_536).await.unwrap();
+        let stream = std::str::from_utf8(&stream).unwrap();
+        assert!(stream.contains(expected), "{stream}");
+        assert!(!stream.contains(private));
+    }
+    assert_eq!(mock.reply_requests.load(Ordering::Relaxed), 3);
 }
 
 #[tokio::test]

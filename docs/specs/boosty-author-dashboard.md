@@ -9,10 +9,15 @@ existing admin access controls, CSP and same-origin form checks apply.
 Boosty owns the account connection, source history and delivery state. The
 native overview, people, financial history, activity, content, analytics,
 sources, inbox and delivery queue use purpose-specific projections. Inbox
-threads and queue reads use locally saved data. Refreshing data or a thread
-requires a same-origin admin POST. vpnctl forwards no browser credentials.
-Account recovery, sending replies and delivery actions stay in the standalone
-panel.
+threads and queue reads use locally saved data. Refreshing data or a thread,
+recording a view, preparing a draft and replying require same-origin admin
+POSTs. Inbox actions stream a receipt to the browser. Draft text stays in
+the open composer. The browser scopes request identity to its tab, blog and
+dialog. An uncertain manual or automatic send blocks a new reply until its
+receipt is confirmed or the operator explicitly closes the check. When Boosty
+confirms rejection before dispatch, the composer keeps the text editable.
+vpnctl forwards no browser credentials. Account recovery
+and delivery actions stay in the standalone panel.
 
 **VPN accounts and sync** opens `/admin/boosty?view=sync`. The page can link a
 current paid subscriber from the author dashboard roster to an existing VPN

@@ -1,4 +1,5 @@
 mod client;
+mod inbox;
 mod views;
 mod workflows;
 
@@ -17,6 +18,10 @@ use crate::i18n::{Locale, tr};
 
 use client::{AuthorClient, AuthorIssue};
 use views::{Query, View};
+
+pub(super) fn inbox_action(state: &AppState, body: &str) -> Response {
+    inbox::inbox_action(state, body)
+}
 
 #[derive(Deserialize)]
 struct Overview {
@@ -161,9 +166,11 @@ pub(super) async fn page(
                     }
                 }
             }
-            p {
-                a href=(standalone.as_str()) target="_blank" rel="noopener noreferrer" {
-                    (query.view.standalone_label(lang))
+            @if query.view != View::Messages {
+                p {
+                    a href=(standalone.as_str()) target="_blank" rel="noopener noreferrer" {
+                        (query.view.standalone_label(lang))
+                    }
                 }
             }
         }
