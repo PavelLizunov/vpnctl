@@ -86,13 +86,13 @@ pub(crate) async fn server_enable_protocol(
                 Ok(ports) => ports,
                 Err(error) => return internal_error(anyhow::Error::new(error)),
             };
-            if state.registry.protocol(&pid).is_some_and(|protocol| {
+            if let Some((_, port)) = state.registry.protocol(&pid).and_then(|protocol| {
                 protocol
                     .effective_listen_ports(&secrets)
-                    .iter()
-                    .any(|(_, port)| reserved.contains(port))
+                    .into_iter()
+                    .find(|(_, port)| reserved.contains(port))
             }) {
-                return bad_request("The VMess TCP port is reserved on this server");
+                return bad_request(&format!("VMess TCP/{port} is reserved on this server"));
             }
         }
     }

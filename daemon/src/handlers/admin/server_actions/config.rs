@@ -807,12 +807,12 @@ pub(crate) async fn server_set_vmess_config(
             Ok(ports) => ports,
             Err(error) => return internal_error(anyhow::Error::new(error)),
         };
-        if protocol
+        if let Some((_, port)) = protocol
             .effective_listen_ports(&candidate)
-            .iter()
-            .any(|(_, port)| reserved.contains(port))
+            .into_iter()
+            .find(|(_, port)| reserved.contains(port))
         {
-            return bad_request("The VMess TCP port is reserved on this server");
+            return bad_request(&format!("VMess TCP/{port} is reserved on this server"));
         }
     }
     if changed
