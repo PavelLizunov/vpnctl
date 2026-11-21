@@ -5,10 +5,10 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 546 (350 prod / 196 test)
-- **Total Rust LOC:** 201,250 (106,283 prod / 94,967 test)
+- **Tracked Rust Files:** 548 (351 prod / 197 test)
+- **Total Rust LOC:** 202,566 (106,808 prod / 95,758 test)
 - **Database Migrations:** 77
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 156
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 157
 
 ## Workspace Crates & Targets
 
@@ -16,15 +16,15 @@
 |---|---|---|---|---|---|---|
 | `vpnctl` | `cli` | 0.9.0 | bin, 2 tests | 6,448 (20) | 1,617 (3) | **8,065** |
 | `vpnctl-boosty-bridge` | `crates/boosty-bridge` | 0.9.0 | lib, 2 tests | 1,494 (6) | 1,345 (2) | **2,839** |
-| `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,431 (13) | 0 (0) | **1,431** |
+| `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,434 (13) | 0 (0) | **1,434** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 318 (1) | 125 (1) | **443** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 193 (1) | 454 (2) | **647** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 61 tests | 19,007 (64) | 27,912 (67) | **46,919** |
-| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 5 tests, 1 examples | 7,342 (16) | 1,709 (7) | **9,051** |
-| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,373 (22) | 4,615 (12) | **8,988** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 61 tests | 19,014 (64) | 27,912 (67) | **46,926** |
+| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 5 tests, 1 examples | 7,345 (16) | 1,709 (7) | **9,054** |
+| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 13 tests | 4,575 (23) | 4,928 (13) | **9,503** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,825 (5) | 1,191 (5) | **4,016** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 30 tests | 62,852 (202) | 55,999 (97) | **118,851** |
-| **Total** | | | | **106,283 (350)** | **94,967 (196)** | **201,250** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 30 tests | 63,162 (202) | 56,477 (97) | **119,639** |
+| **Total** | | | | **106,808 (351)** | **95,758 (197)** | **202,566** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -138,7 +138,7 @@
 | `0076` | server security reports | `crates/inventory/migrations/0076_server_security_reports.sql` | 6 |
 | `0077` | new server bandwidth default | `crates/inventory/migrations/0077_new_server_bandwidth_default.sql` | 5 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (156)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (157)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -236,6 +236,7 @@
 | `POST` | `/admin/servers/{id}/user-bandwidth` | `admin::server_set_user_bandwidth` |
 | `POST` | `/admin/servers/{id}/user-bandwidth-default` | `admin::server_set_new_server_bandwidth_default` |
 | `POST` | `/admin/servers/{id}/vlessws-config` | `admin::server_set_vlessws_config` |
+| `POST` | `/admin/servers/{id}/vmess-config` | `admin::server_set_vmess_config` |
 | `POST` | `/admin/servers/{sid}/grants/{uid}` | `admin::server_grant_user` |
 | `POST` | `/admin/servers/{sid}/grants/{uid}/revoke` | `admin::server_revoke_user` |
 | `POST` | `/admin/servers/{sid}/protocols/{pid}/hide` | `admin::server_protocol_hide` |

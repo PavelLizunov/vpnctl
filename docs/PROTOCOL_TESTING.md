@@ -231,7 +231,7 @@ DPI tiers mirror each implementation's `dpi_risk()`.
 | `vless-ws` | WebSocket/TLS | Strong | VLESS behind an HTTPS cover site | ✅ shipped | `caddy` + `sing-box` |
 | `vless+xhttp` | XHTTP/TLS | Strong | XHTTP transport | ✅ shipped | `xray`; requires a compatible client |
 | `shadowtls` v3 | TCP/TLS | — | Wrap Shadowsocks in a real TLS handshake | ❌ NOT shipped | candidate; separate implementation and validation required |
-| `vmess` | TCP | — | Legacy compatibility | ❌ NOT shipped | skip; no current product requirement |
+| `vmess` | TCP | Moderate | VMess AEAD over WebSocket and TLS | ✅ shipped | `sing-box`; opt-in, defaults to TCP/443 |
 | `mixed` / `socks` / `http` | TCP | — | Local debugging proxy | ❌ NOT shipped | skip; local proxies, not VPN server protocols |
 | `direct` | TCP/UDP | — | Raw tunneling | ❌ NOT shipped | skip; port-forward use case |
 | `tun` / `redirect` / `tproxy` | OS-level | — | Transparent VPN client | ❌ NOT shipped | skip; client-side feature |
@@ -241,7 +241,7 @@ DPI tiers mirror each implementation's `dpi_risk()`.
 | Order | Inbound | Effort | Threat-model gap closed |
 |---|---|---|---|
 | 1 | ShadowTLS v3 | ~250 LOC + tests | TLS wrapper with a different handshake shape |
-| — | VMess, mixed, direct, tun | — | skip; see table above |
+| — | mixed, direct, tun | — | skip; see table above |
 
 ---
 

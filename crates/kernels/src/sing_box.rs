@@ -59,6 +59,7 @@ impl Kernel for SingBox {
             ProtocolId("trojan".to_string()),
             ProtocolId("amneziawg2".to_string()),
             ProtocolId("amneziawg3".to_string()),
+            ProtocolId("vmess".to_string()),
         ]
     }
 

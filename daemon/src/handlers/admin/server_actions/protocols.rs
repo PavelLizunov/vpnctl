@@ -74,6 +74,27 @@ pub(crate) async fn server_enable_protocol(
                 return bad_request(&format!("cannot enable protocol '{protocol_id_str}': {e}"));
             }
         }
+        if pid.0 == "vmess" {
+            let secrets = match state.inv.list_server_secrets(&sid).await {
+                Ok(secrets) => secrets,
+                Err(error) => return internal_error(anyhow::Error::new(error)),
+            };
+            if let Err(error) = state.registry.validate_server(&after, &secrets) {
+                return bad_request(&error.to_string());
+            }
+            let reserved = match state.inv.get_reserved_ports(&sid).await {
+                Ok(ports) => ports,
+                Err(error) => return internal_error(anyhow::Error::new(error)),
+            };
+            if state.registry.protocol(&pid).is_some_and(|protocol| {
+                protocol
+                    .effective_listen_ports(&secrets)
+                    .iter()
+                    .any(|(_, port)| reserved.contains(port))
+            }) {
+                return bad_request("The VMess TCP port is reserved on this server");
+            }
+        }
     }
 
     let inserted = match state.inv.add_server_protocol(&sid, &pid).await {

@@ -309,6 +309,7 @@ fn outbound_supports_udp(value: &Value) -> bool {
 fn protocol_display_name(protocol_id: &str) -> String {
     match protocol_id {
         "vless+reality" => "VLESS".into(),
+        "vmess" => "VMess".into(),
         "tuic-v5" => "TUIC".into(),
         "hysteria2" => "HY2".into(),
         "shadowsocks-2022" => "SS-22".into(),

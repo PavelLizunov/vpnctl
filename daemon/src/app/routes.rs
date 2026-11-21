@@ -298,6 +298,10 @@ pub(crate) fn admin_router(state: AppState) -> Router {
             post(admin::server_rotate_hysteria2_obfs),
         )
         .route(
+            "/admin/servers/{id}/vmess-config",
+            post(admin::server_set_vmess_config),
+        )
+        .route(
             "/admin/servers/{id}/dnstt-config",
             post(admin::server_set_dnstt_config),
         )

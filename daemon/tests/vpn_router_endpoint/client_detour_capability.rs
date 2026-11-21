@@ -464,3 +464,128 @@ async fn target_omitted_when_upstream_unusable() {
         "target must be omitted when entry is unusable/missing secrets: {lines:?}"
     );
 }
+
+#[tokio::test]
+async fn vmess_capability_uses_existing_subscription_and_visible_vless_hop() {
+    use std::sync::Arc;
+    use vpnctl_core::{KernelId, Server};
+
+    let dir = TempDir::new().unwrap();
+    let mut state = seed_state(&dir).await;
+    state.registry = Arc::new(vpnctl_kernels::build_registry().unwrap());
+    state.rate_limiter = Arc::new(vpnctld::rate_limit::RateLimiter::new(
+        100.0,
+        0.0,
+        std::time::Duration::from_secs(60),
+    ));
+    let pid = ProtocolId("vmess".into());
+    let exit = ServerId("ws-exit".into());
+    let entry = ServerId("de".into());
+    let uid = UserId("tester-1".into());
+
+    let fetch = |ua: &'static str, cap: Option<&'static str>| {
+        let state = state.clone();
+        async move {
+            let path = format!("/api/v1/app/config/{TEST_DEVICE_ID}");
+            let (status, body, _) = get_with_headers(router(state), &path, ua, cap).await;
+            assert_eq!(status, StatusCode::OK);
+            decode_config_lines(&body)
+        }
+    };
+    let legacy = fetch("VPNRouter/2.51", Some("detour-v1")).await;
+    let generic = fetch("v2rayN/6.62", Some("detour-v1, vmess-v1")).await;
+
+    state
+        .inv
+        .add_server(&Server {
+            id: exit.clone(),
+            address: "192.0.2.77".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![pid.clone()],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+    state.inv.grant(&uid, &exit).await.unwrap();
+    state
+        .inv
+        .set_server_display_name(&exit, Some("WS Exit"))
+        .await
+        .unwrap();
+    for (key, value) in [
+        ("vmess.domain", "ws.example.com"),
+        ("vmess.preferred_entry", "de"),
+    ] {
+        state
+            .inv
+            .set_server_secret(&exit, key, value)
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(fetch("VPNRouter/2.51", Some("detour-v1")).await, legacy);
+    assert_eq!(
+        fetch("v2rayN/6.62", Some("detour-v1, vmess-v1")).await,
+        generic
+    );
+    let profiles = |lines: &[String]| {
+        lines
+            .iter()
+            .filter_map(|line| line.strip_prefix("vmess://"))
+            .map(|data| {
+                serde_json::from_slice::<Value>(&BASE64_STANDARD.decode(data).unwrap()).unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    let direct = profiles(&fetch("VPNRouter/2.51", Some("vmess-v1")).await);
+    assert_eq!(direct.len(), 1);
+    assert_eq!(direct[0]["add"], "ws.example.com");
+    assert_eq!(direct[0]["ps"], "WS Exit VMess ~tester-1");
+    assert_eq!(direct[0]["scy"], "aes-128-gcm");
+    assert_eq!(direct[0]["net"], "ws");
+    assert_eq!(direct[0]["sni"], "ws.example.com");
+    assert!(direct[0].get("detour").is_none());
+
+    let opts = Some("detour-v1, vmess-v1");
+    let lines = fetch("VPNRouter/2.51", opts).await;
+    let chained = profiles(&lines);
+    assert_eq!(chained.len(), 2);
+    assert_eq!(chained[0]["add"], "192.0.2.77");
+    assert_eq!(chained[0]["sni"], "ws.example.com");
+    assert_eq!(chained[0]["host"], "ws.example.com");
+    assert_eq!(chained[0]["path"], "/vmess");
+    assert_eq!(chained[0]["detour"], "de");
+    assert_eq!(chained[0]["outbound"], "vmess-ws-exit");
+    assert_eq!(chained[1], direct[0]);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("@de.example.com") && line.contains("&outbound=de#"))
+    );
+
+    state
+        .inv
+        .set_server_protocol_hidden(&entry, &ProtocolId("vless+reality".into()), true)
+        .await
+        .unwrap();
+    assert_eq!(profiles(&fetch("VPNRouter/2.51", opts).await), direct);
+
+    state
+        .inv
+        .set_client_detour_via_as("test", &exit, Some(&entry))
+        .await
+        .unwrap();
+    assert!(profiles(&fetch("VPNRouter/2.51", opts).await).is_empty());
+
+    state
+        .inv
+        .set_grant_protocol_override(&uid, &exit, &pid, false)
+        .await
+        .unwrap();
+    assert!(profiles(&fetch("VPNRouter/2.51", opts).await).is_empty());
+}

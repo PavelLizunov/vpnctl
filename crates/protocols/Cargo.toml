@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 vpnctl-core = { path = "../core" }
+vpnctl-crypto = { path = "../crypto" }
 serde_json = { workspace = true }
 percent-encoding = "2"
 base64 = "0.22"

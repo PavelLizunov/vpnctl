@@ -717,3 +717,132 @@ pub(crate) async fn server_set_dnstt_config(
     ))
     .into_response()
 }
+
+pub(crate) async fn server_set_vmess_config(
+    Path(server_id): Path<String>,
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id.clone());
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(server)) => server,
+        Ok(None) => return not_found("VMess server not found"),
+        Err(error) => return internal_error(anyhow::Error::new(error)),
+    };
+    let vmess = vpnctl_core::ProtocolId("vmess".into());
+    let Some(protocol) = state.registry.protocol(&vmess) else {
+        return bad_request("VMess is not registered");
+    };
+    let domain = form_field(&body, "domain")
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let port = form_field(&body, "listen_port").unwrap_or_default();
+    let port = if port.trim().is_empty() {
+        "443"
+    } else {
+        port.trim()
+    };
+    let detour = form_field(&body, "detour_via").unwrap_or_default();
+    let detour = detour.trim();
+    if !detour.is_empty() {
+        if detour == server_id {
+            return bad_request("VMess entry must be a different server");
+        }
+        match state
+            .inv
+            .get_server(&vpnctl_core::ServerId(detour.into()))
+            .await
+        {
+            Ok(Some(entry))
+                if entry
+                    .enabled_protocols
+                    .contains(&vpnctl_core::ProtocolId("vless+reality".into())) => {}
+            Ok(_) => return bad_request("VMess entry must have VLESS Reality enabled"),
+            Err(error) => return internal_error(anyhow::Error::new(error)),
+        }
+    }
+
+    let certificate = form_field(&body, "certificate").unwrap_or_default();
+    let key = form_field(&body, "key").unwrap_or_default();
+    if certificate.trim().is_empty() != key.trim().is_empty() {
+        return bad_request("Provide both the VMess certificate chain and private key");
+    }
+    let mut values = vec![
+        ("vmess.domain", domain.as_str()),
+        ("vmess.listen_port", port),
+        ("vmess.preferred_entry", detour),
+    ];
+    if !certificate.trim().is_empty() {
+        values.extend([
+            ("vmess.certificate", certificate.trim()),
+            ("vmess.key", key.trim()),
+        ]);
+    }
+    let mut candidate = match state.inv.list_server_secrets(&sid).await {
+        Ok(secrets) => secrets,
+        Err(error) => return internal_error(anyhow::Error::new(error)),
+    };
+    let changed = values
+        .iter()
+        .any(|(key, value)| candidate.get(*key).map(String::as_str) != Some(*value));
+    candidate.extend(
+        values
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string())),
+    );
+    if let Err(error) = protocol.validate_server(&vpnctl_core::RenderCtx::new(&server, &candidate))
+    {
+        return bad_request(&error.to_string());
+    }
+    if let Err(error) = state.registry.validate_server(&server, &candidate) {
+        return bad_request(&error.to_string());
+    }
+    if !certificate.trim().is_empty() && !vmess_tls_pair_matches(certificate.trim(), key.trim()) {
+        return bad_request("The VMess PEM certificate and private key must form a valid pair");
+    }
+    if server.enabled_protocols.contains(&vmess) {
+        let reserved = match state.inv.get_reserved_ports(&sid).await {
+            Ok(ports) => ports,
+            Err(error) => return internal_error(anyhow::Error::new(error)),
+        };
+        if protocol
+            .effective_listen_ports(&candidate)
+            .iter()
+            .any(|(_, port)| reserved.contains(port))
+        {
+            return bad_request("The VMess TCP port is reserved on this server");
+        }
+    }
+    if changed
+        && let Err(error) = state
+            .inv
+            .set_server_secrets_audited(&sid, "admin", "server.vmess.set", &values)
+            .await
+    {
+        return internal_error(anyhow::Error::new(error));
+    }
+    Redirect::to(&format!(
+        "/admin/servers/{}/protocols#vmess",
+        path_segment_encode(&server_id)
+    ))
+    .into_response()
+}
+
+fn vmess_tls_pair_matches(certificate: &str, key: &str) -> bool {
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+    let Ok(chain) =
+        CertificateDer::pem_slice_iter(certificate.as_bytes()).collect::<Result<Vec<_>, _>>()
+    else {
+        return false;
+    };
+    let Ok(key) = PrivateKeyDer::from_pem_slice(key.as_bytes()) else {
+        return false;
+    };
+    let provider = rustls::crypto::ring::default_provider();
+    rustls::sign::CertifiedKey::from_der(chain, key, &provider)
+        .is_ok_and(|pair| pair.keys_match().is_ok())
+}
