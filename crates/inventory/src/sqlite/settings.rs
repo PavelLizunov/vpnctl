@@ -1,6 +1,47 @@
 use super::*;
 
 impl SqliteInventory {
+    pub async fn get_new_server_bandwidth_default(&self) -> Result<Option<(u32, String)>> {
+        sqlx::query_as("SELECT mbps, boosty_policy FROM new_server_bandwidth_default WHERE id = 1")
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn set_new_server_bandwidth_default_as(
+        &self,
+        actor: &str,
+        mbps: u32,
+        boosty_policy: &str,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let changed = sqlx::query(
+            "INSERT INTO new_server_bandwidth_default (id, mbps, boosty_policy)
+             VALUES (1, ?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET mbps = excluded.mbps, boosty_policy = excluded.boosty_policy
+             WHERE new_server_bandwidth_default.mbps <> excluded.mbps
+                OR new_server_bandwidth_default.boosty_policy <> excluded.boosty_policy",
+        )
+        .bind(mbps)
+        .bind(boosty_policy)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            != 0;
+        if changed {
+            sqlx::query(
+                "INSERT INTO audit_log (actor, action, target, payload)
+                 VALUES (?1, 'settings.server_bandwidth_default.set', 'new-servers', ?2)",
+            )
+            .bind(actor)
+            .bind(serde_json::json!({ "keys": ["mbps", "boosty_policy"] }).to_string())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(changed)
+    }
+
     /// Load persistent signing material, creating and auditing it only once.
     pub async fn get_or_create_admin_session_secret(&self) -> Result<String> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;

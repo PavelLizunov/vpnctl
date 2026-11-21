@@ -173,7 +173,12 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
     key_ssh.exec_unprivileged("true").await?;
 
     server.trusted_host_fingerprint = Some(observed_fp.clone());
-    inv.register_server(&server, "cli").await?;
+    inv.register_server_with_secrets(
+        &server,
+        "cli",
+        &[("vless.sni", vpnctl_protocols::NEW_SERVER_REALITY_SNI)],
+    )
+    .await?;
 
     inv.audit(
         "cli",

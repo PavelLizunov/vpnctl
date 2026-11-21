@@ -285,7 +285,7 @@ pub(super) async fn server_detail_render(
         .list_server_secrets(&sid)
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
-    let boosty_roster = if tab == ServerTab::Protocols
+    let (boosty_roster, onboarding_default) = if tab == ServerTab::Protocols
         && server.kernels.iter().any(|kernel| kernel.0 == "sing-box")
     {
         let result = tokio::time::timeout(
@@ -294,15 +294,21 @@ pub(super) async fn server_detail_render(
         )
         .await
         .unwrap_or(Err(crate::boosty_bandwidth::RosterIssue::Unavailable));
-        match result {
+        let roster = match result {
             Ok(roster) => Some(roster),
             Err(issue) => {
                 tracing::warn!(target: "vpnctld::boosty_bandwidth", ?issue, "could not display Boosty tiers");
                 None
             }
-        }
+        };
+        let onboarding_default = state
+            .inv
+            .get_new_server_bandwidth_default()
+            .await
+            .map_err(|error| internal_error(anyhow::Error::new(error)))?;
+        (roster, onboarding_default)
     } else {
-        None
+        (None, None)
     };
 
     let hidden_map = state
@@ -714,7 +720,7 @@ pub(super) async fn server_detail_render(
             (server_detail_vlessws_config_section(&server, &server_secrets, lang))
             (server_detail_reality_config_section(&server, &server_secrets, lang))
             (server_detail_hysteria2_obfs_section(&server, lang))
-            (server_detail_user_bandwidth_section(&server, &server_secrets, boosty_roster.as_ref(), lang))
+            (server_detail_user_bandwidth_section(&server, &server_secrets, boosty_roster.as_ref(), onboarding_default.as_ref(), lang))
             (server_detail_ss2022_mode_section(&server, &server_secrets, lang))
             (server_detail_dnstt_section(&server, &server_secrets, latest.as_ref(), lang))
             @if udp_pair_enabled { (server_detail_udp_pair_section(lang)) }

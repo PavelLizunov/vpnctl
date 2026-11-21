@@ -205,9 +205,10 @@ pub(crate) fn server_detail_user_bandwidth_section(
     server: &vpnctl_core::Server,
     secrets: &std::collections::HashMap<String, String>,
     roster: Option<&crate::boosty_bandwidth::Roster>,
+    onboarding_default: Option<&(u32, String)>,
     lang: crate::i18n::Locale,
 ) -> Markup {
-    use crate::boosty_bandwidth::{POLICY_KEY, TierPolicy};
+    use crate::boosty_bandwidth::{PENDING_KEY, POLICY_KEY, TierPolicy};
     use crate::i18n::tr;
     use vpnctl_kernels::{USER_BANDWIDTH_KEY, USER_BANDWIDTH_MAX_MBPS};
 
@@ -218,8 +219,14 @@ pub(crate) fn server_detail_user_bandwidth_section(
     let rate = secrets.get(USER_BANDWIDTH_KEY).map_or("0", String::as_str);
     let saved_policy = secrets
         .get(POLICY_KEY)
-        .and_then(|json| serde_json::from_str::<TierPolicy>(json).ok())
-        .filter(|policy| !policy.blog.is_empty());
+        .and_then(|json| TierPolicy::from_saved(json));
+    let can_set_default = saved_policy.is_some()
+        && rate
+            .parse::<u32>()
+            .is_ok_and(|mbps| (1..=USER_BANDWIDTH_MAX_MBPS).contains(&mbps));
+    let is_default = onboarding_default.is_some_and(|(mbps, policy)| {
+        rate.parse::<u32>() == Ok(*mbps) && secrets.get(POLICY_KEY) == Some(policy)
+    });
     let saved = saved_policy
         .as_ref()
         .filter(|policy| roster.is_some_and(|roster| policy.blog == roster.blog));
@@ -247,6 +254,12 @@ pub(crate) fn server_detail_user_bandwidth_section(
                 max=(USER_BANDWIDTH_MAX_MBPS) value=(rate) required;
             " "
             button.ed-abtn type="submit" { (tr(lang, "Apply uniform speed", "Применить единый лимит")) }
+        }
+        @if secrets.get(PENDING_KEY).is_some_and(|value| value == "1") {
+            p.ed-grid__mut {
+                (tr(lang, "The base limit is saved. Apply Boosty rates when a fresh roster is available.",
+                    "Базовый лимит сохранён. Примените лимиты Boosty, когда будет доступен свежий список подписчиков."))
+            }
         }
         details.ed-spoiler {
             summary { (tr(lang, "Speed by Boosty tier", "Скорость по уровням Boosty")) }
@@ -284,6 +297,18 @@ pub(crate) fn server_detail_user_bandwidth_section(
                 }
             } @else {
                 p.ed-grid__mut { (tr(lang, "Waiting for a fresh roster from the Boosty dashboard.", "Ожидается свежий список подписчиков из панели Boosty.")) }
+            }
+            @if is_default {
+                p.ed-grid__mut {
+                    (tr(lang, "These rates are the default for newly added nodes.",
+                        "Эти лимиты используются для новых узлов."))
+                }
+            } @else if can_set_default {
+                form method="post" action=(format!("/admin/servers/{sid}/user-bandwidth-default")) {
+                    button.ed-abtn type="submit" {
+                        (tr(lang, "Use saved Boosty rates for new nodes", "Использовать сохранённые лимиты Boosty для новых узлов"))
+                    }
+                }
             }
         }
     }

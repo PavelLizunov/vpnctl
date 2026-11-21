@@ -5,26 +5,26 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 545 (350 prod / 195 test)
-- **Total Rust LOC:** 200,707 (106,027 prod / 94,680 test)
-- **Database Migrations:** 76
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 155
+- **Tracked Rust Files:** 546 (350 prod / 196 test)
+- **Total Rust LOC:** 201,250 (106,283 prod / 94,967 test)
+- **Database Migrations:** 77
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 156
 
 ## Workspace Crates & Targets
 
 | Crate | Path | Version | Targets | Prod LOC (Files) | Test LOC (Files) | Total LOC |
 |---|---|---|---|---|---|---|
-| `vpnctl` | `cli` | 0.9.0 | bin, 2 tests | 6,438 (20) | 1,617 (3) | **8,055** |
+| `vpnctl` | `cli` | 0.9.0 | bin, 2 tests | 6,448 (20) | 1,617 (3) | **8,065** |
 | `vpnctl-boosty-bridge` | `crates/boosty-bridge` | 0.9.0 | lib, 2 tests | 1,494 (6) | 1,345 (2) | **2,839** |
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,431 (13) | 0 (0) | **1,431** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 318 (1) | 125 (1) | **443** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 193 (1) | 454 (2) | **647** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 60 tests | 18,942 (64) | 27,757 (66) | **46,699** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 61 tests | 19,007 (64) | 27,912 (67) | **46,919** |
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 5 tests, 1 examples | 7,342 (16) | 1,709 (7) | **9,051** |
-| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,371 (22) | 4,615 (12) | **8,986** |
+| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,373 (22) | 4,615 (12) | **8,988** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,825 (5) | 1,191 (5) | **4,016** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 30 tests | 62,673 (202) | 55,867 (97) | **118,540** |
-| **Total** | | | | **106,027 (350)** | **94,680 (195)** | **200,707** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 30 tests | 62,852 (202) | 55,999 (97) | **118,851** |
+| **Total** | | | | **106,283 (350)** | **94,967 (196)** | **201,250** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -41,7 +41,7 @@
 | `vendor/sqlx-sqlite/src/connection/explain.rs` | 1,779 | `other` | Prod |
 | `daemon/tests/spec_corp_egress.rs` | 1,531 | `daemon` | Test |
 | `daemon/tests/admin_smoke/alerts_health.rs` | 1,514 | `daemon` | Test |
-| `daemon/tests/admin_smoke/servers.rs` | 1,452 | `daemon` | Test |
+| `daemon/tests/admin_smoke/servers.rs` | 1,465 | `daemon` | Test |
 | `daemon/tests/spec_corp_policy_eligibility.rs` | 1,404 | `daemon` | Test |
 | `daemon/tests/sub_endpoint/mihomo.rs` | 1,398 | `daemon` | Test |
 | `crates/ssh/src/subprocess.rs` | 1,380 | `crates/ssh` | Prod |
@@ -56,7 +56,7 @@
 | `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,184 | `daemon` | Test |
 | `daemon/tests/spec_corp_probe_runtime.rs` | 1,166 | `daemon` | Test |
 
-## Database Migrations (76)
+## Database Migrations (77)
 
 | Version | Migration Name | File | Lines |
 |---|---|---|---|
@@ -136,8 +136,9 @@
 | `0074` | corp telephony | `crates/inventory/migrations/0074_corp_telephony.sql` | 14 |
 | `0075` | corp companies | `crates/inventory/migrations/0075_corp_companies.sql` | 97 |
 | `0076` | server security reports | `crates/inventory/migrations/0076_server_security_reports.sql` | 6 |
+| `0077` | new server bandwidth default | `crates/inventory/migrations/0077_new_server_bandwidth_default.sql` | 5 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (155)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (156)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -233,6 +234,7 @@
 | `POST` | `/admin/servers/{id}/udp-pair` | `admin::server_set_udp_pair` |
 | `GET` | `/admin/servers/{id}/update-kernels/sse` | `admin::server_update_kernels_sse` |
 | `POST` | `/admin/servers/{id}/user-bandwidth` | `admin::server_set_user_bandwidth` |
+| `POST` | `/admin/servers/{id}/user-bandwidth-default` | `admin::server_set_new_server_bandwidth_default` |
 | `POST` | `/admin/servers/{id}/vlessws-config` | `admin::server_set_vlessws_config` |
 | `POST` | `/admin/servers/{sid}/grants/{uid}` | `admin::server_grant_user` |
 | `POST` | `/admin/servers/{sid}/grants/{uid}/revoke` | `admin::server_revoke_user` |

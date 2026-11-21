@@ -330,12 +330,55 @@ pub(crate) async fn server_rotate_hysteria2_obfs(
     .into_response()
 }
 
+pub(crate) async fn server_set_new_server_bandwidth_default(
+    Path(server_id): Path<String>,
+    State(state): State<AppState>,
+) -> Response {
+    use crate::boosty_bandwidth::{POLICY_KEY, TierPolicy};
+    use vpnctl_kernels::{USER_BANDWIDTH_KEY, USER_BANDWIDTH_MAX_MBPS};
+
+    let sid = vpnctl_core::ServerId(server_id.clone());
+    match state.inv.get_server(&sid).await {
+        Ok(Some(server)) if server.kernels.iter().any(|kernel| kernel.0 == "sing-box") => {}
+        Ok(Some(_)) => return bad_request("per-user speed requires the sing-box kernel"),
+        Ok(None) => return not_found(&format!("no such server '{server_id}'")),
+        Err(error) => return internal_error(anyhow::Error::new(error)),
+    }
+    let secrets = match state.inv.list_server_secrets(&sid).await {
+        Ok(secrets) => secrets,
+        Err(error) => return internal_error(anyhow::Error::new(error)),
+    };
+    let mbps = secrets
+        .get(USER_BANDWIDTH_KEY)
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| (1..=USER_BANDWIDTH_MAX_MBPS).contains(value));
+    let Some((mbps, policy)) = mbps.zip(
+        secrets
+            .get(POLICY_KEY)
+            .filter(|json| TierPolicy::from_saved(json).is_some()),
+    ) else {
+        return bad_request("Apply Boosty rates on this node before making them the default");
+    };
+    if let Err(error) = state
+        .inv
+        .set_new_server_bandwidth_default_as("admin", mbps, policy)
+        .await
+    {
+        return internal_error(anyhow::Error::new(error));
+    }
+    Redirect::to(&format!(
+        "/admin/servers/{}/protocols#user-bandwidth",
+        path_segment_encode(&server_id)
+    ))
+    .into_response()
+}
+
 pub(crate) async fn server_set_user_bandwidth(
     Path(server_id): Path<String>,
     State(state): State<AppState>,
     body: String,
 ) -> Response {
-    use crate::boosty_bandwidth::{POLICY_KEY, Roster, TierPolicy};
+    use crate::boosty_bandwidth::{PENDING_KEY, POLICY_KEY, Roster, TierPolicy};
     use vpnctl_kernels::{
         USER_BANDWIDTH_KEY, USER_BANDWIDTH_MAX_MBPS, USER_BANDWIDTH_OVERRIDES_KEY,
     };
@@ -396,17 +439,11 @@ pub(crate) async fn server_set_user_bandwidth(
                 "The active Boosty account changed. Reload the Protocols tab and verify the levels.",
             );
         }
-        let links = match state.inv.list_boosty_links().await {
-            Ok(links) => links,
+        policy.blog.clone_from(&roster.blog);
+        overrides = match roster.inventory_overrides(&state.inv, &policy, rate).await {
+            Ok(overrides) => overrides,
             Err(error) => return internal_error(anyhow::Error::new(error)),
         };
-        let users = match state.inv.list_users().await {
-            Ok(users) => users,
-            Err(error) => return internal_error(anyhow::Error::new(error)),
-        };
-        let account_ids = users.iter().map(|user| user.id.0.as_str()).collect();
-        policy.blog = roster.blog.clone();
-        overrides = roster.overrides(&policy, rate, &links, &account_ids);
     }
     let value = rate.to_string();
     let policy = match serde_json::to_string(&policy) {
@@ -417,11 +454,16 @@ pub(crate) async fn server_set_user_bandwidth(
         Ok(overrides) => overrides,
         Err(error) => return internal_error(anyhow::Error::new(error)),
     };
-    let values = [
+    let mut values = vec![
         (USER_BANDWIDTH_KEY, value.as_str()),
         (POLICY_KEY, policy.as_str()),
         (USER_BANDWIDTH_OVERRIDES_KEY, overrides.as_str()),
     ];
+    match state.inv.get_server_secret(&sid, PENDING_KEY).await {
+        Ok(Some(value)) if value == "1" => values.push((PENDING_KEY, "")),
+        Ok(_) => {}
+        Err(error) => return internal_error(anyhow::Error::new(error)),
+    }
     let changed = match state
         .inv
         .set_server_secrets_audited(&sid, "admin", "server.user_bandwidth.set", &values)
