@@ -312,21 +312,23 @@ async fn server_revoke_all_users_requires_confirm_match() {
         .unwrap();
     let app = router(st.clone());
 
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/admin/servers/srv/grants/_revoke-all")
-                .header("Origin", "http://127.0.0.1")
-                .header("Host", "127.0.0.1")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("confirm=WRONG"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    for invalid in ["confirm=", "confirm=WRONG"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/servers/srv/grants/_revoke-all")
+                    .header("Origin", "http://127.0.0.1")
+                    .header("Host", "127.0.0.1")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(invalid))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
     let still_granted = st
         .inv
         .users_for_server(&ServerId("srv".into()))
@@ -366,12 +368,13 @@ async fn server_revoke_all_users_requires_confirm_match() {
 }
 
 #[tokio::test]
-async fn server_detail_revoke_all_uses_data_confirm_prompt_not_inline_js() {
+async fn server_detail_revoke_all_renders_a_required_confirmation_input() {
     let dir = TempDir::new().unwrap();
     let st = state(&dir).await;
+    let sid = ServerId("srv.example".into());
     st.inv
         .add_server(&Server {
-            id: ServerId("srv".into()),
+            id: sid.clone(),
             address: "203.0.113.22".into(),
             ssh_port: 22,
             ssh_user: "root".into(),
@@ -397,15 +400,12 @@ async fn server_detail_revoke_all_uses_data_confirm_prompt_not_inline_js() {
         })
         .await
         .unwrap();
-    st.inv
-        .grant(&UserId("u".into()), &ServerId("srv".into()))
-        .await
-        .unwrap();
+    st.inv.grant(&UserId("u".into()), &sid).await.unwrap();
     let app = router(st);
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin/servers/srv/grants")
+                .uri("/admin/servers/srv.example/grants")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -414,25 +414,22 @@ async fn server_detail_revoke_all_uses_data_confirm_prompt_not_inline_js() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let html = std::str::from_utf8(&body).unwrap();
+    let (_, form) = html
+        .split_once(r#"<form method="post" action="/admin/servers/srv.example/grants/_revoke-all""#)
+        .expect("revoke-all form must render with a granted user");
+    let (form, _) = form.split_once("</form>").unwrap();
+    assert!(form.contains(
+        r#"<label for="bulk-revoke-confirm">Type the server ID <code>srv.example</code>"#
+    ));
     assert!(
-        html.contains(r#"action="/admin/servers/srv/grants/_revoke-all""#),
-        "revoke-all form must render (one granted user seeded)"
+        form.contains(r#"<input id="bulk-revoke-confirm" type="text" name="confirm" required"#),
+        "revoke-all must submit the typed server ID through a native form input"
     );
-    assert!(
-        html.contains("data-confirm-prompt="),
-        "revoke-all must carry data-confirm-prompt for admin.js"
-    );
-    assert!(
-        html.contains(r#"data-confirm-match="srv""#),
-        "revoke-all must require typing the server id (data-confirm-match)"
-    );
-    assert!(
-        html.contains(r#"name="confirm""#),
-        "revoke-all must keep the hidden confirm field"
-    );
-    assert!(
-        !html.contains("onsubmit="),
-        "revoke-all must not use an inline onsubmit handler"
+    let (_, pattern) = form.split_once(r#"pattern=""#).unwrap();
+    let (pattern, _) = pattern.split_once('"').unwrap();
+    assert_eq!(
+        pattern, r"srv\.example",
+        "the dot in the ID must be literal"
     );
 }
 
