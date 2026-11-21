@@ -295,7 +295,7 @@ mod tests {
         let protocol = ProtocolId("dnstt".into());
         let server = state.inv.get_server(&sid).await.unwrap().unwrap();
         let registered = state.registry.protocol(&protocol).unwrap();
-        run_check(
+        let _event = run_check(
             &state,
             &server,
             &protocol,
