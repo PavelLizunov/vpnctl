@@ -88,7 +88,8 @@
           if (iconUse) iconUse.setAttribute("href", "/admin/assets/icons.svg#check");
           var reloadSelf = btn.getAttribute("data-reload-self");
           setTimeout(function () {
-            window.location = reloadSelf ? window.location.href : redirect || window.location.href;
+            if (reloadSelf || !redirect) window.location.reload();
+            else window.location = redirect;
           }, 1200);
         });
 

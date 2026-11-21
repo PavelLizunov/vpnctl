@@ -32,6 +32,11 @@ HTTPS admin at `https://vpnctld.tail9fd337.ts.net/admin/boosty`. Set
 standalone URL on port 9443. vpnctl reads the service on loopback port 3001.
 Keep the credential-stripping ingress on port 9443 for standalone access.
 
+For the [manual DNSTT check](dnstt-on-demand-assurance.md), install
+`scripts/dnstt-assurance-on-demand.py` as a root-owned executable and point
+`VPNCTLD_DNSTT_CHECK_RUNNER` to it. The adapter uses the separately provisioned
+one-shot probe and its private template.
+
 Build static musl binaries with `just build-release` on a
 [HomeLab worker](agent-workflow.md#remote-builds-and-tests) or in GitHub Actions.
 The CI job installs `musl-tools`, `cmake`, and the Rust

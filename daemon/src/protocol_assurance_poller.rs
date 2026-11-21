@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,6 +19,8 @@ use vpnctl_inventory::{AssuranceStage, AssuranceState, ProtocolAssuranceSample, 
 const DEFAULT_INTERVAL_SECS: u64 = 10 * 60;
 const TCP_TIMEOUT: Duration = Duration::from_secs(3);
 const RUNNER_TIMEOUT: Duration = Duration::from_secs(30);
+const DNSTT_CHECK_TIMEOUT: Duration = Duration::from_secs(42);
+const DNSTT_CHECK_CLIENT_KIND: &str = "dnstt-on-demand";
 const NODE_HEALTH_MAX_AGE: chrono::Duration = chrono::Duration::minutes(20);
 const CLIENT_KIND: &str = "vpnctl-builtin";
 const ALERT_FAILURE_TICKS: u32 = 3;
@@ -69,6 +72,7 @@ pub(crate) fn status_max_age() -> Duration {
 pub fn spawn_protocol_assurance_poller(
     inv: SqliteInventory,
     registry: Arc<Registry>,
+    dnstt_on_demand: bool,
 ) -> tokio::task::JoinHandle<()> {
     let seconds = assurance_interval_secs();
     tokio::spawn(async move {
@@ -107,6 +111,9 @@ pub fn spawn_protocol_assurance_poller(
                         return;
                     };
                     for protocol_id in &server.enabled_protocols {
+                        if !scheduled_protocol(&protocol_id.0, dnstt_on_demand) {
+                            continue;
+                        }
                         let Some(protocol) = registry.protocol(protocol_id) else {
                             continue;
                         };
@@ -237,31 +244,7 @@ async fn sample_protocol(
         }
     };
     match runner_attempt {
-        RunnerAttempt::Result(result) => {
-            let failure_code = result
-                .failure_code
-                .as_deref()
-                .filter(|value| {
-                    !value.is_empty()
-                        && value.len() <= 64
-                        && value
-                            .chars()
-                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-                })
-                .or(result
-                    .failure_code
-                    .as_ref()
-                    .map(|_| "runner_invalid_failure_code"));
-            return Ok(sample(
-                server,
-                protocol,
-                &result.client_kind,
-                result.stage,
-                result.state,
-                result.latency_ms,
-                failure_code,
-            ));
-        }
+        RunnerAttempt::Result(result) => return Ok(runner_sample(server, protocol, &result)),
         RunnerAttempt::Failed(code) => {
             return Ok(sample(
                 server,
@@ -345,6 +328,128 @@ async fn sample_protocol(
     ))
 }
 
+fn scheduled_protocol(id: &str, dnstt_on_demand: bool) -> bool {
+    id != "dnstt" || !dnstt_on_demand
+}
+
+fn runner_sample(
+    server: &Server,
+    protocol: &dyn Protocol,
+    result: &RunnerResult,
+) -> ProtocolAssuranceSample {
+    let failure_code = result.failure_code.as_deref().map(|value| {
+        if !value.is_empty()
+            && value.len() <= 64
+            && value
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        {
+            value
+        } else {
+            "runner_invalid_failure_code"
+        }
+    });
+    sample(
+        server,
+        protocol,
+        &result.client_kind,
+        result.stage,
+        result.state,
+        result.latency_ms,
+        failure_code,
+    )
+}
+
+pub(crate) async fn sample_dnstt_on_demand(
+    server: &Server,
+    protocol: &dyn Protocol,
+    runner: PathBuf,
+) -> anyhow::Result<ProtocolAssuranceSample> {
+    let request = RunnerRequest {
+        server: &server.address,
+        protocol: "dnstt",
+        ports: protocol.listen_ports(),
+    };
+    let attempt = invoke_runner(runner, request, DNSTT_CHECK_TIMEOUT).await?;
+    Ok(dnstt_runner_sample(server, protocol, attempt))
+}
+
+fn dnstt_runner_sample(
+    server: &Server,
+    protocol: &dyn Protocol,
+    attempt: RunnerAttempt,
+) -> ProtocolAssuranceSample {
+    let reason = match attempt {
+        RunnerAttempt::Result(mut result)
+            if matches!(
+                (result.stage, result.state),
+                (AssuranceStage::Transfer, AssuranceState::Verified)
+                    | (
+                        AssuranceStage::Transfer | AssuranceStage::Handshake,
+                        AssuranceState::Blocked | AssuranceState::Degraded
+                    )
+                    | (AssuranceStage::ClientImport, AssuranceState::Unknown)
+            ) =>
+        {
+            result.client_kind = DNSTT_CHECK_CLIENT_KIND.into();
+            return runner_sample(server, protocol, &result);
+        }
+        RunnerAttempt::Result(_) => "runner_invalid_result",
+        RunnerAttempt::Failed(code) => code,
+        RunnerAttempt::NotConfigured => "runner_unavailable",
+    };
+    sample(
+        server,
+        protocol,
+        DNSTT_CHECK_CLIENT_KIND,
+        AssuranceStage::ClientImport,
+        AssuranceState::Unknown,
+        None,
+        Some(reason),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn sample_dnstt_fixture(
+    server: &Server,
+    protocol: &dyn Protocol,
+) -> anyhow::Result<ProtocolAssuranceSample> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir()?;
+    let runner = dir.path().join("runner");
+    let adapter = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../scripts/dnstt-assurance-on-demand.py");
+    let adapter = serde_json::to_string(&adapter)?;
+    std::fs::write(
+        &runner,
+        format!(
+            r#"#!/usr/bin/env python3
+import json
+import runpy
+import sys
+request = json.load(sys.stdin)
+assert request["protocol"] == "dnstt"
+interpret = runpy.run_path({adapter})["interpret"]
+print(json.dumps(interpret(0, b'{{"result":"verified","protocol":"dnstt","stage":"transfer","https_requests":1,"elapsed_ms":1234}}')))
+"#,
+        ),
+    )?;
+    std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o700))?;
+    let request = serde_json::to_vec(&RunnerRequest {
+        server: &server.address,
+        protocol: "dnstt",
+        ports: protocol.listen_ports(),
+    })?;
+    let result = run_runner_process_with_timeout(&runner, &request, Duration::from_secs(5))?
+        .ok_or_else(|| anyhow::anyhow!("DNSTT fixture produced no result"))?;
+    Ok(dnstt_runner_sample(
+        server,
+        protocol,
+        RunnerAttempt::Result(result),
+    ))
+}
+
 fn node_health_is_fresh(ts: chrono::DateTime<Utc>, now: chrono::DateTime<Utc>) -> bool {
     let age = now.signed_duration_since(ts);
     age >= chrono::Duration::zero() && age <= NODE_HEALTH_MAX_AGE
@@ -379,44 +484,67 @@ async fn run_external_runner(
     let Ok(runner) = std::env::var("VPNCTLD_PROTOCOL_ASSURANCE_RUNNER") else {
         return Ok(RunnerAttempt::NotConfigured);
     };
-    let runner = std::path::PathBuf::from(runner.trim());
+    let request = RunnerRequest {
+        server: &server.address,
+        protocol: &protocol.id().0,
+        ports,
+    };
+    invoke_runner(PathBuf::from(runner.trim()), request, RUNNER_TIMEOUT).await
+}
+
+pub(crate) fn configured_dnstt_check_runner() -> Option<PathBuf> {
+    let value = std::env::var_os("VPNCTLD_DNSTT_CHECK_RUNNER").filter(|value| !value.is_empty())?;
+    match trusted_runner(PathBuf::from(value)) {
+        Ok(path) => Some(path),
+        Err(code) => {
+            tracing::warn!(target: "vpnctld::assurance", code, "DNSTT on-demand runner is unavailable");
+            None
+        }
+    }
+}
+
+fn trusted_runner(runner: PathBuf) -> Result<PathBuf, &'static str> {
     if !runner.is_absolute() {
         tracing::warn!(
             target = "vpnctld::assurance",
             "runner path must be absolute"
         );
-        return Ok(RunnerAttempt::Failed("runner_invalid_path"));
+        return Err("runner_invalid_path");
     }
     if std::fs::symlink_metadata(&runner).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         tracing::warn!(
             target = "vpnctld::assurance",
             "runner path must not be a symlink"
         );
-        return Ok(RunnerAttempt::Failed("runner_unsafe_path"));
+        return Err("runner_unsafe_path");
     }
     let runner = match std::fs::canonicalize(&runner) {
         Ok(path) => path,
         Err(error) => {
             tracing::warn!(target = "vpnctld::assurance", %error, "runner canonicalization failed");
-            return Ok(RunnerAttempt::Failed("runner_unavailable"));
+            return Err("runner_unavailable");
         }
     };
     let metadata = match std::fs::metadata(&runner) {
         Ok(metadata) => metadata,
         Err(error) => {
             tracing::warn!(target = "vpnctld::assurance", %error, "runner metadata unavailable");
-            return Ok(RunnerAttempt::Failed("runner_unavailable"));
+            return Err("runner_unavailable");
         }
     };
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 || metadata.mode() & 0o111 == 0 {
+        if !metadata.is_file()
+            || metadata.uid() != 0
+            || metadata.mode() & 0o022 != 0
+            || metadata.mode() & 0o111 == 0
+        {
             tracing::warn!(
                 target = "vpnctld::assurance",
                 "runner must be root-owned, executable and not group/world writable"
             );
-            return Ok(RunnerAttempt::Failed("runner_unsafe_permissions"));
+            return Err("runner_unsafe_permissions");
         }
         for parent in runner
             .ancestors()
@@ -430,15 +558,23 @@ async fn run_external_runner(
                     target = "vpnctld::assurance",
                     "runner parent directory is not trusted"
                 );
-                return Ok(RunnerAttempt::Failed("runner_unsafe_path"));
+                return Err("runner_unsafe_path");
             }
         }
     }
-    let request = serde_json::to_vec(&RunnerRequest {
-        server: &server.address,
-        protocol: &protocol.id().0,
-        ports,
-    })?;
+    Ok(runner)
+}
+
+async fn invoke_runner(
+    runner: PathBuf,
+    request: RunnerRequest<'_>,
+    runner_timeout: Duration,
+) -> anyhow::Result<RunnerAttempt> {
+    let runner = match trusted_runner(runner) {
+        Ok(runner) => runner,
+        Err(code) => return Ok(RunnerAttempt::Failed(code)),
+    };
+    let request = serde_json::to_vec(&request)?;
     if request.len() > 64 * 1024 {
         tracing::warn!(
             target = "vpnctld::assurance",
@@ -446,7 +582,11 @@ async fn run_external_runner(
         );
         return Ok(RunnerAttempt::Failed("runner_request_too_large"));
     }
-    match tokio::task::spawn_blocking(move || run_runner_process(&runner, &request)).await {
+    match tokio::task::spawn_blocking(move || {
+        run_runner_process_with_timeout(&runner, &request, runner_timeout)
+    })
+    .await
+    {
         Ok(Ok(Some(result))) => Ok(RunnerAttempt::Result(result)),
         Ok(Ok(None)) => Ok(RunnerAttempt::Failed("runner_invalid_result")),
         Ok(Err(error)) => {
@@ -458,13 +598,6 @@ async fn run_external_runner(
             Ok(RunnerAttempt::Failed("runner_task_failed"))
         }
     }
-}
-
-fn run_runner_process(
-    runner: &std::path::Path,
-    request: &[u8],
-) -> anyhow::Result<Option<RunnerResult>> {
-    run_runner_process_with_timeout(runner, request, RUNNER_TIMEOUT)
 }
 
 fn run_runner_process_with_timeout(
@@ -774,6 +907,14 @@ mod tests {
         permissions.set_mode(0o700);
         std::fs::set_permissions(&path, permissions).unwrap();
         (dir, path)
+    }
+
+    #[test]
+    fn enabling_on_demand_assurance_skips_only_scheduled_dnstt() {
+        assert!(scheduled_protocol("dnstt", false));
+        assert!(!scheduled_protocol("dnstt", true));
+        assert!(scheduled_protocol("hysteria2", true));
+        assert!(scheduled_protocol("vless+reality", true));
     }
 
     #[test]

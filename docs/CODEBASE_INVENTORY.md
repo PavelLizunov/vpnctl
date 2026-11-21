@@ -5,10 +5,10 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 544 (349 prod / 195 test)
-- **Total Rust LOC:** 200,213 (105,530 prod / 94,683 test)
+- **Tracked Rust Files:** 545 (350 prod / 195 test)
+- **Total Rust LOC:** 200,707 (106,024 prod / 94,683 test)
 - **Database Migrations:** 76
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 154
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 155
 
 ## Workspace Crates & Targets
 
@@ -23,8 +23,8 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 5 tests, 1 examples | 7,342 (16) | 1,709 (7) | **9,051** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,371 (22) | 4,615 (12) | **8,986** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,825 (5) | 1,191 (5) | **4,016** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 30 tests | 62,176 (201) | 55,870 (97) | **118,046** |
-| **Total** | | | | **105,530 (349)** | **94,683 (195)** | **200,213** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 30 tests | 62,670 (202) | 55,870 (97) | **118,540** |
+| **Total** | | | | **106,024 (350)** | **94,683 (195)** | **200,707** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -50,11 +50,11 @@
 | `daemon/src/handlers/auth.rs` | 1,288 | `daemon` | Prod |
 | `crates/boosty-bridge/tests/sync_integration.rs` | 1,285 | `crates/boosty-bridge` | Test |
 | `daemon/src/handlers/admin/boosty.rs` | 1,283 | `daemon` | Prod |
+| `daemon/src/protocol_assurance_poller.rs` | 1,253 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/dashboard.rs` | 1,217 | `daemon` | Test |
 | `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,200 | `daemon` | Test |
 | `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,184 | `daemon` | Test |
 | `daemon/tests/spec_corp_probe_runtime.rs` | 1,166 | `daemon` | Test |
-| `daemon/src/handlers/admin/legacy/server_detail/render.rs` | 1,118 | `daemon` | Prod |
 
 ## Database Migrations (76)
 
@@ -137,7 +137,7 @@
 | `0075` | corp companies | `crates/inventory/migrations/0075_corp_companies.sql` | 97 |
 | `0076` | server security reports | `crates/inventory/migrations/0076_server_security_reports.sql` | 6 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (154)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (155)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -204,6 +204,7 @@
 | `POST` | `/admin/servers/{id}/deploy` | `admin::server_deploy` |
 | `GET` | `/admin/servers/{id}/deploy/sse` | `admin::server_deploy_sse` |
 | `POST` | `/admin/servers/{id}/display-name` | `admin::server_set_display_name` |
+| `GET` | `/admin/servers/{id}/dnstt-check/sse` | `admin::dnstt_check` |
 | `POST` | `/admin/servers/{id}/dnstt-config` | `admin::server_set_dnstt_config` |
 | `GET` | `/admin/servers/{id}/grants` | `admin::server_detail_grants_tab` |
 | `POST` | `/admin/servers/{id}/grants` | `admin::server_grant_user_form` |

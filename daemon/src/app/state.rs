@@ -34,6 +34,7 @@ pub struct AppState {
     pub(crate) cheburcheck: Arc<crate::handlers::admin::cheburcheck_checks::ExternalChecks>,
     pub(crate) boosty_roster_url: Arc<str>,
     pub(crate) boosty_dashboard_url: Option<reqwest::Url>,
+    pub(crate) dnstt_check_runner: Option<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -78,6 +79,7 @@ fn boosty_dashboard_url(value: &str) -> anyhow::Result<reqwest::Url> {
 }
 
 pub async fn build(config: DaemonConfig) -> anyhow::Result<(Router, tokio::task::JoinHandle<()>)> {
+    let dnstt_check_runner = crate::protocol_assurance_poller::configured_dnstt_check_runner();
     let boosty_dashboard_url = std::env::var("VPNCTLD_BOOSTY_DASHBOARD_URL")
         .ok()
         .filter(|value| !value.is_empty())
@@ -134,6 +136,7 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<(Router, tokio::task:
         crate::protocol_assurance_poller::spawn_protocol_assurance_poller(
             inv.clone(),
             Arc::clone(&registry),
+            dnstt_check_runner.is_some(),
         ),
     );
 
@@ -215,6 +218,7 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<(Router, tokio::task:
         cheburcheck: Arc::default(),
         boosty_roster_url: Arc::from(crate::boosty_bandwidth::ROSTER_URL),
         boosty_dashboard_url,
+        dnstt_check_runner,
     };
     drop(crate::corp_egress::spawn_refresh(state.clone()));
     Ok((router(state), writer_handle))
@@ -249,6 +253,7 @@ pub fn make_app_state_with_rate_limiter(
             cheburcheck: Arc::default(),
             boosty_roster_url: Arc::from("http://127.0.0.1:0/api/v1/roster"),
             boosty_dashboard_url: None,
+            dnstt_check_runner: None,
         },
         handle,
     )
