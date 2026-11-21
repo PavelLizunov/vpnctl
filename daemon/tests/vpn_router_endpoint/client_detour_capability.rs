@@ -584,7 +584,14 @@ async fn vmess_capability_uses_existing_subscription_and_visible_vless_hop() {
 
     state
         .inv
-        .set_grant_protocol_override(&uid, &exit, &pid, false)
+        .set_client_detour_via_as("test", &exit, None)
+        .await
+        .unwrap();
+    assert_eq!(profiles(&fetch("VPNRouter/2.51", opts).await), direct);
+
+    state
+        .inv
+        .set_grant_protocol_override(&uid, &exit, &pid, true)
         .await
         .unwrap();
     assert!(profiles(&fetch("VPNRouter/2.51", opts).await).is_empty());

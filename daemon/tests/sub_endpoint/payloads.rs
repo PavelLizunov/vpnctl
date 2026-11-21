@@ -696,7 +696,7 @@ async fn stock_vmess_subscription_relabels_duplicate_tags_and_honors_visibility(
     assert_eq!(visible.len(), 1);
     assert_eq!(visible[0]["server"], "vmess-b.example.com");
 
-    inv.set_grant_protocol_override(&uid, &ServerId("vmess-b".into()), &protocol, false)
+    inv.set_grant_protocol_override(&uid, &ServerId("vmess-b".into()), &protocol, true)
         .await
         .unwrap();
     assert!(fetch().await.is_empty());
