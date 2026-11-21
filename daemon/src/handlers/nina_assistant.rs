@@ -137,13 +137,13 @@ impl Gateway {
 
     fn request(&self, report: &Report) -> Result<reqwest::RequestBuilder> {
         let report = serde_json::to_string(report).map_err(|_| ApiError::InvalidReport)?;
-        Ok(self.chat_request(PROMPT, report, "NINA-Assistant/1.0"))
+        Ok(self.chat_request(PROMPT, &report, "NINA-Assistant/1.0"))
     }
 
     pub(super) fn chat_request(
         &self,
         prompt: &str,
-        report: String,
+        report: &str,
         user_agent: &str,
     ) -> reqwest::RequestBuilder {
         let mut body = json!({

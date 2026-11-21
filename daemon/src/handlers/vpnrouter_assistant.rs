@@ -103,7 +103,7 @@ async fn plan(
     limit_account(&state, b"vpnrouter:assistant:user", &user_id)?;
 
     let report = serde_json::to_string(&input).map_err(|_| ApiError::InvalidReport)?;
-    let request = gateway.chat_request(PROMPT, report, "VPNRouter-Assistant/1.0");
+    let request = gateway.chat_request(PROMPT, &report, "VPNRouter-Assistant/1.0");
     let bytes = gateway.complete(request).await?;
     let payload: Value = serde_json::from_slice(&bytes).map_err(|_| ApiError::Gateway)?;
     let content = gateway.content(&payload, &credential)?;

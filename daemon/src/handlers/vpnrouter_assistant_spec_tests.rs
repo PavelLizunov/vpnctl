@@ -114,7 +114,7 @@ fn plan_body(locale: &str, goal: &str, target_available: bool) -> Value {
     })
 }
 
-fn completion(inner: Value) -> Value {
+fn completion(inner: &Value) -> Value {
     json!({"choices": [{"message": {"content": inner.to_string()}}]})
 }
 
@@ -182,7 +182,7 @@ fn assert_upstream_request(headers: &HeaderMap, payload: &Value, expected: &Valu
 }
 
 async fn assert_valid_result(inner: Value, target_available: bool, locale: &str, expected: Value) {
-    let (upstream, gateway) = Upstream::start(StatusCode::OK, completion(inner)).await;
+    let (upstream, gateway) = Upstream::start(StatusCode::OK, completion(&inner)).await;
     let fixture = Fixture::new(Some(gateway)).await;
     let user = fixture.user(0xcd, false).await;
     let [(identity, credential), _] = credentials(&user);
@@ -225,7 +225,7 @@ async fn assert_bad_model(upstream_body: Value, target_available: bool) {
 async fn valid_plan_reaches_the_model_for_both_identities() {
     let (upstream, gateway) = Upstream::start(
         StatusCode::OK,
-        completion(json!({"operation": "route_only_app"})),
+        completion(&json!({"operation": "route_only_app"})),
     )
     .await;
     let fixture = Fixture::new(Some(gateway)).await;
@@ -257,7 +257,7 @@ async fn valid_plan_reaches_the_model_for_both_identities() {
 async fn disabled_accounts_are_forbidden_for_both_identities() {
     let (upstream, gateway) = Upstream::start(
         StatusCode::OK,
-        completion(json!({"operation": "route_only_app"})),
+        completion(&json!({"operation": "route_only_app"})),
     )
     .await;
     let fixture = Fixture::new(Some(gateway)).await;
@@ -278,7 +278,7 @@ async fn disabled_accounts_are_forbidden_for_both_identities() {
 async fn both_identity_forms_share_the_six_request_account_quota() {
     let (upstream, gateway) = Upstream::start(
         StatusCode::OK,
-        completion(json!({"operation": "route_only_app"})),
+        completion(&json!({"operation": "route_only_app"})),
     )
     .await;
     let fixture = Fixture::new(Some(gateway)).await;
@@ -308,7 +308,7 @@ async fn both_identity_forms_share_the_six_request_account_quota() {
 async fn body_limit_is_exactly_2048_bytes() {
     let (upstream, gateway) = Upstream::start(
         StatusCode::OK,
-        completion(json!({"operation": "route_only_app"})),
+        completion(&json!({"operation": "route_only_app"})),
     )
     .await;
     let fixture = Fixture::new(Some(gateway)).await;
@@ -337,7 +337,7 @@ async fn body_limit_is_exactly_2048_bytes() {
 async fn invalid_plan_requests_are_rejected_before_the_model() {
     let (upstream, gateway) = Upstream::start(
         StatusCode::OK,
-        completion(json!({"operation": "route_only_app"})),
+        completion(&json!({"operation": "route_only_app"})),
     )
     .await;
     let fixture = Fixture::new(Some(gateway)).await;
@@ -393,7 +393,7 @@ async fn invalid_plan_requests_are_rejected_before_the_model() {
 async fn goal_bounds_use_trimmed_utf8_bytes() {
     let (upstream, gateway) = Upstream::start(
         StatusCode::OK,
-        completion(json!({"operation": "route_only_app"})),
+        completion(&json!({"operation": "route_only_app"})),
     )
     .await;
     let fixture = Fixture::new(Some(gateway)).await;
@@ -436,7 +436,7 @@ async fn goal_bounds_use_trimmed_utf8_bytes() {
 async fn goal_cannot_echo_the_caller_credential() {
     let (upstream, gateway) = Upstream::start(
         StatusCode::OK,
-        completion(json!({"operation": "route_only_app"})),
+        completion(&json!({"operation": "route_only_app"})),
     )
     .await;
     let fixture = Fixture::new(Some(gateway)).await;
@@ -476,21 +476,21 @@ async fn valid_clarifications_return_the_typed_result() {
 
 #[tokio::test]
 async fn invalid_model_results_are_rejected() {
-    assert_bad_model(completion(json!({"operation": "route_only_app"})), false).await;
+    assert_bad_model(completion(&json!({"operation": "route_only_app"})), false).await;
     assert_bad_model(
-        completion(json!({"operation": "route_only_app", "extra": "synthetic"})),
+        completion(&json!({"operation": "route_only_app", "extra": "synthetic"})),
         true,
     )
     .await;
-    assert_bad_model(completion(json!({"operation": "apply_everything"})), true).await;
-    assert_bad_model(completion(json!({"operation": "clarify"})), true).await;
+    assert_bad_model(completion(&json!({"operation": "apply_everything"})), true).await;
+    assert_bad_model(completion(&json!({"operation": "clarify"})), true).await;
     assert_bad_model(
-        completion(json!({"operation": "clarify", "reason": "unsupported_goal", "extra": true})),
+        completion(&json!({"operation": "clarify", "reason": "unsupported_goal", "extra": true})),
         true,
     )
     .await;
     assert_bad_model(
-        completion(json!({"operation": "clarify", "reason": "not_a_reason"})),
+        completion(&json!({"operation": "clarify", "reason": "not_a_reason"})),
         true,
     )
     .await;
