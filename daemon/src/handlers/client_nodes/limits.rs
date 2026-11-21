@@ -33,7 +33,10 @@ impl PollLimits {
         capacity: u32,
     ) -> Result<(), u64> {
         let now = Instant::now();
-        let anonymous = matches!(namespace, b"nodes:ip" | b"nina:ip");
+        let anonymous = matches!(
+            namespace,
+            b"nodes:ip" | b"nina:ip" | b"vpnrouter:assistant:ip"
+        );
         let (buckets, max_buckets) = if anonymous {
             (&mut self.anonymous_ips, MAX_IP_BUCKETS)
         } else {
@@ -86,24 +89,30 @@ impl PollLimits {
     }
 }
 
+fn pool(namespace: &[u8]) -> &'static OnceLock<Mutex<PollLimits>> {
+    static NODE_LIMITS: OnceLock<Mutex<PollLimits>> = OnceLock::new();
+    static NINA_LIMITS: OnceLock<Mutex<PollLimits>> = OnceLock::new();
+    static VPNROUTER_LIMITS: OnceLock<Mutex<PollLimits>> = OnceLock::new();
+    if namespace.starts_with(b"nina:") {
+        &NINA_LIMITS
+    } else if namespace.starts_with(b"vpnrouter:assistant:") {
+        &VPNROUTER_LIMITS
+    } else {
+        &NODE_LIMITS
+    }
+}
+
 pub(in crate::handlers) fn acquire(
     owner: &Arc<RateLimiter>,
     namespace: &[u8],
     identity: &str,
     capacity: u32,
 ) -> Result<(), u64> {
-    static NODE_LIMITS: OnceLock<Mutex<PollLimits>> = OnceLock::new();
-    static ASSISTANT_LIMITS: OnceLock<Mutex<PollLimits>> = OnceLock::new();
-    let limits = if namespace.starts_with(b"nina:") {
-        &ASSISTANT_LIMITS
-    } else {
-        &NODE_LIMITS
-    };
     let mut digest = Sha256::new();
     digest.update(namespace);
     digest.update([0]);
     digest.update(identity.as_bytes());
-    limits
+    pool(namespace)
         .get_or_init(|| Mutex::new(PollLimits::default()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -114,6 +123,23 @@ pub(in crate::handlers) fn acquire(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vpnrouter_assistant_has_isolated_ip_and_account_capacity() {
+        let ip = b"vpnrouter:assistant:ip";
+        let user = b"vpnrouter:assistant:user";
+        assert!(std::ptr::eq(pool(ip), pool(user)));
+        assert!(!std::ptr::eq(pool(ip), pool(b"nina:ip")));
+        assert!(!std::ptr::eq(pool(user), pool(b"nodes:device")));
+
+        let owner = Arc::new(RateLimiter::default());
+        let mut limits = PollLimits::default();
+        assert!(limits.acquire(&owner, ip, [1; 32], 120).is_ok());
+        assert_eq!(limits.anonymous_ips.len(), 1);
+        assert!(limits.credentials.is_empty());
+        assert!(limits.acquire(&owner, user, [2; 32], 6).is_ok());
+        assert_eq!(limits.credentials.len(), 1);
+    }
 
     #[test]
     fn polling_is_bounded_and_dead_app_buckets_are_reclaimed() {
