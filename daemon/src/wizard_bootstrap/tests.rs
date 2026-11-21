@@ -207,7 +207,10 @@ async fn bootstrap_mints_every_secret_each_enabled_protocol_needs_to_render() {
         for spec in proto.server_secret_specs() {
             use vpnctl_core::ServerSecretSpec as S;
             let keys: Vec<&'static str> = match spec {
-                S::Password { key, .. } | S::Base64Key { key, .. } | S::ShortId { key } => {
+                S::Required { key }
+                | S::Password { key, .. }
+                | S::Base64Key { key, .. }
+                | S::ShortId { key } => {
                     vec![key]
                 }
                 S::X25519Keypair {
@@ -488,7 +491,10 @@ fn declared_secret_keys(registry: &vpnctl_core::Registry, protocol_id: &str) -> 
         .server_secret_specs()
         .into_iter()
         .flat_map(|spec| match spec {
-            S::Password { key, .. } | S::Base64Key { key, .. } | S::ShortId { key } => {
+            S::Required { key }
+            | S::Password { key, .. }
+            | S::Base64Key { key, .. }
+            | S::ShortId { key } => {
                 vec![key]
             }
             S::X25519Keypair {
