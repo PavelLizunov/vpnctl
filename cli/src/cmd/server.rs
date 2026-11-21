@@ -190,7 +190,12 @@ pub(crate) async fn run(
                     server.address
                 );
             }
-            inv.register_server(&server, "cli").await?;
+            inv.register_server_with_secrets(
+                &server,
+                "cli",
+                &[("vless.sni", vpnctl_protocols::NEW_SERVER_REALITY_SNI)],
+            )
+            .await?;
             let audit_payload = json!({
                 "id": server.id.0,
                 "address": server.address,

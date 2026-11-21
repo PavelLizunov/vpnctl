@@ -143,7 +143,10 @@ pub(crate) async fn server_quick_add(State(state): State<AppState>, body: String
         usage_coefficient: 1.0,
     };
 
-    if let Err(e) = state.inv.register_server(&server, "admin").await {
+    if let Err(e) =
+        crate::boosty_bandwidth::register_new_server(&state.inv, &server, &state.boosty_roster_url)
+            .await
+    {
         return match e {
             vpnctl_inventory::SqliteInventoryError::AlreadyExists(what) => {
                 bad_request(&format!("{what} already exists"))

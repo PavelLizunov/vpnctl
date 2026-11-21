@@ -6,15 +6,30 @@ use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
 impl SqliteInventory {
     /// Low-level insertion for imports and existing inventory fixtures.
     pub async fn add_server(&self, s: &Server) -> Result<()> {
-        self.insert_server(s, None).await
+        self.insert_server(s, None, &[]).await
     }
 
     /// Register a node once, checking its canonical address and auditing atomically.
     pub async fn register_server(&self, s: &Server, actor: &str) -> Result<()> {
-        self.insert_server(s, Some(actor)).await
+        self.register_server_with_secrets(s, actor, &[]).await
     }
 
-    async fn insert_server(&self, s: &Server, registration_actor: Option<&str>) -> Result<()> {
+    /// Register a node and its initial server settings in the same transaction.
+    pub async fn register_server_with_secrets(
+        &self,
+        s: &Server,
+        actor: &str,
+        values: &[(&str, &str)],
+    ) -> Result<()> {
+        self.insert_server(s, Some(actor), values).await
+    }
+
+    async fn insert_server(
+        &self,
+        s: &Server,
+        registration_actor: Option<&str>,
+        values: &[(&str, &str)],
+    ) -> Result<()> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         if registration_actor.is_some()
             && let Some(existing) =
@@ -79,6 +94,15 @@ impl SqliteInventory {
             .bind(&s.id.0)
             .execute(&mut *tx)
             .await?;
+        }
+
+        for (key, value) in values {
+            sqlx::query("INSERT INTO server_secrets (server_id, key, value) VALUES (?1, ?2, ?3)")
+                .bind(&s.id.0)
+                .bind(*key)
+                .bind(*value)
+                .execute(&mut *tx)
+                .await?;
         }
 
         if let Some(actor) = registration_actor {

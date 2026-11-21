@@ -65,7 +65,12 @@ pub(crate) async fn wizard_step2_sse(
 
     let inv = state.inv.clone();
     let registry = std::sync::Arc::clone(&state.registry);
-    let raw = crate::wizard_bootstrap::run_bootstrap(plan, inv, registry);
+    let raw = crate::wizard_bootstrap::run_bootstrap_with_roster(
+        plan,
+        inv,
+        registry,
+        std::sync::Arc::clone(&state.boosty_roster_url),
+    );
     let mapped = raw.map(|ev| {
         let name = match &ev {
             crate::wizard_bootstrap::BootstrapEvent::Step { .. } => "step",

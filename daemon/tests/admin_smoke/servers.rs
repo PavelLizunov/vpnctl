@@ -333,6 +333,19 @@ async fn admin_server_quick_add_registers_with_default_protocols() {
     assert_eq!(srv.kernels[0].0, "sing-box");
     let pids: Vec<&str> = srv.enabled_protocols.iter().map(|p| p.0.as_str()).collect();
     assert_eq!(pids, ["vless+reality"]);
+    assert_eq!(
+        inv.get_server_secret(&srv.id, "vless.sni")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("ya.ru"),
+    );
+    assert!(
+        inv.get_server_secret(&srv.id, vpnctl_kernels::USER_BANDWIDTH_KEY)
+            .await
+            .unwrap()
+            .is_none(),
+    );
 }
 
 #[tokio::test]
