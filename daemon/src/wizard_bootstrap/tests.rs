@@ -166,7 +166,7 @@ async fn bootstrap_mints_reality_identity_for_an_xray_only_xhttp_server() {
 }
 
 #[tokio::test]
-async fn bootstrap_mints_every_secret_each_enabled_protocol_needs_to_render() {
+async fn bootstrap_provides_every_secret_each_enabled_protocol_needs_to_render() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("inv.db");
     let inv = vpnctl_inventory::SqliteInventory::open(&db).await.unwrap();
@@ -188,9 +188,29 @@ async fn bootstrap_mints_every_secret_each_enabled_protocol_needs_to_render() {
     };
     inv.add_server(&server).await.unwrap();
 
-    let (secrets, _minted) = bootstrap_server_secrets(&inv, &server, &registry)
+    for (key, value) in [
+        ("vmess.domain", "vmess.example.com"),
+        (
+            "vmess.certificate",
+            "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----",
+        ),
+        (
+            "vmess.key",
+            concat!(
+                "-----BEGIN ",
+                "PRIVATE KEY-----\nfixture\n-----END ",
+                "PRIVATE KEY-----"
+            ),
+        ),
+    ] {
+        inv.set_server_secret(&server.id, key, value).await.unwrap();
+    }
+
+    let (secrets, minted) = bootstrap_server_secrets(&inv, &server, &registry)
         .await
         .unwrap();
+
+    assert!(minted.iter().all(|key| !key.starts_with("vmess.")));
 
     let ctx = RenderCtx::new(&server, &secrets);
     for pid in &enabled {
@@ -225,7 +245,7 @@ async fn bootstrap_mints_every_secret_each_enabled_protocol_needs_to_render() {
             for k in keys {
                 assert!(
                     secrets.contains_key(k),
-                    "{pid:?} declares secret `{k}` but bootstrap didn't mint it"
+                    "{pid:?} declares secret `{k}` but bootstrap returned without it"
                 );
             }
         }
