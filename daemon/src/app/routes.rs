@@ -302,6 +302,10 @@ pub(crate) fn admin_router(state: AppState) -> Router {
             post(admin::server_set_dnstt_config),
         )
         .route(
+            "/admin/servers/{id}/dnstt-check/sse",
+            get(admin::dnstt_check),
+        )
+        .route(
             "/admin/servers/{id}/user-bandwidth",
             post(admin::server_set_user_bandwidth),
         )

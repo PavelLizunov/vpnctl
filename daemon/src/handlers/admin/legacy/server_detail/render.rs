@@ -162,6 +162,9 @@ pub(super) async fn server_detail_render(
         &assurance_rows,
         path_now,
     );
+    let dnstt_check_server = (state.dnstt_check_runner.is_some()
+        && server.enabled_protocols.iter().any(|id| id.0 == "dnstt"))
+    .then_some(&sid);
 
     let trend_rows = state
         .inv
@@ -641,7 +644,7 @@ pub(super) async fn server_detail_render(
 
         @if tab == ServerTab::Status {
             (crate::handlers::admin::ssh_access::detail_section(&server, ssh_access.as_ref(), ssh_checking, lang))
-            (crate::handlers::admin::path_availability::detail_section(Some(&path_current), path_incidents.as_deref().ok(), !assurance_rows.is_empty(), lang))
+            (crate::handlers::admin::path_availability::detail_section(Some(&path_current), path_incidents.as_deref().ok(), !assurance_rows.is_empty(), dnstt_check_server, lang))
             div.ed-detail-grid {
                 div {
                     (server_detail_uptime_section(

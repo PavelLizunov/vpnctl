@@ -5,7 +5,7 @@ use maud::{Markup, html};
 use vpnctl_inventory::{ServicePathIncident, ServicePathState, ServicePathStatus};
 
 use chrono::{DateTime, Utc};
-use vpnctl_core::{ProtocolId, Registry, Server};
+use vpnctl_core::{ProtocolId, Registry, Server, ServerId};
 use vpnctl_inventory::{AssuranceStage, AssuranceState, ProtocolAssuranceSample};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -357,12 +357,26 @@ pub(super) fn detail_section(
     current: Option<&Availability>,
     incidents: Option<&[ServicePathIncident]>,
     has_protocol_results: bool,
+    dnstt_check_server: Option<&ServerId>,
     lang: Locale,
 ) -> Markup {
     html! {
         section #current-path-availability style="margin-bottom:24px;" {
             h2 { (tr(lang, "Current path availability", "Доступность сейчас")) }
             (status_badge(current, lang))
+            @if let Some(server) = dnstt_check_server {
+                button.ed-abtn type="button"
+                    data-sse-url=(format!("/admin/servers/{}/dnstt-check/sse", path_segment_encode(&server.0)))
+                    data-log="dnstt-check-log"
+                    data-reload-self="true"
+                    data-busy-label=(tr(lang, "Checking DNSTT…", "Проверяем DNSTT…")) {
+                    (tr(lang, "Check DNSTT now", "Проверить DNSTT"))
+                }
+                p.ed-grid__mut {
+                    (tr(lang, "One tunnel transfer from the controller.", "Одна проверка передачи через туннель с контроллера."))
+                }
+                pre #dnstt-check-log aria-live="polite" hidden {}
+            }
             @if current.is_some_and(|record| record.udp.is_some()) {
                 p.ed-grid__mut {
                     (tr(lang,
@@ -479,7 +493,7 @@ mod tests {
 
     #[test]
     fn unknown_and_tcp_scope_never_claim_full_vpn_readiness() {
-        let page = detail_section(None, None, false, Locale::En).into_string();
+        let page = detail_section(None, None, false, None, Locale::En).into_string();
         assert!(page.contains("Unknown / stale"));
         assert!(page.contains("A successful check confirms a connection to the port"));
         assert!(page.contains("could not be loaded"));

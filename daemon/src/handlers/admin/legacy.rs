@@ -1,5 +1,6 @@
 mod dashboard;
 mod deploy_sse;
+mod dnstt_check;
 mod kernel_update_sse;
 mod server_detail;
 mod settings;
@@ -11,6 +12,7 @@ mod wizard_ui;
 
 pub(crate) use self::dashboard::*;
 pub(crate) use self::deploy_sse::*;
+pub(crate) use self::dnstt_check::dnstt_check;
 pub(crate) use self::kernel_update_sse::*;
 pub(crate) use self::server_detail::*;
 pub(crate) use self::settings::*;
