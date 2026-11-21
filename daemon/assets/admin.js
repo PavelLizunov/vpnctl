@@ -132,22 +132,6 @@
     });
   }
 
-  function wireConfirmPrompt(form) {
-    var ask = form.getAttribute("data-confirm-prompt");
-    var match = form.getAttribute("data-confirm-match");
-    var field = form.getAttribute("data-confirm-field") || "confirm";
-    form.addEventListener("submit", function (e) {
-      var v = window.prompt(ask);
-      if (v !== match) {
-        e.preventDefault();
-        if (v !== null) window.alert("confirm did not match — nothing changed");
-        return;
-      }
-      var target = form.elements[field];
-      if (target) target.value = v;
-    });
-  }
-
   function wireAutoSse(pre) {
     var url = pre.getAttribute("data-sse-autostart");
     if (!url) return;
@@ -518,7 +502,5 @@
     for (var a = 0; a < autos.length; a++) wireAutoSse(autos[a]);
     var confirms = document.querySelectorAll("[data-confirm]");
     for (var c = 0; c < confirms.length; c++) wireConfirm(confirms[c]);
-    var prompts = document.querySelectorAll("[data-confirm-prompt]");
-    for (var p = 0; p < prompts.length; p++) wireConfirmPrompt(prompts[p]);
   });
 })();

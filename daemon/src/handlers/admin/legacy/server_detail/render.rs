@@ -804,7 +804,7 @@ pub(super) async fn server_detail_render(
                     "Grant writes the pair into the inventory; keys are minted per protocol on the next deploy (auto-deploy runs after).",
                     "Грант пишет пару в инвентарь; ключи чеканятся на следующем деплое (авто-деплой запускается сам).",
                 )) { (status("info", lang, "Information", "Информация")) }
-                div style="margin-left: auto; display: flex; gap: 8px;" {
+                div style="margin-left: auto; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px;" {
                     @if !ungranted.is_empty() {
                         form method="post"
                              action=(format!("/admin/servers/{sid_enc_b}/grants/_grant-all"))
@@ -822,30 +822,33 @@ pub(super) async fn server_detail_render(
                         }
                     }
                     @if granted_count > 0 {
-                        @let sid_clean = server.id.0.clone();
-                        @let confirm_msg = match lang {
-                            crate::i18n::Locale::En => format!(
-                                "Revoke access for all {granted_count} granted users on server '{sid_clean}'? Type the server id to confirm:"
-                            ),
-                            crate::i18n::Locale::Ru => format!(
-                                "Отозвать доступ у всех {granted_count} юзеров с грантом на сервере '{sid_clean}'? Введи id сервера для подтверждения:"
-                            ),
-                        };
-                        form method="post"
-                             action=(format!("/admin/servers/{sid_enc_b}/grants/_revoke-all"))
-                             data-confirm-prompt=(confirm_msg)
-                             data-confirm-match=(sid_clean)
-                             style="margin: 0; padding: 0;" {
-                            input type="hidden" name="confirm" value="";
-                            button type="submit"
-                                   title=(crate::i18n::tr(
-                                       lang,
-                                       "Revoke access for every currently-granted user on this server. Destructive — requires confirm.",
-                                       "Отозвать доступ у всех юзеров с текущим грантом. Деструктивно — нужно подтверждение.",
-                                   ))
-                                   class="ed-abtn ed-abtn--danger ed-abtn--sm" {
+                        details {
+                            summary.ed-abtn.ed-abtn--secondary.ed-abtn--sm {
                                 (icon("unlink")) (crate::i18n::tr(lang, "revoke all ", "отозвать все "))
                                 "(" (granted_count) ")…"
+                            }
+                            form method="post"
+                                 action=(format!("/admin/servers/{sid_enc_b}/grants/_revoke-all"))
+                                 style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px;" {
+                                @let confirm_pattern = {
+                                    let mut pattern = String::with_capacity(server.id.0.len());
+                                    for ch in server.id.0.chars() {
+                                        if matches!(ch, '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$' | '/') {
+                                            pattern.push('\\');
+                                        }
+                                        pattern.push(ch);
+                                    }
+                                    pattern
+                                };
+                                @let confirm_label = crate::i18n::tr(lang, "Type the server ID", "Введи ID сервера");
+                                label for="bulk-revoke-confirm" { (confirm_label) " " code { (&server.id.0) } }
+                                input id="bulk-revoke-confirm" type="text" name="confirm" required
+                                      pattern=(confirm_pattern) title=(format!("{confirm_label} {}", server.id.0))
+                                      autocomplete="off" autocapitalize="none" spellcheck="false"
+                                      style="width: min(100%, 16rem);";
+                                button type="submit" class="ed-abtn ed-abtn--danger ed-abtn--sm" {
+                                    (crate::i18n::tr(lang, "revoke access", "отозвать доступ"))
+                                }
                             }
                         }
                     }
