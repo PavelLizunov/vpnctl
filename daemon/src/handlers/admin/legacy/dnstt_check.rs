@@ -65,7 +65,7 @@ pub(crate) async fn dnstt_check(
                 .registry
                 .protocol(&protocol)
                 .ok_or_else(|| anyhow::anyhow!("DNSTT is not registered"))?;
-            crate::protocol_assurance_poller::sample_dnstt_on_demand(&server, registered, runner)
+            crate::protocol_assurance_poller::sample_dnstt_on_demand(&server, registered, &runner)
                 .await
         };
         let event = match run_check(&state, &server, &protocol, sample, lang).await {

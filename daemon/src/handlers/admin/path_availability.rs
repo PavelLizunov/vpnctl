@@ -493,7 +493,7 @@ mod tests {
 
     #[test]
     fn unknown_and_tcp_scope_never_claim_full_vpn_readiness() {
-        let page = detail_section(None, None, false, Locale::En).into_string();
+        let page = detail_section(None, None, false, None, Locale::En).into_string();
         assert!(page.contains("Unknown / stale"));
         assert!(page.contains("A successful check confirms a connection to the port"));
         assert!(page.contains("could not be loaded"));

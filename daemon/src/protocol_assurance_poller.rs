@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -363,7 +363,7 @@ fn runner_sample(
 pub(crate) async fn sample_dnstt_on_demand(
     server: &Server,
     protocol: &dyn Protocol,
-    runner: PathBuf,
+    runner: &Path,
 ) -> anyhow::Result<ProtocolAssuranceSample> {
     let request = RunnerRequest {
         server: &server.address,
@@ -489,12 +489,12 @@ async fn run_external_runner(
         protocol: &protocol.id().0,
         ports,
     };
-    invoke_runner(PathBuf::from(runner.trim()), request, RUNNER_TIMEOUT).await
+    invoke_runner(Path::new(runner.trim()), request, RUNNER_TIMEOUT).await
 }
 
 pub(crate) fn configured_dnstt_check_runner() -> Option<PathBuf> {
     let value = std::env::var_os("VPNCTLD_DNSTT_CHECK_RUNNER").filter(|value| !value.is_empty())?;
-    match trusted_runner(PathBuf::from(value)) {
+    match trusted_runner(Path::new(&value)) {
         Ok(path) => Some(path),
         Err(code) => {
             tracing::warn!(target: "vpnctld::assurance", code, "DNSTT on-demand runner is unavailable");
@@ -503,7 +503,7 @@ pub(crate) fn configured_dnstt_check_runner() -> Option<PathBuf> {
     }
 }
 
-fn trusted_runner(runner: PathBuf) -> Result<PathBuf, &'static str> {
+fn trusted_runner(runner: &Path) -> Result<PathBuf, &'static str> {
     if !runner.is_absolute() {
         tracing::warn!(
             target = "vpnctld::assurance",
@@ -511,14 +511,14 @@ fn trusted_runner(runner: PathBuf) -> Result<PathBuf, &'static str> {
         );
         return Err("runner_invalid_path");
     }
-    if std::fs::symlink_metadata(&runner).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+    if std::fs::symlink_metadata(runner).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         tracing::warn!(
             target = "vpnctld::assurance",
             "runner path must not be a symlink"
         );
         return Err("runner_unsafe_path");
     }
-    let runner = match std::fs::canonicalize(&runner) {
+    let runner = match std::fs::canonicalize(runner) {
         Ok(path) => path,
         Err(error) => {
             tracing::warn!(target = "vpnctld::assurance", %error, "runner canonicalization failed");
@@ -566,7 +566,7 @@ fn trusted_runner(runner: PathBuf) -> Result<PathBuf, &'static str> {
 }
 
 async fn invoke_runner(
-    runner: PathBuf,
+    runner: &Path,
     request: RunnerRequest<'_>,
     runner_timeout: Duration,
 ) -> anyhow::Result<RunnerAttempt> {
