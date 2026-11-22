@@ -60,6 +60,9 @@ pub trait Protocol: fmt::Debug + Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerSecretSpec {
+    Required {
+        key: &'static str,
+    },
     Password {
         key: &'static str,
         entropy_bytes: usize,

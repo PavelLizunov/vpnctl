@@ -953,3 +953,122 @@ async fn protocols_view_shows_live_boosty_tiers_and_the_waiting_state() {
         "an unavailable roster must render the waiting state"
     );
 }
+
+#[tokio::test]
+async fn saved_boosty_rates_become_defaults_for_new_admin_nodes() {
+    let mock = MockServer::start(RosterMock::valid()).await;
+    let f = fixture(mock.url.clone()).await;
+    let inv = &f.state.inv;
+    let preset = "/admin/servers/s0/user-bandwidth-default";
+    assert_eq!(
+        post_form(&f.state, preset, "").await.status(),
+        StatusCode::BAD_REQUEST,
+    );
+    assert_eq!(post(&f.state, FORM).await.0, StatusCode::SEE_OTHER);
+    assert_eq!(
+        post_form(&f.state, preset, "").await.status(),
+        StatusCode::SEE_OTHER
+    );
+    let html = get_html(&f.state, "/admin/servers/s0/protocols").await;
+    assert!(html.contains("These rates are the default for newly added nodes."));
+
+    let response = post_form(
+        &f.state,
+        "/admin/servers/quick-add",
+        "id=new-node&address=198.51.100.20",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let sid = ServerId("new-node".into());
+    let server = inv.get_server(&sid).await.unwrap().unwrap();
+    let mut secrets = inv.list_server_secrets(&sid).await.unwrap();
+    assert_eq!(secrets.get("vless.sni").map(String::as_str), Some("ya.ru"));
+    assert_eq!(secrets.get(DEFAULT_KEY).map(String::as_str), Some("40"));
+    assert_eq!(
+        serde_json::from_str::<Value>(&secrets[OVERRIDES_KEY]).unwrap(),
+        json!({"u101":80, "u202":160}),
+    );
+    assert!(!secrets.contains_key(super::PENDING_KEY));
+    let render_settings = [
+        ("vless.private_key".into(), "fixture-private-key".into()),
+        ("vless.public_key".into(), "fixture-public-key".into()),
+        ("vless.short_id".into(), "fixture-short-id".into()),
+        ("vlessxhttp.path".into(), "fixture-path".into()),
+    ];
+    secrets.extend(render_settings.clone());
+    let context = vpnctl_core::RenderCtx::new(&server, &secrets);
+    let users = inv.list_users().await.unwrap();
+    let reality = f
+        .state
+        .registry
+        .protocol(&ProtocolId("vless+reality".into()))
+        .unwrap();
+    let inbound = reality.server_inbound(&context, &users).unwrap();
+    assert_eq!(inbound["tls"]["reality"]["handshake"]["server"], "ya.ru");
+    let link = reality.share_link(&context, &users[0]).unwrap();
+    assert!(link.contains("&sni=ya.ru&"));
+    let xhttp = f
+        .state
+        .registry
+        .protocol(&ProtocolId("vless+xhttp".into()))
+        .unwrap();
+    let inbound = xhttp.server_inbound(&context, &users).unwrap();
+    assert_eq!(
+        inbound["streamSettings"]["realitySettings"]["dest"],
+        "ya.ru:443"
+    );
+    assert_eq!(
+        inbound["streamSettings"]["realitySettings"]["serverNames"],
+        json!(["ya.ru"]),
+    );
+    let link = xhttp.share_link(&context, &users[0]).unwrap();
+    assert!(link.contains("&sni=ya.ru&"));
+
+    let legacy_id = ServerId("s1".into());
+    let legacy_server = inv.get_server(&legacy_id).await.unwrap().unwrap();
+    let mut legacy_secrets = inv.list_server_secrets(&legacy_id).await.unwrap();
+    assert!(!legacy_secrets.contains_key("vless.sni"));
+    assert!(!legacy_secrets.contains_key(DEFAULT_KEY));
+    legacy_secrets.extend(render_settings);
+    let legacy_context = vpnctl_core::RenderCtx::new(&legacy_server, &legacy_secrets);
+    let inbound = reality.server_inbound(&legacy_context, &users).unwrap();
+    assert_eq!(
+        inbound["tls"]["reality"]["handshake"]["server"],
+        "yahoo.com"
+    );
+    assert!(
+        reality
+            .share_link(&legacy_context, &users[0])
+            .unwrap()
+            .contains("&sni=yahoo.com&")
+    );
+}
+
+#[tokio::test]
+async fn stale_boosty_roster_leaves_new_node_with_base_limit_and_pending_tiers() {
+    let mock = MockServer::start(RosterMock::stale()).await;
+    let f = fixture(mock.url.clone()).await;
+    let inv = &f.state.inv;
+    let policy = json!({"blog": BLOG, "levels": {"11": 80}});
+    inv.set_new_server_bandwidth_default_as("admin", 40, &policy.to_string())
+        .await
+        .unwrap();
+
+    let response = post_form(
+        &f.state,
+        "/admin/servers/quick-add",
+        "id=stale-node&address=198.51.100.21",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let sid = ServerId("stale-node".into());
+    let secrets = inv.list_server_secrets(&sid).await.unwrap();
+    assert_eq!(secrets.get(DEFAULT_KEY).map(String::as_str), Some("40"));
+    assert_eq!(secrets.get(OVERRIDES_KEY).map(String::as_str), Some("{}"));
+    assert_eq!(
+        serde_json::from_str::<Value>(&secrets[super::POLICY_KEY]).unwrap(),
+        policy,
+    );
+    let html = get_html(&f.state, "/admin/servers/stale-node/protocols").await;
+    assert!(html.contains("The base limit is saved."));
+}

@@ -7,6 +7,7 @@ use vpnctl_core::{Protocol, ProtocolId, RenderCtx, Result, User};
 pub(crate) const REALITY_UTLS_FP: &str = "randomized";
 
 pub const DEFAULT_REALITY_SNI: &str = "yahoo.com";
+pub const NEW_SERVER_REALITY_SNI: &str = "ya.ru";
 
 pub const VLESS_PACKET_ENCODING: &str = "xudp";
 

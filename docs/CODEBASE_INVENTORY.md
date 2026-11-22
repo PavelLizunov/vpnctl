@@ -5,26 +5,26 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 547 (351 prod / 196 test)
-- **Total Rust LOC:** 201,436 (106,214 prod / 95,222 test)
-- **Database Migrations:** 76
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 155
+- **Tracked Rust Files:** 556 (355 prod / 201 test)
+- **Total Rust LOC:** 205,623 (107,784 prod / 97,839 test)
+- **Database Migrations:** 78
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 158
 
 ## Workspace Crates & Targets
 
 | Crate | Path | Version | Targets | Prod LOC (Files) | Test LOC (Files) | Total LOC |
 |---|---|---|---|---|---|---|
-| `vpnctl` | `cli` | 0.9.0 | bin, 2 tests | 6,438 (20) | 1,617 (3) | **8,055** |
+| `vpnctl` | `cli` | 0.9.0 | bin, 2 tests | 6,465 (20) | 1,617 (3) | **8,082** |
 | `vpnctl-boosty-bridge` | `crates/boosty-bridge` | 0.9.0 | lib, 2 tests | 1,494 (6) | 1,345 (2) | **2,839** |
-| `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,431 (13) | 0 (0) | **1,431** |
+| `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,434 (13) | 0 (0) | **1,434** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 318 (1) | 125 (1) | **443** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 193 (1) | 454 (2) | **647** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 60 tests | 18,942 (64) | 27,757 (66) | **46,699** |
-| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 5 tests, 1 examples | 7,342 (16) | 1,709 (7) | **9,051** |
-| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 12 tests | 4,371 (22) | 4,615 (12) | **8,986** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 61 tests | 19,133 (65) | 27,932 (67) | **47,065** |
+| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 7 tests, 1 examples | 7,368 (17) | 2,346 (9) | **9,714** |
+| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 13 tests | 4,575 (23) | 4,928 (13) | **9,503** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,825 (5) | 1,191 (5) | **4,016** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 30 tests | 62,860 (203) | 56,409 (98) | **119,269** |
-| **Total** | | | | **106,214 (351)** | **95,222 (196)** | **201,436** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 31 tests | 63,979 (204) | 57,901 (99) | **121,880** |
+| **Total** | | | | **107,784 (355)** | **97,839 (201)** | **205,623** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -35,13 +35,13 @@
 | `daemon/tests/spec_corp_policy_http.rs` | 2,338 | `daemon` | Test |
 | `daemon/tests/spec_corp_operator.rs` | 2,071 | `daemon` | Test |
 | `crates/inventory/src/sqlite/tests.rs` | 2,065 | `crates/inventory` | Prod |
-| `crates/kernels/src/sing_box/tests.rs` | 1,900 | `crates/kernels` | Prod |
+| `crates/kernels/src/sing_box/tests.rs` | 1,851 | `crates/kernels` | Prod |
 | `daemon/src/health_monitor/tests.rs` | 1,845 | `daemon` | Prod |
-| `crates/kernels/src/caddy/tests.rs` | 1,800 | `crates/kernels` | Prod |
 | `vendor/sqlx-sqlite/src/connection/explain.rs` | 1,779 | `other` | Prod |
+| `crates/kernels/src/caddy/tests.rs` | 1,772 | `crates/kernels` | Prod |
+| `daemon/tests/admin_smoke/servers.rs` | 1,613 | `daemon` | Test |
 | `daemon/tests/spec_corp_egress.rs` | 1,531 | `daemon` | Test |
 | `daemon/tests/admin_smoke/alerts_health.rs` | 1,514 | `daemon` | Test |
-| `daemon/tests/admin_smoke/servers.rs` | 1,452 | `daemon` | Test |
 | `daemon/tests/spec_corp_policy_eligibility.rs` | 1,404 | `daemon` | Test |
 | `daemon/tests/sub_endpoint/mihomo.rs` | 1,398 | `daemon` | Test |
 | `crates/ssh/src/subprocess.rs` | 1,380 | `crates/ssh` | Prod |
@@ -56,7 +56,7 @@
 | `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,184 | `daemon` | Test |
 | `daemon/tests/spec_corp_probe_runtime.rs` | 1,166 | `daemon` | Test |
 
-## Database Migrations (76)
+## Database Migrations (78)
 
 | Version | Migration Name | File | Lines |
 |---|---|---|---|
@@ -136,8 +136,10 @@
 | `0074` | corp telephony | `crates/inventory/migrations/0074_corp_telephony.sql` | 14 |
 | `0075` | corp companies | `crates/inventory/migrations/0075_corp_companies.sql` | 97 |
 | `0076` | server security reports | `crates/inventory/migrations/0076_server_security_reports.sql` | 6 |
+| `0077` | new server bandwidth default | `crates/inventory/migrations/0077_new_server_bandwidth_default.sql` | 5 |
+| `0078` | desktop subscription core | `crates/inventory/migrations/0078_desktop_subscription_core.sql` | 1 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (155)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (158)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -203,6 +205,7 @@
 | `GET` | `/admin/servers/{id}/delete-confirm` | `admin::server_delete_confirm` |
 | `POST` | `/admin/servers/{id}/deploy` | `admin::server_deploy` |
 | `GET` | `/admin/servers/{id}/deploy/sse` | `admin::server_deploy_sse` |
+| `POST` | `/admin/servers/{id}/desktop-subscription` | `admin::server_set_desktop_subscription` |
 | `POST` | `/admin/servers/{id}/display-name` | `admin::server_set_display_name` |
 | `GET` | `/admin/servers/{id}/dnstt-check/sse` | `admin::dnstt_check` |
 | `POST` | `/admin/servers/{id}/dnstt-config` | `admin::server_set_dnstt_config` |
@@ -233,7 +236,9 @@
 | `POST` | `/admin/servers/{id}/udp-pair` | `admin::server_set_udp_pair` |
 | `GET` | `/admin/servers/{id}/update-kernels/sse` | `admin::server_update_kernels_sse` |
 | `POST` | `/admin/servers/{id}/user-bandwidth` | `admin::server_set_user_bandwidth` |
+| `POST` | `/admin/servers/{id}/user-bandwidth-default` | `admin::server_set_new_server_bandwidth_default` |
 | `POST` | `/admin/servers/{id}/vlessws-config` | `admin::server_set_vlessws_config` |
+| `POST` | `/admin/servers/{id}/vmess-config` | `admin::server_set_vmess_config` |
 | `POST` | `/admin/servers/{sid}/grants/{uid}` | `admin::server_grant_user` |
 | `POST` | `/admin/servers/{sid}/grants/{uid}/revoke` | `admin::server_revoke_user` |
 | `POST` | `/admin/servers/{sid}/protocols/{pid}/hide` | `admin::server_protocol_hide` |

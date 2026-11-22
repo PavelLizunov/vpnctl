@@ -1,6 +1,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
+use sqlx::Connection;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -333,6 +334,19 @@ async fn admin_server_quick_add_registers_with_default_protocols() {
     assert_eq!(srv.kernels[0].0, "sing-box");
     let pids: Vec<&str> = srv.enabled_protocols.iter().map(|p| p.0.as_str()).collect();
     assert_eq!(pids, ["vless+reality"]);
+    assert_eq!(
+        inv.get_server_secret(&srv.id, "vless.sni")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("ya.ru"),
+    );
+    assert!(
+        inv.get_server_secret(&srv.id, vpnctl_kernels::USER_BANDWIDTH_KEY)
+            .await
+            .unwrap()
+            .is_none(),
+    );
 }
 
 #[tokio::test]
@@ -916,6 +930,153 @@ async fn admin_server_delete_cascades_grants_and_audits() {
         payload.get("grants_removed").and_then(|v| v.as_u64()),
         Some(2),
         "audit payload must record the 2 grants removed"
+    );
+}
+
+#[tokio::test]
+async fn admin_server_delete_under_write_lock_returns_pending_then_finishes() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    // Process-wide deploy guards make short generic ids ("s0") collide with
+    // other tests in this binary; the pending flow gets its own synthetic id.
+    let target_id = "del-pending-lock-7f3a";
+    let target = ServerId(target_id.into());
+    s.inv
+        .add_server(&Server {
+            id: target.clone(),
+            address: "203.0.113.231".into(),
+            ssh_port: 22,
+            ssh_user: "root".into(),
+            kernels: vec![KernelId("sing-box".into())],
+            enabled_protocols: vec![],
+            trusted_host_fingerprint: None,
+            hoster: "generic".into(),
+            jump_via: None,
+            usage_coefficient: 1.0,
+        })
+        .await
+        .unwrap();
+
+    // A second connection takes the single SQLite writer slot, so the app
+    // pool cannot complete a `remove_server` until this transaction ends.
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(dir.path().join("inv.db"))
+        .create_if_missing(false);
+    let mut lock_conn = sqlx::sqlite::SqliteConnection::connect_with(&options)
+        .await
+        .unwrap();
+    let lock = lock_conn.begin_with("BEGIN IMMEDIATE").await.unwrap();
+
+    let app = router(s.clone());
+    let delete_path = format!("/admin/servers/{target_id}/delete");
+    let confirm_path = format!("/admin/servers/{target_id}/delete-confirm?deletion=pending");
+    let resp = app
+        .clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri(delete_path.as_str())
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from(format!("confirm={target_id}")))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "delete under a held inventory write lock must queue as pending, not fail"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok()),
+        Some(confirm_path.as_str()),
+        "pending delete must redirect to the pending confirm page"
+    );
+    // While the lock is still held the confirm page explains the queued
+    // delete instead of pretending the server is already gone.
+    let pending = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(confirm_path.as_str())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    lock.rollback().await.unwrap();
+    lock_conn.close().await.unwrap();
+
+    assert_eq!(
+        pending.status(),
+        StatusCode::OK,
+        "pending confirm page must render while the write lock is held"
+    );
+    let bytes = pending.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(
+        html.contains("data-server-delete-pending"),
+        "pending confirm page must carry data-server-delete-pending: {html}"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(confirm_path.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if resp.status() == StatusCode::SEE_OTHER {
+            assert_eq!(
+                resp.headers()
+                    .get("location")
+                    .and_then(|value| value.to_str().ok()),
+                Some("/admin/servers"),
+                "finished pending delete must land on the servers list"
+            );
+            break;
+        }
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "pending confirm page returned {status} after the lock was released: {html}"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "queued delete did not finish within 15s after the lock was released: {html}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    assert!(
+        s.inv.get_server(&target).await.unwrap().is_none(),
+        "pending delete must remove the server once the lock is gone"
+    );
+    let removed: Vec<_> = s
+        .inv
+        .recent_audit(100)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|entry| {
+            entry.action == "server.remove" && entry.target.as_deref() == Some(target_id)
+        })
+        .collect();
+    assert_eq!(
+        removed.len(),
+        1,
+        "pending delete must write exactly one server.remove audit row"
     );
 }
 

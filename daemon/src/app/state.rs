@@ -32,6 +32,7 @@ pub struct AppState {
     pub geo: crate::geoip::GeoLookup,
     pub(crate) private_checks: Arc<crate::handlers::admin::private_checks::PrivateChecks>,
     pub(crate) cheburcheck: Arc<crate::handlers::admin::cheburcheck_checks::ExternalChecks>,
+    pub(crate) server_deletions: Arc<crate::handlers::admin::ServerDeletions>,
     pub(crate) boosty_roster_url: Arc<str>,
     pub(crate) boosty_dashboard_url: Option<reqwest::Url>,
     pub(crate) dnstt_check_runner: Option<std::path::PathBuf>,
@@ -119,6 +120,11 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<(Router, tokio::task:
     drop(crate::wg_stats_poller::spawn_wg_stats_poller(inv.clone()));
     drop(crate::ssh_access::spawn_poller(inv.clone()));
     drop(crate::server_security::spawn_poller(inv.clone()));
+    drop(crate::firewall_poller::spawn_poller(
+        inv.clone(),
+        Arc::clone(&registry),
+        deploy_key_path.clone(),
+    ));
 
     drop(crate::dns_resolver::spawn_dns_resolver(
         inv.clone(),
@@ -216,6 +222,7 @@ pub async fn build(config: DaemonConfig) -> anyhow::Result<(Router, tokio::task:
         geo,
         private_checks: Arc::default(),
         cheburcheck: Arc::default(),
+        server_deletions: Arc::default(),
         boosty_roster_url: Arc::from(crate::boosty_bandwidth::ROSTER_URL),
         boosty_dashboard_url,
         dnstt_check_runner,
@@ -251,6 +258,7 @@ pub fn make_app_state_with_rate_limiter(
             geo: crate::geoip::GeoLookup::disabled(),
             private_checks: Arc::default(),
             cheburcheck: Arc::default(),
+            server_deletions: Arc::default(),
             boosty_roster_url: Arc::from("http://127.0.0.1:0/api/v1/roster"),
             boosty_dashboard_url: None,
             dnstt_check_runner: None,

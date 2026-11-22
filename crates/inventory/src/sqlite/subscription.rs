@@ -42,6 +42,29 @@ impl SqliteInventory {
         include_awg_peers: bool,
     ) -> Result<Vec<SubscriptionServer>> {
         let servers = self.subscription_servers_for_user(user).await?;
+        self.load_subscription_render_inputs(user, include_awg_peers, servers)
+            .await
+    }
+
+    pub async fn subscription_render_inputs_for_client(
+        &self,
+        user: &UserId,
+        include_awg_peers: bool,
+        desktop_core: Option<&str>,
+    ) -> Result<Vec<SubscriptionServer>> {
+        let servers = self
+            .subscription_servers_for_client(user, desktop_core)
+            .await?;
+        self.load_subscription_render_inputs(user, include_awg_peers, servers)
+            .await
+    }
+
+    async fn load_subscription_render_inputs(
+        &self,
+        user: &UserId,
+        include_awg_peers: bool,
+        servers: Vec<Server>,
+    ) -> Result<Vec<SubscriptionServer>> {
         let mut inputs = HashMap::with_capacity(servers.len());
         let rows = sqlx::query(
             "SELECT s.id, s.auto_suppress_when_unreachable, s.suppressed_at,

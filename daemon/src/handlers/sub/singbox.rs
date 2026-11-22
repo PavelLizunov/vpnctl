@@ -65,7 +65,7 @@ async fn render_singbox_with(
 
     let servers = state
         .inv
-        .subscription_servers_for_user(&user.id)
+        .subscription_servers_for_client(&user.id, None)
         .await
         .map_err(|e| SubError::Internal(format!("inventory: {e}")))?;
 
@@ -309,6 +309,7 @@ fn outbound_supports_udp(value: &Value) -> bool {
 fn protocol_display_name(protocol_id: &str) -> String {
     match protocol_id {
         "vless+reality" => "VLESS".into(),
+        "vmess" => "VMess".into(),
         "tuic-v5" => "TUIC".into(),
         "hysteria2" => "HY2".into(),
         "shadowsocks-2022" => "SS-22".into(),

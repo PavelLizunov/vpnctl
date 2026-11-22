@@ -1,8 +1,10 @@
+use std::collections::HashSet;
+
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use vpnctl_core::url_host::host_for_url;
-use vpnctl_core::{RenderCtx, User};
+use vpnctl_core::{ProtocolId, RenderCtx, ServerId, User};
 use vpnctl_inventory::sqlite::SubscriptionServer;
 use vpnctl_protocols::VLESS_PACKET_ENCODING;
 
@@ -41,10 +43,31 @@ pub(crate) fn render_vless_uri(
     format!("vless://{client_uuid}@{host}:{port}?{params}#{fragment}")
 }
 
+fn vless_reality_keys(input: &SubscriptionServer) -> Option<(&str, &str)> {
+    if (input.suppressed && input.detour_via.is_none())
+        || !input.visible.iter().any(|id| id.0 == "vless+reality")
+    {
+        return None;
+    }
+    Some((
+        input.secrets.get("vless.public_key")?.as_str(),
+        input.secrets.get("vless.short_id")?.as_str(),
+    ))
+}
+
 pub(crate) fn collect_vless_uris_for_user(
     inputs: &[SubscriptionServer],
     client_name: &str,
     detour_capable: bool,
+) -> Vec<String> {
+    collect_vless_uris_with_entries(inputs, client_name, detour_capable, &HashSet::new())
+}
+
+pub(super) fn collect_vless_uris_with_entries(
+    inputs: &[SubscriptionServer],
+    client_name: &str,
+    detour_capable: bool,
+    extra_entries: &HashSet<ServerId>,
 ) -> Vec<String> {
     struct RenderedServer {
         server_id: vpnctl_core::ServerId,
@@ -53,22 +76,13 @@ pub(crate) fn collect_vless_uris_for_user(
     }
 
     let mut rendered: Vec<RenderedServer> = Vec::with_capacity(inputs.len());
-    let vless_id = vpnctl_core::ProtocolId("vless+reality".to_string());
     for input in inputs {
-        let server = &input.server;
-        if (input.suppressed && input.detour_via.is_none()) || !input.visible.contains(&vless_id) {
+        let Some((pbk, sid)) = vless_reality_keys(input) else {
             continue;
-        }
+        };
+        let server = &input.server;
         let detour_via = input.detour_via.clone();
         let secrets = &input.secrets;
-        let pbk = match secrets.get("vless.public_key") {
-            Some(v) => v.as_str(),
-            None => continue,
-        };
-        let sid = match secrets.get("vless.short_id") {
-            Some(v) => v.as_str(),
-            None => continue,
-        };
         let sni = secrets
             .get("vless.sni")
             .map(String::as_str)
@@ -121,7 +135,7 @@ pub(crate) fn collect_vless_uris_for_user(
         })
         .collect();
 
-    let valid_entries: std::collections::HashSet<vpnctl_core::ServerId> = rendered
+    let mut valid_entries: HashSet<ServerId> = rendered
         .iter()
         .filter_map(|r| {
             r.detour_via
@@ -132,6 +146,7 @@ pub(crate) fn collect_vless_uris_for_user(
                 .cloned()
         })
         .collect();
+    valid_entries.extend(extra_entries.intersection(&direct_entry_ids).cloned());
 
     let mut uris = Vec::with_capacity(rendered.len());
     for item in rendered {
@@ -154,6 +169,85 @@ pub(crate) fn collect_vless_uris_for_user(
     }
 
     uris
+}
+
+pub(super) fn collect_vmess_uris(
+    state: &AppState,
+    inputs: &[SubscriptionServer],
+    user: &User,
+    detour_capable: bool,
+) -> (Vec<String>, HashSet<ServerId>) {
+    let mut entries = HashSet::new();
+    let mut uris = Vec::new();
+    let vmess = ProtocolId("vmess".into());
+    let Some(protocol) = state.registry.protocol(&vmess) else {
+        return (uris, entries);
+    };
+    let direct_hops: HashSet<ServerId> = inputs
+        .iter()
+        .filter(|input| input.detour_via.is_none() && vless_reality_keys(input).is_some())
+        .map(|input| input.server.id.clone())
+        .collect();
+
+    for input in inputs {
+        if !input.visible.contains(&vmess) || (input.suppressed && input.detour_via.is_none()) {
+            continue;
+        }
+        let ctx = RenderCtx::new(&input.server, &input.secrets);
+        let per_server_user = user.with_per_server_uuid(&input.client_uuid);
+        let Ok(uri) = protocol.share_link(&ctx, &per_server_user) else {
+            continue;
+        };
+        let Some(encoded) = uri.strip_prefix("vmess://") else {
+            continue;
+        };
+        let Ok(decoded) = BASE64_STANDARD.decode(encoded) else {
+            continue;
+        };
+        let Ok(mut profile) =
+            serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&decoded)
+        else {
+            continue;
+        };
+        let label = server_display_label(&input.server.id.0, input.display_name.as_deref());
+
+        let preferred = input
+            .secrets
+            .get("vmess.preferred_entry")
+            .filter(|value| !value.is_empty())
+            .map(|value| ServerId(value.clone()));
+        let entry = input.detour_via.as_ref().or(preferred.as_ref());
+        if detour_capable
+            && input.server.address.parse::<std::net::IpAddr>().is_ok()
+            && let Some(entry) = entry
+            && entry != &input.server.id
+            && direct_hops.contains(entry)
+        {
+            let mut chained = profile.clone();
+            chained.insert("add".into(), input.server.address.clone().into());
+            chained.insert("detour".into(), entry.0.clone().into());
+            chained.insert(
+                "outbound".into(),
+                format!("vmess-{}", input.server.id.0).into(),
+            );
+            chained.insert(
+                "ps".into(),
+                format!("{label} VMess via {} ~{}", entry.0, user.id.0).into(),
+            );
+            uris.push(encode_vmess_profile(chained));
+            entries.insert(entry.clone());
+        }
+        if input.detour_via.is_none() {
+            profile.insert("ps".into(), format!("{label} VMess ~{}", user.id.0).into());
+            uris.push(encode_vmess_profile(profile));
+        }
+    }
+    (uris, entries)
+}
+
+fn encode_vmess_profile(profile: serde_json::Map<String, serde_json::Value>) -> String {
+    let encoded = BASE64_STANDARD.encode(serde_json::Value::Object(profile).to_string());
+    format!("vmess://{encoded}")
 }
 
 pub(crate) fn collect_extra_protocol_uris(

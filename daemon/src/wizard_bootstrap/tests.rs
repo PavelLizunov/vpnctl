@@ -166,7 +166,7 @@ async fn bootstrap_mints_reality_identity_for_an_xray_only_xhttp_server() {
 }
 
 #[tokio::test]
-async fn bootstrap_mints_every_secret_each_enabled_protocol_needs_to_render() {
+async fn bootstrap_provides_every_secret_each_enabled_protocol_needs_to_render() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("inv.db");
     let inv = vpnctl_inventory::SqliteInventory::open(&db).await.unwrap();
@@ -188,9 +188,29 @@ async fn bootstrap_mints_every_secret_each_enabled_protocol_needs_to_render() {
     };
     inv.add_server(&server).await.unwrap();
 
-    let (secrets, _minted) = bootstrap_server_secrets(&inv, &server, &registry)
+    for (key, value) in [
+        ("vmess.domain", "vmess.example.com"),
+        (
+            "vmess.certificate",
+            "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----",
+        ),
+        (
+            "vmess.key",
+            concat!(
+                "-----BEGIN ",
+                "PRIVATE KEY-----\nfixture\n-----END ",
+                "PRIVATE KEY-----"
+            ),
+        ),
+    ] {
+        inv.set_server_secret(&server.id, key, value).await.unwrap();
+    }
+
+    let (secrets, minted) = bootstrap_server_secrets(&inv, &server, &registry)
         .await
         .unwrap();
+
+    assert!(minted.iter().all(|key| !key.starts_with("vmess.")));
 
     let ctx = RenderCtx::new(&server, &secrets);
     for pid in &enabled {
@@ -207,7 +227,10 @@ async fn bootstrap_mints_every_secret_each_enabled_protocol_needs_to_render() {
         for spec in proto.server_secret_specs() {
             use vpnctl_core::ServerSecretSpec as S;
             let keys: Vec<&'static str> = match spec {
-                S::Password { key, .. } | S::Base64Key { key, .. } | S::ShortId { key } => {
+                S::Required { key }
+                | S::Password { key, .. }
+                | S::Base64Key { key, .. }
+                | S::ShortId { key } => {
                     vec![key]
                 }
                 S::X25519Keypair {
@@ -222,7 +245,7 @@ async fn bootstrap_mints_every_secret_each_enabled_protocol_needs_to_render() {
             for k in keys {
                 assert!(
                     secrets.contains_key(k),
-                    "{pid:?} declares secret `{k}` but bootstrap didn't mint it"
+                    "{pid:?} declares secret `{k}` but bootstrap returned without it"
                 );
             }
         }
@@ -331,6 +354,7 @@ async fn shutdown_only_deploy_clears_pending_only_after_successful_reconciliatio
             None,
             false,
             &revision,
+            None,
         )
         .await;
         assert_eq!(
@@ -488,7 +512,10 @@ fn declared_secret_keys(registry: &vpnctl_core::Registry, protocol_id: &str) -> 
         .server_secret_specs()
         .into_iter()
         .flat_map(|spec| match spec {
-            S::Password { key, .. } | S::Base64Key { key, .. } | S::ShortId { key } => {
+            S::Required { key }
+            | S::Password { key, .. }
+            | S::Base64Key { key, .. }
+            | S::ShortId { key } => {
                 vec![key]
             }
             S::X25519Keypair {
@@ -522,7 +549,13 @@ async fn collect_redeploy_bounded(
     use std::time::Duration;
     use tokio_stream::StreamExt;
 
-    let mut stream = Box::pin(run_redeploy(snapshot, inv, registry, missing_key));
+    let mut stream = Box::pin(redeploy::run_redeploy_with_transport(
+        snapshot,
+        inv,
+        registry,
+        missing_key,
+        Some(Arc::new(vpnctl_ssh::MockTransport::new())),
+    ));
     let mut events = Vec::new();
     for _ in 0..32 {
         match tokio::time::timeout(Duration::from_secs(2), stream.next()).await {
@@ -890,7 +923,7 @@ async fn redeploy_firewall_failure_records_failed_audit_and_keeps_server_pending
     inv.set_reserved_ports(&server.id, &[12345]).await.unwrap();
     assert!(inv.server_pending_deploy(&server.id).await.unwrap());
     let key = dir.path().join("unused-deploy-key");
-    std::fs::write(&key, "fixture: kernel methods do not invoke SSH").unwrap();
+    std::fs::write(&key, "fixture key for the injected SSH transport").unwrap();
 
     let events =
         collect_redeploy_bounded(server.clone(), inv.clone(), Arc::new(registry), key).await;
@@ -993,7 +1026,7 @@ async fn redeploy_persists_observed_certificate_only_on_change_and_propagates_er
     inv.add_server(&server).await.unwrap();
     inv.set_reserved_ports(&server.id, &[12345]).await.unwrap();
     let key = dir.path().join("unused-deploy-key");
-    std::fs::write(&key, "fixture: kernel methods do not invoke SSH").unwrap();
+    std::fs::write(&key, "fixture key for the injected SSH transport").unwrap();
     for (pin, expected_count) in [(Some("ab"), 1), (Some("ab"), 1), (Some("cd"), 2), (None, 2)] {
         *observed.lock().unwrap() = pin.map(|pin| pin.repeat(32));
         let events = collect_redeploy_bounded(

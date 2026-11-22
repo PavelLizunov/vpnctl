@@ -205,9 +205,10 @@ pub(crate) fn server_detail_user_bandwidth_section(
     server: &vpnctl_core::Server,
     secrets: &std::collections::HashMap<String, String>,
     roster: Option<&crate::boosty_bandwidth::Roster>,
+    onboarding_default: Option<&(u32, String)>,
     lang: crate::i18n::Locale,
 ) -> Markup {
-    use crate::boosty_bandwidth::{POLICY_KEY, TierPolicy};
+    use crate::boosty_bandwidth::{PENDING_KEY, POLICY_KEY, TierPolicy};
     use crate::i18n::tr;
     use vpnctl_kernels::{USER_BANDWIDTH_KEY, USER_BANDWIDTH_MAX_MBPS};
 
@@ -218,8 +219,14 @@ pub(crate) fn server_detail_user_bandwidth_section(
     let rate = secrets.get(USER_BANDWIDTH_KEY).map_or("0", String::as_str);
     let saved_policy = secrets
         .get(POLICY_KEY)
-        .and_then(|json| serde_json::from_str::<TierPolicy>(json).ok())
-        .filter(|policy| !policy.blog.is_empty());
+        .and_then(|json| TierPolicy::from_saved(json));
+    let can_set_default = saved_policy.is_some()
+        && rate
+            .parse::<u32>()
+            .is_ok_and(|mbps| (1..=USER_BANDWIDTH_MAX_MBPS).contains(&mbps));
+    let is_default = onboarding_default.is_some_and(|(mbps, policy)| {
+        rate.parse::<u32>() == Ok(*mbps) && secrets.get(POLICY_KEY) == Some(policy)
+    });
     let saved = saved_policy
         .as_ref()
         .filter(|policy| roster.is_some_and(|roster| policy.blog == roster.blog));
@@ -247,6 +254,12 @@ pub(crate) fn server_detail_user_bandwidth_section(
                 max=(USER_BANDWIDTH_MAX_MBPS) value=(rate) required;
             " "
             button.ed-abtn type="submit" { (tr(lang, "Apply uniform speed", "Применить единый лимит")) }
+        }
+        @if secrets.get(PENDING_KEY).is_some_and(|value| value == "1") {
+            p.ed-grid__mut {
+                (tr(lang, "The base limit is saved. Apply Boosty rates when a fresh roster is available.",
+                    "Базовый лимит сохранён. Примените лимиты Boosty, когда будет доступен свежий список подписчиков."))
+            }
         }
         details.ed-spoiler {
             summary { (tr(lang, "Speed by Boosty tier", "Скорость по уровням Boosty")) }
@@ -284,6 +297,18 @@ pub(crate) fn server_detail_user_bandwidth_section(
                 }
             } @else {
                 p.ed-grid__mut { (tr(lang, "Waiting for a fresh roster from the Boosty dashboard.", "Ожидается свежий список подписчиков из панели Boosty.")) }
+            }
+            @if is_default {
+                p.ed-grid__mut {
+                    (tr(lang, "These rates are the default for newly added nodes.",
+                        "Эти лимиты используются для новых узлов."))
+                }
+            } @else if can_set_default {
+                form method="post" action=(format!("/admin/servers/{sid}/user-bandwidth-default")) {
+                    button.ed-abtn type="submit" {
+                        (tr(lang, "Use saved Boosty rates for new nodes", "Использовать сохранённые лимиты Boosty для новых узлов"))
+                    }
+                }
             }
         }
     }
@@ -757,6 +782,57 @@ pub(crate) fn server_detail_dnstt_section(
                 input.ed-field type="text" name="resolver" value=(resolver) maxlength="15" required;
             }
             button.ed-abtn type="submit" { (tr(lang,"Save DNSTT settings","Сохранить настройки DNSTT")) }
+        }
+    }
+}
+
+pub(crate) fn server_detail_vmess_section(
+    server: &vpnctl_core::Server,
+    secrets: &HashMap<String, String>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    if !server.kernels.iter().any(|kernel| kernel.0 == "sing-box") {
+        return html! {};
+    }
+    let sid = path_segment_encode(&server.id.0);
+    let domain = secrets
+        .get("vmess.domain")
+        .map(String::as_str)
+        .unwrap_or("");
+    let port = secrets
+        .get("vmess.listen_port")
+        .map(String::as_str)
+        .unwrap_or("443");
+    let detour = secrets
+        .get("vmess.preferred_entry")
+        .map(String::as_str)
+        .unwrap_or("");
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow id="vmess" { "VMess WebSocket + TLS" }
+        form method="post" action=(format!("/admin/servers/{sid}/vmess-config")) {
+            label { (tr(lang, "TLS hostname", "Имя хоста TLS"))
+                input type="text" name="domain" value=(domain) required maxlength="253";
+            }
+            label { (tr(lang, "TCP port", "Порт TCP"))
+                input type="number" name="listen_port" value=(port) min="1" max="65535" required;
+            }
+            label { (tr(lang, "Optional VLESS Reality entry server ID", "ID входного сервера VLESS Reality, если нужен"))
+                input type="text" name="detour_via" value=(detour);
+            }
+            div {
+                label { (tr(lang, "PEM certificate chain", "Цепочка сертификатов PEM"))
+                    textarea name="certificate" rows="4" autocomplete="off" {}
+                }
+                label { (tr(lang, "PEM private key", "Закрытый ключ PEM"))
+                    textarea name="key" rows="4" autocomplete="off" {}
+                }
+            }
+            @if secrets.contains_key("vmess.key") {
+                p.ed-muted { (tr(lang, "Leave both PEM fields blank to keep the saved pair.", "Оставьте оба поля PEM пустыми, чтобы сохранить действующую пару.")) }
+            }
+            button.ed-abtn type="submit" { (tr(lang, "Save VMess settings", "Сохранить настройки VMess")) }
         }
     }
 }

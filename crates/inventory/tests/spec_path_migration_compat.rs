@@ -129,15 +129,24 @@ async fn table_names(pool: &SqlitePool) -> Vec<String> {
 }
 
 async fn table_contents(pool: &SqlitePool, table: &str) -> Vec<Vec<String>> {
+    table_contents_excluding(pool, table, None).await
+}
+
+async fn table_contents_excluding(
+    pool: &SqlitePool,
+    table: &str,
+    excluded_column: Option<&str>,
+) -> Vec<Vec<String>> {
     let info = sqlx::query(&format!("PRAGMA table_info({})", quoted_identifier(table)))
         .fetch_all(pool)
         .await
         .unwrap();
     let columns: Vec<String> = info
         .iter()
-        .map(|row| {
+        .filter_map(|row| {
             let name: String = row.get("name");
-            format!("quote({})", quoted_identifier(&name))
+            (Some(name.as_str()) != excluded_column)
+                .then(|| format!("quote({})", quoted_identifier(&name)))
         })
         .collect();
     assert!(!columns.is_empty());
@@ -182,10 +191,12 @@ async fn retained_contents(pool: &SqlitePool) -> Vec<(String, Vec<Vec<String>>)>
             || table.starts_with("service_path_")
             || table == "ssh_access_checks"
             || table == "server_security_reports"
+            || table == "new_server_bandwidth_default"
         {
             continue;
         }
-        let contents = table_contents(pool, &table).await;
+        let new_column = (table == "servers").then_some("desktop_subscription_core");
+        let contents = table_contents_excluding(pool, &table, new_column).await;
         tables.push((table, contents));
     }
     tables
@@ -216,12 +227,21 @@ async fn assert_current_migrations(pool: &SqlitePool) {
         assert!(tables.iter().any(|name| name == table), "missing {table}");
     }
     assert_eq!(reindex_count(pool).await, 0);
-    assert!(table_contents(pool, "ssh_access_checks").await.is_empty());
-    assert!(
-        table_contents(pool, "server_security_reports")
-            .await
-            .is_empty()
+    let restricted: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM servers WHERE desktop_subscription_core IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        restricted, 0,
+        "migration must leave existing delivery unrestricted"
     );
+    assert!(table_contents(pool, "ssh_access_checks").await.is_empty());
+    for table in ["server_security_reports", "new_server_bandwidth_default"] {
+        let contents = table_contents(pool, table).await;
+        assert!(contents.is_empty(), "unexpected rows in {table}");
+    }
 }
 
 impl Fixture {

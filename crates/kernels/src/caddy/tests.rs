@@ -630,6 +630,7 @@ BUNDLE_EOF\n",
         chmod() {{ :; }}
         journalctl() {{ :; }}
         ufw() {{ :; }}
+        python3() {{ :; }}
         sleep() {{ :; }}
         systemctl() {{
             action="$1"; shift
@@ -647,7 +648,7 @@ BUNDLE_EOF\n",
 {script}
 EOF
 )
-        EVAL_SCRIPT=$(echo "$EVAL_SCRIPT" | sed "s|/etc/caddy|$TMP_DIR/etc/caddy|g" | sed "s|/usr/local/bin/caddy|caddy|g")
+        EVAL_SCRIPT=$(echo "$EVAL_SCRIPT" | sed "s|/etc/caddy|$TMP_DIR/etc/caddy|g" | sed "s|/usr/local/bin/caddy|caddy|g" | sed "s|/usr/bin/python3|python3|g")
 
         set +e
         OUTPUT=$(eval "$EVAL_SCRIPT" 2>&1)
@@ -1697,7 +1698,7 @@ async fn caddy_and_amneziawg_open_firewall_for_effective_protocol_ports() {
         (&caddy, &naive, "tcp", 443),
         (&amneziawg, &wireguard, "udp", 51821),
     ] {
-        let expected = crate::sing_box::firewall_open_script(&[(transport, port)]).unwrap();
+        let expected = crate::firewall::firewall_open_script(&[(transport, port)]).unwrap();
         let ssh = RequireCommand(expected);
         let error = kernel
             .open_firewall(&ssh, &ctx, &[protocol])
@@ -1709,41 +1710,13 @@ async fn caddy_and_amneziawg_open_firewall_for_effective_protocol_ports() {
 }
 
 #[test]
-fn runtime_firewall_failure_aborts_provisioning() {
-    let runtime = caddy_runtime_provision_script();
-    let start = runtime.find("if command -v ufw").unwrap();
-    let firewall = runtime[start..]
-        .split("command -v /usr/local/bin/caddy")
-        .next()
-        .unwrap();
-    for (state, failed_port, success) in [
-        ("inactive", "80/tcp", true),
-        ("active", "none", true),
-        ("active", "80/tcp", false),
-        ("active", "443/tcp", false),
-    ] {
-        let mocks = r#"
-            ufw() {
-                case "$1" in
-                    status) echo "Status: $VPNCTL_UFW_STATE" ;;
-                    allow) [ "$2" != "$VPNCTL_FAILED_PORT" ] ;;
-                    *) return 99 ;;
-                esac
-            }
-        "#;
-        let output = std::process::Command::new("sh")
-            .args(["-c", &format!("{mocks}\nset -eu\n{firewall}")])
-            .env("VPNCTL_UFW_STATE", state)
-            .env("VPNCTL_FAILED_PORT", failed_port)
-            .output()
-            .unwrap();
-        assert_eq!(output.status.success(), success, "{output:?}");
-    }
+fn runtime_provision_leaves_firewall_to_apply() {
+    assert!(!caddy_runtime_provision_script().contains("ufw"));
 }
 
 #[test]
 fn vlessws_apply_firewall_failure_rolls_back_e2e() {
-    for failed_port in ["80/tcp", "8443/tcp"] {
+    for failed_port in ["tcp:80", "tcp:8443"] {
         sim_env(
             &vlessws_apply_script(),
             &[
@@ -1754,12 +1727,11 @@ fn vlessws_apply_firewall_failure_rolls_back_e2e() {
             ],
             &format!(
                 r#"
-                ufw() {{
-                    case "$1" in
-                        status) echo 'Status: active' ;;
-                        allow) [ "$2" != '{failed_port}' ] ;;
-                        *) return 99 ;;
-                    esac
+                python3() {{
+                    [ "$*" = '-I - allow tcp:80 tcp:8443' ] || return 99
+                    for arg in "$@"; do
+                        [ "$arg" != '{failed_port}' ] || return 1
+                    done
                 }}
             "#
             ),

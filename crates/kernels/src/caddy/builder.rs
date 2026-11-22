@@ -202,18 +202,6 @@ WantedBy=multi-user.target
 VLESSWS_UNIT_EOF
         systemctl daemon-reload
 
-        # naive needs 80 (ACME HTTP) + 443. A closed port means no cert
-        # or service, so an active firewall must accept both rules.
-        if command -v ufw >/dev/null 2>&1; then
-            ufw_status=$(LC_ALL=C ufw status)
-            case "$ufw_status" in
-                'Status: active'*)
-                    ufw allow 80/tcp
-                    ufw allow 443/tcp
-                    ;;
-            esac
-        fi
-
         command -v /usr/local/bin/caddy
         "#,
         site = MASQUERADE_INDEX_HTML,

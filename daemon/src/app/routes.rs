@@ -279,6 +279,10 @@ pub(crate) fn admin_router(state: AppState) -> Router {
             post(admin::server_set_client_detour_via),
         )
         .route(
+            "/admin/servers/{id}/desktop-subscription",
+            post(admin::server_set_desktop_subscription),
+        )
+        .route(
             "/admin/servers/{id}/display-name",
             post(admin::server_set_display_name),
         )
@@ -299,6 +303,10 @@ pub(crate) fn admin_router(state: AppState) -> Router {
             post(admin::server_rotate_hysteria2_obfs),
         )
         .route(
+            "/admin/servers/{id}/vmess-config",
+            post(admin::server_set_vmess_config),
+        )
+        .route(
             "/admin/servers/{id}/dnstt-config",
             post(admin::server_set_dnstt_config),
         )
@@ -309,6 +317,10 @@ pub(crate) fn admin_router(state: AppState) -> Router {
         .route(
             "/admin/servers/{id}/user-bandwidth",
             post(admin::server_set_user_bandwidth),
+        )
+        .route(
+            "/admin/servers/{id}/user-bandwidth-default",
+            post(admin::server_set_new_server_bandwidth_default),
         )
         .route(
             "/admin/servers/{id}/ss2022-mode",

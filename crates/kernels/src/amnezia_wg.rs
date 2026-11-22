@@ -283,7 +283,7 @@ impl Kernel for AmneziaWg {
             .iter()
             .flat_map(|p| p.effective_listen_ports(ctx.secrets))
             .collect();
-        if let Some(script) = super::sing_box::firewall_open_script(&ports) {
+        if let Some(script) = crate::firewall::firewall_open_script(&ports) {
             ssh.exec(&script).await?;
         }
         Ok(())

@@ -6,8 +6,8 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
 use super::collectors::{
-    collect_awg_subscription_uris, collect_extra_protocol_uris, collect_vless_uris_for_user,
-    make_config_blob,
+    collect_awg_subscription_uris, collect_extra_protocol_uris, collect_vless_uris_with_entries,
+    collect_vmess_uris, make_config_blob,
 };
 use super::compat::{is_vpn_client_ua, is_vpnrouter_client_ua};
 use crate::app::AppState;
@@ -99,6 +99,12 @@ pub(crate) async fn get_config_root_catchall(headers: HeaderMap) -> Response {
     unregistered_response(&headers)
 }
 
+fn single_header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    let mut values = headers.get_all(name).iter();
+    let value = values.next()?.to_str().ok()?;
+    values.next().is_none().then_some(value)
+}
+
 pub(crate) async fn get_config(
     State(state): State<AppState>,
     Path(tail): Path<String>,
@@ -120,8 +126,22 @@ pub(crate) async fn get_config(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let want_raw = is_vpn_client_ua(ua);
+    let vpnrouter = is_vpnrouter_client_ua(ua);
+    let desktop_vpnrouter = single_header(&headers, "user-agent")
+        .and_then(|ua| ua.split_ascii_whitespace().next())
+        .and_then(|product| product.split('/').next())
+        .is_some_and(|product| product.eq_ignore_ascii_case("VPNRouter"));
+    let desktop_core = if desktop_vpnrouter
+        && matches!(
+            single_header(&headers, "x-vpnrouter-platform"),
+            Some("windows" | "macos" | "linux")
+        ) {
+        single_header(&headers, "x-vpnrouter-core-version")
+    } else {
+        None
+    };
     let supports = |capability: &str| {
-        is_vpnrouter_client_ua(ua)
+        vpnrouter
             && headers
                 .get_all("X-VPNRouter-Capabilities")
                 .iter()
@@ -131,6 +151,7 @@ pub(crate) async fn get_config(
     };
     let has_detour_cap = supports("detour-v1");
     let has_dnstt_cap = supports("dnstt-v1");
+    let has_vmess_cap = supports("vmess-v1");
     let now = now_unix_secs();
 
     let peer_ip: Option<std::net::IpAddr> = request
@@ -183,7 +204,7 @@ pub(crate) async fn get_config(
 
     let inputs = match state
         .inv
-        .subscription_render_inputs(&user.id, is_vpnrouter_client_ua(ua))
+        .subscription_render_inputs_for_client(&user.id, vpnrouter, desktop_core)
         .await
     {
         Ok(inputs) => inputs,
@@ -192,7 +213,13 @@ pub(crate) async fn get_config(
             return empty_response(want_raw, now);
         }
     };
-    let mut uris = collect_vless_uris_for_user(&inputs, &user.id.0, has_detour_cap);
+    let (vmess, vmess_entries) = if has_vmess_cap {
+        collect_vmess_uris(&state, &inputs, &user, has_detour_cap)
+    } else {
+        Default::default()
+    };
+    let mut uris =
+        collect_vless_uris_with_entries(&inputs, &user.id.0, has_detour_cap, &vmess_entries);
 
     const EXTRA_PROTOCOLS: &[(&str, &str, Option<&str>)] = &[
         ("naive", "NAIVE", Some("naive.domain")),
@@ -234,6 +261,8 @@ pub(crate) async fn get_config(
             Some("observed.dnstt.applied"),
         ));
     }
+
+    uris.extend(vmess);
 
     let Some(config) = make_config_blob(&uris) else {
         return empty_response(want_raw, now);
@@ -305,7 +334,9 @@ fn config_response(mut response: Response) -> Response {
     );
     response.headers_mut().append(
         header::VARY,
-        HeaderValue::from_static("User-Agent, X-VPNRouter-Capabilities"),
+        HeaderValue::from_static(
+            "User-Agent, X-VPNRouter-Capabilities, X-VPNRouter-Platform, X-VPNRouter-Core-Version",
+        ),
     );
     response
 }

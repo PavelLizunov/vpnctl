@@ -2,9 +2,12 @@ use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use vpnctl_core::UserId;
+use vpnctl_core::{Server, UserId};
+use vpnctl_inventory::{SqliteInventory, SqliteInventoryError};
+use vpnctl_kernels::{USER_BANDWIDTH_KEY, USER_BANDWIDTH_MAX_MBPS, USER_BANDWIDTH_OVERRIDES_KEY};
 
 pub(crate) const POLICY_KEY: &str = "sing-box.boosty_bandwidth_policy";
+pub(crate) const PENDING_KEY: &str = "sing-box.boosty_bandwidth_pending";
 pub(crate) const ROSTER_URL: &str = "http://127.0.0.1:3001/api/v1/roster";
 const PAGE_SIZE: usize = 200;
 const MAX_SUBSCRIBERS: usize = 10_000;
@@ -15,6 +18,65 @@ const MAX_AGE_SECS: i64 = 5 * 60;
 pub(crate) struct TierPolicy {
     pub blog: String,
     pub levels: BTreeMap<i64, u32>,
+}
+
+impl TierPolicy {
+    pub(crate) fn from_saved(json: &str) -> Option<Self> {
+        let policy: Self = serde_json::from_str(json).ok()?;
+        (!policy.blog.is_empty()
+            && policy
+                .levels
+                .iter()
+                .all(|(id, rate)| *id > 0 && (1..=USER_BANDWIDTH_MAX_MBPS).contains(rate)))
+        .then_some(policy)
+    }
+}
+
+pub(crate) async fn register_new_server(
+    inv: &SqliteInventory,
+    server: &Server,
+    roster_url: &str,
+) -> Result<bool, SqliteInventoryError> {
+    let mut settings = vec![(
+        "vless.sni",
+        vpnctl_protocols::NEW_SERVER_REALITY_SNI.to_string(),
+    )];
+    let mut pending = false;
+    if server.kernels.iter().any(|kernel| kernel.0 == "sing-box")
+        && let Some((mbps, json)) = inv.get_new_server_bandwidth_default().await?
+    {
+        let policy = TierPolicy::from_saved(&json)
+            .filter(|_| (1..=USER_BANDWIDTH_MAX_MBPS).contains(&mbps))
+            .ok_or_else(|| {
+                SqliteInventoryError::Invalid("invalid new-node Boosty policy".into())
+            })?;
+        let roster = tokio::time::timeout(Duration::from_secs(3), Roster::fetch(roster_url)).await;
+        let overrides = match roster {
+            Ok(Ok(roster)) if roster.blog == policy.blog => {
+                roster.inventory_overrides(inv, &policy, mbps).await?
+            }
+            _ => {
+                pending = true;
+                settings.push((PENDING_KEY, "1".into()));
+                BTreeMap::new()
+            }
+        };
+        settings.extend([
+            (USER_BANDWIDTH_KEY, mbps.to_string()),
+            (POLICY_KEY, json),
+            (
+                USER_BANDWIDTH_OVERRIDES_KEY,
+                serde_json::to_string(&overrides)?,
+            ),
+        ]);
+    }
+    let values = settings
+        .iter()
+        .map(|(k, v)| (*k, v.as_str()))
+        .collect::<Vec<_>>();
+    inv.register_server_with_secrets(server, "admin", &values)
+        .await?;
+    Ok(pending)
 }
 
 #[derive(Deserialize)]
@@ -166,6 +228,18 @@ impl Roster {
 
     pub(crate) fn active_subscribers(&self) -> &BTreeMap<i64, ActiveSubscriber> {
         &self.subscribers
+    }
+
+    pub(crate) async fn inventory_overrides(
+        &self,
+        inv: &SqliteInventory,
+        policy: &TierPolicy,
+        base: u32,
+    ) -> Result<BTreeMap<String, u32>, SqliteInventoryError> {
+        let links = inv.list_boosty_links().await?;
+        let users = inv.list_users().await?;
+        let account_ids = users.iter().map(|user| user.id.0.as_str()).collect();
+        Ok(self.overrides(policy, base, &links, &account_ids))
     }
 
     pub(crate) fn overrides(

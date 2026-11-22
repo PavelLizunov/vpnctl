@@ -597,3 +597,107 @@ async fn ss2022_mode_preserves_legacy_http_bytes_and_revokes_rendered_users() {
         serde_json::json!([{"name": "vpnctl-no-users", "password": "BAUGBwgJCgsMDQ4PEBESEw=="}])
     );
 }
+
+#[tokio::test]
+async fn stock_vmess_subscription_relabels_duplicate_tags_and_honors_visibility() {
+    let dir = TempDir::new().unwrap();
+    let (mut state, _) = seed(&dir).await;
+    state.registry = Arc::new(vpnctl_kernels::build_registry().unwrap());
+    let inv = &state.inv;
+    let protocol = ProtocolId("vmess".into());
+    let uid = UserId("vmess-fixture".into());
+    let mut user = inv
+        .get_user(&UserId("alice".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    user.id = uid.clone();
+    user.uuid = "00000000-0000-4000-8000-000000000042".into();
+    user.sub_token = None;
+    inv.add_user(&user).await.unwrap();
+    let token = inv
+        .get_user(&uid)
+        .await
+        .unwrap()
+        .unwrap()
+        .sub_token
+        .unwrap();
+    let mut server = inv
+        .get_server(&ServerId("srv".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    server.enabled_protocols = vec![protocol.clone()];
+    for (id, address) in [("vmess-a", "192.0.2.10"), ("vmess-b", "192.0.2.11")] {
+        server.id = ServerId(id.into());
+        server.address = address.into();
+        inv.add_server(&server).await.unwrap();
+        inv.set_server_secret(&server.id, "vmess.domain", &format!("{id}.example.com"))
+            .await
+            .unwrap();
+        inv.set_server_display_name(&server.id, Some("Shared"))
+            .await
+            .unwrap();
+        inv.grant(&uid, &server.id).await.unwrap();
+    }
+
+    let fetch = || {
+        let state = state.clone();
+        let token = token.clone();
+        async move {
+            let response = router(state)
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/sub/{token}?format=sing-box"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let json: Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            json["outbounds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry["type"] == "vmess")
+                .cloned()
+                .collect::<Vec<Value>>()
+        }
+    };
+
+    let visible = fetch().await;
+    assert_eq!(visible.len(), 2);
+    assert_ne!(visible[0]["tag"], visible[1]["tag"]);
+    assert!(visible.iter().all(|entry| entry["alter_id"] == 0));
+
+    let hop = ServerId("srv".into());
+    inv.grant(&uid, &hop).await.unwrap();
+    inv.set_client_detour_via_as("test", &ServerId("vmess-a".into()), Some(&hop))
+        .await
+        .unwrap();
+    let after_detour = fetch().await;
+    let chained = after_detour
+        .iter()
+        .find(|outbound| outbound["server"] == "vmess-a.example.com")
+        .unwrap();
+    assert!(
+        chained["detour"]
+            .as_str()
+            .is_some_and(|tag| tag.contains("VLESS"))
+    );
+
+    inv.set_server_protocol_hidden(&ServerId("vmess-a".into()), &protocol, true)
+        .await
+        .unwrap();
+    let visible = fetch().await;
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0]["server"], "vmess-b.example.com");
+
+    inv.set_grant_protocol_override(&uid, &ServerId("vmess-b".into()), &protocol, true)
+        .await
+        .unwrap();
+    assert!(fetch().await.is_empty());
+}

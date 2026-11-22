@@ -6,9 +6,9 @@ mod scripts;
 #[cfg(test)]
 mod tests;
 
+use crate::firewall::firewall_open_script;
 pub(crate) use arch::resolve_sing_box_artifact_path;
 pub use guards::{live_config_user_uuids, validate_config_excludes_ports};
-pub(crate) use scripts::firewall_open_script;
 pub use scripts::{
     SING_BOX_AMD64_SHA256, SING_BOX_ARM64_SHA256, SING_BOX_ARMV7_SHA256, SING_BOX_MIN_VERSION,
     SING_BOX_VPNCTL_VERSION,
@@ -59,6 +59,7 @@ impl Kernel for SingBox {
             ProtocolId("trojan".to_string()),
             ProtocolId("amneziawg2".to_string()),
             ProtocolId("amneziawg3".to_string()),
+            ProtocolId("vmess".to_string()),
         ]
     }
 

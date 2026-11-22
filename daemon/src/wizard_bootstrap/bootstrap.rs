@@ -20,9 +20,23 @@ pub fn run_bootstrap(
     inv: SqliteInventory,
     registry: Arc<Registry>,
 ) -> impl Stream<Item = BootstrapEvent> + Send + 'static {
+    run_bootstrap_with_roster(
+        plan,
+        inv,
+        registry,
+        Arc::from(crate::boosty_bandwidth::ROSTER_URL),
+    )
+}
+
+pub(crate) fn run_bootstrap_with_roster(
+    plan: BootstrapPlan,
+    inv: SqliteInventory,
+    registry: Arc<Registry>,
+    roster_url: Arc<str>,
+) -> impl Stream<Item = BootstrapEvent> + Send + 'static {
     let (tx, rx) = mpsc::channel::<BootstrapEvent>(64);
     tokio::spawn(async move {
-        bootstrap_pipeline(plan, inv, registry, tx).await;
+        bootstrap_pipeline(plan, inv, registry, &roster_url, tx).await;
     });
     ReceiverStream::new(rx)
 }
@@ -31,6 +45,7 @@ async fn bootstrap_pipeline(
     plan: BootstrapPlan,
     inv: SqliteInventory,
     registry: Arc<Registry>,
+    roster_url: &str,
     tx: mpsc::Sender<BootstrapEvent>,
 ) {
     macro_rules! send_step {
@@ -210,8 +225,13 @@ async fn bootstrap_pipeline(
         jump_via: None,
         usage_coefficient: 1.0,
     };
-    if let Err(e) = inv.register_server(&server, "admin").await {
-        fail!("register", "inv.register_server: {e}");
+    match crate::boosty_bandwidth::register_new_server(&inv, &server, roster_url).await {
+        Ok(true) => send_step!(
+            "register",
+            "Base speed saved. Apply Boosty rates in Protocols after the dashboard has a fresh roster."
+        ),
+        Ok(false) => {}
+        Err(e) => fail!("register", "cannot register server: {e}"),
     }
     if let Err(e) = inv
         .update_trusted_fingerprint(&server.id, &fingerprint)
@@ -402,9 +422,21 @@ async fn bootstrap_pipeline(
         }
     }
 
+    let firewall_warning =
+        match super::reconcile_firewall_if_current(&inv, &deploy_revision, &ssh, &registry, &ctx)
+            .await
+        {
+            Ok(warning) => warning,
+            Err(e) => fail!("apply", "firewall cleanup failed: {e}"),
+        };
+    if let Some(warning) = &firewall_warning {
+        send_step!("apply", "⚠ {warning}");
+    }
+
     let payload = serde_json::json!({
         "kernels": server.kernels.iter().map(|k| &k.0).collect::<Vec<_>>(),
         "protocols": server.enabled_protocols.iter().map(|p| &p.0).collect::<Vec<_>>(),
+        "firewall_warning": firewall_warning,
         "via": "wizard-bootstrap",
     });
     match inv

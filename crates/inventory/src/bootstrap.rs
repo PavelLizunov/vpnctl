@@ -136,6 +136,13 @@ async fn mint_secret_spec(
 ) -> Result<(), String> {
     use ServerSecretSpec as S;
     match spec {
+        S::Required { key } => {
+            if secrets.get(key).is_none_or(|value| value.trim().is_empty()) {
+                return Err(format!(
+                    "missing required secret `{key}` for server `{server_id}`"
+                ));
+            }
+        }
         S::Password { key, entropy_bytes } => {
             if !secrets.contains_key(key) {
                 let v = vpnctl_crypto::gen_password(entropy_bytes)

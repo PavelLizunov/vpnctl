@@ -285,14 +285,37 @@ impl SqliteInventory {
         self.get_servers_batch(&sids).await
     }
 
+    /// Granted exits for operator and metadata views.
     pub async fn subscription_servers_for_user(&self, user: &UserId) -> Result<Vec<Server>> {
+        self.list_subscription_servers(user, false, None).await
+    }
+
+    /// Granted exits eligible for profile delivery. Token subscriptions pass no desktop core.
+    pub async fn subscription_servers_for_client(
+        &self,
+        user: &UserId,
+        desktop_core: Option<&str>,
+    ) -> Result<Vec<Server>> {
+        self.list_subscription_servers(user, true, desktop_core)
+            .await
+    }
+
+    async fn list_subscription_servers(
+        &self,
+        user: &UserId,
+        desktop_policy: bool,
+        desktop_core: Option<&str>,
+    ) -> Result<Vec<Server>> {
         let rows = sqlx::query(
             "SELECT g.server_id FROM grants g
              INNER JOIN servers s ON s.id = g.server_id
              WHERE g.user_id = ?1 AND s.role = 'vpn-exit'
+               AND (NOT ?2 OR s.desktop_subscription_core IS NULL OR s.desktop_subscription_core = ?3)
              ORDER BY g.server_id",
         )
         .bind(&user.0)
+        .bind(desktop_policy)
+        .bind(desktop_core)
         .fetch_all(&self.pool)
         .await?;
         let sids: Vec<ServerId> = rows
