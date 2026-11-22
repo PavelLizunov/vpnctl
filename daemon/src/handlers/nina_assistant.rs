@@ -3,12 +3,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequest, Request, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{Extensions, HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Extension, Json, Router};
 use reqwest::{Client, Url, redirect};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
@@ -29,10 +29,10 @@ const CHECK_IDS: [&str; 6] = [
 ];
 const PROMPT: &str = "Ты помощник NINA. Объясни по-русски результаты локальной диагностики сети. Укажи, что удалось проверить, и предложи один безопасный следующий шаг при наличии ошибки. Отвечай кратко обычным текстом. Успешный HTTPS-запрос к сайту не подтверждает работу видео или голоса. Не утверждай, что знаешь причину сбоя, если отчёт её не показывает.";
 
-type Result<T> = std::result::Result<T, ApiError>;
+pub(super) type Result<T> = std::result::Result<T, ApiError>;
 
 #[derive(Debug)]
-enum ApiError {
+pub(super) enum ApiError {
     Unauthorized,
     Disabled,
     InvalidReport,
@@ -111,14 +111,8 @@ impl Gateway {
         })
     }
 
-    fn from_env() -> Option<Self> {
-        let endpoint = [
-            "VPNCTLD_NINA_GATEWAY_URL",
-            "VPNCTLD_NINA_GATEWAY_MODEL",
-            "VPNCTLD_NINA_GATEWAY_KEY_FILE",
-        ]
-        .map(|name| std::env::var(name).ok());
-        let [url, model, path] = endpoint;
+    pub(super) fn from_env(names: [&str; 3]) -> Option<Self> {
+        let [url, model, path] = names.map(|name| std::env::var(name).ok());
         if url.is_none() && model.is_none() && path.is_none() {
             return None;
         }
@@ -131,7 +125,8 @@ impl Gateway {
             }
         }
         tracing::warn!(
-            "NINA assistant disabled because its gateway settings are incomplete or invalid"
+            setting = names[0],
+            "Assistant gateway settings are incomplete or invalid"
         );
         None
     }
@@ -142,10 +137,19 @@ impl Gateway {
 
     fn request(&self, report: &Report) -> Result<reqwest::RequestBuilder> {
         let report = serde_json::to_string(report).map_err(|_| ApiError::InvalidReport)?;
+        Ok(self.chat_request(PROMPT, &report, "NINA-Assistant/1.0"))
+    }
+
+    pub(super) fn chat_request(
+        &self,
+        prompt: &str,
+        report: &str,
+        user_agent: &str,
+    ) -> reqwest::RequestBuilder {
         let mut body = json!({
             "model": self.model,
             "messages": [
-                {"role": "system", "content": PROMPT},
+                {"role": "system", "content": prompt},
                 {"role": "user", "content": report},
             ],
             "max_tokens": 400,
@@ -158,21 +162,22 @@ impl Gateway {
             .header(header::CONTENT_TYPE, "application/json");
         if self.url.as_str() == OPENCODE_GO {
             request = request
-                .header(header::USER_AGENT, "NINA-Assistant/1.0")
+                .header(header::USER_AGENT, user_agent)
                 .header("x-opencode-session", vpnctl_crypto::gen_uuid());
         }
         if self.uses_open_code_flash() {
             body["thinking"] = json!({"type": "disabled"});
         }
-        Ok(request.body(body.to_string()))
+        request.body(body.to_string())
     }
 
     async fn explain(&self, report: &Report, credential: &str) -> Result<Value> {
-        let mut response = self
-            .request(report)?
-            .send()
-            .await
-            .map_err(|_| ApiError::Gateway)?;
+        let bytes = self.complete(self.request(report)?).await?;
+        self.decode_explanation(&bytes, credential)
+    }
+
+    pub(super) async fn complete(&self, request: reqwest::RequestBuilder) -> Result<Vec<u8>> {
+        let mut response = request.send().await.map_err(|_| ApiError::Gateway)?;
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
             return Err(ApiError::Quota(None));
         }
@@ -186,11 +191,20 @@ impl Gateway {
             }
             bytes.extend_from_slice(&chunk);
         }
-        self.decode_explanation(&bytes, credential)
+        Ok(bytes)
     }
 
     fn decode_explanation(&self, bytes: &[u8], credential: &str) -> Result<Value> {
         let payload: Value = serde_json::from_slice(bytes).map_err(|_| ApiError::Gateway)?;
+        let explanation = self.content(&payload, credential)?;
+        let mut end = explanation.len().min(4096);
+        while !explanation.is_char_boundary(end) {
+            end -= 1;
+        }
+        Ok(json!({"schema": 1, "explanation": &explanation[..end]}))
+    }
+
+    pub(super) fn content<'a>(&self, payload: &'a Value, credential: &str) -> Result<&'a str> {
         if self.uses_open_code_flash() && payload["model"].as_str() != Some(DEEPSEEK_FLASH) {
             return Err(ApiError::Gateway);
         }
@@ -204,11 +218,7 @@ impl Gateway {
         {
             return Err(ApiError::Gateway);
         }
-        let mut end = explanation.len().min(4096);
-        while !explanation.is_char_boundary(end) {
-            end -= 1;
-        }
-        Ok(json!({"schema": 1, "explanation": &explanation[..end]}))
+        Ok(explanation)
     }
 }
 
@@ -319,12 +329,22 @@ impl Report {
 }
 
 pub(crate) fn from_env() -> Router<AppState> {
-    router(Gateway::from_env())
+    router(Gateway::from_env([
+        "VPNCTLD_NINA_GATEWAY_URL",
+        "VPNCTLD_NINA_GATEWAY_MODEL",
+        "VPNCTLD_NINA_GATEWAY_KEY_FILE",
+    ]))
 }
 
 pub(super) fn router(gateway: Option<Gateway>) -> Router<AppState> {
-    Router::new()
-        .route(PATH, post(diagnose))
+    configure_route(Router::new().route(PATH, post(diagnose)), gateway)
+}
+
+pub(super) fn configure_route(
+    route: Router<AppState>,
+    gateway: Option<Gateway>,
+) -> Router<AppState> {
+    route
         .layer(Extension(gateway.map(Arc::new)))
         .layer(DefaultBodyLimit::max(2048))
         .layer(
@@ -357,12 +377,29 @@ async fn diagnose(
     Extension(gateway): Extension<Option<Arc<Gateway>>>,
     request: Request,
 ) -> Result<Json<Value>> {
-    if let Some(ConnectInfo(peer)) = request.extensions().get::<ConnectInfo<SocketAddr>>() {
-        let ip = crate::real_ip::resolve_peer_real_ip(request.headers(), peer.ip());
-        limits::acquire(&state.rate_limiter, b"nina:ip", &ip.to_string(), 120)
+    let (user_id, token) =
+        authorize(&state, request.headers(), request.extensions(), b"nina:ip").await?;
+    let report: Report = read_report(request, &state).await?;
+    if !report.valid() {
+        return Err(ApiError::InvalidReport);
+    }
+    let gateway = gateway.ok_or(ApiError::Unavailable)?;
+    limit_account(&state, b"nina:user", &user_id)?;
+    gateway.explain(&report, &token).await.map(Json)
+}
+
+pub(super) async fn authorize(
+    state: &AppState,
+    headers: &HeaderMap,
+    extensions: &Extensions,
+    ip_bucket: &[u8],
+) -> Result<(String, Zeroizing<String>)> {
+    if let Some(ConnectInfo(peer)) = extensions.get::<ConnectInfo<SocketAddr>>() {
+        let ip = crate::real_ip::resolve_peer_real_ip(headers, peer.ip());
+        limits::acquire(&state.rate_limiter, ip_bucket, &ip.to_string(), 120)
             .map_err(|retry| ApiError::Quota(Some(retry)))?;
     }
-    let (identity, token) = credential(request.headers()).ok_or(ApiError::Unauthorized)?;
+    let (identity, token) = credential(headers).ok_or(ApiError::Unauthorized)?;
     let user = identity
         .find_user(&state.inv, token)
         .await
@@ -371,8 +408,14 @@ async fn diagnose(
     if user.disabled {
         return Err(ApiError::Disabled);
     }
-    let token = Zeroizing::new(token.to_owned());
-    let Json(report) = Json::<Report>::from_request(request, &state)
+    Ok((user.id.0, Zeroizing::new(token.to_owned())))
+}
+
+pub(super) async fn read_report<T: DeserializeOwned>(
+    request: Request,
+    state: &AppState,
+) -> Result<T> {
+    let Json(report) = Json::<T>::from_request(request, state)
         .await
         .map_err(|rejection| {
             if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
@@ -381,11 +424,10 @@ async fn diagnose(
                 ApiError::InvalidReport
             }
         })?;
-    if !report.valid() {
-        return Err(ApiError::InvalidReport);
-    }
-    let gateway = gateway.ok_or(ApiError::Unavailable)?;
-    limits::acquire(&state.rate_limiter, b"nina:user", &user.id.0, 6)
-        .map_err(|retry| ApiError::Quota(Some(retry)))?;
-    gateway.explain(&report, &token).await.map(Json)
+    Ok(report)
+}
+
+pub(super) fn limit_account(state: &AppState, bucket: &[u8], user_id: &str) -> Result<()> {
+    limits::acquire(&state.rate_limiter, bucket, user_id, 6)
+        .map_err(|retry| ApiError::Quota(Some(retry)))
 }

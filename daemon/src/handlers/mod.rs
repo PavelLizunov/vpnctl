@@ -9,3 +9,6 @@ mod nina_assistant_spec_tests;
 pub(crate) mod stats;
 pub(crate) mod sub;
 pub(crate) mod vpn_router;
+pub(crate) mod vpnrouter_assistant;
+#[cfg(test)]
+mod vpnrouter_assistant_spec_tests;
