@@ -1,15 +1,86 @@
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
 use crate::handlers::admin::icons::icon;
-use axum::extract::{Path, State};
+use axum::extract::{Path, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
-use maud::{Markup, html};
+use maud::html;
+use tokio::sync::watch;
 
 use super::super::helpers::{
-    bad_request, error_resp, internal_error, not_found, render_page, theme_accent_lang,
+    bad_request, error_resp, internal_error, not_found, render_page, shell, theme_accent_lang,
     valid_server_id,
 };
 use crate::AppState;
 use crate::http_util::{form_field, path_segment_encode};
+use crate::wizard_bootstrap::DeployGuard;
+use vpnctl_core::Server;
+use vpnctl_inventory::{SqliteInventory, SqliteInventoryError};
+
+const DELETE_INLINE_WAIT: Duration = Duration::from_secs(2);
+const DELETE_RESULT_TTL: Duration = Duration::from_secs(600);
+const DELETE_PENDING_QUERY: &str = "deletion=pending";
+
+#[derive(Clone)]
+enum DeleteOutcome {
+    Removed,
+    Conflict(String),
+    Failed,
+}
+
+impl IntoResponse for DeleteOutcome {
+    fn into_response(self) -> Response {
+        if let Some((status, message)) = self.problem() {
+            error_resp(status, message)
+        } else {
+            Redirect::to("/admin/servers").into_response()
+        }
+    }
+}
+
+impl DeleteOutcome {
+    fn problem(&self) -> Option<(StatusCode, &str)> {
+        match self {
+            Self::Removed => None,
+            Self::Conflict(message) => Some((StatusCode::CONFLICT, message)),
+            Self::Failed => Some((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Server removal could not be confirmed. Check the server list before retrying.",
+            )),
+        }
+    }
+}
+
+type DeleteResult = Option<(Instant, DeleteOutcome)>;
+
+#[derive(Default)]
+pub(crate) struct ServerDeletions {
+    jobs: Mutex<HashMap<String, watch::Receiver<DeleteResult>>>,
+}
+
+impl ServerDeletions {
+    fn register(&self, id: String, receiver: watch::Receiver<DeleteResult>) {
+        let mut jobs = self
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        jobs.retain(|_, job| match job.borrow().as_ref() {
+            Some((finished, _)) => finished.elapsed() < DELETE_RESULT_TTL,
+            None => job.has_changed().is_ok(),
+        });
+        jobs.insert(id, receiver);
+    }
+
+    fn get(&self, id: &str) -> Option<watch::Receiver<DeleteResult>> {
+        self.jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .cloned()
+    }
+}
 
 pub(crate) async fn server_set_routing_policy(
     State(state): State<AppState>,
@@ -211,14 +282,22 @@ pub(crate) async fn server_delete_confirm(
     headers: HeaderMap,
     State(state): State<AppState>,
     Path(server_id_str): Path<String>,
-) -> Result<Markup, Response> {
+    RawQuery(query): RawQuery,
+) -> Response {
     use crate::i18n::tr;
     let (theme, accent, lang) = theme_accent_lang(&headers);
+    let checking_status = query.as_deref() == Some(DELETE_PENDING_QUERY);
+    if let Some(job) = state.server_deletions.get(&server_id_str)
+        && let Some(response) = deletion_status(&job, &server_id_str, checking_status, &headers)
+    {
+        return response;
+    }
     let sid = vpnctl_core::ServerId(server_id_str.clone());
     let server = match state.inv.get_server(&sid).await {
         Ok(Some(s)) => s,
-        Ok(None) => return Err(not_found(&format!("no such server '{server_id_str}'"))),
-        Err(e) => return Err(internal_error(anyhow::Error::new(e))),
+        Ok(None) if checking_status => return Redirect::to("/admin/servers").into_response(),
+        Ok(None) => return not_found(&format!("no such server '{server_id_str}'")),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
     };
     let grant_count = match state.inv.users_for_server(&sid).await {
         Ok(v) => Some(v.len()),
@@ -253,6 +332,11 @@ pub(crate) async fn server_delete_confirm(
             (tr(lang, "  ·  delete", "  ·  удаление"))
         }
         h1.ed-art-h1 { (tr(lang, "delete ", "удалить ")) em { (server_id_str) } (tr(lang, " — really?", " — точно?")) }
+        @if checking_status {
+            p.ed-alert.ed-alert--warn role="alert" {
+                (tr(lang, "The previous deletion status is unavailable. The server is still in the inventory.", "Состояние предыдущего удаления недоступно. Сервер всё ещё в инвентаре."))
+            }
+        }
         p.ed-art-deck {
             (tr(lang, "Drops the server (", "Удаляет сервер (")) span.ed-mono { (server.address) } (tr(lang, ") from the inventory. ", ") из инвентаря. "))
             b {
@@ -299,7 +383,61 @@ pub(crate) async fn server_delete_confirm(
             }
         }
     };
-    Ok(render_page(&state, "servers", &theme, &accent, lang, body).await)
+    render_page(&state, "servers", &theme, &accent, lang, body)
+        .await
+        .into_response()
+}
+
+fn delete_status_path(id: &str) -> String {
+    format!(
+        "/admin/servers/{}/delete-confirm?{DELETE_PENDING_QUERY}",
+        path_segment_encode(id)
+    )
+}
+
+fn deletion_status(
+    job: &watch::Receiver<DeleteResult>,
+    id: &str,
+    checking_status: bool,
+    headers: &HeaderMap,
+) -> Option<Response> {
+    use crate::i18n::tr;
+    let result = job.borrow();
+    let (theme, accent, lang) = theme_accent_lang(headers);
+    let outcome = match result.as_ref() {
+        None if job.has_changed().is_ok() => {
+            let status_path = delete_status_path(id);
+            if !checking_status {
+                return Some(Redirect::to(&status_path).into_response());
+            }
+            let body = html! {
+                h1.ed-art-h1 { (tr(lang, "Removing ", "Удаляем ")) em { (id) } }
+                p.ed-art-deck data-server-delete-pending="" data-reload-after="2" role="status" {
+                    (tr(lang, "Removing the server and its history from the inventory.", "Удаляем сервер и его историю из инвентаря."))
+                }
+                a.ed-abtn.ed-abtn--secondary href=(status_path) {
+                    (tr(lang, "Check status", "Проверить состояние"))
+                }
+            };
+            return Some(shell("servers", &theme, &accent, lang, 0, body).into_response());
+        }
+        Some((finished, outcome)) if checking_status && finished.elapsed() < DELETE_RESULT_TTL => {
+            outcome
+        }
+        None if checking_status => &DeleteOutcome::Failed,
+        _ => return None,
+    };
+    let Some((status, message)) = outcome.problem() else {
+        return Some(Redirect::to("/admin/servers").into_response());
+    };
+    let body = html! {
+        h1.ed-art-h1 { (tr(lang, "Removal failed", "Не удалось удалить сервер")) }
+        p.ed-alert.ed-alert--warn role="alert" { (message) }
+        a.ed-abtn.ed-abtn--secondary href="/admin/servers" {
+            (tr(lang, "Back to servers", "К списку серверов"))
+        }
+    };
+    Some((status, shell("servers", &theme, &accent, lang, 0, body)).into_response())
 }
 
 pub(crate) async fn server_delete(
@@ -313,13 +451,7 @@ pub(crate) async fn server_delete(
             "delete confirm mismatch: form sent '{confirm}', URL targets '{server_id_str}' — type the server id exactly to confirm"
         ));
     }
-    let sid = vpnctl_core::ServerId(server_id_str.clone());
-    let server = match state.inv.get_server(&sid).await {
-        Ok(Some(s)) => s,
-        Ok(None) => return not_found(&format!("no such server '{server_id_str}'")),
-        Err(e) => return internal_error(anyhow::Error::new(e)),
-    };
-    let _deploy_guard = match crate::wizard_bootstrap::DeployGuard::try_acquire(&server_id_str) {
+    let deploy_guard = match DeployGuard::try_acquire(&server_id_str) {
         Some(g) => g,
         None => {
             return error_resp(
@@ -330,26 +462,53 @@ pub(crate) async fn server_delete(
             );
         }
     };
-    let grants_removed = state
-        .inv
-        .users_for_server(&sid)
+    let sid = vpnctl_core::ServerId(server_id_str.clone());
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return not_found(&format!("no such server '{server_id_str}'")),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    let (sender, mut receiver) = watch::channel(None);
+    let pending_path = delete_status_path(&server_id_str);
+    state
+        .server_deletions
+        .register(server_id_str, receiver.clone());
+    tokio::spawn(async move {
+        let outcome = remove_server(&state.inv, server).await;
+        sender.send_replace(Some((Instant::now(), outcome)));
+        drop(deploy_guard);
+    });
+
+    match tokio::time::timeout(DELETE_INLINE_WAIT, receiver.changed()).await {
+        Ok(Ok(())) => receiver.borrow().as_ref().map_or_else(
+            || DeleteOutcome::Failed.into_response(),
+            |(_, outcome)| outcome.clone().into_response(),
+        ),
+        Ok(Err(_)) => DeleteOutcome::Failed.into_response(),
+        Err(_) => Redirect::to(&pending_path).into_response(),
+    }
+}
+
+async fn remove_server(inv: &SqliteInventory, server: Server) -> DeleteOutcome {
+    let grants_removed = inv
+        .users_for_server(&server.id)
         .await
         .map(|v| v.len())
         .unwrap_or(0);
-    if let Err(e) = state.inv.remove_server(&sid).await {
+    if let Err(e) = inv.remove_server(&server.id).await {
         return match e {
-            vpnctl_inventory::SqliteInventoryError::Invalid(message) => {
-                error_resp(StatusCode::CONFLICT, &message)
+            SqliteInventoryError::Invalid(message) => DeleteOutcome::Conflict(message),
+            e => {
+                tracing::error!(server = %server.id.0, error = %e, "server removal failed");
+                DeleteOutcome::Failed
             }
-            e => internal_error(anyhow::Error::new(e)),
         };
     }
-    if let Err(e) = state
-        .inv
+    if let Err(e) = inv
         .audit(
             "admin",
             "server.remove",
-            Some(&server_id_str),
+            Some(&server.id.0),
             Some(&serde_json::json!({
                 "address": server.address,
                 "grants_removed": grants_removed,
@@ -359,10 +518,10 @@ pub(crate) async fn server_delete(
     {
         tracing::warn!(
             target = "vpnctld::admin",
-            server = %server_id_str,
+            server = %server.id.0,
             error = %e,
             "audit row for server.remove failed; mutation already committed"
         );
     }
-    Redirect::to("/admin/servers").into_response()
+    DeleteOutcome::Removed
 }
