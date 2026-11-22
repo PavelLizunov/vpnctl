@@ -144,18 +144,54 @@ impl SqliteInventory {
         limit: u32,
     ) -> Result<Vec<HeavyUser>> {
         let cutoff = (days != u32::MAX).then(|| format!("-{} days", days.saturating_sub(1)));
+        // Raw ticks keep the current day (and any not-yet-rolled-up day) fresh;
+        // daily rows contribute only the part a partially retained raw day does
+        // not cover. Taking the remainder instead of the whole daily row avoids
+        // double counting while preserving totals completed before raw purge.
         let rows = sqlx::query(
-            "SELECT d.user_id AS user_id,
-                    CAST(SUM(d.upload_bytes
+            "WITH raw_daily AS (
+                 SELECT s.user_id AS user_id,
+                        s.server_id AS server_id,
+                        substr(s.ts, 1, 10) AS day,
+                        SUM(s.upload_bytes) AS upload_bytes,
+                        SUM(s.download_bytes) AS download_bytes
+                 FROM vpn_connection_stats s
+                 WHERE s.user_id IN (SELECT id FROM users)
+                   AND (?1 IS NULL
+                        OR s.ts >= strftime('%Y-%m-%dT00:00:00.000Z', 'now', ?1))
+                 GROUP BY s.user_id, s.server_id, substr(s.ts, 1, 10)
+             ),
+             combined AS (
+                 SELECT user_id, server_id, upload_bytes, download_bytes
+                 FROM raw_daily
+                 UNION ALL
+                 SELECT d.user_id,
+                        d.server_id,
+                        MAX(d.upload_bytes - COALESCE(r.upload_bytes, 0), 0),
+                        MAX(d.download_bytes - COALESCE(r.download_bytes, 0), 0)
+                 FROM vpn_user_daily d
+                 LEFT JOIN raw_daily r
+                   ON r.user_id = d.user_id
+                  AND r.server_id = d.server_id
+                  AND r.day = d.date
+                 WHERE d.user_id IN (SELECT id FROM users)
+                   AND (?1 IS NULL
+                        OR d.date >= strftime('%Y-%m-%d', 'now', ?1))
+                   AND (r.user_id IS NULL
+                        OR d.upload_bytes > r.upload_bytes
+                        OR d.download_bytes > r.download_bytes)
+             )
+             SELECT c.user_id AS user_id,
+                    CAST(SUM(c.upload_bytes
                              * COALESCE(sv.usage_coefficient, 1.0)) AS INTEGER) AS up_b,
-                    CAST(SUM(d.download_bytes
-                             * COALESCE(sv.usage_coefficient, 1.0)) AS INTEGER) AS down_b
-             FROM vpn_user_daily d
-             JOIN servers sv ON sv.id = d.server_id
-             WHERE d.date >= CASE WHEN ?1 IS NULL THEN ''
-                                 ELSE strftime('%Y-%m-%d', 'now', ?1) END
-             GROUP BY d.user_id
-             ORDER BY SUM((d.upload_bytes + d.download_bytes)
+                    CAST(SUM(c.download_bytes
+                             * COALESCE(sv.usage_coefficient, 1.0)) AS INTEGER) AS down_b,
+                    CAST(SUM((c.upload_bytes + c.download_bytes)
+                             * COALESCE(sv.usage_coefficient, 1.0)) AS INTEGER) AS total
+             FROM combined c
+             JOIN servers sv ON sv.id = c.server_id
+             GROUP BY c.user_id
+             ORDER BY SUM((c.upload_bytes + c.download_bytes)
                           * COALESCE(sv.usage_coefficient, 1.0)) DESC
              LIMIT ?2",
         )
@@ -172,7 +208,7 @@ impl SqliteInventory {
                 user_id: UserId(uid),
                 upload_bytes: up,
                 download_bytes: down,
-                total_bytes: up.saturating_add(down),
+                total_bytes: r.try_get::<i64, _>("total")?.max(0) as u64,
             });
         }
         Ok(out)

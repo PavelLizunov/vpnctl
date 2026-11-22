@@ -1,6 +1,7 @@
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Redirect, Response};
 
+use super::grant_targets;
 use super::helpers::{bad_request, internal_error, not_found, user_not_found};
 use super::legacy::spawn_user_servers_redeploy;
 use crate::AppState;
@@ -25,6 +26,19 @@ pub(crate) async fn user_grant_server(
         }
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
+
+    // A no-op re-grant must stay idempotent even if the node's SSH check has
+    // since gone stale; only a new grant needs a verified deploy-key path.
+    let already_granted = match state.inv.servers_for_user(&uid).await {
+        Ok(servers) => servers.iter().any(|granted| granted.id == sid),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    if !already_granted {
+        let readiness = grant_targets::read(&state, &server).await;
+        if !readiness.is_eligible() {
+            return bad_request(&grant_targets::blocked_message(&server, readiness));
+        }
+    }
 
     let granted = match state
         .inv

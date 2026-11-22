@@ -6,7 +6,7 @@ use tower::ServiceExt;
 use vpnctl_core::{KernelId, Server, ServerId, User, UserId};
 use vpnctld::router;
 
-use crate::common::{add_same_origin, fetch_html, seed, state};
+use crate::common::{add_same_origin, fetch_html, mark_ssh_available, seed, state};
 
 #[tokio::test]
 async fn admin_server_grant_user_persists_and_redirects_to_server() {
@@ -28,6 +28,7 @@ async fn admin_server_grant_user_persists_and_redirects_to_server() {
         })
         .await
         .unwrap();
+    mark_ssh_available(&s.inv, &ServerId("sb".into())).await;
     s.inv
         .add_user(&User {
             id: UserId("alice".into()),

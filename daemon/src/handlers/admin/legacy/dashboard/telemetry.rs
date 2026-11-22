@@ -68,12 +68,12 @@ pub(in crate::handlers::admin::legacy) fn dashboard_heavy_users(
         } @else {
             p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
                 (tr(lang, "Top ", "Топ ")) (rows.len())
-                (tr(lang, " accounts by total (upload + download) over ", " аккаунтов по суммарному (upload + download) за "))
+                (tr(lang, " accounts by charged (weighted) total over ", " аккаунтов по начисленному (взвешенному) итогу за "))
                 (window_label)
                 (tr(
                     lang,
-                    ". Click through to investigate; the user page has the full breakdown + sparkline.",
-                    ". Кликни чтобы разобраться — страница пользователя содержит полную разбивку + sparkline.",
+                    ". Each node's usage coefficient is applied; measured physical bytes are on the user's Traffic tab. Click through to investigate.",
+                    ". Применяется коэффициент нагрузки каждой ноды; измеренные физические байты — на вкладке «Трафик» пользователя. Кликни чтобы разобраться.",
                 ))
             }
             table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px;" {
@@ -89,7 +89,7 @@ pub(in crate::handlers::admin::legacy) fn dashboard_heavy_users(
                             (icon("arrow-down")) (tr(lang, "Download", "Приём"))
                         }
                         th style="text-align: right; padding: 4px 0; font-weight: 600;" {
-                            "Σ " (tr(lang, "Total", "Всего"))
+                            "Σ " (tr(lang, "Total", "Всего")) " · " (tr(lang, "weighted", "взвешено"))
                         }
                     }
                 }
@@ -97,7 +97,11 @@ pub(in crate::handlers::admin::legacy) fn dashboard_heavy_users(
                     @for hu in rows {
                         tr style="border-bottom: 1px dotted var(--rule);" {
                             td style="text-align: left; padding: 4px 0;" {
-                                a href=(format!("/admin/users/{}", path_segment_encode(&hu.user_id.0)))
+                                a href=(format!(
+                                    "/admin/users/{}/traffic?vpn_window={}",
+                                    path_segment_encode(&hu.user_id.0),
+                                    window.slug,
+                                ))
                                   style="color: var(--ink); text-decoration: none; font-weight: 600;" {
                                     (hu.user_id.0)
                                 }

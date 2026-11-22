@@ -4,7 +4,10 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use maud::{Markup, html};
 
-use super::helpers::{humanize_bytes, internal_error, render_page, theme_accent_lang};
+use super::grant_targets;
+use super::helpers::{
+    humanize_bytes, internal_error, named_server, render_page, server_names, theme_accent_lang,
+};
 use crate::AppState;
 use crate::http_util::path_segment_encode;
 
@@ -87,12 +90,34 @@ pub(crate) async fn users(
 ) -> Result<Markup, Response> {
     let (theme, accent, lang) = theme_accent_lang(&headers);
 
-    let (users_list, servers_list, grants_map) = tokio::try_join!(
+    let (users_list, servers_list, grants_map, fleet_servers) = tokio::try_join!(
         state.inv.list_users(),
         state.inv.list_servers(),
         state.inv.servers_count_per_user(),
+        state.inv.list_fleet_servers(),
     )
     .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let readiness_by_server = grant_targets::read_many(&state, &fleet_servers).await;
+    let grant_names = server_names(&state.inv, &fleet_servers).await?;
+    let ready_grant_servers: Vec<&vpnctl_core::Server> = fleet_servers
+        .iter()
+        .filter(|server| {
+            readiness_by_server
+                .get(&server.id)
+                .is_some_and(|readiness| readiness.is_eligible())
+        })
+        .collect();
+    let skipped_grant_servers: Vec<(&vpnctl_core::Server, grant_targets::GrantReadiness)> =
+        fleet_servers
+            .iter()
+            .filter_map(|server| {
+                readiness_by_server
+                    .get(&server.id)
+                    .copied()
+                    .filter(|readiness| !readiness.is_eligible())
+                    .map(|readiness| (server, readiness))
+            })
+            .collect();
     let heavy = state
         .inv
         .top_users_by_traffic(24, u32::MAX)
@@ -189,7 +214,7 @@ pub(crate) async fn users(
                 div.ed-headrow__actions style="font-family: var(--mono); font-size: 11px;" {
                     (crate::i18n::tr(lang, "sort:", "сортировка:"))
                     (sort_link("id", "id"))
-                    (sort_link("traffic", crate::i18n::tr(lang, "traffic 24h", "трафик 24ч")))
+                    (sort_link("traffic", crate::i18n::tr(lang, "weighted traffic 24h", "взвеш. трафик 24ч")))
                     @if sort_kind == "servers-desc" {
                         (sort_link("servers", crate::i18n::tr(lang, "servers", "серверы")))
                     } @else {
@@ -241,17 +266,30 @@ pub(crate) async fn users(
                 label style="display: flex; align-items: center; gap: 4px;"
                       title=(crate::i18n::tr(
                           lang,
-                          "Grant access to EVERY currently-registered server (default ON). Uncheck to create a user with zero grants — useful for test accounts or paused users.",
-                          "Дать доступ КО ВСЕМ зарегистрированным сейчас серверам (по-умолчанию вкл). Сними галку, чтобы создать пользователя без грантов — полезно для тестового или приостановленного аккаунта.",
+                          "Grant access to every READY server: workload-only servers and servers without a verified SSH deploy-key path are skipped. Uncheck to create a user with zero grants — useful for test accounts or paused users.",
+                          "Дать доступ ко ВСЕМ ГОТОВЫМ серверам: workload-only и серверы без проверенного SSH deploy-key пути пропускаются. Сними галку, чтобы создать пользователя без грантов — полезно для тестового или приостановленного аккаунта.",
                       )) {
                     input type="checkbox" name="grant_all" value="1" checked="checked" style="margin: 0;";
-                    (crate::i18n::tr(lang, "grant all servers", "выдать все серверы"))
+                    (crate::i18n::tr(lang, "grant all ready servers", "выдать все готовые серверы"))
+                }
+                @if !fleet_servers.is_empty() {
+                    span.ed-grid__mut style="font-size: 10px; line-height: 1.35; max-width: 230px;"
+                         title=(crate::i18n::tr(
+                             lang,
+                             "Eligible servers have a fresh successful deploy-key SSH check on the route vpnctld will use (direct, or the configured jump).",
+                             "Готовые серверы имеют свежую успешную проверку SSH deploy-ключом по тому маршруту, который использует vpnctld (напрямую или через настроенный jump).",
+                         )) {
+                        (ready_grant_servers.len()) " " (crate::i18n::tr(lang, "ready", "готовы"))
+                        @if !skipped_grant_servers.is_empty() {
+                            " · " (skipped_grant_servers.len()) " " (crate::i18n::tr(lang, "not ready", "не готовы"))
+                        }
+                    }
                 }
                 button.ed-abtn.ed-abtn--recovery.ed-abtn--sm type="submit"
                        title=(crate::i18n::tr(
                            lang,
-                           "Mint UUID + tuic_password + sub_token + WG keypair, optionally grant all servers; redirect to /admin/users/<id> where keys are visible",
-                           "Сгенерирует UUID + tuic_password + sub_token + WG-пару, по-желанию выдаст все серверы; редирект на /admin/users/<id> где ключи видны",
+                           "Mint UUID + tuic_password + sub_token + WG keypair, optionally grant every READY server (unverified servers are skipped); redirect to /admin/users/<id> where keys are visible",
+                           "Сгенерирует UUID + tuic_password + sub_token + WG-пару, по-желанию выдаст все готовые серверы (непроверенные пропускаются); редирект на /admin/users/<id> где ключи видны",
                        )) {
                     (icon("plus")) (crate::i18n::tr(lang, "create", "создать")) " " (icon("arrow-right")) " " (crate::i18n::tr(lang, "mints uuid + keys", "uuid + ключи"))
                 }
@@ -260,6 +298,55 @@ pub(crate) async fn users(
                     "all keys are auto-generated and shown on the user page.",
                     "Все ключи генерируются автоматически и видны на странице пользователя.",
                 )) { (icon("info")) }
+                @if !ready_grant_servers.is_empty() {
+                    details style="flex-basis: 100%; font-family: var(--mono); font-size: 10px; color: var(--mute);"
+                            title=(crate::i18n::tr(
+                                lang,
+                                "These servers currently qualify for automatic grants: fresh deploy-key SSH check on the route vpnctld will use.",
+                                "Эти серверы сейчас подходят для автоматической выдачи: свежая проверка SSH deploy-ключом по маршруту, который использует vpnctld.",
+                            )) {
+                        summary style="cursor: pointer;" {
+                            (crate::i18n::tr(lang, "ready targets: ", "готовые цели: "))
+                            (ready_grant_servers.len())
+                        }
+                        div style="margin: 6px 0 0 16px; line-height: 1.55;" {
+                            @for (index, server) in ready_grant_servers.iter().enumerate() {
+                                @if index > 0 { " · " }
+                                b { (named_server(&server.id, &grant_names)) }
+                            }
+                        }
+                    }
+                }
+                @if !skipped_grant_servers.is_empty() {
+                    details style="flex-basis: 100%; font-family: var(--mono); font-size: 10px; color: var(--mute);"
+                            title=(crate::i18n::tr(
+                                lang,
+                                "These servers stay ungranted so the user is never handed access that cannot be deployed.",
+                                "Эти серверы останутся без доступа, чтобы пользователь не получил доступ, который невозможно задеплоить.",
+                            )) {
+                        summary style="cursor: pointer;" {
+                            (crate::i18n::tr(
+                                lang,
+                                "why some servers are skipped",
+                                "почему часть серверов пропускается",
+                            ))
+                        }
+                        ul style="margin: 6px 0 0 16px; padding: 0; line-height: 1.55;" {
+                            @for (server, readiness) in &skipped_grant_servers {
+                                li {
+                                    b { (named_server(&server.id, &grant_names)) }
+                                    " — " (readiness.reason(lang))
+                                    @if *readiness != grant_targets::GrantReadiness::WorkloadOnly {
+                                        " · "
+                                        a href=(grant_targets::GrantReadiness::check_href(&server.id)) style="color: var(--acc);" {
+                                            (crate::i18n::tr(lang, "check SSH access", "проверить SSH-доступ"))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -286,7 +373,7 @@ pub(crate) async fn users(
                         th { "№" }
                         th { (crate::i18n::tr(lang, "user", "пользователь")) }
                         th { (crate::i18n::tr(lang, "presence", "присутствие")) }
-                        th.num { (crate::i18n::tr(lang, "traffic 24h", "трафик 24ч")) }
+                        th.num { (crate::i18n::tr(lang, "weighted traffic 24h", "взвеш. трафик 24ч")) }
                         th { "uuid" }
                         th { "sub-token" }
                         th.num { (crate::i18n::tr(lang, "servers", "серверы")) }

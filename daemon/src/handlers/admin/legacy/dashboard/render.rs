@@ -169,25 +169,17 @@ async fn dashboard_render(
         .await
         .map_err(internal_error)?;
 
-    let heavy_users = if window.bucket_hours >= 24 {
-        state
-            .inv
-            .top_users_by_daily_traffic(
-                if window.slug == "all" {
-                    u32::MAX
-                } else {
-                    since_hours.div_ceil(24)
-                },
-                5,
-            )
-            .await
-    } else {
-        state.inv.top_users_by_traffic(since_hours, 5).await
-    }
-    .unwrap_or_else(|e| {
-        tracing::warn!(target = "vpnctld::admin", error = %e, "top users traffic query failed");
-        Vec::new()
-    });
+    // The ranking uses the same rolling hours and raw-plus-daily merge as the
+    // linked user Traffic tab. Daily rows contribute only the remainder a
+    // partially retained raw day does not cover.
+    let heavy_users = state
+        .inv
+        .top_users_by_traffic(since_hours, 5)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", error = %e, "top users traffic query failed");
+            Vec::new()
+        });
 
     let server_list_fleet = state.inv.list_servers().await.unwrap_or_else(|e| {
         tracing::warn!(target = "vpnctld::admin", error = %e, "list_servers (fleet) failed");

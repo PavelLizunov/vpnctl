@@ -19,6 +19,8 @@ mod icon_fixtures;
 mod monitoring;
 #[path = "admin_smoke/private_checks.rs"]
 mod private_checks;
+#[path = "admin_smoke/provisioning_delivery.rs"]
+mod provisioning_delivery;
 #[path = "admin_smoke/readiness_quality_spec.rs"]
 mod readiness_quality_spec;
 #[path = "admin_smoke/server_detail.rs"]
@@ -47,3 +49,8 @@ mod server_traffic;
 
 #[path = "admin_smoke/full_nic_surfaces.rs"]
 mod full_nic_surfaces;
+
+#[path = "admin_smoke/qol_deploy_contract.rs"]
+mod qol_deploy_contract;
+#[path = "admin_smoke/qol_traffic_contract.rs"]
+mod qol_traffic_contract;

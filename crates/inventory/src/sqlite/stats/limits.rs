@@ -66,7 +66,7 @@ impl SqliteInventory {
              FROM vpn_connection_stats s
              JOIN servers sv ON sv.id = s.server_id
              WHERE s.user_id = ?1
-               AND s.ts >= strftime('%Y-%m-01T00:00:00Z', 'now')",
+               AND s.ts >= strftime('%Y-%m-01T00:00:00', 'now')",
         )
         .bind(&id.0)
         .fetch_one(&self.pool)
@@ -87,7 +87,7 @@ impl SqliteInventory {
                              FROM vpn_connection_stats s
                              JOIN servers sv ON sv.id = s.server_id
                              WHERE s.user_id = u.id
-                               AND s.ts >= strftime('%Y-%m-01T00:00:00Z', 'now')),
+                               AND s.ts >= strftime('%Y-%m-01T00:00:00', 'now')),
                             0
                         ) AS INTEGER
                     ) AS used
@@ -130,20 +130,54 @@ impl SqliteInventory {
         since_hours: u32,
         limit: u32,
     ) -> Result<Vec<HeavyUser>> {
+        let cutoff = (since_hours != u32::MAX).then(|| format!("-{since_hours} hours"));
         let rows = sqlx::query(
-            "SELECT s.user_id AS user_id,
-                    CAST(SUM(s.upload_bytes   * COALESCE(sv.usage_coefficient, 1.0)) AS INTEGER) AS up_b,
-                    CAST(SUM(s.download_bytes * COALESCE(sv.usage_coefficient, 1.0)) AS INTEGER) AS down_b
-             FROM vpn_connection_stats s
-             JOIN servers sv ON sv.id = s.server_id
-             WHERE s.user_id IS NOT NULL
-               AND s.ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)
-             GROUP BY s.user_id
-             ORDER BY SUM((s.upload_bytes + s.download_bytes)
+            "WITH raw_daily AS (
+                 SELECT s.user_id AS user_id,
+                        s.server_id AS server_id,
+                        substr(s.ts, 1, 10) AS day,
+                        SUM(s.upload_bytes) AS upload_bytes,
+                        SUM(s.download_bytes) AS download_bytes
+                 FROM vpn_connection_stats s
+                 WHERE s.user_id IN (SELECT id FROM users)
+                   AND (?1 IS NULL
+                        OR s.ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1))
+                 GROUP BY s.user_id, s.server_id, substr(s.ts, 1, 10)
+             ),
+             combined AS (
+                 SELECT user_id, server_id, upload_bytes, download_bytes FROM raw_daily
+                 UNION ALL
+                 SELECT d.user_id,
+                        d.server_id,
+                        MAX(d.upload_bytes - COALESCE(r.upload_bytes, 0), 0),
+                        MAX(d.download_bytes - COALESCE(r.download_bytes, 0), 0)
+                 FROM vpn_user_daily d
+                 LEFT JOIN raw_daily r
+                   ON r.user_id = d.user_id
+                  AND r.server_id = d.server_id
+                  AND r.day = d.date
+                 WHERE d.user_id IN (SELECT id FROM users)
+                   AND (?1 IS NULL
+                        OR d.date > strftime('%Y-%m-%d', 'now', ?1))
+                   AND (r.user_id IS NULL
+                        OR d.upload_bytes > r.upload_bytes
+                        OR d.download_bytes > r.download_bytes)
+             )
+             SELECT c.user_id AS user_id,
+                    CAST(SUM(c.upload_bytes
+                             * COALESCE(sv.usage_coefficient, 1.0)) AS INTEGER) AS up_b,
+                    CAST(SUM(c.download_bytes
+                             * COALESCE(sv.usage_coefficient, 1.0)) AS INTEGER) AS down_b,
+                    CAST(SUM((c.upload_bytes + c.download_bytes)
+                             * COALESCE(sv.usage_coefficient, 1.0)) AS INTEGER) AS total
+             FROM combined c
+             JOIN servers sv ON sv.id = c.server_id
+             GROUP BY c.user_id
+             ORDER BY SUM((c.upload_bytes + c.download_bytes)
                           * COALESCE(sv.usage_coefficient, 1.0)) DESC
              LIMIT ?2",
         )
-        .bind(format!("-{since_hours} hours"))
+        .bind(&cutoff)
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await?;
@@ -156,7 +190,7 @@ impl SqliteInventory {
                 user_id: UserId(uid),
                 upload_bytes: up,
                 download_bytes: down,
-                total_bytes: up + down,
+                total_bytes: r.try_get::<i64, _>("total")?.max(0) as u64,
             });
         }
         Ok(out)
@@ -168,21 +202,48 @@ impl SqliteInventory {
         since_hours: u32,
         limit: u32,
     ) -> Result<Vec<(UserId, u64)>> {
+        let cutoff = (since_hours != u32::MAX).then(|| format!("-{since_hours} hours"));
         let rows = sqlx::query(
-            "SELECT s.user_id AS user_id,
-                    CAST(SUM((s.upload_bytes + s.download_bytes)
+            "WITH raw_daily AS (
+                 SELECT s.user_id AS user_id,
+                        substr(s.ts, 1, 10) AS day,
+                        SUM(s.upload_bytes) AS upload_bytes,
+                        SUM(s.download_bytes) AS download_bytes
+                 FROM vpn_connection_stats s
+                 WHERE s.server_id = ?1
+                   AND s.user_id IN (SELECT id FROM users)
+                   AND (?2 IS NULL
+                        OR s.ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2))
+                 GROUP BY s.user_id, substr(s.ts, 1, 10)
+             ),
+             combined AS (
+                 SELECT user_id, upload_bytes, download_bytes FROM raw_daily
+                 UNION ALL
+                 SELECT d.user_id,
+                        MAX(d.upload_bytes - COALESCE(r.upload_bytes, 0), 0),
+                        MAX(d.download_bytes - COALESCE(r.download_bytes, 0), 0)
+                 FROM vpn_user_daily d
+                 LEFT JOIN raw_daily r
+                   ON r.user_id = d.user_id AND r.day = d.date
+                 WHERE d.server_id = ?1
+                   AND d.user_id IN (SELECT id FROM users)
+                   AND (?2 IS NULL
+                        OR d.date > strftime('%Y-%m-%d', 'now', ?2))
+                   AND (r.user_id IS NULL
+                        OR d.upload_bytes > r.upload_bytes
+                        OR d.download_bytes > r.download_bytes)
+             )
+             SELECT c.user_id AS user_id,
+                    CAST(SUM((c.upload_bytes + c.download_bytes)
                              * COALESCE(sv.usage_coefficient, 1.0)) AS INTEGER) AS total
-             FROM vpn_connection_stats s
-             JOIN servers sv ON sv.id = s.server_id
-             WHERE s.server_id = ?1
-               AND s.user_id IS NOT NULL
-               AND s.ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2)
-             GROUP BY s.user_id
+             FROM combined c
+             JOIN servers sv ON sv.id = ?1
+             GROUP BY c.user_id
              ORDER BY total DESC
              LIMIT ?3",
         )
         .bind(&server.0)
-        .bind(format!("-{since_hours} hours"))
+        .bind(&cutoff)
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await?;

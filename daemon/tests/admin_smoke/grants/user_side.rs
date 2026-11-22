@@ -6,13 +6,13 @@ use tower::ServiceExt;
 use vpnctl_core::UserId;
 use vpnctld::router;
 
-use crate::common::{add_same_origin, body_of, fetch_html, seed, state};
+use crate::common::{add_same_origin, body_of, fetch_html, seed_verified, state};
 
 #[tokio::test]
 async fn admin_user_grant_server_happy_path() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    seed(&s.inv, 1, 1, &[]).await;
+    seed_verified(&s.inv, 1, 1, &[]).await;
     assert_eq!(
         s.inv
             .servers_for_user(&UserId("u0".into()))
@@ -68,7 +68,7 @@ async fn admin_user_grant_server_happy_path() {
 async fn admin_user_revoke_server_happy_path() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    seed_verified(&s.inv, 1, 1, &[(0, 0)]).await;
     assert_eq!(
         s.inv
             .servers_for_user(&UserId("u0".into()))
@@ -117,7 +117,7 @@ async fn admin_user_revoke_server_happy_path() {
 async fn admin_user_grant_unknown_user_404() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    seed(&s.inv, 1, 0, &[]).await;
+    seed_verified(&s.inv, 1, 0, &[]).await;
     let body = body_of(
         router(s),
         "POST",
@@ -133,7 +133,7 @@ async fn admin_user_grant_unknown_user_404() {
 async fn admin_user_grant_unknown_server_404() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    seed(&s.inv, 0, 1, &[]).await;
+    seed_verified(&s.inv, 0, 1, &[]).await;
     let body = body_of(
         router(s),
         "POST",
@@ -149,7 +149,7 @@ async fn admin_user_grant_unknown_server_404() {
 async fn admin_user_detail_renders_grant_revoke_buttons() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    seed(&s.inv, 2, 1, &[(0, 0)]).await;
+    seed_verified(&s.inv, 2, 1, &[(0, 0)]).await;
     let app = router(s);
 
     let html = fetch_html(app, "/admin/users/u0/access").await;
@@ -219,7 +219,7 @@ async fn admin_user_detail_renders_grant_revoke_buttons() {
 async fn v2_user_access_renders_grant_state_table_and_identities() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    seed(&s.inv, 2, 1, &[(0, 0)]).await;
+    seed_verified(&s.inv, 2, 1, &[(0, 0)]).await;
     let html = fetch_html(router(s), "/admin/users/u0/access").await;
     assert!(
         html.contains("Grants · per-server key state"),

@@ -7,7 +7,7 @@ use tower::ServiceExt;
 use vpnctl_core::{KernelId, Server, ServerId, User, UserId};
 use vpnctld::router;
 
-use crate::common::state;
+use crate::common::{mark_ssh_available, seed_verified, state};
 
 #[tokio::test]
 async fn user_create_with_grant_all_grants_every_registered_server() {
@@ -29,6 +29,7 @@ async fn user_create_with_grant_all_grants_every_registered_server() {
             })
             .await
             .unwrap();
+        mark_ssh_available(&st.inv, &ServerId(sid_s.into())).await;
     }
     let app = router(st.clone());
     let resp = app
@@ -149,6 +150,7 @@ async fn server_grant_all_users_grants_every_ungranted() {
         })
         .await
         .unwrap();
+    mark_ssh_available(&st.inv, &ServerId("srv".into())).await;
     for (idx, id) in ["alice", "bob", "carol"].iter().enumerate() {
         st.inv
             .add_user(&User {
@@ -217,6 +219,7 @@ async fn server_grant_all_skips_disabled_users() {
         })
         .await
         .unwrap();
+    mark_ssh_available(&st.inv, &ServerId("srv".into())).await;
     st.inv
         .add_user(&User {
             id: UserId("alive".into()),
@@ -531,7 +534,7 @@ async fn revoke_handlers_preserve_grants_when_audit_fails() {
     ] {
         let dir = TempDir::new().unwrap();
         let st = state(&dir).await;
-        crate::common::seed(&st.inv, 1, 1, &[(0, 0)]).await;
+        seed_verified(&st.inv, 1, 1, &[(0, 0)]).await;
         inject_grant_failure(
             &dir,
             "CREATE TRIGGER fail_revoke_audit BEFORE INSERT ON audit_log
@@ -548,7 +551,15 @@ async fn revoke_handlers_preserve_grants_when_audit_fails() {
             .unwrap();
         assert_eq!(resp.status(), expected_status, "{path}");
         assert_eq!(st.inv.count_grants().await.unwrap(), 1, "{path}");
-        assert!(st.inv.recent_audit(10).await.unwrap().is_empty(), "{path}");
+        assert!(
+            st.inv
+                .recent_audit(10)
+                .await
+                .unwrap()
+                .iter()
+                .all(|row| row.action == "server.ssh_access.changed"),
+            "{path}: only fixture SSH observations may be present, no mutation audit"
+        );
     }
 }
 
@@ -556,7 +567,7 @@ async fn revoke_handlers_preserve_grants_when_audit_fails() {
 async fn grant_all_result_reports_uuid_conflict_and_success_counts() {
     let dir = TempDir::new().unwrap();
     let st = state(&dir).await;
-    crate::common::seed(&st.inv, 1, 3, &[(0, 0)]).await;
+    seed_verified(&st.inv, 1, 3, &[(0, 0)]).await;
     // u0's imported UUID reserves u1's global UUID on this server.
     st.inv
         .set_grant_client_uuid(
@@ -603,7 +614,7 @@ async fn grant_all_result_reports_uuid_conflict_and_success_counts() {
 async fn revoke_all_result_reports_partial_failure_and_escapes_reason() {
     let dir = TempDir::new().unwrap();
     let st = state(&dir).await;
-    crate::common::seed(&st.inv, 1, 2, &[(0, 0), (1, 0)]).await;
+    seed_verified(&st.inv, 1, 2, &[(0, 0), (1, 0)]).await;
     inject_grant_failure(
         &dir,
         "CREATE TRIGGER fail_one_revoke BEFORE DELETE ON grants
@@ -660,7 +671,7 @@ async fn bulk_no_op_results_do_not_write_mutation_audit() {
     ] {
         let dir = TempDir::new().unwrap();
         let st = state(&dir).await;
-        crate::common::seed(&st.inv, 1, 1, &grants).await;
+        seed_verified(&st.inv, 1, 1, &grants).await;
         let resp = router(st.clone())
             .oneshot(
                 crate::common::add_same_origin(
@@ -676,6 +687,14 @@ async fn bulk_no_op_results_do_not_write_mutation_audit() {
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         assert!(std::str::from_utf8(&bytes).unwrap().contains(summary));
-        assert!(st.inv.recent_audit(10).await.unwrap().is_empty());
+        assert!(
+            st.inv
+                .recent_audit(10)
+                .await
+                .unwrap()
+                .iter()
+                .all(|row| row.action == "server.ssh_access.changed"),
+            "no-op bulk mutation must not add an audit row beyond fixture SSH observations"
+        );
     }
 }

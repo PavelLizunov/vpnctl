@@ -3,6 +3,8 @@ pub(crate) struct UserDetailQuery {
     #[serde(default)]
     pub(crate) vpn_window: Option<String>,
     #[serde(default)]
+    pub(crate) vpn_server: Option<String>,
+    #[serde(default)]
     pub(crate) log_page: Option<i64>,
 }
 

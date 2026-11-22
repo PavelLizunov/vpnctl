@@ -6,6 +6,7 @@ use futures_core::Stream;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+use super::activity::DeployActivityHandle;
 use super::audit::write_deploy_audit;
 use super::guard::{DEPLOY_ALREADY_RUNNING_PREFIX, DEPLOY_KEY_ABSENT_MSG, DeployGuard};
 use super::types::BootstrapEvent;
@@ -15,7 +16,7 @@ use vpnctl_core::{Registry, RenderCtx, Server, SshTransport};
 use vpnctl_inventory::{SqliteInventory, bootstrap_server_secrets};
 
 #[path = "autodeploy.rs"]
-mod autodeploy;
+pub(crate) mod autodeploy;
 pub use autodeploy::queue_servers_redeploy;
 pub use autodeploy::{AutodeployPhase, AutodeployStatus, autodeploy_status};
 
@@ -269,23 +270,36 @@ async fn redeploy_pipeline(
     tx: mpsc::Sender<BootstrapEvent>,
     transport: Option<Arc<dyn SshTransport>>,
 ) {
+    let mut activity = DeployActivityHandle::start(&inv, &server.id.0);
     macro_rules! send_step {
         ($phase:expr, $($arg:tt)*) => {{
             let msg = format!($($arg)*);
+            let msg = crate::credential_redaction::redact_uuid_literals(&msg).into_owned();
+            activity.stage($phase, &msg);
             let _ = tx.send(BootstrapEvent::Step { phase: $phase, message: msg }).await;
         }};
     }
     macro_rules! fail {
-        ($phase:expr, $($arg:tt)*) => {{
-            let msg = format!($($arg)*);
+        (@report $phase:expr, $msg:expr) => {{
+            let msg = $msg;
+            activity.fail(&msg);
             let _ = tx.send(BootstrapEvent::Error { phase: $phase, message: msg }).await;
             return;
+        }};
+        ($phase:expr, $($arg:tt)*) => {{
+            let raw = format!($($arg)*);
+            let msg = crate::credential_redaction::redact_uuid_literals(&raw).into_owned();
+            let payload = serde_json::json!({ "phase": $phase, "error": &msg });
+            if let Err(err) = inv.audit("admin", "server.deploy.failed", Some(&server.id.0), Some(&payload)).await {
+                tracing::warn!(server = %server.id.0, error = %err, "failed to record deployment error");
+            }
+            fail!(@report $phase, msg);
         }};
     }
 
     let server = match inv.get_server(&server.id).await {
         Ok(Some(server)) => server,
-        Ok(None) => fail!("deploy", "server was removed before deploy"),
+        Ok(None) => fail!(@report "deploy", "server was removed before deploy".to_string()),
         Err(e) => fail!("deploy", "cannot refresh server before bootstrap: {e}"),
     };
     let redirect = format!("/admin/servers/{}", path_segment_encode(&server.id.0));
@@ -326,7 +340,7 @@ async fn redeploy_pipeline(
     };
     let current_server = match inv.get_server(&server.id).await {
         Ok(Some(server)) => server,
-        Ok(None) => fail!("deploy", "server was removed before deploy"),
+        Ok(None) => fail!(@report "deploy", "server was removed before deploy".to_string()),
         Err(e) => fail!("deploy", "cannot refresh server before deploy: {e}"),
     };
     if current_server.enabled_protocols != server.enabled_protocols
@@ -346,7 +360,7 @@ async fn redeploy_pipeline(
             None,
         )
         .await;
-        fail!("deploy", "inventory changed while preparing deploy; retry");
+        fail!(@report "deploy", "inventory changed while preparing deploy; retry".to_string());
     }
     let server = current_server;
     let secrets = match inv.list_server_secrets(&server.id).await {
@@ -379,7 +393,7 @@ async fn redeploy_pipeline(
             None,
         )
         .await;
-        fail!("deploy", "deploy skipped — {reason}.");
+        fail!(@report "deploy", format!("deploy skipped — {reason}."));
     }
 
     let jump = match inv.resolve_jump_host(&server).await {
@@ -424,7 +438,7 @@ async fn redeploy_pipeline(
             None,
         )
         .await;
-        fail!("deploy", "inventory changed while preparing deploy; retry");
+        fail!(@report "deploy", "inventory changed while preparing deploy; retry".to_string());
     }
     if let Err(e) = inv.assert_no_uuid_collisions(&server.id).await {
         fail!("deploy", "{e}");
@@ -579,6 +593,7 @@ async fn redeploy_pipeline(
     .await;
 
     if audit_action == "server.deploy" {
+        activity.succeed();
         let _ = tx
             .send(BootstrapEvent::Ok {
                 server_id: server.id.0.clone(),
@@ -597,6 +612,8 @@ async fn redeploy_pipeline(
                 ssh_errors.join("; ")
             )
         };
+        let message = crate::credential_redaction::redact_uuid_literals(&message).into_owned();
+        activity.fail(&message);
         let _ = tx
             .send(BootstrapEvent::Error {
                 phase: "apply",

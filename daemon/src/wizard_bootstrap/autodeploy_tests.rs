@@ -125,13 +125,9 @@ async fn stale_and_competing_lock_are_bounded_and_final_errors_observable() {
             if failure.retryable() { MAX_PASSES } else { 1 }
         );
         assert_eq!(outcome(completion).await, Err(failure));
-        assert_eq!(
-            coordinator.status("retry").unwrap(),
-            AutodeployStatus {
-                phase: AutodeployPhase::Failed,
-                message: failure.message()
-            }
-        );
+        let status = coordinator.status("retry").unwrap();
+        assert_eq!(status.phase, AutodeployPhase::Failed);
+        assert_eq!(status.message, failure.message());
         let (_, retry) = coordinator.request("retry".into());
         assert!(
             retry.is_some(),

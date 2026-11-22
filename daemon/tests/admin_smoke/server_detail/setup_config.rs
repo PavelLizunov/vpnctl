@@ -467,8 +467,20 @@ async fn server_detail_renders_live_monitoring_when_deploy_is_in_flight() {
     let html = fetch_html(app, "/admin/servers/sb-live").await;
 
     assert!(
-        html.contains(r#"data-reload-after="5""#),
-        "deploy log pane must refresh while a deploy is in flight: {html}"
+        html.contains(r#"id="deployment-status""#),
+        "deploy status panel must be present while a deploy is in flight: {html}"
+    );
+    assert!(
+        html.contains(r#"data-deploy-state="running""#),
+        "in-flight deploy must render an explicit running state: {html}"
+    );
+    assert!(
+        html.contains(r#"data-deploy-can-start="false""#),
+        "in-flight deploy must not offer another start: {html}"
+    );
+    assert!(
+        !html.contains(r#"data-reload-after="5""#),
+        "deploy status must poll the single panel instead of reloading the page: {html}"
     );
     assert!(
         !html.contains("data-sse-autostart"),

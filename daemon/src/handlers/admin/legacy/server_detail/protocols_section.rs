@@ -1,180 +1,144 @@
 use crate::handlers::admin::helpers::ordered_kernel_ids;
 use crate::handlers::admin::icons::icon;
 use crate::http_util::path_segment_encode;
+use crate::i18n::{K, Locale, t, tr};
 use maud::{Markup, html};
 use std::collections::{HashMap, HashSet};
+use vpnctl_core::{DpiRisk, ProtocolId, Registry, Server};
 
 pub(crate) fn server_detail_protocols_section(
-    server: &vpnctl_core::Server,
-    registry: &vpnctl_core::Registry,
-    hidden_map: &HashMap<vpnctl_core::ProtocolId, bool>,
-    lang: crate::i18n::Locale,
+    server: &Server,
+    registry: &Registry,
+    hidden_map: &HashMap<ProtocolId, bool>,
+    lang: Locale,
 ) -> Markup {
-    use crate::i18n::{K, t, tr};
-    let enabled: HashSet<&vpnctl_core::ProtocolId> = server.enabled_protocols.iter().collect();
-    let mut all_protocols = registry.protocol_ids();
-    all_protocols.extend(
-        server
-            .enabled_protocols
-            .iter()
-            .filter(|pid| {
-                registry
-                    .protocol(pid)
-                    .is_some_and(|protocol| protocol.is_retired())
-            })
-            .cloned(),
-    );
-    let kernel_supports_map: Vec<(vpnctl_core::KernelId, HashSet<vpnctl_core::ProtocolId>)> =
-        server
-            .kernels
-            .iter()
-            .filter_map(|kid| {
-                registry
-                    .kernel(kid)
-                    .map(|k| (kid.clone(), k.supported_protocols().into_iter().collect()))
-            })
-            .collect();
-    let kernel_supports: HashSet<vpnctl_core::ProtocolId> = kernel_supports_map
+    let supported: HashSet<_> = server
+        .kernels
         .iter()
-        .flat_map(|(_, sup)| sup.iter().cloned())
+        .filter_map(|id| registry.kernel(id))
+        .flat_map(|kernel| kernel.supported_protocols())
         .collect();
-    let sid_enc = path_segment_encode(&server.id.0);
-    html! {
-        div.ed-rule {}
-        div.ed-art-eyebrow id="enabled-protocols" { (t(lang, K::EyebrowEnabledProtocols)) }
-        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 8px;" {
-            (tr(
-                lang,
-                "Check what runs on this node. Protocols are wire formats; their kernels (one or more) are picked from the section above.",
-                "Что крутится на этой ноде. Протоколы — это wire-форматы; их ядра (одно или больше) выбираются выше в секции Ядра.",
-            ))
-        }
-        div style="padding: 6px 12px; margin: 0 0 12px; background: var(--paper); border-left: 3px solid var(--acc); font-family: var(--serif); font-size: 12px; line-height: 1.5;" {
-            b style="color: var(--acc); font-family: var(--mono); letter-spacing: 0.1em; text-transform: uppercase; font-size: 11px;" {
-                (icon("triangle-alert")) (tr(lang, "Changes are saved and applied automatically to the node.", "Изменения сохраняются и автоматически применяются на ноде."))
-            }
-        }
-        ul style="list-style: none; padding: 0; font-family: var(--mono); font-size: 12px; line-height: 1.8;" {
-            @for pid in &all_protocols {
-                @let is_on = enabled.contains(pid);
-                @let compatible = kernel_supports.contains(pid);
-                @let is_hidden = hidden_map.get(pid).copied().unwrap_or(false);
-                @let risk = registry.protocol(pid).map(|p| p.dpi_risk());
-                @let pid_is_weak = matches!(risk, Some(vpnctl_core::DpiRisk::Weak));
-                li style="display: flex; align-items: baseline; gap: 12px; padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
-                    span style=(format!(
-                        "flex: 1; color: {}; font-size: {};",
-                        if compatible { "var(--ink)" } else { "var(--mute)" },
-                        if pid_is_weak { "11px" } else { "12px" },
-                    )) {
-                        (pid.0)
-                        @if registry.protocol(pid).is_some_and(|protocol| protocol.is_retired()) {
-                            " " (tr(lang, "(retired)", "(выведен из новых подключений)"))
+    let enabled = &server.enabled_protocols;
+    let (available, incompatible): (Vec<_>, Vec<_>) = registry
+        .protocol_ids()
+        .into_iter()
+        .filter(|pid| !enabled.contains(pid))
+        .partition(|pid| supported.contains(pid));
+    let kernels = ordered_kernel_ids(server)
+        .iter()
+        .map(|kid| kid.0.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let server_path = format!("/admin/servers/{}", path_segment_encode(&server.id.0));
+    let render_row = |pid: &ProtocolId, is_on: bool| {
+        let compatible = supported.contains(pid);
+        let protocol = registry.protocol(pid);
+        let hidden = hidden_map.get(pid).copied().unwrap_or(false);
+        let action = format!("{server_path}/protocols/{}", path_segment_encode(&pid.0));
+        let applied_hint = tr(
+            lang,
+            "Applied automatically to the node.",
+            "Применяется автоматически на ноде.",
+        );
+        html! {
+            li.ed-protocol {
+                div.ed-protocol__info {
+                    div.ed-protocol__identity {
+                        strong.ed-protocol__weak[protocol.is_some_and(|p| matches!(p.dpi_risk(), DpiRisk::Weak))] { (pid.0) }
+                        @if is_on {
+                            span.ed-protocol__on { (icon("check")) (tr(lang, "Enabled", "Включён")) }
+                        } @else if compatible {
+                            span { (tr(lang, "Disabled", "Выключен")) }
                         }
-                        @if let Some(r) = risk {
-                            " "
-                            span title=(r.tooltip())
-                                 style=(format!(
-                                     "font-family: var(--mono); font-size: 10px; padding: 1px 6px; border: 1px solid {}; color: {}; letter-spacing: 0.04em;",
-                                     r.border_css(),
-                                     r.text_css(),
-                                 )) {
-                                (r.label())
+                    }
+                    div.ed-protocol__meta {
+                        @if is_on {
+                            @if hidden {
+                                span { (tr(lang, "Hidden from subscriptions", "Скрыт из подписок")) }
+                            } @else if compatible {
+                                span { (tr(lang, "Allowed in subscriptions", "Разрешён в подписках")) }
+                            }
+                            @if !compatible {
+                                span { (tr(lang, "Unsupported by selected kernels", "Выбранные ядра не поддерживают протокол")) }
                             }
                         }
-                        @if !compatible {
-                            " "
-                            span style="font-size: 10px; color: var(--mute); font-style: italic; font-family: var(--serif);" {
-                                (tr(lang, "(not supported by ", "(не поддерживается "))
-                                @if server.kernels.len() == 1 {
-                                    (tr(lang, "kernel ", "ядром ")) (server.kernels[0].0)
+                        @if let Some(p) = protocol {
+                            @if p.is_retired() {
+                                span { (tr(lang, "(retired)", "(выведен из новых подключений)")) }
+                            }
+                            @let risk = p.dpi_risk();
+                            span.ed-protocol__dpi title=(tr(lang, risk.tooltip(), "Устойчивость протокола к распознаванию трафика")) {
+                                (tr(lang, risk.label(), match risk {
+                                    DpiRisk::Strong => "Устойчивость к DPI: высокая",
+                                    DpiRisk::Moderate => "Устойчивость к DPI: средняя",
+                                    DpiRisk::Weak => "Устойчивость к DPI: низкая",
+                                }))
+                            }
+                        }
+                    }
+                }
+                div.ed-protocol__actions {
+                    @if is_on && compatible {
+                        form method="post" action=(format!("{action}/{}", if hidden { "unhide" } else { "hide" })) {
+                            button type="submit" class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
+                                @if hidden {
+                                    (icon("eye")) (tr(lang, "Show in subscriptions", "Показать в подписках"))
                                 } @else {
-                                    (tr(lang, "any kernel on this server: ", "ни одним ядром на этом сервере: "))
-                                    (ordered_kernel_ids(server).iter().map(|k| k.0.clone()).collect::<Vec<_>>().join(", "))
+                                    (icon("eye-off")) (tr(lang, "Hide from subscriptions", "Скрыть из подписок"))
                                 }
-                                ")"
                             }
                         }
                     }
                     @if is_on {
-                        @if is_hidden {
-                            span style="font-family: var(--mono); font-size: 11px; color: var(--acc); margin-right: 4px;" {
-                                (icon("check")) (tr(lang, "on · hidden", "вкл · скрыт"))
-                            }
-                        } @else {
-                            span style="font-family: var(--mono); font-size: 11px; color: var(--acc); margin-right: 4px;" {
-                                (icon("check")) (tr(lang, "on", "вкл"))
-                            }
-                        }
-                        form method="post"
-                             action=(format!("/admin/servers/{}/protocols/{}/disable", sid_enc, path_segment_encode(&pid.0)))
-                             data-confirm=(crate::i18n::tr(lang, "Disable this protocol on the server for every user?", "Отключить этот протокол на сервере для всех пользователей?"))
-                             style="margin: 0; padding: 0;" {
-                            @let dis_proto_title = match lang {
-                                crate::i18n::Locale::En => format!("Remove {} from {}.enabled_protocols. Applied automatically to the node.", pid.0, server.id.0),
-                                crate::i18n::Locale::Ru => format!("Убрать {} из {}.enabled_protocols. Применяется автоматически на ноде.", pid.0, server.id.0),
-                            };
-                            button type="submit"
-                                   title=(dis_proto_title)
-                                   class="ed-abtn ed-abtn--warning ed-abtn--sm" {
+                        form method="post" action=(format!("{action}/disable"))
+                             data-confirm=(tr(lang, "Disable this protocol on the server for every user?", "Отключить этот протокол на сервере для всех пользователей?")) {
+                            button type="submit" class="ed-abtn ed-abtn--warning ed-abtn--sm" title=(applied_hint) {
                                 (icon("pause")) (t(lang, K::BtnDisable))
                             }
                         }
-                        @if !compatible {
-                            span style="font-family: var(--mono); font-size: 10px; color: var(--mute); font-style: italic;" {
-                                (tr(lang, "(disable to clear)", "(выключи чтобы убрать)"))
-                            }
-                        } @else if is_hidden {
-                            form method="post"
-                                 action=(format!("/admin/servers/{}/protocols/{}/unhide", sid_enc, path_segment_encode(&pid.0)))
-                                 style="margin: 0; padding: 0;" {
-                                @let unhide_title = match lang {
-                                    crate::i18n::Locale::En => format!("Resume emitting {} in this server's subscription URLs. Live sing-box inbound was never stopped; this just unmutes the render.", pid.0),
-                                    crate::i18n::Locale::Ru => format!("Снова отдавать {} в URL подписок этого сервера. Живой sing-box inbound никто не останавливал; это только снимает mute с рендера.", pid.0),
-                                };
-                                button type="submit"
-                                       title=(unhide_title)
-                                       class="ed-abtn ed-abtn--sm" {
-                                    (icon("eye")) (t(lang, K::BtnUnhide))
-                                }
-                            }
-                        } @else {
-                            form method="post"
-                                 action=(format!("/admin/servers/{}/protocols/{}/hide", sid_enc, path_segment_encode(&pid.0)))
-                                 style="margin: 0; padding: 0;" {
-                                @let hide_title = match lang {
-                                    crate::i18n::Locale::En => format!("Stop emitting {} in this server's subscription URLs WITHOUT removing the live inbound. Existing client URIs keep working until they re-pull.", pid.0),
-                                    crate::i18n::Locale::Ru => format!("Перестать отдавать {} в URL подписок этого сервера БЕЗ удаления живого inbound. Закешированные клиентские URI продолжают работать до следующего pull.", pid.0),
-                                };
-                                button type="submit"
-                                       title=(hide_title)
-                                       class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
-                                    (icon("eye-off")) (t(lang, K::BtnHide))
-                                }
-                            }
-                        }
                     } @else if compatible {
-                        span style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-right: 4px;" {
-                            "—"
-                        }
-                        form method="post"
-                             action=(format!("/admin/servers/{}/protocols/{}/enable", sid_enc, path_segment_encode(&pid.0)))
-                             style="margin: 0; padding: 0;" {
-                            @let en_proto_title = match lang {
-                                crate::i18n::Locale::En => format!("Add {} to {}.enabled_protocols. Applied automatically to the node.", pid.0, server.id.0),
-                                crate::i18n::Locale::Ru => format!("Добавить {} в {}.enabled_protocols. Применяется автоматически на ноде.", pid.0, server.id.0),
-                            };
-                            button type="submit"
-                                   title=(en_proto_title)
-                                   class="ed-abtn ed-abtn--sm" {
+                        form method="post" action=(format!("{action}/enable")) {
+                            button type="submit" class="ed-abtn ed-abtn--sm" title=(applied_hint) {
                                 (icon("power")) (t(lang, K::BtnEnable))
                             }
                         }
-                    } @else {
-                        span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                            (tr(lang, "incompatible", "несовместимо"))
-                        }
                     }
+                }
+            }
+        }
+    };
+    html! {
+        section.ed-protocols id="enabled-protocols" {
+            h2 { (t(lang, K::EyebrowEnabledProtocols)) " · " (enabled.len()) }
+            @if enabled.is_empty() {
+                p { (tr(lang, "No protocols enabled. Choose an available protocol below.", "Все протоколы выключены. Выберите доступный протокол ниже.")) }
+            } @else {
+                ul { @for pid in enabled { (render_row(pid, true)) } }
+            }
+            details.ed-protocols__group {
+                summary { (tr(lang, "Available to enable", "Можно включить")) " · " (available.len()) }
+                @if available.is_empty() {
+                    p { (tr(lang, "No other protocols available with these kernels.", "Для выбранных ядер нет других доступных протоколов.")) }
+                } @else {
+                    ul { @for pid in &available { (render_row(pid, false)) } }
+                }
+            }
+            @if !incompatible.is_empty() {
+                details.ed-protocols__group {
+                    summary { (tr(lang, "Require a different kernel", "Требуют другого ядра")) " · " (incompatible.len()) }
+                    p {
+                        (tr(lang, "These protocols are not supported by ", "Эти протоколы не поддерживаются "))
+                        @if server.kernels.len() == 1 { (tr(lang, "kernel ", "ядром ")) }
+                        @else { (tr(lang, "the selected kernels: ", "выбранными ядрами: ")) }
+                        (kernels) "."
+                    }
+                    ul { @for pid in &incompatible { (render_row(pid, false)) } }
+                }
+            }
+            p.ed-protocols__hint {
+                (tr(lang, "Changes are saved and applied automatically to the node.", "Изменения сохраняются и автоматически применяются на ноде.")) " "
+                a href=(format!("{server_path}/status#external-readiness")) {
+                    (tr(lang, "View connectivity checks", "Результаты проверок подключения"))
                 }
             }
         }

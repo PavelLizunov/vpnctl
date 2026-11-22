@@ -23,8 +23,8 @@ async fn server_detail_shows_pending_banner_after_revoke_until_deploy() {
 
     let html = fetch_html(app.clone(), "/admin/servers/s0").await;
     assert!(
-        !html.contains("pending-deploy-banner"),
-        "freshly-deployed server must not show the pending banner"
+        html.contains(r#"data-deploy-state="applied""#),
+        "freshly-deployed server must report the audited application: {html}"
     );
 
     app.clone()
@@ -41,8 +41,12 @@ async fn server_detail_shows_pending_banner_after_revoke_until_deploy() {
         .unwrap();
     let html = fetch_html(app.clone(), "/admin/servers/s0").await;
     assert!(
-        html.contains("pending-deploy-banner"),
-        "revoke must raise the server-side pending-deploy banner"
+        html.contains(r#"data-deploy-pending="pending""#),
+        "revoke must leave the saved changes awaiting application: {html}"
+    );
+    assert!(
+        !html.contains(r#"data-deploy-state="applied""#),
+        "revoke must not be reported as applied: {html}"
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -51,8 +55,8 @@ async fn server_detail_shows_pending_banner_after_revoke_until_deploy() {
         .unwrap();
     let html = fetch_html(app, "/admin/servers/s0").await;
     assert!(
-        !html.contains("pending-deploy-banner"),
-        "deploy must clear the pending banner"
+        html.contains(r#"data-deploy-state="applied""#),
+        "deploy must clear the pending status: {html}"
     );
 }
 
@@ -180,6 +184,7 @@ async fn admin_server_detail_lists_all_users_with_grant_buttons() {
         })
         .await
         .unwrap();
+    mark_ssh_available(&s.inv, &ServerId("sb".into())).await;
     for uid in ["alice", "bob"] {
         s.inv
             .add_user(&User {
