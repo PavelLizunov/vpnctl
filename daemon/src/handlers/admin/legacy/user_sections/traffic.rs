@@ -414,8 +414,8 @@ pub(in crate::handlers::admin::legacy) fn window_picker_section(
             span style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 11px; margin-left: auto;" {
                 (tr(
                     lang,
-                    "→ all charts + tiles below update together (custom date range — coming next)",
-                    "→ все графики и плитки ниже обновляются вместе (произвольный диапазон дат — в следующем релизе)",
+                    "Period for traffic statistics.",
+                    "Период для статистики трафика.",
                 ))
             }
         }

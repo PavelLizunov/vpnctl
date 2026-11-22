@@ -31,49 +31,33 @@ pub(in crate::handlers::admin::legacy) fn dashboard_heavy_users(
     window: VpnSparklineWindow,
     lang: crate::i18n::Locale,
 ) -> Markup {
-    use crate::i18n::{K, t, tr};
+    use crate::i18n::tr;
     let window_label = match lang {
         crate::i18n::Locale::En => window.label_en,
         crate::i18n::Locale::Ru => window.label_ru,
     };
     html! {
         div.ed-rule {}
-        div.ed-art-eyebrow
-            title=(tr(
-                lang,
-                "Top-N by sum of (upload+download bytes) across all servers in the selected window. Data source: clash-api 5-minute polls. WireGuard traffic NOT included (kernel-level, no clash-api visibility); only sing-box-mediated protocols (VLESS, TUIC, Trojan, Hysteria2, AnyTLS, Shadowsocks-2022) appear here.",
-                "Топ-N по сумме (upload+download байт) на всех серверах за выбранное окно. Источник: 5-минутные опросы clash-api. Трафик WireGuard НЕ учитывается (kernel-уровень, clash-api их не видит); только протоколы которые видит sing-box (VLESS, TUIC, Trojan, Hysteria2, AnyTLS, Shadowsocks-2022).",
-            )) {
-            (tr(lang, "Heavy users · ", "Тяжёлые пользователи · "))
-            (window_label)
+        h2 #top-users {
+            (tr(lang, "Top users by traffic", "Кто больше всего расходует трафик"))
+            " · " (window_label)
         }
         @if rows.is_empty() {
-            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-                (tr(
-                    lang,
-                    "No per-user traffic recorded yet. The clash-api poller ticks every 5 minutes — once the daemon's SSH deploy key is in each node's ",
-                    "Трафик по пользователям ещё не записан. Опрос clash-api идёт раз в 5 минут — как только SSH deploy-ключ демона окажется в ",
+            p.ed-grid__mut {
+                (tr(lang,
+                    "No user traffic recorded for this period. Counters are collected every 5 minutes. If a node has never reported, check its SSH access and ",
+                    "За этот период нет данных о трафике пользователей. Счётчики опрашиваются каждые 5 минут. Если узел ещё не передавал данные, проверьте его SSH-доступ и ",
                 ))
-                span.ed-mono { "~/.ssh/authorized_keys" }
-                (tr(lang, " (see ", " каждой ноды (см. "))
-                a href="/admin/settings/system#deploy-ssh-key" style="color: var(--ink);" {
-                    (t(lang, K::NavSettings))
+                a href="/admin/settings/system#deploy-ssh-key" {
+                    (tr(lang, "deploy key", "ключ деплоя"))
                 }
-                (tr(
-                    lang,
-                    ") the section populates on the next tick.",
-                    ") — секция наполнится на следующем тике.",
-                ))
+                "."
             }
         } @else {
-            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
-                (tr(lang, "Top ", "Топ ")) (rows.len())
-                (tr(lang, " accounts by charged (weighted) total over ", " аккаунтов по начисленному (взвешенному) итогу за "))
-                (window_label)
-                (tr(
-                    lang,
-                    ". Each node's usage coefficient is applied; measured physical bytes are on the user's Traffic tab. Click through to investigate.",
-                    ". Применяется коэффициент нагрузки каждой ноды; измеренные физические байты — на вкладке «Трафик» пользователя. Кликни чтобы разобраться.",
+            p.ed-grid__mut {
+                (tr(lang,
+                    "Ranked by charged (weighted) upload + download. WireGuard traffic is excluded.",
+                    "Рейтинг по сумме отдачи и приёма с учётом коэффициентов серверов. Трафик WireGuard сюда не входит.",
                 ))
             }
             table style="width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px;" {
@@ -96,7 +80,7 @@ pub(in crate::handlers::admin::legacy) fn dashboard_heavy_users(
                 tbody {
                     @for hu in rows {
                         tr style="border-bottom: 1px dotted var(--rule);" {
-                            td style="text-align: left; padding: 4px 0;" {
+                            td style="text-align: left; padding: 4px 0; overflow-wrap: anywhere;" {
                                 a href=(format!(
                                     "/admin/users/{}/traffic?vpn_window={}",
                                     path_segment_encode(&hu.user_id.0),

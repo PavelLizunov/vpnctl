@@ -363,8 +363,6 @@ async fn dashboard_render(
     let body = html! {
         div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageDashboard)) }
         (dashboard_summary_bar(&stats, conns_now, lang))
-        (crate::handlers::admin::path_availability::fleet_summary(&server_list_fleet, &current_paths, &names, lang))
-        (dashboard_fleet_table(&server_list_fleet, &latest_health_per_server, &active_conns_now, &nic_day, &kernel_versions, &current_paths, &names, lang))
         (detail_tabs(
             "/admin",
             tab.slug(),
@@ -375,6 +373,14 @@ async fn dashboard_render(
             ],
             lang,
         ))
+
+        @if tab == DashboardTab::Activity {
+            (window_picker_section("/admin/activity", window.slug, lang))
+            (dashboard_heavy_users(&heavy_users, window, lang))
+        }
+
+        (crate::handlers::admin::path_availability::fleet_summary(&server_list_fleet, &current_paths, &names, lang))
+        (dashboard_fleet_table(&server_list_fleet, &latest_health_per_server, &active_conns_now, &nic_day, &kernel_versions, &current_paths, &names, lang))
 
         @if tab == DashboardTab::Overview {
             (dashboard_quality_ranking(&fleet_quality, lang))
@@ -396,13 +402,11 @@ async fn dashboard_render(
         }
 
         @if tab == DashboardTab::Activity {
-            (window_picker_section("/admin/activity", window.slug, lang))
             (dashboard_fleet_uptime(&fleet_uptime, lang))
             div id="vpn-traffic" style="margin-top:24px;" {
                 (crate::handlers::admin::nic_traffic::panel(&nic_selected, &active_conns_now, lang))
             }
             (kernel_floor_rollup(&kernel_versions, lang))
-            (dashboard_heavy_users(&heavy_users, window, lang))
         }
 
         @if tab == DashboardTab::Sharing {

@@ -263,7 +263,7 @@ async fn dashboard_weekly_heavy_users_use_fresh_raw_ticks_and_carry_period_conte
     let app = router(s);
     let html = fetch_html(app.clone(), "/admin/activity?vpn_window=7d").await;
     assert!(
-        html.contains("Heavy users · 7 days"),
+        html.contains("Top users by traffic · 7 days"),
         "weekly ranking heading missing"
     );
     assert!(
@@ -278,6 +278,14 @@ async fn dashboard_weekly_heavy_users_use_fresh_raw_ticks_and_carry_period_conte
         html.contains("6.9 MiB"),
         "weekly ranking must merge the daily-only day with fresh raw ticks"
     );
+    assert_eq!(html.matches(r#"id="top-users""#).count(), 1);
+    let (_, after_picker) = html.split_once(r#"id="timeframe""#).unwrap();
+    let (_, after_ranking) = after_picker.split_once(r#"id="top-users""#).unwrap();
+    let (before_fleet, _) = after_ranking
+        .split_once(r#"id="fleet-current-path""#)
+        .unwrap();
+    assert!(before_fleet.contains("/admin/users/u0/traffic?vpn_window=7d"));
+    assert!(after_ranking.contains(r#"id="fleet-at-a-glance""#));
     let user = fetch_html(app, "/admin/users/u0/traffic?vpn_window=7d").await;
     assert!(
         user.contains("6.9 MiB"),

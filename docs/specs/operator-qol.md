@@ -22,6 +22,9 @@ subscription formats retain their byte-level compatibility.
 - Deployment updates in place across tabs. The current phase, failure, retry and
   successful application agree with the server's state. New unsaved input,
   keyboard focus, selected tab and scroll position survive background updates.
+- Dashboard navigation precedes fleet telemetry. Activity opens with the period
+  selector and the top five users by weighted traffic across nodes. The ranking
+  or its empty state is visible before the fleet panels on desktop and mobile.
 - A user's Traffic tab keeps the period and node selector available for empty
   selections. Graph, table and totals use one period definition. Measured bytes
   and bytes charged toward the limit have distinct labels. The monthly balance
