@@ -414,20 +414,3 @@ pub(super) fn sing_box_apply_script() -> &'static str {
             exit 1
         "#
 }
-
-pub(crate) fn firewall_open_script(ports: &[(&str, u16)]) -> Option<String> {
-    let uniq: std::collections::BTreeSet<(&str, u16)> = ports.iter().copied().collect();
-    if uniq.is_empty() {
-        return None;
-    }
-    // The status is captured as its own command so a failing `ufw status`
-    // stops the script (set -e) instead of reading as "inactive".
-    let mut s = String::from(
-        "set -eu\nif command -v ufw >/dev/null 2>&1; then\n  ufw_status=$(LC_ALL=C ufw status)\n  case \"$ufw_status\" in\n    'Status: active'*)\n",
-    );
-    for (transport, port) in &uniq {
-        s.push_str(&format!("      ufw allow {port}/{transport}\n"));
-    }
-    s.push_str("      ;;\n  esac\nfi\n");
-    Some(s)
-}

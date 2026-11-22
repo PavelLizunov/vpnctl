@@ -152,10 +152,22 @@ pub(crate) async fn run(
         rendered_kernels.push(k.id().0);
     }
 
+    let firewall_warning = if inv.deploy_input_revision(&sid).await? == deploy_revision {
+        vpnctl_kernels::reconcile_firewall(&ssh, &registry, &ctx)
+            .await
+            .map_err(|e| anyhow::anyhow!("firewall cleanup failed: {e}"))?
+    } else {
+        None
+    };
+    if let Some(warning) = &firewall_warning {
+        println!("⚠ {warning}");
+    }
+
     let payload = json!({
         "users": users.len(),
         "protocols": server.enabled_protocols.iter().map(|p| p.0.as_str()).collect::<Vec<_>>(),
         "kernels_rendered": rendered_kernels,
+        "firewall_warning": firewall_warning,
         "config_bytes_total": total_config_bytes,
         "inputs_changed": false,
     });

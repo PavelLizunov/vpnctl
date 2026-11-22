@@ -177,7 +177,8 @@ impl Kernel for DnsttKernel {
             .address
             .parse::<Ipv4Addr>()
             .map_err(|_| CoreError::Render("DNSTT needs a literal IPv4 node address".into()))?;
-        ssh.exec(&format!("set -eu; if command -v ufw >/dev/null 2>&1 && LC_ALL=C ufw status | grep -qx 'Status: active'; then ufw allow in proto udp to {address} port 53 comment 'vpnctl DNSTT'; fi")).await?;
+        ssh.exec(&crate::firewall::firewall_open_dnstt(address))
+            .await?;
         Ok(())
     }
 

@@ -354,6 +354,7 @@ async fn shutdown_only_deploy_clears_pending_only_after_successful_reconciliatio
             None,
             false,
             &revision,
+            None,
         )
         .await;
         assert_eq!(

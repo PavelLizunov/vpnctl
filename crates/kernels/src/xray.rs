@@ -1,3 +1,4 @@
+use crate::firewall::firewall_open_script;
 use async_trait::async_trait;
 use serde_json::json;
 use vpnctl_core::{
@@ -187,23 +188,6 @@ fn xray_apply_script() -> String {
         staging_path = XRAY_CONFIG_STAGING_PATH,
         config_path = XRAY_CONFIG_PATH,
     )
-}
-
-fn firewall_open_script(ports: &[(&str, u16)]) -> Option<String> {
-    let uniq: std::collections::BTreeSet<(&str, u16)> = ports.iter().copied().collect();
-    if uniq.is_empty() {
-        return None;
-    }
-    // The status is captured as its own command so a failing `ufw status`
-    // stops the script (set -e) instead of reading as "inactive".
-    let mut s = String::from(
-        "set -eu\nif command -v ufw >/dev/null 2>&1; then\n  ufw_status=$(LC_ALL=C ufw status)\n  case \"$ufw_status\" in\n    'Status: active'*)\n",
-    );
-    for (transport, port) in &uniq {
-        s.push_str(&format!("      ufw allow {port}/{transport}\n"));
-    }
-    s.push_str("      ;;\n  esac\nfi\n");
-    Some(s)
 }
 
 #[async_trait]
@@ -664,19 +648,5 @@ mod tests {
             s.contains("journalctl -u xray"),
             "must dump diagnostics on failure: {s}"
         );
-    }
-
-    #[test]
-    fn firewall_open_script_opens_each_port_idempotently_guarded() {
-        let s = firewall_open_script(&[("tcp", 9443)]).unwrap();
-        assert!(s.contains("command -v ufw"));
-        assert!(s.contains("ufw allow 9443/tcp"));
-        assert!(s.contains("LC_ALL=C ufw status"));
-        assert!(!s.contains("|| true"));
-    }
-
-    #[test]
-    fn firewall_open_script_empty_ports_is_none() {
-        assert!(firewall_open_script(&[]).is_none());
     }
 }

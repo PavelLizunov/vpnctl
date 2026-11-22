@@ -741,22 +741,8 @@ fn firewall_open_script_opens_each_port_idempotently_guarded() {
         script.contains("command -v ufw"),
         "must guard on ufw presence: {script}"
     );
-    for line in [
-        "ufw allow 443/tcp",
-        "ufw allow 8443/udp",
-        "ufw allow 8444/udp",
-    ] {
-        assert!(script.contains(line), "missing `{line}` in: {script}");
-    }
-    assert_eq!(
-        script.matches("ufw allow 8444/udp").count(),
-        1,
-        "duplicate ports must collapse: {script}"
-    );
-    assert!(
-        script.contains("LC_ALL=C ufw status") && !script.contains("|| true"),
-        "must only open active ufw rules and propagate failures: {script}"
-    );
+    assert!(script.ends_with("vpnctl_ufw allow tcp:443 udp:8443 udp:8444\n"));
+    assert!(script.contains("LC_ALL=C /usr/bin/python3"));
 }
 
 #[test]
@@ -1369,11 +1355,11 @@ async fn open_firewall_uses_effective_listen_ports() {
     assert_eq!(scripts.len(), 1, "exactly one ufw script expected");
     let script = &scripts[0];
     assert!(
-        script.contains("ufw allow 8443/tcp"),
+        script.ends_with("vpnctl_ufw allow tcp:8443\n"),
         "override port must be opened: {script}"
     );
     assert!(
-        !script.contains(" 443/tcp"),
+        !script.contains(" tcp:443"),
         "static default must NOT be opened once overridden: {script}"
     );
 }
@@ -1698,41 +1684,6 @@ fn managed_install_starts_and_verifies_inactive_service_with_unchanged_binary() 
             let start = commands.find("start sing-box").unwrap();
             assert!(commands[start..].contains("is-active --quiet sing-box"));
         }
-    }
-}
-
-#[test]
-fn firewall_script_fails_when_ufw_status_fails() {
-    let script = firewall_open_script(&[("tcp", 443)]).unwrap();
-    for (status_rc, status_out, expect_ok, expect_allow) in [
-        (0, "Status: active", true, true),
-        (0, "Status: inactive", true, false),
-        (1, "", false, false),
-    ] {
-        let mocks = format!(
-            r#"
-            ufw() {{
-                case "$1" in
-                    status) printf '%s\n' '{status_out}'; return {status_rc} ;;
-                    allow) echo "allow $2" >&2; return 0 ;;
-                esac
-            }}
-            "#
-        );
-        let output = std::process::Command::new("bash")
-            .args(["-c", &format!("{mocks}\n{script}")])
-            .output()
-            .unwrap();
-        assert_eq!(
-            output.status.success(),
-            expect_ok,
-            "{status_out:?} rc={status_rc}"
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&output.stderr).contains("allow 443/tcp"),
-            expect_allow,
-            "{status_out:?} rc={status_rc}"
-        );
     }
 }
 

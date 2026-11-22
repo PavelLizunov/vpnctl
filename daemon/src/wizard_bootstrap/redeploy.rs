@@ -332,6 +332,7 @@ async fn redeploy_pipeline(
             None,
             true,
             &deploy_revision,
+            None,
         )
         .await;
         fail!("deploy", "inventory changed while preparing deploy; retry");
@@ -364,6 +365,7 @@ async fn redeploy_pipeline(
             Some(reason),
             false,
             &deploy_revision,
+            None,
         )
         .await;
         fail!("deploy", "deploy skipped — {reason}.");
@@ -407,6 +409,7 @@ async fn redeploy_pipeline(
             None,
             true,
             &deploy_revision,
+            None,
         )
         .await;
         fail!("deploy", "inventory changed while preparing deploy; retry");
@@ -530,6 +533,24 @@ async fn redeploy_pipeline(
         }
     }
 
+    let firewall_warning = if ssh_errors.is_empty() {
+        match super::reconcile_firewall_if_current(&inv, &deploy_revision, &ssh, &registry, &ctx)
+            .await
+        {
+            Ok(warning) => warning,
+            Err(e) => {
+                ssh_errors.push(format!("firewall cleanup failed: {e}"));
+                send_step!("apply", "✗ firewall cleanup failed: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(warning) = &firewall_warning {
+        send_step!("apply", "⚠ {warning}");
+    }
+
     let audit_action = write_deploy_audit(
         &inv,
         &server,
@@ -541,6 +562,7 @@ async fn redeploy_pipeline(
         None,
         false,
         &deploy_revision,
+        firewall_warning.as_deref(),
     )
     .await;
 
