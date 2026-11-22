@@ -145,7 +145,7 @@ async fn revoke_during_remote_apply_converges_via_canonical_audit() {
                     inv.clone(),
                     Arc::clone(&registry),
                     key.clone(),
-                    Some(ssh.clone()),
+                    Some(Arc::<vpnctl_ssh::MockTransport>::clone(&ssh)),
                 )
             }
         },
