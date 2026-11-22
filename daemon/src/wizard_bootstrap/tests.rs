@@ -354,6 +354,7 @@ async fn shutdown_only_deploy_clears_pending_only_after_successful_reconciliatio
             None,
             false,
             &revision,
+            None,
         )
         .await;
         assert_eq!(
@@ -548,7 +549,13 @@ async fn collect_redeploy_bounded(
     use std::time::Duration;
     use tokio_stream::StreamExt;
 
-    let mut stream = Box::pin(run_redeploy(snapshot, inv, registry, missing_key));
+    let mut stream = Box::pin(redeploy::run_redeploy_with_transport(
+        snapshot,
+        inv,
+        registry,
+        missing_key,
+        Some(Arc::new(vpnctl_ssh::MockTransport::new())),
+    ));
     let mut events = Vec::new();
     for _ in 0..32 {
         match tokio::time::timeout(Duration::from_secs(2), stream.next()).await {
@@ -916,7 +923,7 @@ async fn redeploy_firewall_failure_records_failed_audit_and_keeps_server_pending
     inv.set_reserved_ports(&server.id, &[12345]).await.unwrap();
     assert!(inv.server_pending_deploy(&server.id).await.unwrap());
     let key = dir.path().join("unused-deploy-key");
-    std::fs::write(&key, "fixture: kernel methods do not invoke SSH").unwrap();
+    std::fs::write(&key, "fixture key for the injected SSH transport").unwrap();
 
     let events =
         collect_redeploy_bounded(server.clone(), inv.clone(), Arc::new(registry), key).await;
@@ -1019,7 +1026,7 @@ async fn redeploy_persists_observed_certificate_only_on_change_and_propagates_er
     inv.add_server(&server).await.unwrap();
     inv.set_reserved_ports(&server.id, &[12345]).await.unwrap();
     let key = dir.path().join("unused-deploy-key");
-    std::fs::write(&key, "fixture: kernel methods do not invoke SSH").unwrap();
+    std::fs::write(&key, "fixture key for the injected SSH transport").unwrap();
     for (pin, expected_count) in [(Some("ab"), 1), (Some("ab"), 1), (Some("cd"), 2), (None, 2)] {
         *observed.lock().unwrap() = pin.map(|pin| pin.repeat(32));
         let events = collect_redeploy_bounded(

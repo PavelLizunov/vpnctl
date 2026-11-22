@@ -68,6 +68,7 @@ pub(super) async fn write_deploy_audit(
     ssh_skip_reason: Option<&'static str>,
     inputs_changed: bool,
     expected_revision: &str,
+    firewall_warning: Option<&str>,
 ) -> &'static str {
     let mut action = deploy_audit_action(
         ssh_errors,
@@ -86,6 +87,7 @@ pub(super) async fn write_deploy_audit(
         "configs_applied": configs_applied,
         "ssh_skip_reason": ssh_skip_reason,
         "inputs_changed": inputs_changed,
+        "firewall_warning": firewall_warning,
         "via": "sse",
     });
     let result = if action == "server.deploy" {

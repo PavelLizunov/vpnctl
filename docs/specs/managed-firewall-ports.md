@@ -1,0 +1,54 @@
+# Managed firewall ports
+
+## Intent and invariants
+
+- Deploy manages owned inbound UFW rules on nodes with an active UFW firewall.
+  Setup continues without changes to firewall policy if UFW is absent or inactive.
+- New VPN ingress rules carry a vpnctl comment. An existing rule with the same
+  match retains its action and comment. An exact deny or reject fails the deploy.
+  Deploy retains unmarked single-port allowances with no public listener and
+  reports them in deployment output and audit details.
+- Keep the configured SSH port, the active SSH connection's server port,
+  non-loopback listeners, enabled protocol ports and TCP 80 for Caddy's ACME HTTP challenge.
+  Keep IPv4 and IPv6 rules independent so a manual rule in one family does not
+  become owned when vpnctl opens the other family.
+
+## Interface and data
+
+- The existing web deploy, redeploy and protocol actions and CLI deploy remove
+  obsolete rules after all service changes succeed, including when the last
+  protocol is disabled. A stale inventory revision or a failed service change
+  skips deletion. Firewall errors use the existing deploy failure paths.
+- The node-local UFW comment is the ownership record. It covers single-port
+  inbound allows, including DNSTT's address-scoped UDP 53. The previous DNSTT
+  comment is recognized for that rule shape. Read and change rules under UFW's
+  lock. Delete exact owned rules and leave provider firewall policy intact.
+- Caddy opens its selected front port and HTTP challenge port within its apply
+  transaction. Provisioning the binary no longer opens ports.
+
+## Verification
+
+- Change an effective port and disable the last protocol. Confirm obsolete
+  owned allowances are removed and repeated deploys are idempotent.
+- Exercise IPv4/IPv6, manual allows and denies, the scoped legacy DNSTT rule,
+  Caddy custom ports, live listeners, SSH, and absent or inactive UFW.
+- On a failed apply or socket inventory read, retain old allowances and report
+  the failure through the deploy surface.
+
+## Automatic cleanup
+
+- vpnctld sweeps eligible nodes at startup and every ten minutes. A busy node,
+  pending deploy, or failed observation clears the node's earlier observation.
+  Use the normal deploy SSH route and the shared node operation lock.
+- The sweep protects declared endpoints, SSH, reserved ports in both transports,
+  and live public listeners. An unchanged VPN configuration and SSH route must
+  yield two consecutive idle observations of the same address family before
+  an unmarked rule can be removed.
+- The unmarked candidates are exact, unrestricted and uncommented inbound UFW
+  allows on single TCP or UDP ports. Only remove an unmarked rule when UFW's
+  default input policy is deny or reject and the rule has no conflicting match.
+  The sweep also removes stale vpnctl-owned rules. Audit each successful
+  rule by address family, including successes before a later removal fails.
+- Verify startup scheduling, the two-observation requirement, and preservation
+  of reserved, in-use, commented, scoped, conflicting and otherwise out-of-scope
+  rules. Verify that a busy, failed, or reconfigured node starts observation anew.

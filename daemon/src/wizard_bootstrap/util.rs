@@ -1,3 +1,20 @@
+use vpnctl_core::{Registry, RenderCtx, SshTransport};
+use vpnctl_inventory::SqliteInventory;
+
+pub(crate) async fn reconcile_firewall_if_current(
+    inv: &SqliteInventory,
+    deploy_revision: &str,
+    ssh: &dyn SshTransport,
+    registry: &Registry,
+    ctx: &RenderCtx<'_>,
+) -> anyhow::Result<Option<String>> {
+    let reserved = inv.get_reserved_ports(&ctx.server.id).await?;
+    if inv.deploy_input_revision(&ctx.server.id).await? == deploy_revision {
+        return Ok(vpnctl_kernels::reconcile_firewall(ssh, registry, ctx, &reserved).await?);
+    }
+    Ok(None)
+}
+
 pub fn find_available_server_id(
     existing: &std::collections::HashSet<String>,
     base: &str,

@@ -422,9 +422,21 @@ async fn bootstrap_pipeline(
         }
     }
 
+    let firewall_warning =
+        match super::reconcile_firewall_if_current(&inv, &deploy_revision, &ssh, &registry, &ctx)
+            .await
+        {
+            Ok(warning) => warning,
+            Err(e) => fail!("apply", "firewall cleanup failed: {e}"),
+        };
+    if let Some(warning) = &firewall_warning {
+        send_step!("apply", "⚠ {warning}");
+    }
+
     let payload = serde_json::json!({
         "kernels": server.kernels.iter().map(|k| &k.0).collect::<Vec<_>>(),
         "protocols": server.enabled_protocols.iter().map(|p| &p.0).collect::<Vec<_>>(),
+        "firewall_warning": firewall_warning,
         "via": "wizard-bootstrap",
     });
     match inv

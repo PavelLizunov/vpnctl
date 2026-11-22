@@ -387,21 +387,9 @@ pub(crate) fn vlessws_apply_script() -> String {
             chmod 0644 {deploy_env} || recover ""
             rm -f "$BUNDLE" || recover ""
 
-            # Firewall: open ACME :80 + the operator-chosen front port
-            # (absent or inactive ufw is a no-op). The front port comes
-            # from the rendered meta member; failures restore the configs.
-            if command -v ufw >/dev/null 2>&1; then
-                ufw_status=$(LC_ALL=C ufw status) || recover "caddy"
-                case "$ufw_status" in
-                    'Status: active'*)
-                        ufw allow 80/tcp || recover "caddy"
-                        . {deploy_env} 2>/dev/null || true
-                        if [ -n "${{VLESSWS_FRONT_PORT:-}}" ]; then
-                            ufw allow "${{VLESSWS_FRONT_PORT}}/tcp" || recover "caddy"
-                        fi
-                        ;;
-                esac
-            fi
+{ufw}
+            . {deploy_env} || recover "caddy"
+            vpnctl_ufw allow tcp:80 "tcp:$VLESSWS_FRONT_PORT" || recover "caddy"
 
             # Restart the BACKEND (loopback sing-box) FIRST so caddy's
             # reverse_proxy upstream is reachable when caddy reloads.
@@ -437,6 +425,7 @@ pub(crate) fn vlessws_apply_script() -> String {
         deploy_env = VLESSWS_DEPLOY_ENV,
         vlessws_unit = VLESSWS_UNIT,
         prologue = prologue,
+        ufw = crate::firewall::ufw_function(),
     )
 }
 
@@ -460,6 +449,9 @@ pub(crate) fn naive_apply_script() -> String {
             mv {caddyfile}.new {caddyfile} || recover ""
             chown root:caddy {caddyfile} || recover ""
             chmod 0640 {caddyfile} || recover ""
+
+{ufw}
+            vpnctl_ufw allow tcp:80 tcp:443 || recover "caddy"
 
             # Enable and reload-or-restart caddy.
             systemctl enable caddy >/dev/null 2>&1 || recover "caddy"
@@ -496,5 +488,6 @@ pub(crate) fn naive_apply_script() -> String {
         deploy_env = VLESSWS_DEPLOY_ENV,
         vlessws_unit = VLESSWS_UNIT,
         prologue = prologue,
+        ufw = crate::firewall::ufw_function(),
     )
 }

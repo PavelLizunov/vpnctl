@@ -92,6 +92,7 @@ async fn server_deploy_locked(
     let key_path = crate::app::deploy_key_path();
     let mut ssh_kernels_pushed: Vec<String> = Vec::new();
     let mut ssh_errors: Vec<String> = Vec::new();
+    let mut firewall_warning = None;
     let mut total_config_bytes: usize = 0;
     let mut configs_applied: usize = 0;
     let ssh_skip_reason: Option<&'static str> = if !key_path.exists() {
@@ -239,6 +240,20 @@ async fn server_deploy_locked(
                 ssh_errors.push(format!("{}: {e}", kid.0));
             }
         }
+        if ssh_errors.is_empty() {
+            match crate::wizard_bootstrap::reconcile_firewall_if_current(
+                &state.inv,
+                &deploy_revision,
+                &ssh,
+                &state.registry,
+                &ctx,
+            )
+            .await
+            {
+                Ok(warning) => firewall_warning = warning,
+                Err(e) => ssh_errors.push(format!("firewall cleanup failed: {e}")),
+            }
+        }
     }
 
     let mut audit_action = crate::wizard_bootstrap::deploy_audit_action(
@@ -253,6 +268,7 @@ async fn server_deploy_locked(
         "kernels": server.kernels.iter().map(|k| &k.0).collect::<Vec<_>>(),
         "protocols": server.enabled_protocols.iter().map(|p| &p.0).collect::<Vec<_>>(),
         "ssh_skip_reason": ssh_skip_reason,
+        "firewall_warning": firewall_warning,
         "ssh_kernels_pushed": ssh_kernels_pushed,
         "ssh_errors": ssh_errors.iter().map(|error| crate::credential_redaction::redact_uuid_literals(error)).collect::<Vec<_>>(),
         "ssh_config_bytes_total": total_config_bytes,

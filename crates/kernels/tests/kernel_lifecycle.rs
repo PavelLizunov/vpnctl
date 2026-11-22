@@ -362,7 +362,7 @@ esac
     }
 
     #[tokio::test]
-    async fn all_kernels_propagate_firewall_errors_and_skip_absent_or_inactive_ufw() {
+    async fn all_kernels_propagate_firewall_errors_and_skip_absent_ufw() {
         let registry = registry();
         let server = server(vec![]);
         let secrets = std::collections::HashMap::new();
@@ -387,41 +387,30 @@ esac
                 .await
                 .unwrap();
             let script = ssh.scripts.lock().unwrap().pop().unwrap();
-            for (present, active, fail_allow) in [
-                (false, false, true),
-                (true, false, true),
-                (true, true, false),
-                (true, true, true),
-            ] {
+            let script = script.replace("/usr/bin/python3", "python3");
+            for (present, fail_allow) in [(false, true), (true, false), (true, true)] {
                 let dir = tempfile::tempdir().unwrap();
                 let calls = dir.path().join("calls");
                 let mocks = r#"
                     command() { return "$VPNCTL_UFW_ABSENT"; }
-                    ufw() {
-                        case "$1" in
-                            status) echo "Status: $VPNCTL_UFW_STATE" ;;
-                            allow) echo "$*" >> "$VPNCTL_CALLS"; return "$VPNCTL_FAIL_ALLOW" ;;
-                            *) return 99 ;;
-                        esac
+                    python3() {
+                        echo "$*" >> "$VPNCTL_CALLS"
+                        return "$VPNCTL_FAIL_ALLOW"
                     }
                 "#;
                 let output = std::process::Command::new("sh")
                     .args(["-c", &format!("{mocks}\n{script}")])
                     .env("VPNCTL_UFW_ABSENT", if present { "0" } else { "1" })
-                    .env(
-                        "VPNCTL_UFW_STATE",
-                        if active { "active" } else { "inactive" },
-                    )
                     .env("VPNCTL_FAIL_ALLOW", if fail_allow { "1" } else { "0" })
                     .env("VPNCTL_CALLS", &calls)
                     .output()
                     .unwrap();
                 assert_eq!(
                     output.status.success(),
-                    !(present && active && fail_allow),
+                    !(present && fail_allow),
                     "{id}: {output:?}"
                 );
-                assert_eq!(calls.exists(), present && active, "{id}");
+                assert_eq!(calls.exists(), present, "{id}");
             }
         }
     }
