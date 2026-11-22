@@ -16,6 +16,7 @@ pub mod corp_probe_runtime;
 mod credential_redaction;
 pub mod dns_resolver;
 pub mod exchange_rate_poller;
+mod firewall_poller;
 pub mod geoip;
 pub mod geoip_update_runner;
 pub mod ha;

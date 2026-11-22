@@ -8,8 +8,9 @@ pub(crate) async fn reconcile_firewall_if_current(
     registry: &Registry,
     ctx: &RenderCtx<'_>,
 ) -> anyhow::Result<Option<String>> {
+    let reserved = inv.get_reserved_ports(&ctx.server.id).await?;
     if inv.deploy_input_revision(&ctx.server.id).await? == deploy_revision {
-        return Ok(vpnctl_kernels::reconcile_firewall(ssh, registry, ctx).await?);
+        return Ok(vpnctl_kernels::reconcile_firewall(ssh, registry, ctx, &reserved).await?);
     }
     Ok(None)
 }

@@ -10,12 +10,13 @@ from ufw.util import create_lock, hex_encode, release_lock
 
 MARKER = "vpnctl managed ingress"
 DNSTT_MARKER = "vpnctl DNSTT"
+RULE_TRANSPORTS = ("tcp4", "tcp6", "udp4", "udp6")
 
 
-def parse_port(value):
+def parse_port(value, transports=("tcp", "udp")):
     protocol, port_text = value.split(":")
     port = int(port_text)
-    if protocol not in ("tcp", "udp") or not 1 <= port <= 65535:
+    if protocol not in transports or not 1 <= port <= 65535:
         raise ValueError("invalid firewall port")
     return protocol, port
 
@@ -92,39 +93,76 @@ def has_listener(rule, addresses):
     )
 
 
-def cleanup(backend, protected):
+def cleanup(backend, protected, previous_idle=None):
     connection = os.environ.get("SSH_CONNECTION", "").split()
     if len(connection) == 4:
         protected.add(parse_port(f"tcp:{connection[3]}"))
 
+    rules = backend.get_rules()
     candidates = [
         (rule, port)
-        for rule in backend.get_rules()
+        for rule in rules
         if (port := cleanup_port(rule)) is not None and port not in protected
     ]
     if not candidates:
         return
 
     listeners = listening_addresses()
+    clear_unmarked = (
+        previous_idle is not None
+        and backend._get_default_policy() in ("deny", "reject")
+    )
     unmarked = set()
     for rule, port in candidates:
         if has_listener(rule, listeners.get(port, ())):
             continue
+        transport, number = port
+        family = 6 if rule.v6 else 4
+        key = (f"{transport}{family}", number)
         if not rule.comment:
-            unmarked.add(port)
-            continue
+            if previous_idle is None:
+                unmarked.add(port)
+                continue
+            if not clear_unmarked:
+                continue
+            # An empty comment in UFW's delete operation can also match
+            # commented rules. Remove only when the whole match is unique.
+            if sum(UFWRule.match(other, rule) != 1 for other in rules) != 1:
+                continue
+            if key not in previous_idle:
+                unmarked.add(key)
+                continue
         deletion = rule.dup_rule()
         deletion.remove = True
-        # The comment and family are part of this deletion's identity.
-        backend.set_rule(deletion)
+        try:
+            backend.set_rule(deletion)
+        except Exception:
+            if previous_idle is None:
+                raise
+            print(f"failed {key[0]}:{key[1]}", flush=True)
+            break
+        if previous_idle is not None:
+            print(f"removed {key[0]}:{key[1]}", flush=True)
 
-    if unmarked:
-        print(" ".join(f"{protocol}:{port}" for protocol, port in sorted(unmarked)))
+    if previous_idle is None:
+        if unmarked:
+            print(" ".join(f"{protocol}:{port}" for protocol, port in sorted(unmarked)))
+    else:
+        for protocol, port in sorted(unmarked):
+            print(f"idle {protocol}:{port}")
 
 
 def main():
     action, *arguments = sys.argv[1:]
-    if action == "allow-dnstt":
+    previous_idle = None
+    if action == "sweep":
+        boundary = arguments.index("--")
+        ports = set(map(parse_port, arguments[:boundary]))
+        previous_idle = {
+            parse_port(value, RULE_TRANSPORTS) for value in arguments[boundary + 1:]
+        }
+        address = None
+    elif action == "allow-dnstt":
         address, = map(ipaddress.IPv4Address, arguments)
         ports = {("udp", 53)}
     elif action in ("allow", "cleanup"):
@@ -142,8 +180,8 @@ def main():
             return
         if status != "Status: active":
             raise RuntimeError("could not determine UFW status")
-        if action == "cleanup":
-            cleanup(firewall.backend, ports)
+        if action in ("cleanup", "sweep"):
+            cleanup(firewall.backend, ports, previous_idle)
         else:
             open_ports(firewall.backend, sorted(ports), address)
     finally:

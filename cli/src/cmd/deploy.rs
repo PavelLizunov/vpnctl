@@ -152,8 +152,9 @@ pub(crate) async fn run(
         rendered_kernels.push(k.id().0);
     }
 
+    let reserved = inv.get_reserved_ports(&sid).await?;
     let firewall_warning = if inv.deploy_input_revision(&sid).await? == deploy_revision {
-        vpnctl_kernels::reconcile_firewall(&ssh, &registry, &ctx)
+        vpnctl_kernels::reconcile_firewall(&ssh, &registry, &ctx, &reserved)
             .await
             .map_err(|e| anyhow::anyhow!("firewall cleanup failed: {e}"))?
     } else {

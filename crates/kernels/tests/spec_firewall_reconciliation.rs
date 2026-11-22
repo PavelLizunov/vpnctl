@@ -133,7 +133,7 @@ async fn cleanup_protects_dynamic_ports_and_caddy_acme_port() {
     let naive_ctx = RenderCtx::new(&naive_server, &naive_secrets);
     let naive_ssh = RecordingTransport::default();
     assert!(
-        reconcile_firewall(&naive_ssh, &registry, &naive_ctx)
+        reconcile_firewall(&naive_ssh, &registry, &naive_ctx, &[])
             .await
             .unwrap()
             .is_none()
@@ -145,7 +145,7 @@ async fn cleanup_protects_dynamic_ports_and_caddy_acme_port() {
     let vless_ws_ctx = RenderCtx::new(&vless_ws_server, &vless_ws_secrets);
     let vless_ws_ssh = RecordingTransport::default();
     assert!(
-        reconcile_firewall(&vless_ws_ssh, &registry, &vless_ws_ctx)
+        reconcile_firewall(&vless_ws_ssh, &registry, &vless_ws_ctx, &[])
             .await
             .unwrap()
             .is_none()
@@ -162,7 +162,7 @@ async fn cleanup_deduplicates_ports_shared_by_protocols() {
     let ssh = RecordingTransport::default();
 
     assert!(
-        reconcile_firewall(&ssh, &registry, &ctx)
+        reconcile_firewall(&ssh, &registry, &ctx, &[])
             .await
             .unwrap()
             .is_none()
@@ -182,7 +182,9 @@ async fn transport_failure_is_returned_to_the_caller() {
         ..RecordingTransport::default()
     };
 
-    let error = reconcile_firewall(&ssh, &registry, &ctx).await.unwrap_err();
+    let error = reconcile_firewall(&ssh, &registry, &ctx, &[])
+        .await
+        .unwrap_err();
     match error {
         CoreError::Transport(message) => assert!(
             message.contains("fixture firewall transport failure"),
@@ -204,7 +206,7 @@ async fn empty_protocol_set_still_cleans_stale_rules_and_protects_ssh() {
     let ssh = RecordingTransport::default();
 
     assert!(
-        reconcile_firewall(&ssh, &registry, &ctx)
+        reconcile_firewall(&ssh, &registry, &ctx, &[])
             .await
             .unwrap()
             .is_none()
@@ -222,7 +224,9 @@ async fn unknown_enabled_protocol_fails_without_touching_the_firewall() {
     let ssh = RecordingTransport::default();
 
     assert!(
-        reconcile_firewall(&ssh, &registry, &ctx).await.is_err(),
+        reconcile_firewall(&ssh, &registry, &ctx, &[])
+            .await
+            .is_err(),
         "an unknown enabled protocol must fail the reconciliation"
     );
     assert!(
@@ -244,7 +248,9 @@ async fn cleanup_reports_unmarked_ports_without_echoing_unexpected_output() {
         ..RecordingTransport::default()
     };
 
-    let warning = reconcile_firewall(&ssh, &registry, &ctx).await.unwrap();
+    let warning = reconcile_firewall(&ssh, &registry, &ctx, &[])
+        .await
+        .unwrap();
 
     assert_eq!(
         warning.as_deref(),

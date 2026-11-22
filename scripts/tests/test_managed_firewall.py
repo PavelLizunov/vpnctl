@@ -126,6 +126,86 @@ class ManagedFirewallTest(unittest.TestCase):
         for expected, deletion in zip([old, dnstt], deleted, strict=True):
             self.assertEqual(vars(deletion), {**vars(expected), "remove": True})
 
+    def test_sweep_confirms_unmarked_rules_and_rechecks_current_listeners(self):
+        legacy = Rule("allow", "tcp", dport="8443")
+        owned = Rule("allow", "udp", dport="8444", comment=hex_encode(MARKER))
+        active = Rule("allow", "tcp", dport="8445")
+        operator = Rule("allow", "tcp", dport="8446", comment=hex_encode("manual"))
+        reserved = Rule("allow", "udp", dport="8447")
+        self.backend.get_rules.return_value = [legacy, owned, active, operator, reserved]
+        self.backend._get_default_policy.return_value = "deny"
+        report = io.StringIO()
+        with (
+            contextlib.redirect_stdout(report),
+            patch.object(self.firewall.subprocess, "check_output", return_value=(
+                "tcp LISTEN 0 128 198.51.100.7:8445 0.0.0.0:*\n"
+            )),
+        ):
+            self.firewall.cleanup(self.backend, {("udp", 8447)}, set())
+        self.assertEqual(report.getvalue(), "removed udp4:8444\nidle tcp4:8443\n")
+        self.assertEqual(self.backend.set_rule.call_args.args[0].dport, "8444")
+
+        self.backend.get_rules.return_value = [legacy, active, operator, reserved]
+        self.backend.reset_mock()
+        report = io.StringIO()
+        with (
+            contextlib.redirect_stdout(report),
+            patch.object(self.firewall.subprocess, "check_output", return_value=(
+                "tcp LISTEN 0 128 198.51.100.7:8445 0.0.0.0:*\n"
+            )),
+        ):
+            self.firewall.cleanup(
+                self.backend,
+                {("udp", 8447)},
+                {("tcp4", 8443), ("tcp4", 8445), ("tcp4", 8446), ("udp4", 8447)},
+            )
+        self.assertEqual(report.getvalue(), "removed tcp4:8443\n")
+        self.backend.set_rule.assert_called_once()
+        self.assertEqual(self.backend.set_rule.call_args.args[0].dport, "8443")
+
+    def test_sweep_preserves_unmarked_on_default_allow_or_ambiguous_match(self):
+        legacy = Rule("allow", "tcp", dport="8443")
+        matching = Rule("allow", "tcp", dport="8443", comment=hex_encode("manual"))
+        for policy, rules in [("allow", [legacy]), ("deny", [legacy, matching])]:
+            with self.subTest(policy=policy):
+                self.backend._get_default_policy.return_value = policy
+                self.backend.get_rules.return_value = rules
+                with patch.object(self.firewall.subprocess, "check_output", return_value=""):
+                    self.firewall.cleanup(self.backend, set(), {("tcp4", 8443)})
+                self.backend.set_rule.assert_not_called()
+
+    def test_sweep_confirms_each_address_family_independently(self):
+        ipv4 = Rule("allow", "tcp", dport="8443")
+        ipv6 = Rule("allow", "tcp", dport="8443")
+        ipv6.set_v6(True)
+        self.backend.get_rules.return_value = [ipv4, ipv6]
+        self.backend._get_default_policy.return_value = "deny"
+        report = io.StringIO()
+        with (
+            contextlib.redirect_stdout(report),
+            patch.object(self.firewall.subprocess, "check_output", return_value=""),
+        ):
+            self.firewall.cleanup(self.backend, set(), {("tcp4", 8443)})
+
+        self.assertEqual(report.getvalue(), "removed tcp4:8443\nidle tcp6:8443\n")
+        self.backend.set_rule.assert_called_once()
+        self.assertFalse(self.backend.set_rule.call_args.args[0].v6)
+
+    def test_sweep_reports_successful_removal_before_later_error(self):
+        rules = [Rule("allow", "tcp", dport=port, comment=hex_encode(MARKER))
+                 for port in ("8443", "8444", "8445")]
+        self.backend.get_rules.return_value = rules
+        self.backend.set_rule.side_effect = [None, RuntimeError("fixture failure")]
+        report = io.StringIO()
+        with (
+            contextlib.redirect_stdout(report),
+            patch.object(self.firewall.subprocess, "check_output", return_value=""),
+        ):
+            self.firewall.cleanup(self.backend, set(), set())
+
+        self.assertEqual(report.getvalue(), "removed tcp4:8443\nfailed tcp4:8444\n")
+        self.assertEqual(self.backend.set_rule.call_count, 2)
+
     def test_failed_listener_read_aborts_before_rule_changes(self):
         self.backend.get_rules.return_value = [
             Rule("allow", "tcp", dport="8443", comment=hex_encode(MARKER))
