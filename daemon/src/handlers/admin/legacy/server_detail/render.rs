@@ -40,6 +40,15 @@ pub(super) async fn server_detail_render(
         }
         Err(e) => return Err(internal_error(anyhow::Error::new(e))),
     };
+    let desktop_subscription_core = if tab == ServerTab::Setup {
+        state
+            .inv
+            .desktop_subscription_core(&sid)
+            .await
+            .map_err(|error| internal_error(anyhow::Error::new(error)))?
+    } else {
+        None
+    };
 
     let users = state
         .inv
@@ -1088,6 +1097,7 @@ pub(super) async fn server_detail_render(
             (server_detail_fingerprint_section(&server, lang))
             (server_detail_routing_policy_section(&server, server_role, &routing_candidates, routing_error.as_deref(), lang))
             (server_detail_client_detour_section(&server, client_detour_via.as_ref(), &client_detour_candidates, lang))
+            (server_detail_desktop_subscription_section(&server, desktop_subscription_core.as_deref(), lang))
             (server_detail_display_name_section(&server, display_name.as_deref(), lang))
             (server_detail_billing_section(&server, server_billing.as_ref(), lang))
             (server_detail_auto_suppress_section(&server, auto_suppress_optin, suppressed_at.as_deref(), lang))

@@ -65,7 +65,7 @@ async fn render_singbox_with(
 
     let servers = state
         .inv
-        .subscription_servers_for_user(&user.id)
+        .subscription_servers_for_client(&user.id, None)
         .await
         .map_err(|e| SubError::Internal(format!("inventory: {e}")))?;
 

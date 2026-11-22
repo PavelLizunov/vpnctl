@@ -5,6 +5,7 @@ mod currency;
 mod deploy;
 mod protocols;
 mod role;
+mod subscription_policy;
 
 pub use billing::{advance_date_by_cycle, validate_due_date};
 pub use currency::{convert_minor, monthly_equivalent};

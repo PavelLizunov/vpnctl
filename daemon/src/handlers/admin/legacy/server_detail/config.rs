@@ -6,6 +6,40 @@ use maud::{Markup, html};
 use crate::handlers::admin::helpers::kernel_priority;
 use crate::http_util::path_segment_encode;
 
+pub(super) fn server_detail_desktop_subscription_section(
+    server: &vpnctl_core::Server,
+    core: Option<&str>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    let server_id = path_segment_encode(&server.id.0);
+    html! {
+        section id="desktop-subscription" class="ed-card" style="margin: 16px 0;" {
+            h2 { (tr(lang, "Desktop subscription", "Подписка для ПК")) }
+            p id="desktop-subscription-help" {
+                (tr(
+                    lang,
+                    "Enter the exact core version to offer this server only in desktop VPNRouter subscriptions, including Omarchy. Leave blank to allow ordinary subscriptions. Previously saved profiles retain access.",
+                    "Укажите точную версию ядра, чтобы выдавать этот сервер только в настольном VPNRouter, включая Omarchy. Пустое поле разрешает обычные подписки. Ранее сохранённые профили сохраняют доступ.",
+                ))
+            }
+            form method="post" action=(format!("/admin/servers/{server_id}/desktop-subscription")) {
+                label for="desktop-subscription-core" {
+                    (tr(lang, "Required sing-box-vpnctl version", "Требуемая версия sing-box-vpnctl"))
+                }
+                " "
+                input id="desktop-subscription-core" name="core_version" type="text"
+                      value=(core.unwrap_or_default()) maxlength="64" placeholder="1.14.4-vpnctl.3"
+                      aria-describedby="desktop-subscription-help" spellcheck="false";
+                " "
+                button type="submit" class="ed-abtn ed-abtn--primary ed-abtn--sm" {
+                    (tr(lang, "Save", "Сохранить"))
+                }
+            }
+        }
+    }
+}
+
 pub(super) fn server_detail_kernels_section(
     server: &vpnctl_core::Server,
     registry: &vpnctl_core::Registry,
