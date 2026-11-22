@@ -139,15 +139,6 @@ fn vpn_chart_window(
     vpn_chart_window_at(window, rows, Utc::now().timestamp())
 }
 
-pub(in crate::handlers::admin::legacy) fn fit_vpn_sparkline_window(
-    mut window: VpnSparklineWindow,
-    rows: &[vpnctl_inventory::VpnStatsRow],
-) -> VpnSparklineWindow {
-    let chart = vpn_chart_window(window, rows);
-    window.cells = u32::try_from(chart.cells).unwrap_or(u32::MAX);
-    window
-}
-
 fn nice_byte_ceiling(n: u64) -> u64 {
     const KIB: u64 = 1024;
     const MIB: u64 = 1024 * KIB;
@@ -194,7 +185,10 @@ fn nice_byte_ceiling(n: u64) -> u64 {
     n
 }
 
-fn x_axis_tick_label(t: chrono::DateTime<Utc>, bucket_hours: u32) -> String {
+fn x_axis_tick_label(timestamp: i64, bucket_hours: u32) -> String {
+    let Some(t) = chrono::DateTime::from_timestamp(timestamp, 0) else {
+        return "—".to_owned();
+    };
     let fmt = if bucket_hours == 1 {
         "%H:%M"
     } else if bucket_hours == 24 {
@@ -236,7 +230,7 @@ fn vpn_traffic_cells(
     (up_per_cell, dn_per_cell)
 }
 
-pub(in crate::handlers::admin::legacy) fn vpn_traffic_chart(
+fn vpn_traffic_chart(
     rows: &[vpnctl_inventory::VpnStatsRow],
     chart: VpnChartWindow,
     window: VpnSparklineWindow,
