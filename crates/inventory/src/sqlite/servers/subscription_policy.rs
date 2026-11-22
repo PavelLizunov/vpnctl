@@ -10,25 +10,29 @@ impl SqliteInventory {
             .map_err(Into::into)
     }
 
+    /// Save the policy and report whether the server exists.
     pub async fn set_desktop_subscription_core(
         &self,
         server: &ServerId,
         core_version: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if core_version.is_some_and(|version| !valid_core_version(version)) {
             return Err(SqliteInventoryError::Invalid(
                 "enter a managed sing-box version such as 1.14.4-vpnctl.3".to_owned(),
             ));
         }
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let previous: Option<String> =
+        let previous: Option<Option<String>> =
             sqlx::query_scalar("SELECT desktop_subscription_core FROM servers WHERE id = ?1")
                 .bind(&server.0)
-                .fetch_one(&mut *transaction)
+                .fetch_optional(&mut *transaction)
                 .await?;
+        let Some(previous) = previous else {
+            return Ok(false);
+        };
         if previous.as_deref() == core_version {
             transaction.commit().await?;
-            return Ok(());
+            return Ok(true);
         }
         sqlx::query("UPDATE servers SET desktop_subscription_core = ?1 WHERE id = ?2")
             .bind(core_version)
@@ -44,7 +48,7 @@ impl SqliteInventory {
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
-        Ok(())
+        Ok(true)
     }
 }
 

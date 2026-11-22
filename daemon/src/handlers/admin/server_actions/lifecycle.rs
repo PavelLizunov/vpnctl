@@ -101,15 +101,13 @@ pub(crate) async fn server_set_desktop_subscription(
         .set_desktop_subscription_core(&server, (!core_version.is_empty()).then_some(core_version))
         .await
     {
-        Ok(()) => Redirect::to(&format!(
+        Ok(true) => Redirect::to(&format!(
             "/admin/servers/{}/setup#desktop-subscription",
             path_segment_encode(&id)
         ))
         .into_response(),
+        Ok(false) => not_found(&format!("no such server '{id}'")),
         Err(vpnctl_inventory::SqliteInventoryError::Invalid(message)) => bad_request(&message),
-        Err(vpnctl_inventory::SqliteInventoryError::Sqlx(sqlx::Error::RowNotFound)) => {
-            not_found(&format!("no such server '{id}'"))
-        }
         Err(error) => internal_error(anyhow::Error::new(error)),
     }
 }
