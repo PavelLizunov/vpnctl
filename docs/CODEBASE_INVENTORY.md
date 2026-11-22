@@ -5,26 +5,26 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 548 (351 prod / 197 test)
-- **Total Rust LOC:** 202,599 (106,834 prod / 95,765 test)
-- **Database Migrations:** 77
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 157
+- **Tracked Rust Files:** 550 (352 prod / 198 test)
+- **Total Rust LOC:** 203,528 (107,051 prod / 96,477 test)
+- **Database Migrations:** 78
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 158
 
 ## Workspace Crates & Targets
 
 | Crate | Path | Version | Targets | Prod LOC (Files) | Test LOC (Files) | Total LOC |
 |---|---|---|---|---|---|---|
-| `vpnctl` | `cli` | 0.9.0 | bin, 2 tests | 6,448 (20) | 1,617 (3) | **8,065** |
+| `vpnctl` | `cli` | 0.9.0 | bin, 2 tests | 6,452 (20) | 1,617 (3) | **8,069** |
 | `vpnctl-boosty-bridge` | `crates/boosty-bridge` | 0.9.0 | lib, 2 tests | 1,494 (6) | 1,345 (2) | **2,839** |
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,434 (13) | 0 (0) | **1,434** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 318 (1) | 125 (1) | **443** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 193 (1) | 454 (2) | **647** |
-| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 61 tests | 19,014 (64) | 27,912 (67) | **46,926** |
+| `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 61 tests | 19,129 (65) | 27,912 (67) | **47,041** |
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 5 tests, 1 examples | 7,345 (16) | 1,709 (7) | **9,054** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 13 tests | 4,575 (23) | 4,928 (13) | **9,503** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,825 (5) | 1,191 (5) | **4,016** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 30 tests | 63,188 (202) | 56,484 (97) | **119,672** |
-| **Total** | | | | **106,834 (351)** | **95,765 (197)** | **202,599** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 31 tests | 63,286 (202) | 57,196 (98) | **120,482** |
+| **Total** | | | | **107,051 (352)** | **96,477 (198)** | **203,528** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -56,7 +56,7 @@
 | `daemon/tests/admin_smoke/user_detail/subscription_share_links.rs` | 1,184 | `daemon` | Test |
 | `daemon/tests/spec_corp_probe_runtime.rs` | 1,166 | `daemon` | Test |
 
-## Database Migrations (77)
+## Database Migrations (78)
 
 | Version | Migration Name | File | Lines |
 |---|---|---|---|
@@ -137,8 +137,9 @@
 | `0075` | corp companies | `crates/inventory/migrations/0075_corp_companies.sql` | 97 |
 | `0076` | server security reports | `crates/inventory/migrations/0076_server_security_reports.sql` | 6 |
 | `0077` | new server bandwidth default | `crates/inventory/migrations/0077_new_server_bandwidth_default.sql` | 5 |
+| `0078` | desktop subscription core | `crates/inventory/migrations/0078_desktop_subscription_core.sql` | 1 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (157)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (158)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -204,6 +205,7 @@
 | `GET` | `/admin/servers/{id}/delete-confirm` | `admin::server_delete_confirm` |
 | `POST` | `/admin/servers/{id}/deploy` | `admin::server_deploy` |
 | `GET` | `/admin/servers/{id}/deploy/sse` | `admin::server_deploy_sse` |
+| `POST` | `/admin/servers/{id}/desktop-subscription` | `admin::server_set_desktop_subscription` |
 | `POST` | `/admin/servers/{id}/display-name` | `admin::server_set_display_name` |
 | `GET` | `/admin/servers/{id}/dnstt-check/sse` | `admin::dnstt_check` |
 | `POST` | `/admin/servers/{id}/dnstt-config` | `admin::server_set_dnstt_config` |

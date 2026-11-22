@@ -76,7 +76,11 @@ async fn resolve_sub_targets(
         return Ok(Vec::new());
     }
 
-    let servers = inv.subscription_servers_for_user(&user.id).await?;
+    let servers = if ignore_policy {
+        inv.subscription_servers_for_user(&user.id).await?
+    } else {
+        inv.subscription_servers_for_client(&user.id, None).await?
+    };
     let mut out: Vec<(Server, Vec<ProtocolId>)> = Vec::new();
 
     for server in servers {

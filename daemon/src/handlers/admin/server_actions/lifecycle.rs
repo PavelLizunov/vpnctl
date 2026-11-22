@@ -86,6 +86,34 @@ pub(crate) async fn server_set_client_detour_via(
     .into_response()
 }
 
+pub(crate) async fn server_set_desktop_subscription(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: String,
+) -> Response {
+    let Some(core_field) = form_field(&body, "core_version") else {
+        return bad_request("core_version field is required");
+    };
+    let core_version = core_field.trim();
+    let server = vpnctl_core::ServerId(id.clone());
+    match state
+        .inv
+        .set_desktop_subscription_core(&server, (!core_version.is_empty()).then_some(core_version))
+        .await
+    {
+        Ok(()) => Redirect::to(&format!(
+            "/admin/servers/{}/setup#desktop-subscription",
+            path_segment_encode(&id)
+        ))
+        .into_response(),
+        Err(vpnctl_inventory::SqliteInventoryError::Invalid(message)) => bad_request(&message),
+        Err(vpnctl_inventory::SqliteInventoryError::Sqlx(sqlx::Error::RowNotFound)) => {
+            not_found(&format!("no such server '{id}'"))
+        }
+        Err(error) => internal_error(anyhow::Error::new(error)),
+    }
+}
+
 pub(crate) async fn server_quick_add(State(state): State<AppState>, body: String) -> Response {
     let id: String = form_field(&body, "id")
         .map(|s| s.trim().to_string())

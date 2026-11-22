@@ -278,6 +278,10 @@ pub(crate) fn admin_router(state: AppState) -> Router {
             post(admin::server_set_client_detour_via),
         )
         .route(
+            "/admin/servers/{id}/desktop-subscription",
+            post(admin::server_set_desktop_subscription),
+        )
+        .route(
             "/admin/servers/{id}/display-name",
             post(admin::server_set_display_name),
         )
