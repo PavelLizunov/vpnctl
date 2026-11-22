@@ -8,11 +8,17 @@ pub(crate) struct ServerDetailQuery {
     pub(crate) vpn_window: Option<String>,
     #[serde(default)]
     pub(crate) grant_sort: Option<String>,
+    #[serde(default)]
+    pub(crate) deploy_status: Option<String>,
 }
 
 impl ServerDetailQuery {
     pub(crate) fn drift_live(&self) -> bool {
         matches!(self.drift.as_deref(), Some("live"))
+    }
+
+    pub(crate) fn deploy_status_fragment(&self) -> bool {
+        matches!(self.deploy_status.as_deref(), Some("1"))
     }
 }
 
@@ -44,10 +50,11 @@ pub(crate) fn detail_tabs(
     lang: crate::i18n::Locale,
 ) -> Markup {
     html! {
-        div.ed-tabs {
+        div.ed-tabs role="navigation" aria-label=(crate::i18n::tr(lang, "Page sections", "Разделы страницы")) {
             @for (slug, label) in tabs {
                 a class=(if *slug == active { "ed-tab ed-tab--on" } else { "ed-tab" })
                   href=(format!("{base}/{slug}"))
+                  aria-current=[(*slug == active).then_some("page")]
                   style="cursor: pointer; text-decoration: none;" {
                     (crate::handlers::admin::icons::icon(match *slug {
                         "overview" => "layout-dashboard",

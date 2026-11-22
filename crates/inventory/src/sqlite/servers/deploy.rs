@@ -1,6 +1,6 @@
 use crate::sqlite::{Result, SqliteInventory, SqliteInventoryError};
 use sqlx::Row;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use vpnctl_core::{ServerId, UserId};
 
 // Observed deployment outputs belong to the observed.* namespace.
@@ -283,6 +283,36 @@ impl SqliteInventory {
             map.insert(r.try_get("key")?, r.try_get("value")?);
         }
         Ok(map)
+    }
+
+    /// Granted nodes with a successful deploy since the current grant was created.
+    /// When timestamps tie, use audit order if the grant was audited.
+    pub async fn servers_deployed_since_grant(&self, user: &UserId) -> Result<HashSet<ServerId>> {
+        let ids = sqlx::query_scalar::<_, String>(
+            "SELECT g.server_id
+             FROM grants g
+             JOIN audit_log d ON d.id = (
+                 SELECT MAX(id) FROM audit_log
+                 WHERE target = g.server_id AND action = 'server.deploy'
+             )
+             WHERE g.user_id = ?1 AND (
+                 julianday(d.ts) > julianday(g.created_at) OR (
+                     julianday(d.ts) = julianday(g.created_at)
+                     AND (SELECT m.action = 'user.grant' AND m.id < d.id
+                          FROM audit_log m
+                          WHERE m.target = g.user_id
+                            AND m.action IN ('user.grant', 'user.revoke')
+                            AND CASE WHEN json_valid(m.payload)
+                                     THEN json_extract(m.payload, '$.server') END = g.server_id
+                            AND julianday(m.ts) = julianday(g.created_at)
+                          ORDER BY m.id DESC LIMIT 1)
+                 )
+             )",
+        )
+        .bind(&user.0)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(ids.into_iter().map(ServerId).collect())
     }
 
     pub async fn servers_pending_deploy_for_user(

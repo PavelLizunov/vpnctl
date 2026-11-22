@@ -6,6 +6,7 @@ pub(crate) mod backup;
 pub(crate) mod billing;
 pub(crate) mod boosty;
 pub(crate) mod cheburcheck_checks;
+pub(crate) mod grant_targets;
 pub(crate) mod helpers;
 pub(crate) mod icons;
 pub(crate) mod legacy;

@@ -69,8 +69,12 @@ pub(crate) fn user_overview_summary(
 
         section style="margin-top: 18px;" {
             div.ed-art-eyebrow {
-                (tr(lang, "Traffic by server · 24h", "Трафик по серверам · 24ч")) " "
-                span.ed-tip title=(tr(lang, "Per-server upload and download attributed to this user from clash-api ticks.", "Upload и download по серверам, атрибутированные этому пользователю из clash-api тиков.")) { (icon("info")) }
+                (tr(lang, "Charged traffic by server · 24h", "Начисленный трафик по серверам · 24ч")) " "
+                span.ed-tip title=(tr(
+                    lang,
+                    "Per-server upload and download attributed to this user from clash-api ticks, multiplied by each node's usage coefficient. Measured physical bytes are on the Traffic tab.",
+                    "Upload и download по серверам, атрибутированные этому пользователю из clash-api тиков, умноженные на коэффициент нагрузки ноды. Измеренные физические байты — на вкладке «Трафик».",
+                )) { (icon("info")) }
             }
             @if traffic.is_empty() {
                 p.ed-grid__mut style="font-family: var(--serif); font-style: italic; font-size: 12px;" {
@@ -87,7 +91,11 @@ pub(crate) fn user_overview_summary(
                                 td { a.ed-grid__id href=(format!("/admin/servers/{}", path_segment_encode(&sid.0))) { (crate::handlers::admin::helpers::named_server(sid, names)) } }
                                 td.num { (humanize_bytes(*up)) }
                                 td.num { (humanize_bytes(*down)) }
-                                td.num { b { (humanize_bytes(total)) } }
+                                td.num { b { a href=(format!(
+                                    "/admin/users/{}/traffic?vpn_window=24h&vpn_server={}",
+                                    path_segment_encode(&user.id.0),
+                                    path_segment_encode(&sid.0),
+                                )) style="color: var(--ink); text-decoration: none;" { (humanize_bytes(total)) } } }
                                 td { div.ed-hist__bar title=(format!("{share}%")) { div style=(format!("width: {share}%;")) {} } }
                             }
                         }

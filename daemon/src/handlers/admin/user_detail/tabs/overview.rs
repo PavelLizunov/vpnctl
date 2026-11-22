@@ -203,7 +203,7 @@ pub(crate) async fn render_overview_tab(
         }
 
 
-            (user_traffic_limit_section(state, &user.id, lang).await)
+            (user_traffic_limit_section(state, &user.id, lang, None).await)
 
             div.ed-rule {}
             div.ed-art-eyebrow style="margin-top: 24px;" {

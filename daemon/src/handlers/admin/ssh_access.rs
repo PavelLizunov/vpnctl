@@ -23,7 +23,7 @@ pub(crate) async fn recheck(State(state): State<AppState>, Path(id): Path<String
     .into_response()
 }
 
-fn failure_label(failure: SshAccessFailure, lang: Locale) -> &'static str {
+pub(super) fn failure_label(failure: SshAccessFailure, lang: Locale) -> &'static str {
     match failure {
         SshAccessFailure::Timeout => tr(lang, "Connection timed out", "Время подключения истекло"),
         SshAccessFailure::Authentication => tr(

@@ -1,4 +1,5 @@
 use crate::AppState;
+use crate::handlers::admin::grant_targets;
 use crate::handlers::admin::helpers::{
     bad_request, internal_error, render_page, theme_accent_lang, user_not_found, valid_user_id,
 };
@@ -27,15 +28,27 @@ pub(crate) async fn user_set_traffic_limit(
         return bad_request("traffic limit was not loaded — reload the user page before saving");
     }
 
-    let limit_gib: f64 = form_field(&body, "limit_gib")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0.0);
+    let submitted_limit = form_field(&body, "limit_gib").unwrap_or_default();
+    let submitted_trimmed = submitted_limit.trim();
+    let loaded_display = form_field(&body, "limit_gib_loaded").unwrap_or_default();
+    let loaded_bytes = form_field(&body, "limit_bytes_loaded")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|bytes| *bytes > 0 && *bytes <= i64::MAX as u64);
+    let limit_gib: f64 = submitted_trimmed.parse().unwrap_or(0.0);
     let threshold_pct: u8 = form_field(&body, "threshold_pct")
         .and_then(|s| s.parse().ok())
         .map(|v: u32| v.clamp(1, 100) as u8)
         .unwrap_or(DEFAULT_TRAFFIC_THRESHOLD_PCT);
 
-    let limit_bytes: Option<u64> = if limit_gib > 0.0 && limit_gib.is_finite() {
+    // The form renders the stored cap with enough precision to round-trip,
+    // but keep the exact bytes when the displayed value was submitted
+    // unchanged. A 50 MiB cap used to render as 0.0 and clear itself.
+    let unchanged_display = !submitted_trimmed.is_empty()
+        && submitted_trimmed == loaded_display.trim()
+        && loaded_bytes.is_some();
+    let limit_bytes: Option<u64> = if unchanged_display {
+        loaded_bytes
+    } else if limit_gib > 0.0 && limit_gib.is_finite() {
         Some(((limit_gib * 1_073_741_824.0) as u64).min(i64::MAX as u64))
     } else {
         None
@@ -72,11 +85,26 @@ pub(crate) async fn user_set_traffic_limit(
         );
     }
 
-    Redirect::to(&format!(
-        "/admin/users/{}/overview",
-        path_segment_encode(&user_id_str)
-    ))
-    .into_response()
+    let destination = if form_field(&body, "return_to").as_deref() == Some("traffic") {
+        let mut filters = url::form_urlencoded::Serializer::new(String::new());
+        for field in ["vpn_window", "vpn_server"] {
+            if let Some(value) = form_field(&body, field).filter(|value| !value.is_empty()) {
+                filters.append_pair(field, &value);
+            }
+        }
+        let params = filters.finish();
+        let separator = if params.is_empty() { "" } else { "?" };
+        format!(
+            "/admin/users/{}/traffic{separator}{params}#traffic-limit",
+            path_segment_encode(&user_id_str)
+        )
+    } else {
+        format!(
+            "/admin/users/{}/overview",
+            path_segment_encode(&user_id_str)
+        )
+    };
+    Redirect::to(&destination).into_response()
 }
 
 pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> Response {
@@ -147,8 +175,21 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
         match state.inv.list_fleet_servers().await {
             Ok(servers) => {
                 let mut granted: u32 = 0;
+                let mut skipped_unverified: u32 = 0;
                 let mut granted_servers: Vec<vpnctl_core::Server> = Vec::new();
                 for s in &servers {
+                    let readiness = grant_targets::read(&state, s).await;
+                    if !readiness.is_eligible() {
+                        skipped_unverified += 1;
+                        tracing::info!(
+                            target = "vpnctld::admin",
+                            user = %id_decoded,
+                            server = %s.id.0,
+                            reason = %readiness.reason(crate::i18n::Locale::En),
+                            "grant-all: server has no verified SSH deploy-key path; skipping"
+                        );
+                        continue;
+                    }
                     if let Err(e) = state
                         .inv
                         .grant_audited(&user.id, &s.id, "admin", "user.create.grant_all")
@@ -166,11 +207,12 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
                     granted += 1;
                     granted_servers.push(s.clone());
                 }
-                if granted > 0 {
+                if granted > 0 || skipped_unverified > 0 {
                     tracing::info!(
                         target = "vpnctld::admin",
                         user = %id_decoded,
                         granted = granted,
+                        skipped_unverified = skipped_unverified,
                         total = servers.len(),
                         "user-create grant-all complete"
                     );

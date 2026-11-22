@@ -344,12 +344,29 @@ pub(super) fn server_detail_live_connections_section(
 
 pub(super) fn server_detail_top_users_section(
     rows: &[(vpnctl_core::UserId, u64)],
+    window: VpnSparklineWindow,
+    server_id: &vpnctl_core::ServerId,
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
+    let window_label = if window.slug == "24h" {
+        tr(lang, "last 24h", "за 24ч")
+    } else {
+        match lang {
+            crate::i18n::Locale::En => window.label_en,
+            crate::i18n::Locale::Ru => window.label_ru,
+        }
+    };
     html! {
         section id="top-users" style="margin-top: 28px;" {
-            div.ed-art-eyebrow { (tr(lang, "Top users · last 24h", "Топ пользователей · за 24ч")) }
+            div.ed-art-eyebrow { (tr(lang, "Top users · ", "Топ пользователей · ")) (window_label) }
+            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 0;" {
+                (tr(
+                    lang,
+                    "Charged traffic is measured upload + download multiplied by this node's usage coefficient. The user's Traffic tab shows measured and charged bytes separately.",
+                    "Начисленный трафик — измеренные upload + download, умноженные на коэффициент нагрузки этой ноды. На вкладке «Трафик» пользователя измеренные и начисленные байты показаны отдельно.",
+                ))
+            }
             @if rows.is_empty() {
                 p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 0;" {
                     (tr(
@@ -366,7 +383,7 @@ pub(super) fn server_detail_top_users_section(
                                 (tr(lang, "user", "пользователь"))
                             }
                             th style="text-align: right; padding: 5px 8px; font-weight: 500; color: var(--mute); letter-spacing: 0.10em; text-transform: uppercase; font-size: 10px;" {
-                                (tr(lang, "traffic (up+down)", "трафик (вверх+вниз)"))
+                                (tr(lang, "charged traffic (up+down, weighted)", "начислено (вверх+вниз, взвешено)"))
                             }
                         }
                     }
@@ -380,7 +397,15 @@ pub(super) fn server_detail_top_users_section(
                                     }
                                 }
                                 td style="padding: 5px 8px; text-align: right; color: var(--ink);" {
-                                    (humanize_bytes(*bytes))
+                                    a href=(format!(
+                                        "/admin/users/{}/traffic?vpn_window={}&vpn_server={}",
+                                        path_segment_encode(&uid.0),
+                                        window.slug,
+                                        path_segment_encode(&server_id.0),
+                                    ))
+                                      style="color: var(--ink); text-decoration: none;" {
+                                        (humanize_bytes(*bytes))
+                                    }
                                 }
                             }
                         }

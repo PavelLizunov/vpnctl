@@ -202,7 +202,7 @@ async fn admin_user_detail_track4_ua_section_detects_roaming() {
 }
 
 #[tokio::test]
-async fn admin_user_detail_track3_empty_state_quotes_chunk4_status() {
+async fn empty_traffic_selection_keeps_filters_and_links_to_node_status() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 0, 1, &[]).await;
@@ -212,16 +212,16 @@ async fn admin_user_detail_track3_empty_state_quotes_chunk4_status() {
         "section headline must appear even in empty state"
     );
     assert!(
-        html.contains("No live stats yet"),
+        html.contains("No traffic samples for this selection"),
         "empty-state nudge missing"
     );
     assert!(
-        html.contains("every 5 minutes"),
-        "empty-state must state the live poller cadence"
+        html.contains(r#"name="vpn_server""#) && html.contains(r#"name="vpn_window""#),
+        "empty selection must keep both filters available"
     );
     assert!(
-        html.contains("/var/lib/vpnctl/.ssh"),
-        "empty-state must quote the SSH key path the operator needs to populate"
+        html.contains(r#"href="/admin/servers">View servers</a>"#),
+        "the empty state should link to the web server inventory"
     );
 }
 
@@ -276,7 +276,7 @@ async fn admin_user_detail_track3_renders_kpis_and_per_server_breakdown() {
         "server-wide row must not leak into per-user view"
     );
     assert!(
-        !html.contains("No live stats yet"),
+        !html.contains("No traffic samples for this selection"),
         "empty-state copy leaked into populated render"
     );
     assert!(
@@ -306,7 +306,7 @@ async fn admin_user_detail_track3_does_not_leak_other_users_stats() {
 
     let html = fetch_html(router(s), "/admin/users/u1/traffic").await;
     assert!(
-        html.contains("No live stats yet"),
+        html.contains("No traffic samples for this selection"),
         "u1 must show empty state when only u0 has data"
     );
 }
@@ -765,6 +765,212 @@ async fn pr_user_live_stats_folds_in_user_scoped_window_picker() {
     assert!(
         html.contains("traffic trend · "),
         "folded sparkline trend heading missing"
+    );
+}
+
+#[tokio::test]
+async fn user_traffic_controls_render_for_empty_selection_with_quota_above_chart() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    let html = fetch_html(router(s), "/admin/users/u0/traffic").await;
+    assert!(
+        html.contains(r#"name="vpn_server""#),
+        "node selector must render even when the user has no traffic"
+    );
+    assert!(
+        html.contains("/admin/users/u0/traffic?vpn_window=7d"),
+        "period links must render on the empty state"
+    );
+    assert!(
+        html.contains("No traffic samples for this selection"),
+        "empty traffic nudge missing"
+    );
+    let quota = html
+        .find("Traffic limit · month-to-date")
+        .unwrap_or(usize::MAX);
+    let chart = html.find("Live VPN stats · ").unwrap_or(usize::MAX);
+    assert!(
+        quota < chart,
+        "monthly quota and remaining must render above the traffic chart"
+    );
+}
+
+#[tokio::test]
+async fn user_traffic_tab_separates_measured_from_weighted_and_keeps_node_period() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 2, 1, &[(0, 0), (0, 1)]).await;
+    let pool =
+        sqlx::SqlitePool::connect(&format!("sqlite://{}", dir.path().join("inv.db").display()))
+            .await
+            .unwrap();
+    sqlx::query("UPDATE servers SET usage_coefficient = 2.0 WHERE id = 's0'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    s.inv
+        .record_vpn_stats(
+            &ServerId("s0".into()),
+            &[VpnStatsDelta {
+                user_id: Some(UserId("u0".into())),
+                upload_bytes: 3_000_000,
+                download_bytes: 9_000_000,
+                active_connections: 2,
+            }],
+        )
+        .await
+        .unwrap();
+    s.inv
+        .record_vpn_stats(
+            &ServerId("s1".into()),
+            &[VpnStatsDelta {
+                user_id: Some(UserId("u0".into())),
+                upload_bytes: 5_000_000,
+                download_bytes: 5_000_000,
+                active_connections: 1,
+            }],
+        )
+        .await
+        .unwrap();
+
+    let html = fetch_html(
+        router(s),
+        "/admin/users/u0/traffic?vpn_window=24h&vpn_server=s0",
+    )
+    .await;
+    assert!(
+        html.contains("uploaded (measured)") && html.contains("downloaded (measured)"),
+        "measured byte labels missing"
+    );
+    assert!(
+        html.contains("charged (weighted)"),
+        "weighted/charged label missing"
+    );
+    assert!(
+        html.contains("11.4 MiB"),
+        "selected node measured total missing"
+    );
+    assert!(
+        html.contains("22.9 MiB"),
+        "selected node charged total must apply the 2× coefficient"
+    );
+    assert!(
+        !html.contains("9.5 MiB"),
+        "unselected node traffic leaked into the selected-node view"
+    );
+    assert!(
+        html.contains("7d&amp;vpn_server=s0"),
+        "period links must preserve the selected node"
+    );
+    assert!(
+        html.contains(r#"value="s0" selected"#),
+        "selected node must stay selected"
+    );
+}
+
+#[tokio::test]
+async fn server_ranking_link_total_matches_user_tab_for_same_period_and_node() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    let pool =
+        sqlx::SqlitePool::connect(&format!("sqlite://{}", dir.path().join("inv.db").display()))
+            .await
+            .unwrap();
+    sqlx::query("UPDATE servers SET usage_coefficient = 2.0 WHERE id = 's0'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    s.inv
+        .record_vpn_stats(
+            &ServerId("s0".into()),
+            &[VpnStatsDelta {
+                user_id: Some(UserId("u0".into())),
+                upload_bytes: 3_000_000,
+                download_bytes: 7_000_000,
+                active_connections: 2,
+            }],
+        )
+        .await
+        .unwrap();
+    let app = router(s);
+    let server = fetch_html(app.clone(), "/admin/servers/s0/activity?vpn_window=7d").await;
+    let user = fetch_html(app, "/admin/users/u0/traffic?vpn_window=7d&vpn_server=s0").await;
+    assert!(
+        server.contains("19.1 MiB"),
+        "server ranking must show the weighted 7d total"
+    );
+    assert!(
+        user.contains("19.1 MiB"),
+        "the linked user period/node view must show the same charged total"
+    );
+}
+
+#[tokio::test]
+async fn sub_gib_traffic_limit_survives_unchanged_form_save() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    let inv = s.inv.clone();
+    let uid = UserId("u0".into());
+    let fifty_mib = 50 * 1024 * 1024;
+    inv.set_user_traffic_limit(&uid, Some(fifty_mib), Some(80))
+        .await
+        .unwrap();
+    let app = router(s);
+    let html = fetch_html(app.clone(), "/admin/users/u0/overview").await;
+    assert!(
+        html.contains(r#"value="0.048828125""#),
+        "50 MiB cap must render with round-tripping precision"
+    );
+    assert!(
+        html.contains(r#"name="limit_bytes_loaded" value="52428800""#),
+        "exact stored bytes must travel with the form"
+    );
+    let audits_before = inv
+        .recent_audit(100)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|row| row.action == "user.traffic_limit.set")
+        .count();
+    let resp = app
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users/u0/traffic-limit")
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from(
+                "limit_loaded=1&limit_gib=0.048828125&limit_gib_loaded=0.048828125&limit_bytes_loaded=52428800&threshold_pct=80&return_to=traffic&vpn_window=7d&vpn_server=s0",
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        resp.headers()["location"],
+        "/admin/users/u0/traffic?vpn_window=7d&vpn_server=s0#traffic-limit"
+    );
+    assert_eq!(
+        inv.get_user_traffic_limit(&uid).await.unwrap(),
+        (Some(fifty_mib), Some(80)),
+        "unchanged save must not clear or round the 50 MiB cap"
+    );
+    assert_eq!(
+        inv.recent_audit(100)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|row| row.action == "user.traffic_limit.set")
+            .count(),
+        audits_before,
+        "unchanged save must not write a mutation audit"
     );
 }
 

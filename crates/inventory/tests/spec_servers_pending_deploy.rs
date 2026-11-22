@@ -1,5 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::collections::HashSet;
+
 use tempfile::TempDir;
 use vpnctl_core::{KernelId, Server, ServerId, User, UserId};
 use vpnctl_inventory::SqliteInventory;
@@ -691,4 +693,195 @@ async fn protocol_kernel_mutations_raise_server_pending_deploy() {
             "{action}: deploy after mutation clears pending"
         );
     }
+}
+
+// servers_deployed_since_grant: current grants (created_at, ms) covered by a
+// later successful server.deploy on that exact node; fixture timestamps pinned.
+
+const G0: &str = "2026-01-02T03:04:05.000Z"; // grant creation instant
+const D0: &str = "2026-01-02T03:04:06.000Z"; // ordinary later deploy
+const R0: &str = "2026-01-02T03:04:07.000Z"; // revoke
+const G1: &str = "2026-01-02T03:04:08.000Z"; // regrant / later grant
+const D1: &str = "2026-01-02T03:04:09.000Z"; // deploy after regrant
+const MUT: &str = "2026-01-02T03:04:10.000Z"; // later user mutation
+const T_OLD: &str = "2025-12-30T00:00:00.000Z"; // previous grant cycle
+const NODES: &str = "happy idle failed skipped stale shared regrant-stale \
+                     regrant-fresh tie-ordered tie-reversed legacy-tie imported";
+
+struct DeployFixture {
+    _dir: TempDir,
+    inv: SqliteInventory,
+    db: sqlx::sqlite::SqlitePool,
+}
+
+impl DeployFixture {
+    async fn new() -> Self {
+        let dir = TempDir::new().unwrap();
+        let inv = open(&dir).await;
+        let dsn = format!("sqlite://{}", dir.path().join("inventory.db").display());
+        let db = sqlx::sqlite::SqlitePool::connect(&dsn).await.unwrap();
+        Self { _dir: dir, inv, db }
+    }
+
+    async fn grant_at(&self, uid: &str, sid: &str, at: &str) {
+        let (uid, sid) = (UserId(uid.into()), ServerId(sid.into()));
+        self.inv.grant(&uid, &sid).await.unwrap();
+        sqlx::query("UPDATE grants SET created_at=?1 WHERE user_id=?2 AND server_id=?3")
+            .bind(at)
+            .bind(&uid.0)
+            .bind(&sid.0)
+            .execute(&self.db)
+            .await
+            .unwrap();
+    }
+
+    async fn audit_at(&self, at: &str, action: &str, target: &str, payload: Option<&str>) {
+        sqlx::query(
+            "INSERT INTO audit_log(ts,actor,action,target,payload) VALUES(?1,'admin',?2,?3,?4)",
+        )
+        .bind(at)
+        .bind(action)
+        .bind(target)
+        .bind(payload)
+        .execute(&self.db)
+        .await
+        .unwrap();
+    }
+
+    async fn deploy(&self, at: &str, sid: &str) {
+        self.audit_at(at, "server.deploy", sid, None).await;
+    }
+
+    async fn grant_audit(&self, at: &str, sid: &str) {
+        let p = format!(r#"{{"server":"{sid}"}}"#);
+        self.audit_at(at, "user.grant", "alice", Some(&p)).await;
+    }
+
+    async fn deployed_since(&self, uid: &str) -> HashSet<ServerId> {
+        let uid = UserId(uid.into());
+        self.inv.servers_deployed_since_grant(&uid).await.unwrap()
+    }
+
+    fn assert_ids(got: &HashSet<ServerId>, want: &str) {
+        let mut ids: Vec<&str> = got.iter().map(|s| s.0.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids.join(" "), want);
+    }
+}
+
+async fn seeded() -> DeployFixture {
+    let f = DeployFixture::new().await;
+    for (uid, n) in [("alice", 60), ("bob", 61), ("carol", 62)] {
+        f.inv.add_user(&user(uid, n)).await.unwrap();
+    }
+    for sid in NODES.split_whitespace().chain(["undeployed", "neighbour"]) {
+        f.inv.add_server(&srv(sid)).await.unwrap();
+    }
+    for sid in NODES.split_whitespace() {
+        f.grant_at("alice", sid, G0).await;
+    }
+    f.grant_at("bob", "shared", G0).await;
+    f.grant_at("bob", "neighbour", G0).await;
+
+    // The current grant postdates its only deploy.
+    f.deploy(D0, "undeployed").await;
+    f.grant_at("alice", "undeployed", G1).await;
+    for sid in ["happy", "shared", "imported"] {
+        f.deploy(D0, sid).await;
+    }
+    f.audit_at(D0, "server.deploy.failed", "failed", None).await;
+    f.audit_at(D0, "server.deploy.skipped", "skipped", None)
+        .await;
+    f.audit_at(D0, "server.deploy.stale", "stale", None).await;
+
+    // Revoke/regrant: the old deploy is historical; a newer one re-qualifies.
+    for sid in ["regrant-stale", "regrant-fresh"] {
+        f.deploy(D0, sid).await;
+        let uid = UserId("alice".into());
+        f.inv.revoke(&uid, &ServerId(sid.into())).await.unwrap();
+        f.grant_at("alice", sid, G1).await;
+    }
+    let q = "UPDATE audit_log SET ts=?1 WHERE action='user.revoke'";
+    sqlx::query(q).bind(R0).execute(&f.db).await.unwrap();
+    f.deploy(D1, "regrant-fresh").await;
+
+    // Same-millisecond ties: a matching grant audit ordered first is evidence.
+    f.grant_audit(G0, "tie-ordered").await;
+    f.deploy(G0, "tie-ordered").await;
+    f.deploy(G0, "tie-reversed").await;
+    f.grant_audit(G0, "tie-reversed").await;
+    f.deploy(G0, "legacy-tie").await;
+    f.grant_audit(T_OLD, "legacy-tie").await;
+
+    // Imported grant: no grant audit and no granted_at display date.
+    let q = "UPDATE grants SET granted_at=NULL WHERE user_id='alice' AND server_id='imported'";
+    sqlx::query(q).execute(&f.db).await.unwrap();
+    f
+}
+
+#[tokio::test]
+async fn deployed_since_grant_returns_only_qualified_current_grants() {
+    let f = seeded().await;
+    let changed = f
+        .inv
+        .grant_audited(
+            &UserId("alice".into()),
+            &ServerId("happy".into()),
+            "admin",
+            "test",
+        )
+        .await
+        .unwrap();
+    assert!(
+        !changed,
+        "a no-op grant must preserve the existing deploy evidence"
+    );
+    DeployFixture::assert_ids(
+        &f.deployed_since("alice").await,
+        "happy imported regrant-fresh shared tie-ordered",
+    );
+}
+
+#[tokio::test]
+async fn deploy_evidence_is_scoped_to_each_users_own_grants() {
+    assert!(
+        DeployFixture::new()
+            .await
+            .deployed_since("alice")
+            .await
+            .is_empty()
+    );
+    let f = seeded().await;
+    DeployFixture::assert_ids(&f.deployed_since("bob").await, "shared");
+    assert!(f.deployed_since("carol").await.is_empty());
+    assert!(f.deployed_since("ghost").await.is_empty());
+}
+
+#[tokio::test]
+async fn same_millisecond_ties_need_an_ordered_grant_audit() {
+    let f = seeded().await;
+    let got = f.deployed_since("alice").await;
+    assert!(got.contains(&ServerId("tie-ordered".into())));
+    assert!(!got.contains(&ServerId("tie-reversed".into())));
+    assert!(!got.contains(&ServerId("legacy-tie".into())));
+    f.deploy(D1, "legacy-tie").await;
+    let got = f.deployed_since("alice").await;
+    assert!(got.contains(&ServerId("legacy-tie".into())));
+}
+
+#[tokio::test]
+async fn deploy_since_grant_ignores_later_user_mutations() {
+    let f = seeded().await;
+    let before = f.deployed_since("alice").await;
+    f.audit_at(MUT, "user.wireguard.regen", "alice", None).await;
+    let sid = ServerId("happy".into());
+    let uid = UserId("alice".into());
+    let one = std::slice::from_ref(&sid);
+    let pending = f
+        .inv
+        .servers_pending_deploy_for_user(&uid, one)
+        .await
+        .unwrap();
+    assert_eq!(pending, vec![sid]);
+    assert_eq!(f.deployed_since("alice").await, before);
 }

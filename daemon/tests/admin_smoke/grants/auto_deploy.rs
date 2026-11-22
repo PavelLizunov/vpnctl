@@ -9,7 +9,7 @@ use vpnctl_core::{KernelId, ServerId, User, UserId};
 use vpnctld::router;
 
 use crate::common::{
-    add_same_origin, count_autodeploy_rows, seed, state, wait_for_autodeploy_rows,
+    add_same_origin, count_autodeploy_rows, seed_verified, state, wait_for_autodeploy_rows,
 };
 
 #[tokio::test]
@@ -17,7 +17,7 @@ async fn grants_via_real_handlers_mark_server_pending_deploy() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
-    seed(&inv, 3, 3, &[]).await;
+    seed_verified(&inv, 3, 3, &[]).await;
 
     for sid in ["s0", "s1", "s2"] {
         inv.audit("admin", "server.deploy", Some(sid), None)
@@ -127,7 +127,7 @@ async fn revokes_via_real_handlers_flag_only_the_revoked_server() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
-    seed(&inv, 3, 2, &[(0, 0), (0, 1), (1, 1), (1, 2)]).await;
+    seed_verified(&inv, 3, 2, &[(0, 0), (0, 1), (1, 1), (1, 2)]).await;
     for sid in ["s0", "s1", "s2"] {
         inv.audit("admin", "server.deploy", Some(sid), None)
             .await
@@ -239,7 +239,7 @@ async fn grant_from_user_detail_dispatches_auto_deploy_of_that_server_only() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
-    seed(&inv, 2, 1, &[]).await;
+    seed_verified(&inv, 2, 1, &[]).await;
     let app = router(s);
 
     app.clone()
@@ -296,7 +296,7 @@ async fn revoke_from_user_detail_dispatches_auto_deploy_only_on_actual_revoke() 
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
-    seed(&inv, 2, 1, &[(0, 0)]).await;
+    seed_verified(&inv, 2, 1, &[(0, 0)]).await;
     let app = router(s);
 
     app.clone()
@@ -341,7 +341,7 @@ async fn grant_and_revoke_from_server_detail_dispatch_auto_deploy() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
-    seed(&inv, 1, 1, &[]).await;
+    seed_verified(&inv, 1, 1, &[]).await;
     let app = router(s);
 
     app.clone()
@@ -384,7 +384,7 @@ async fn bulk_grant_all_dispatches_one_auto_deploy_for_the_whole_batch() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
-    seed(&inv, 1, 3, &[]).await;
+    seed_verified(&inv, 1, 3, &[]).await;
     let app = router(s);
 
     app.clone()
@@ -439,7 +439,7 @@ async fn bulk_revoke_all_dispatches_one_auto_deploy() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
-    seed(&inv, 1, 2, &[(0, 0), (1, 0)]).await;
+    seed_verified(&inv, 1, 2, &[(0, 0), (1, 0)]).await;
     let app = router(s);
 
     app.oneshot(
@@ -467,7 +467,7 @@ async fn user_create_grant_all_dispatches_auto_deploy_across_granted_servers() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     let inv = s.inv.clone();
-    seed(&inv, 2, 0, &[]).await;
+    seed_verified(&inv, 2, 0, &[]).await;
     let app = router(s);
 
     app.oneshot(
@@ -506,7 +506,7 @@ async fn granted_user_uuid_lands_in_rendered_node_config() {
     let s = state(&dir).await;
     let inv = s.inv.clone();
     let registry = Arc::clone(&s.registry);
-    seed(&inv, 1, 1, &[]).await;
+    seed_verified(&inv, 1, 1, &[]).await;
     let app = router(s);
 
     let sid = ServerId("s0".into());
@@ -564,7 +564,7 @@ async fn granted_user_uuid_lands_in_rendered_node_config() {
 async fn failed_autodeploy_is_visible_even_without_pending_inventory_changes() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
-    seed(&s.inv, 1, 0, &[]).await;
+    seed_verified(&s.inv, 1, 0, &[]).await;
     let mut server = s
         .inv
         .get_server(&ServerId("s0".into()))

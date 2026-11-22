@@ -7,7 +7,7 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 use vpnctl_core::{KernelId, ProtocolId, Registry, Server, ServerId, User, UserId};
-use vpnctl_inventory::SqliteInventory;
+use vpnctl_inventory::{SqliteInventory, SshAccessCheck, SshAccessRoute, SshAccessState};
 use vpnctl_kernels::SingBox;
 use vpnctl_protocols::{TuicV5, VlessReality};
 use vpnctld::AppState;
@@ -60,7 +60,7 @@ pub(crate) async fn seed(
     for i in 0..n_servers {
         let id = ServerId(format!("s{i}"));
         inv.add_server(&Server {
-            id,
+            id: id.clone(),
             address: format!("10.0.0.{i}"),
             ssh_port: 22,
             ssh_user: "root".into(),
@@ -94,6 +94,45 @@ pub(crate) async fn seed(
             .await
             .unwrap();
     }
+}
+
+/// Seed servers and users, then mark every server's direct deploy-key SSH
+/// observation as available. Tests that exercise web grant mutations or the
+/// grant UI need this proof; tests that inspect the unverified SSH state should
+/// keep using `seed` so no synthetic observation exists.
+pub(crate) async fn seed_verified(
+    inv: &SqliteInventory,
+    n_servers: usize,
+    n_users: usize,
+    grant_pairs: &[(usize, usize)],
+) {
+    seed(inv, n_servers, n_users, grant_pairs).await;
+    for i in 0..n_servers {
+        mark_ssh_available(inv, &ServerId(format!("s{i}"))).await;
+    }
+}
+
+/// Record a fresh successful deploy-key SSH observation for a fixture server.
+/// Web grants intentionally require this proof; inventory/CLI fixtures still
+/// bypass the web layer unless they exercise a grant mutation.
+pub(crate) async fn mark_ssh_available(inv: &SqliteInventory, sid: &ServerId) {
+    let server = inv
+        .get_server(sid)
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("fixture server {sid} must exist"));
+    inv.record_ssh_access(
+        &server,
+        SshAccessRoute::Direct,
+        None,
+        &SshAccessCheck {
+            state: SshAccessState::Available,
+            failure: None,
+            checked_at: chrono::Utc::now(),
+        },
+    )
+    .await
+    .unwrap();
 }
 
 pub(crate) async fn fetch_html(app: axum::Router, path: &str) -> String {

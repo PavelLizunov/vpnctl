@@ -184,6 +184,25 @@ async fn admin_server_detail_protocols_section_shows_every_registered_protocol()
     let app = router(s);
     let html = fetch_html(app, "/admin/servers/nowg/protocols").await;
     assert!(html.contains("Enabled protocols"), "section heading");
+    let picker = html
+        .split_once(r#"id="enabled-protocols""#)
+        .unwrap()
+        .1
+        .split_once("</section>")
+        .unwrap()
+        .0;
+    let (shown, groups) = picker.split_once("<details").unwrap();
+    assert!(shown.contains("Enabled protocols · 1"));
+    assert!(shown.contains("vless%2Breality/disable"));
+    assert!(!shown.contains("hysteria2/enable"));
+    let (available, incompatible) = groups.split_once("<details").unwrap();
+    assert!(!available.split_once('>').unwrap().0.contains("open"));
+    assert!(available.contains("Available to enable") && available.contains("hysteria2/enable"));
+    assert!(!incompatible.split_once('>').unwrap().0.contains("open"));
+    assert!(
+        incompatible.contains("Require a different kernel") && incompatible.contains("wireguard")
+    );
+    assert!(!incompatible.contains("<form"));
     for pid in ["shadowsocks-2022", "anytls", "trojan", "amneziawg2"] {
         assert!(!html.contains(&format!("protocols/{pid}/enable")));
     }
@@ -216,7 +235,7 @@ async fn admin_server_detail_protocols_section_shows_every_registered_protocol()
         .next()
         .unwrap();
     assert!(
-        enabled_row.contains(r#"icons.svg#check"></use></svg>on</span>"#),
+        enabled_row.contains(r#"icons.svg#check"></use></svg>Enabled</span>"#),
         "enabled protocol must have the check icon and exact on label"
     );
     assert!(
@@ -231,6 +250,40 @@ async fn admin_server_detail_protocols_section_shows_every_registered_protocol()
         !html.contains(r#"/admin/servers/nowg/protocols/wireguard/enable"#),
         "incompatible protocol MUST NOT have an enable form"
     );
+}
+
+#[tokio::test]
+async fn configured_protocol_stays_enabled_when_no_selected_kernel_supports_it() {
+    let dir = TempDir::new().unwrap();
+    let state = state(&dir).await;
+    seed(&state.inv, 1, 0, &[]).await;
+    let server = ServerId("s0".into());
+    let wireguard = ProtocolId("wireguard".into());
+    state
+        .inv
+        .add_server_protocol(&server, &wireguard)
+        .await
+        .unwrap();
+    let html = fetch_html_with_cookie(
+        router(state),
+        "/admin/servers/s0/protocols",
+        "vpnctl_lang=ru",
+    )
+    .await;
+    let enabled = html
+        .split_once(r#"id="enabled-protocols""#)
+        .unwrap()
+        .1
+        .split_once("<details")
+        .unwrap()
+        .0;
+    let row = enabled
+        .split("<li ")
+        .find(|row| row.contains("/wireguard/disable"))
+        .unwrap();
+    assert!(row.contains("Включён"));
+    assert!(row.contains("Выбранные ядра не поддерживают протокол"));
+    assert!(!row.contains("/wireguard/hide") && !row.contains("/wireguard/enable"));
 }
 
 #[tokio::test]

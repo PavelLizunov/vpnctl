@@ -371,7 +371,9 @@ impl SqliteInventory {
         Ok(u64::try_from(deltas.len()).unwrap_or(u64::MAX))
     }
 
-    // u32::MAX selects all retained history, including daily rows after raw purge.
+    // u32::MAX selects all retained history, including daily rows after raw
+    // purge. Bounded reads merge daily remainders only for complete days
+    // inside the rolling window; the partial cutoff day stays raw-only.
     pub async fn recent_vpn_stats_for_user(
         &self,
         user_id: &UserId,
@@ -379,22 +381,36 @@ impl SqliteInventory {
     ) -> Result<Vec<VpnStatsRow>> {
         let cutoff = (since_hours != u32::MAX).then(|| format!("-{since_hours} hours"));
         let rows = sqlx::query(
-            "SELECT ts, server_id, user_id, upload_bytes, download_bytes, active_connections
+            "WITH raw_daily AS (
+                 SELECT server_id,
+                        substr(ts, 1, 10) AS day,
+                        SUM(upload_bytes) AS upload_bytes,
+                        SUM(download_bytes) AS download_bytes
+                 FROM vpn_connection_stats
+                 WHERE user_id = ?1
+                   AND (?2 IS NULL
+                        OR ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2))
+                 GROUP BY server_id, substr(ts, 1, 10)
+             )
+             SELECT ts, server_id, user_id, upload_bytes, download_bytes, active_connections
              FROM vpn_connection_stats
              WHERE user_id = ?1
-               AND ts > CASE WHEN ?2 IS NULL THEN ''
-                             ELSE strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2) END
+               AND (?2 IS NULL
+                    OR ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?2))
              UNION ALL
              SELECT d.date || 'T00:00:00.000Z' AS ts, d.server_id, d.user_id,
-                    d.upload_bytes, d.download_bytes, d.active_connections_peak AS active_connections
+                    MAX(d.upload_bytes - COALESCE(r.upload_bytes, 0), 0),
+                    MAX(d.download_bytes - COALESCE(r.download_bytes, 0), 0),
+                    d.active_connections_peak AS active_connections
              FROM vpn_user_daily d
-             WHERE d.user_id = ?1 AND ?2 IS NULL
-               AND NOT EXISTS (
-                   SELECT 1 FROM vpn_connection_stats s
-                   WHERE s.user_id = d.user_id AND s.server_id = d.server_id
-                     AND s.ts >= d.date || 'T00:00:00.000Z'
-                     AND s.ts < date(d.date, '+1 day') || 'T00:00:00.000Z'
-               )
+             LEFT JOIN raw_daily r
+               ON r.server_id = d.server_id AND r.day = d.date
+             WHERE d.user_id = ?1
+               AND (?2 IS NULL
+                    OR d.date > strftime('%Y-%m-%d', 'now', ?2))
+               AND (r.server_id IS NULL
+                    OR d.upload_bytes > r.upload_bytes
+                    OR d.download_bytes > r.download_bytes)
              ORDER BY ts DESC",
         )
         .bind(&user_id.0)

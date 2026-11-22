@@ -98,7 +98,7 @@ async fn admin_user_detail_wireguard_section_shows_pubkey_and_rotate_button() {
         "Flow A must not reference 'above' anymore — it has its own QR"
     );
     assert!(
-        html.contains("Recommended default — one URL covers everything"),
+        html.contains("Recommended default — one URL for the visible client config"),
         "Flow A footnote (Recommended default) missing — copy regressed"
     );
 }

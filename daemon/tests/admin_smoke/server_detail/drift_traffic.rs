@@ -709,6 +709,45 @@ async fn server_detail_top_users_lists_users_with_links_when_present() {
 }
 
 #[tokio::test]
+async fn server_top_users_follows_selected_window_and_links_with_context() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    s.inv
+        .record_vpn_stats(
+            &ServerId("s0".into()),
+            &[VpnStatsDelta {
+                user_id: Some(UserId("u0".into())),
+                upload_bytes: 3_000_000,
+                download_bytes: 7_000_000,
+                active_connections: 2,
+            }],
+        )
+        .await
+        .unwrap();
+    let html = fetch_html(router(s), "/admin/servers/s0/activity?vpn_window=7d").await;
+    assert!(
+        html.contains("Top users · 7 days"),
+        "top-users heading must name the selected period"
+    );
+    let top_section = html
+        .split("Top users · 7 days")
+        .nth(1)
+        .unwrap_or("")
+        .split("TCP / UDP split")
+        .next()
+        .unwrap_or("");
+    assert!(
+        top_section.contains("charged traffic"),
+        "weighted server ranking must say it is charged traffic"
+    );
+    assert!(
+        top_section.contains("/admin/users/u0/traffic?vpn_window=7d&amp;vpn_server=s0"),
+        "ranking link must carry the selected period and server; got {top_section}"
+    );
+}
+
+#[tokio::test]
 async fn server_detail_traffic_section_renders_sparkline_and_window_picker() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;

@@ -1,6 +1,7 @@
 mod activity;
 mod config;
 mod config_protocols;
+mod deploy_panel;
 mod drift;
 mod grants;
 mod protocol_grid;

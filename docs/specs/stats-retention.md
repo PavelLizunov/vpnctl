@@ -21,12 +21,17 @@
 ## Interface and data contract
 
 - Existing method signatures remain unchanged. `u32::MAX` selects all retained
-  history for `recent_vpn_stats_for_user`, `recent_vpn_stats_fleet` and
-  `top_users_by_daily_traffic`; other windows retain their existing behavior.
-- The user's all-history read combines raw ticks with daily totals for days
-  without raw ticks on that user/server, avoiding double counting. Fleet charts
-  use indefinitely retained hourly totals. The UI's `all` window expands its
-  monthly buckets to include the oldest retained record.
+  history for `recent_vpn_stats_for_user`, `recent_vpn_stats_fleet`,
+  `top_users_by_traffic`, `top_users_by_traffic_for_server` and
+  `top_users_by_daily_traffic`; bounded calls keep their rolling hour or day
+  definitions. Bounded user/server/dashboard rankings merge raw ticks with the
+  positive daily remainder only for complete days inside the rolling window, so
+  a link from a ranking to the user Traffic tab totals the same period and node.
+- The user's all-history read combines raw ticks with daily totals: a day with
+  no raw ticks contributes its full daily row, and a partially retained day
+  contributes only the positive daily-minus-raw remainder, avoiding double
+  counting. Fleet charts use indefinitely retained hourly totals. The UI's
+  `all` window expands its monthly buckets to include the oldest retained record.
 - Migration 0062 adds global range indexes for the five cleanup predicates not
   covered by existing server/user-leading indexes: node health `ts`, quality
   samples `ts`, destination `date`, source-IP `date`, session `last_seen`.

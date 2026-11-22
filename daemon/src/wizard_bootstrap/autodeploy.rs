@@ -35,6 +35,13 @@ pub fn autodeploy_status(inv: &SqliteInventory, server_id: &str) -> Option<Autod
     coordinator().status(&coordination_key(inv, server_id))
 }
 
+pub(crate) fn autodeploy_updated_at(
+    inv: &SqliteInventory,
+    server_id: &str,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    coordinator().updated_at(&coordination_key(inv, server_id))
+}
+
 fn coordination_key(inv: &SqliteInventory, server_id: &str) -> String {
     let identity = inv.coordination_identity();
     format!("{}:{identity}{server_id}", identity.len())
@@ -81,6 +88,7 @@ struct Entry {
     token: Arc<()>,
     dirty: bool,
     status: AutodeployStatus,
+    updated_at: chrono::DateTime<chrono::Utc>,
     finished: Option<Instant>,
     completion: watch::Sender<Option<Outcome>>,
 }
@@ -128,6 +136,12 @@ impl Coordinator {
         entries.get(id).map(|entry| entry.status.clone())
     }
 
+    fn updated_at(&self, id: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        let mut entries = self.entries();
+        Self::cleanup(&mut entries, Instant::now());
+        entries.get(id).map(|entry| entry.updated_at)
+    }
+
     fn request(self: &Arc<Self>, id: String) -> (Completion, Option<Worker>) {
         let mut entries = self.entries();
         Self::cleanup(&mut entries, Instant::now());
@@ -136,6 +150,7 @@ impl Coordinator {
             .filter(|entry| entry.finished.is_none())
         {
             entry.dirty = true;
+            entry.updated_at = chrono::Utc::now();
             return (entry.completion.subscribe(), None);
         }
         let token = Arc::new(());
@@ -149,6 +164,7 @@ impl Coordinator {
                     phase: AutodeployPhase::Queued,
                     message: "Changes saved; deployment queued.",
                 },
+                updated_at: chrono::Utc::now(),
                 finished: None,
                 completion,
             },
@@ -174,6 +190,7 @@ impl Worker {
     fn begin(&self) {
         if let Some(entry) = self.coordinator.entries().get_mut(&self.id) {
             entry.dirty = false;
+            entry.updated_at = chrono::Utc::now();
             entry.status = AutodeployStatus {
                 phase: AutodeployPhase::Running,
                 message: "Applying saved configuration.",
@@ -188,6 +205,7 @@ impl Worker {
         };
         let followup = entry.dirty || result.is_err_and(Failure::retryable);
         if followup && pass < MAX_PASSES {
+            entry.updated_at = chrono::Utc::now();
             entry.status = AutodeployStatus {
                 phase: AutodeployPhase::Queued,
                 message: "Changes pending; deployment followup queued.",
@@ -202,6 +220,7 @@ impl Worker {
         entry.completion.send_replace(Some(result));
         if let Err(failure) = result {
             entry.finished = Some(Instant::now());
+            entry.updated_at = chrono::Utc::now();
             entry.status = AutodeployStatus {
                 phase: AutodeployPhase::Failed,
                 message: failure.message(),
@@ -242,6 +261,7 @@ impl Drop for Worker {
                 .completion
                 .send_replace(Some(Err(Failure::Interrupted)));
             entry.finished = Some(Instant::now());
+            entry.updated_at = chrono::Utc::now();
             entry.status = AutodeployStatus {
                 phase: AutodeployPhase::Failed,
                 message: Failure::Interrupted.message(),

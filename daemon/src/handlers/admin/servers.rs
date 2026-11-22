@@ -253,51 +253,78 @@ pub(crate) async fn servers(
             }
         }
 
-        form.ed-inbar method="post" action="/admin/servers/quick-add" {
-            span.ed-inbar__label { (crate::i18n::tr(lang, "add server", "добавить сервер")) }
-            input type="text" name="id" required="required"
-                  placeholder=(crate::i18n::tr(lang, "e.g. fra-01", "напр. fra-01"))
-                  pattern="(?!.*\\.\\.)[A-Za-z0-9](?:[A-Za-z0-9._\\-]{0,62}[A-Za-z0-9])?"
-                  maxlength="64"
-                  title=(crate::i18n::tr(
-                      lang,
-                      "1-64 chars: letters, digits, dot, underscore, hyphen; must start and end with alphanumeric; no consecutive dots",
-                      "1-64 символа: буквы, цифры, точка, подчёркивание, дефис; начинается и заканчивается на букву/цифру; без двойных точек",
-                  ))
-                  style="max-width: 130px;";
-            input type="text" name="address" required="required"
-                  placeholder=(crate::i18n::tr(lang, "ip or hostname", "ip или хост"))
-                  title=(crate::i18n::tr(
-                      lang,
-                      "IPv4 / IPv6 / hostname of an already-bootstrapped node",
-                      "IPv4 / IPv6 / хост уже развёрнутой ноды",
-                  ))
-                  style="max-width: 180px;";
-            input type="number" name="ssh_port" value="22" min="1" max="65535"
-                  title=(crate::i18n::tr(
-                      lang,
-                      "SSH port — 22 (DO) or 2222 (Cloudzy)",
-                      "SSH порт — 22 (DO) или 2222 (Cloudzy)",
-                  ))
-                  style="max-width: 58px;";
-            button type="submit"
-                   class="ed-abtn ed-abtn--primary ed-abtn--sm"
-                   title=(crate::i18n::tr(
-                       lang,
-                       "Registers the server with sing-box and only VLESS+REALITY enabled by default, unless SSH uses TCP 443. Enable other protocols on the server page.",
-                       "Регистрирует сервер с sing-box и только VLESS+REALITY по умолчанию, если SSH не занимает TCP 443. Остальные протоколы включаются на странице сервера.",
-                   )) {
-                (icon("plus")) (crate::i18n::tr(lang, "register", "зарегистрировать"))
+        div.ed-inbar style="align-items: center; flex-wrap: wrap; gap: 12px;" {
+            div style="display: flex; flex-direction: column; gap: 3px; min-width: 0;" {
+                span.ed-inbar__label { (crate::i18n::tr(lang, "add server", "добавить сервер")) }
+                span.ed-grid__mut style="font-family: var(--serif); font-style: italic; font-size: 12px; line-height: 1.5;" {
+                    (crate::i18n::tr(
+                        lang,
+                        "Paste the IP and root password. The wizard installs the deploy key, hardens the node and deploys its config — the primary way to add a server.",
+                        "Вставь IP и root-пароль. Мастер установит deploy-ключ, подготовит ноду и задеплоит конфиг — основной способ добавить сервер.",
+                    ))
+                }
+            }
+            a.ed-abtn.ed-abtn--primary href="/admin/servers/new" style="margin-left: auto;" {
+                (icon("rocket")) (crate::i18n::tr(lang, "start wizard", "запустить мастер")) " " (icon("arrow-right"))
             }
             span.ed-tip
                 title=(crate::i18n::tr(
                     lang,
-                    "→ sing-box + VLESS+REALITY by default; SSH on TCP 443 leaves protocols off.",
-                    "→ по умолчанию sing-box + VLESS+REALITY; при SSH на TCP 443 протоколы выключены.",
+                    "The wizard is the flagship add-server path: SSH bootstrap, secrets, hardening and first deploy in one flow.",
+                    "Мастер — основной путь добавления сервера: SSH-bootstrap, секреты, hardening и первый деплой одним потоком.",
                 )) { (icon("info")) }
-            a.ed-grid__open href="/admin/servers/new" style="margin-left: auto;" {
-                (icon("rocket")) (crate::i18n::tr(lang, "wizard", "мастер")) " " (icon("arrow-right")) " "
-                (crate::i18n::tr(lang, "bootstrap a fresh node from scratch", "развернуть свежую ноду с нуля"))
+        }
+        details style="margin: -2px 0 14px;" {
+            summary style="cursor: pointer; font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                (crate::i18n::tr(
+                    lang,
+                    "Already have a node? Register it without bootstrapping (advanced)",
+                    "Нода уже есть? Зарегистрировать без bootstrap (для продвинутых)",
+                ))
+            }
+            form.ed-inbar method="post" action="/admin/servers/quick-add"
+                 style="margin-top: 8px; border-top: 1px dashed var(--rule); padding-top: 10px;" {
+                span.ed-inbar__label { (crate::i18n::tr(lang, "register only", "только регистрация")) }
+                input type="text" name="id" required="required"
+                      placeholder=(crate::i18n::tr(lang, "e.g. fra-01", "напр. fra-01"))
+                      pattern="(?!.*\\.\\.)[A-Za-z0-9](?:[A-Za-z0-9._\\-]{0,62}[A-Za-z0-9])?"
+                      maxlength="64"
+                      title=(crate::i18n::tr(
+                          lang,
+                          "1-64 chars: letters, digits, dot, underscore, hyphen; must start and end with alphanumeric; no consecutive dots",
+                          "1-64 символа: буквы, цифры, точка, подчёркивание, дефис; начинается и заканчивается на букву/цифру; без двойных точек",
+                      ))
+                      style="max-width: 130px;";
+                input type="text" name="address" required="required"
+                      placeholder=(crate::i18n::tr(lang, "ip or hostname", "ip или хост"))
+                      title=(crate::i18n::tr(
+                          lang,
+                          "IPv4 / IPv6 / hostname of an already-bootstrapped node",
+                          "IPv4 / IPv6 / хост уже развёрнутой ноды",
+                      ))
+                      style="max-width: 180px;";
+                input type="number" name="ssh_port" value="22" min="1" max="65535"
+                      title=(crate::i18n::tr(
+                          lang,
+                          "SSH port — 22 (DO) or 2222 (Cloudzy)",
+                          "SSH порт — 22 (DO) или 2222 (Cloudzy)",
+                      ))
+                      style="max-width: 58px;";
+                button type="submit"
+                       class="ed-abtn ed-abtn--secondary ed-abtn--sm"
+                       title=(crate::i18n::tr(
+                           lang,
+                           "Registers the server with sing-box and only VLESS+REALITY enabled by default, unless SSH uses TCP 443. It does NOT install the deploy key, harden the node or deploy anything — new grants stay paused until SSH access is verified.",
+                           "Регистрирует сервер с sing-box и только VLESS+REALITY по умолчанию, если SSH не занимает TCP 443. НЕ устанавливает deploy-ключ, не готовит ноду и ничего не деплоит — новые гранты приостановлены до проверки SSH-доступа.",
+                       )) {
+                    (icon("plus")) (crate::i18n::tr(lang, "register", "зарегистрировать"))
+                }
+                span.ed-tip
+                    title=(crate::i18n::tr(
+                        lang,
+                        "Register-only writes inventory defaults. You must still push the deploy key and verify SSH access on the server page before grants can be deployed.",
+                        "Регистрация только пишет дефолты в инвентарь. Deploy-ключ всё равно нужно запушить и проверить SSH-доступ на странице сервера, иначе гранты не задеплоятся.",
+                    )) { (icon("info")) }
             }
         }
 
