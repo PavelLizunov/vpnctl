@@ -2,6 +2,7 @@ use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 
+use super::super::grant_targets;
 use super::super::helpers::{
     bad_request, internal_error, not_found, render_page, theme_accent_lang, user_not_found,
 };
@@ -27,6 +28,17 @@ pub(crate) async fn server_grant_user(
         Ok(Some(_)) => {}
         Ok(None) => return user_not_found(&user_id_str),
         Err(e) => return internal_error(anyhow::Error::new(e)),
+    }
+
+    let already_granted = match state.inv.servers_for_user(&uid).await {
+        Ok(servers) => servers.iter().any(|granted| granted.id == sid),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    if !already_granted {
+        let readiness = grant_targets::read(&state, &server).await;
+        if !readiness.is_eligible() {
+            return bad_request(&grant_targets::blocked_message(&server, readiness));
+        }
     }
 
     let granted = match state
@@ -132,6 +144,15 @@ pub(crate) async fn server_grant_all_users(
             Ok(v) => v.into_iter().map(|u| u.id).collect(),
             Err(e) => return internal_error(anyhow::Error::new(e)),
         };
+    let needs_grant = users
+        .iter()
+        .any(|u| !u.disabled && !already_granted.contains(&u.id));
+    if needs_grant {
+        let readiness = grant_targets::read(&state, &server).await;
+        if !readiness.is_eligible() {
+            return bad_request(&grant_targets::blocked_message(&server, readiness));
+        }
+    }
     let mut granted: u32 = 0;
     let mut already: u32 = 0;
     let mut failed: u32 = 0;

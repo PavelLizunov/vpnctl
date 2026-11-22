@@ -225,6 +225,75 @@ async fn dashboard_active_now_uses_only_fresh_snapshots_in_every_history_window(
 }
 
 #[tokio::test]
+async fn dashboard_weekly_heavy_users_use_fresh_raw_ticks_and_carry_period_context() {
+    use vpnctl_inventory::VpnStatsDelta;
+
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 1, 1, &[(0, 0)]).await;
+    let old_day = (chrono::Utc::now() - chrono::Duration::days(3))
+        .format("%Y-%m-%d")
+        .to_string();
+    let pool =
+        sqlx::SqlitePool::connect(&format!("sqlite://{}", dir.path().join("inv.db").display()))
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO vpn_user_daily (date, user_id, server_id, upload_bytes, download_bytes)
+         VALUES (?1, 'u0', 's0', ?2, 0)",
+    )
+    .bind(&old_day)
+    .bind(i64::from(4 * (1 << 20)))
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    s.inv
+        .record_vpn_stats(
+            &ServerId("s0".into()),
+            &[VpnStatsDelta {
+                user_id: Some(UserId("u0".into())),
+                upload_bytes: 1_000_000,
+                download_bytes: 2_000_000,
+                active_connections: 1,
+            }],
+        )
+        .await
+        .unwrap();
+    let app = router(s);
+    let html = fetch_html(app.clone(), "/admin/activity?vpn_window=7d").await;
+    assert!(
+        html.contains("Top users by traffic · 7 days"),
+        "weekly ranking heading missing"
+    );
+    assert!(
+        html.contains("/admin/users/u0/traffic?vpn_window=7d"),
+        "weekly ranking must include today's raw ticks before the daily rollup runs"
+    );
+    assert!(
+        html.contains("charged (weighted)"),
+        "ranking copy must distinguish weighted usage"
+    );
+    assert!(
+        html.contains("6.9 MiB"),
+        "weekly ranking must merge the daily-only day with fresh raw ticks"
+    );
+    assert_eq!(html.matches(r#"id="top-users""#).count(), 1);
+    let (_, after_picker) = html.split_once(r#"id="timeframe""#).unwrap();
+    let (_, after_ranking) = after_picker.split_once(r#"id="top-users""#).unwrap();
+    let (before_fleet, _) = after_ranking
+        .split_once(r#"id="fleet-current-path""#)
+        .unwrap();
+    assert!(before_fleet.contains("/admin/users/u0/traffic?vpn_window=7d"));
+    assert!(after_ranking.contains(r#"id="fleet-at-a-glance""#));
+    let user = fetch_html(app, "/admin/users/u0/traffic?vpn_window=7d").await;
+    assert!(
+        user.contains("6.9 MiB"),
+        "the linked rolling 7d user view must show the same merged total"
+    );
+}
+
+#[tokio::test]
 async fn phase4b_dashboard_vpn_activity_tile_shows_empty_state_when_no_polls() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;

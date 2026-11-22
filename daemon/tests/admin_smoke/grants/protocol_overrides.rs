@@ -41,7 +41,9 @@ async fn nm10_server_detail_visible_protocol_shows_hide_button() {
         .next()
         .unwrap();
     assert!(
-        row.contains(r#"icons.svg#check"></use></svg>on</span>"#) && !row.contains("on · hidden"),
+        row.contains(r#"icons.svg#check"></use></svg>Enabled</span>"#)
+            && row.contains("Allowed in subscriptions")
+            && !row.contains("Hidden from subscriptions"),
         "visible enabled protocol should show the check icon and plain on label"
     );
     assert!(
@@ -95,8 +97,9 @@ async fn nm10_server_detail_hidden_protocol_shows_unhide_button() {
         .next()
         .unwrap();
     assert!(
-        row.contains(r#"icons.svg#check"></use></svg>on · hidden</span>"#),
-        "hidden protocol must surface the check icon and exact on · hidden label"
+        row.contains(r#"icons.svg#check"></use></svg>Enabled</span>"#)
+            && row.contains("Hidden from subscriptions"),
+        "hidden protocol must surface the check icon and a separate subscription visibility label"
     );
     assert!(
         html.contains(r#"/admin/servers/hidesrv/protocols/tuic-v5/unhide"#),
@@ -651,8 +654,8 @@ async fn nm12_server_detail_renders_dpi_weak_chip_and_smaller_font_for_wireguard
         "wireguard row must surface its Weak DPI-risk chip"
     );
     assert!(
-        html.contains("font-size: 11px"),
-        "Weak protocol row must shrink the name to 11px (Pavel: «шрифт меньше у них»)"
+        html.contains(r#"<strong class="ed-protocol__weak">wireguard</strong>"#),
+        "Weak protocol names must keep their secondary type treatment"
     );
     assert!(
         html.contains("0x01 handshake tag") || html.contains("WireGuard"),
@@ -776,7 +779,8 @@ async fn nm12_server_detail_hidden_weak_protocol_still_shows_chip() {
         "weak DPI chip must belong to the hidden protocol row"
     );
     assert!(
-        row.contains(r#"icons.svg#check"></use></svg>on · hidden</span>"#),
+        row.contains(r#"icons.svg#check"></use></svg>Enabled</span>"#)
+            && row.contains("Hidden from subscriptions"),
         "hidden status check icon and exact label must appear alongside the chip"
     );
 }

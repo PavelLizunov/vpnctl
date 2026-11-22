@@ -85,7 +85,7 @@ fn assert_identity(html: &str, id: &str, escaped_name: &str) {
 async fn custom_server_name_and_technical_id_appear_on_all_operator_surfaces() {
     let directory = TempDir::new().unwrap();
     let st = state(&directory).await;
-    seed(&st.inv, 1, 1, &[(0, 0)]).await;
+    seed_verified(&st.inv, 1, 1, &[(0, 0)]).await;
     seed_delivery_secrets(&st, &["s0"]).await;
     st.inv
         .set_server_display_name(&ServerId("s0".into()), Some("BitFolk"))
@@ -102,7 +102,7 @@ async fn custom_server_name_and_technical_id_appear_on_all_operator_surfaces() {
 async fn presence_pending_notice_and_lower_access_list_use_escaped_names_and_ids() {
     let directory = TempDir::new().unwrap();
     let st = state(&directory).await;
-    seed(&st.inv, 2, 1, &[(0, 0)]).await;
+    seed_verified(&st.inv, 2, 1, &[(0, 0)]).await;
     for id in ["s0", "s1"] {
         let sid = ServerId(id.into());
         st.inv
@@ -159,7 +159,7 @@ async fn presence_pending_notice_and_lower_access_list_use_escaped_names_and_ids
 async fn duplicate_escaped_names_keep_visible_ids_and_technical_grant_paths() {
     let directory = TempDir::new().unwrap();
     let st = state(&directory).await;
-    seed(&st.inv, 2, 1, &[(0, 0)]).await;
+    seed_verified(&st.inv, 2, 1, &[(0, 0)]).await;
     seed_delivery_secrets(&st, &["s0", "s1"]).await;
     let grant = "action=\"/admin/users/u0/grants/s1\"";
     let revoke = "action=\"/admin/users/u0/grants/s0/revoke\"";
@@ -188,7 +188,7 @@ async fn duplicate_escaped_names_keep_visible_ids_and_technical_grant_paths() {
 async fn unset_names_use_display_fallbacks_and_admin_gets_leave_inventory_unchanged() {
     let directory = TempDir::new().unwrap();
     let st = state(&directory).await;
-    seed(&st.inv, 1, 1, &[(0, 0)]).await;
+    seed_verified(&st.inv, 1, 1, &[(0, 0)]).await;
     seed_delivery_secrets(&st, &["s0"]).await;
     let server_id = ServerId("s0".into());
     let user_id = UserId("u0".into());

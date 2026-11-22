@@ -559,6 +559,176 @@ async fn retention_keeps_raw_rows_when_rollup_fails() {
 }
 
 #[tokio::test]
+async fn fresh_daily_ranking_merges_raw_ticks_and_rollups_without_double_counting() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let pool = raw_pool(&dir).await;
+    inv.add_server(&server("s1")).await.unwrap();
+    for id in ["alice", "bob"] {
+        inv.add_user(&user(id)).await.unwrap();
+    }
+    let day = |days: u64| {
+        (chrono::Utc::now() - chrono::Duration::days(i64::try_from(days).unwrap()))
+            .format("%Y-%m-%d")
+            .to_string()
+    };
+    let old_day = day(10);
+    let recent_day = day(3);
+    let ancient_day = day(400);
+
+    for (date, user_id, up, down) in [
+        (old_day.as_str(), "alice", 1_000u64, 2_000u64),
+        (recent_day.as_str(), "alice", 100, 200),
+        (recent_day.as_str(), "bob", 50, 50),
+        (ancient_day.as_str(), "alice", 7, 8),
+    ] {
+        sqlx::query(
+            "INSERT INTO vpn_user_daily (date, user_id, server_id, upload_bytes, download_bytes)
+             VALUES (?1, ?2, 's1', ?3, ?4)",
+        )
+        .bind(date)
+        .bind(user_id)
+        .bind(i64::try_from(up).unwrap())
+        .bind(i64::try_from(down).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let today_day = day(0);
+    for (date, user_id, up, down) in [
+        (recent_day.as_str(), "alice", 30u64, 40u64),
+        (today_day.as_str(), "alice", 10, 20),
+        (today_day.as_str(), "bob", 500, 500),
+    ] {
+        sqlx::query(
+            "INSERT INTO vpn_connection_stats
+             (ts, server_id, user_id, upload_bytes, download_bytes, active_connections)
+             VALUES (?1 || 'T12:00:00.000Z', 's1', ?2, ?3, ?4, 1)",
+        )
+        .bind(date)
+        .bind(user_id)
+        .bind(i64::try_from(up).unwrap())
+        .bind(i64::try_from(down).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let week = inv.top_users_by_daily_traffic(7, 10).await.unwrap();
+    assert_eq!(week.len(), 2);
+    assert_eq!(week[0].user_id.0, "bob");
+    assert_eq!(week[0].total_bytes, 1_100, "fresh raw day + old daily day");
+    assert_eq!(week[1].user_id.0, "alice");
+    assert_eq!(
+        week[1].total_bytes, 330,
+        "partial raw day contributes its remainder exactly once"
+    );
+
+    let rolling_week = inv.top_users_by_traffic(24 * 7, 10).await.unwrap();
+    assert_eq!(
+        rolling_week, week,
+        "dashboard rolling ranking must match the day-granular ranking for this fixture"
+    );
+    let server_week = inv
+        .top_users_by_traffic_for_server(&ServerId("s1".into()), 24 * 7, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        server_week,
+        vec![(UserId("bob".into()), 1_100), (UserId("alice".into()), 330)],
+        "server ranking must use the same rolling merge as the dashboard and user tab"
+    );
+
+    let all = inv.top_users_by_daily_traffic(u32::MAX, 10).await.unwrap();
+    assert_eq!(all[0].user_id.0, "alice");
+    assert_eq!(all[0].total_bytes, 3_345, "ancient daily history retained");
+    assert_eq!(all[1].user_id.0, "bob");
+    assert_eq!(all[1].total_bytes, 1_100);
+    let rolling_all = inv.top_users_by_traffic(u32::MAX, 10).await.unwrap();
+    assert_eq!(
+        rolling_all, all,
+        "unbounded rolling ranking must also retain every daily-only day"
+    );
+    let all_rows = inv
+        .recent_vpn_stats_for_user(&UserId("alice".into()), u32::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        all_rows.iter().map(|row| row.upload_bytes).sum::<u64>(),
+        1_117,
+        "user all-history read keeps a partial raw day's daily remainder"
+    );
+    assert_eq!(
+        all_rows.iter().map(|row| row.download_bytes).sum::<u64>(),
+        2_228
+    );
+    let bounded_rows = inv
+        .recent_vpn_stats_for_user(&UserId("alice".into()), 24 * 7)
+        .await
+        .unwrap();
+    assert_eq!(
+        bounded_rows.iter().map(|row| row.upload_bytes).sum::<u64>(),
+        110,
+        "bounded user read includes complete daily-only days inside the rolling window"
+    );
+    assert_eq!(
+        bounded_rows
+            .iter()
+            .map(|row| row.download_bytes)
+            .sum::<u64>(),
+        220
+    );
+
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    inv.rollup_vpn_user_daily(&today).await.unwrap();
+    let after_rollup = inv.top_users_by_daily_traffic(7, 10).await.unwrap();
+    assert_eq!(
+        week, after_rollup,
+        "rolling up the fresh day must not double count it"
+    );
+}
+
+#[tokio::test]
+async fn all_history_server_ranking_merges_daily_rows_and_raw_ticks_once() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let pool = raw_pool(&dir).await;
+    inv.add_server(&server_coeff("s1", 2.0)).await.unwrap();
+    inv.add_server(&server("s2")).await.unwrap();
+    inv.add_user(&user("alice")).await.unwrap();
+    inv.add_user(&user("bob")).await.unwrap();
+
+    sqlx::query(
+        "INSERT INTO vpn_user_daily (date, user_id, server_id, upload_bytes, download_bytes)
+         VALUES ('2000-01-01', 'alice', 's1', 100, 200),
+                ('2000-01-01', 'bob', 's2', 9_000, 9_000),
+                ('2000-01-02', 'alice', 's1', 10, 20)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO vpn_connection_stats
+         (ts, server_id, user_id, upload_bytes, download_bytes, active_connections)
+         VALUES ('2000-01-02T03:00:00.000Z', 's1', 'alice', 4, 6, 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let ranking = inv
+        .top_users_by_traffic_for_server(&ServerId("s1".into()), u32::MAX, 10)
+        .await
+        .unwrap();
+    assert_eq!(ranking.len(), 1, "s2 rows stay out of the s1 ranking");
+    assert_eq!(ranking[0].0.0, "alice");
+    assert_eq!(
+        ranking[0].1, 660,
+        "daily remains 30 bytes after a partial raw day, then ×2 coefficient"
+    );
+}
+
+#[tokio::test]
 async fn all_history_includes_old_daily_rows_without_double_counting_raw_days() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;
@@ -660,4 +830,33 @@ async fn rollup_preserves_totals_of_a_day_partially_purged_by_legacy_retention()
         (40, 60, 3),
         "partial raw rows cannot replace a complete day"
     );
+}
+
+#[tokio::test]
+async fn monthly_quota_and_rankings_round_combined_directions_once() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    inv.add_server(&server_coeff("s1", 1.5)).await.unwrap();
+    inv.add_user(&user("alice")).await.unwrap();
+    let pool = raw_pool(&dir).await;
+    sqlx::query(
+        "INSERT INTO vpn_connection_stats (ts, user_id, server_id, upload_bytes, download_bytes)
+         VALUES (strftime('%Y-%m-01T00:00:00.000Z', 'now'), 'alice', 's1', 1, 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let uid = UserId("alice".into());
+    assert_eq!(inv.user_traffic_this_month(&uid).await.unwrap(), 3);
+    for ranking in [
+        inv.top_users_by_traffic(u32::MAX, 1).await.unwrap(),
+        inv.top_users_by_daily_traffic(u32::MAX, 1).await.unwrap(),
+    ] {
+        assert_eq!(ranking[0].total_bytes, 3);
+    }
+    let node = inv
+        .top_users_by_traffic_for_server(&ServerId("s1".into()), u32::MAX, 1)
+        .await
+        .unwrap();
+    assert_eq!(node, vec![(uid, 3)]);
 }

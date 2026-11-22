@@ -169,25 +169,17 @@ async fn dashboard_render(
         .await
         .map_err(internal_error)?;
 
-    let heavy_users = if window.bucket_hours >= 24 {
-        state
-            .inv
-            .top_users_by_daily_traffic(
-                if window.slug == "all" {
-                    u32::MAX
-                } else {
-                    since_hours.div_ceil(24)
-                },
-                5,
-            )
-            .await
-    } else {
-        state.inv.top_users_by_traffic(since_hours, 5).await
-    }
-    .unwrap_or_else(|e| {
-        tracing::warn!(target = "vpnctld::admin", error = %e, "top users traffic query failed");
-        Vec::new()
-    });
+    // The ranking uses the same rolling hours and raw-plus-daily merge as the
+    // linked user Traffic tab. Daily rows contribute only the remainder a
+    // partially retained raw day does not cover.
+    let heavy_users = state
+        .inv
+        .top_users_by_traffic(since_hours, 5)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target = "vpnctld::admin", error = %e, "top users traffic query failed");
+            Vec::new()
+        });
 
     let server_list_fleet = state.inv.list_servers().await.unwrap_or_else(|e| {
         tracing::warn!(target = "vpnctld::admin", error = %e, "list_servers (fleet) failed");
@@ -371,8 +363,6 @@ async fn dashboard_render(
     let body = html! {
         div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageDashboard)) }
         (dashboard_summary_bar(&stats, conns_now, lang))
-        (crate::handlers::admin::path_availability::fleet_summary(&server_list_fleet, &current_paths, &names, lang))
-        (dashboard_fleet_table(&server_list_fleet, &latest_health_per_server, &active_conns_now, &nic_day, &kernel_versions, &current_paths, &names, lang))
         (detail_tabs(
             "/admin",
             tab.slug(),
@@ -383,6 +373,14 @@ async fn dashboard_render(
             ],
             lang,
         ))
+
+        @if tab == DashboardTab::Activity {
+            (window_picker_section("/admin/activity", window.slug, lang))
+            (dashboard_heavy_users(&heavy_users, window, lang))
+        }
+
+        (crate::handlers::admin::path_availability::fleet_summary(&server_list_fleet, &current_paths, &names, lang))
+        (dashboard_fleet_table(&server_list_fleet, &latest_health_per_server, &active_conns_now, &nic_day, &kernel_versions, &current_paths, &names, lang))
 
         @if tab == DashboardTab::Overview {
             (dashboard_quality_ranking(&fleet_quality, lang))
@@ -404,13 +402,11 @@ async fn dashboard_render(
         }
 
         @if tab == DashboardTab::Activity {
-            (window_picker_section("/admin/activity", window.slug, lang))
             (dashboard_fleet_uptime(&fleet_uptime, lang))
             div id="vpn-traffic" style="margin-top:24px;" {
                 (crate::handlers::admin::nic_traffic::panel(&nic_selected, &active_conns_now, lang))
             }
             (kernel_floor_rollup(&kernel_versions, lang))
-            (dashboard_heavy_users(&heavy_users, window, lang))
         }
 
         @if tab == DashboardTab::Sharing {

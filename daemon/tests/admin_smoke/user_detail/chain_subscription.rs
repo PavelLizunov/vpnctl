@@ -157,7 +157,7 @@ async fn delivery_flow_a_uses_public_base() {
             .0;
         assert_eq!(textarea.as_bytes(), expected.as_bytes());
         assert!(flow_a.contains("vpnctl-qr-frame"));
-        assert!(flow_a.contains("Recommended default — one URL covers everything."));
+        assert!(flow_a.contains("Recommended default — one URL for the visible client config."));
         if configured.is_some() {
             assert!(!flow_a.contains("http://vpnctld"));
             assert!(!flow_a.contains("http://vpn.example.com"));

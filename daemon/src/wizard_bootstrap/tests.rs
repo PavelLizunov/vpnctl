@@ -718,6 +718,39 @@ async fn run_redeploy_fails_for_removed_server_without_bootstrapping_secrets() {
     );
 }
 
+#[tokio::test]
+async fn deployment_validation_failure_is_available_after_reopening_inventory() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("inv.db");
+    let inv = vpnctl_inventory::SqliteInventory::open(&path)
+        .await
+        .unwrap();
+    let server = redeploy_test_server(
+        "invalid-config",
+        vec![ProtocolId("unknown-protocol".into())],
+    );
+    inv.add_server(&server).await.unwrap();
+    let events = collect_redeploy_bounded(
+        server.clone(),
+        inv,
+        Arc::new(crate::app::build_registry().unwrap()),
+        dir.path().join("unused"),
+    )
+    .await;
+    assert!(terminal_error(&events).contains("config invalid"));
+    let reopened = vpnctl_inventory::SqliteInventory::open(&path)
+        .await
+        .unwrap();
+    let entry = reopened
+        .latest_audit_for_target_action(&server.id.0, "server.deploy.failed")
+        .await
+        .unwrap()
+        .unwrap();
+    let payload = entry.payload.unwrap();
+    assert_eq!(payload["phase"], "validate");
+    assert_eq!(payload["error"], terminal_error(&events));
+}
+
 #[test]
 fn verify_key_fail_copy_has_no_cat_on_node() {
     let hint = VERIFY_KEY_FAIL_HINT;

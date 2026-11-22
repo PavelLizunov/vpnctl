@@ -56,6 +56,17 @@ pub(crate) async fn user_detail_render(
             Vec::new()
         });
 
+    let deploy_evidence_result = if tab == UserTab::Delivery {
+        state.inv.servers_deployed_since_grant(&uid).await
+    } else {
+        Ok(HashSet::new())
+    };
+    let delivery_history_known = pending_deploy_known && deploy_evidence_result.is_ok();
+    let deploy_evidence = deploy_evidence_result.unwrap_or_else(|error| {
+        tracing::warn!(target = "vpnctld::admin", user = %uid, %error, "delivery readiness: deploy evidence read failed");
+        HashSet::new()
+    });
+
     let all_servers = state
         .inv
         .list_fleet_servers()
@@ -121,6 +132,12 @@ pub(crate) async fn user_detail_render(
             .list_protocol_overrides_for_user(&uid)
             .await
             .map_err(|e| internal_error(anyhow::Error::new(e)))?
+    } else {
+        Default::default()
+    };
+
+    let grant_readiness = if tab == UserTab::Access {
+        crate::handlers::admin::grant_targets::read_many(&state, &all_servers).await
     } else {
         Default::default()
     };
@@ -206,6 +223,9 @@ pub(crate) async fn user_detail_render(
         Default::default()
     };
 
+    let public_base_configured = configured_base
+        .as_deref()
+        .is_some_and(|url| !url.trim().is_empty());
     let base = public_base(&headers, configured_base.as_deref());
     let sub_url_str = sub_token.as_deref().map(|t| sub_url(&headers, t));
     let mihomo_sub_url_str = sub_token.as_deref().map(|t| mihomo_sub_url(&base, t));
@@ -218,6 +238,49 @@ pub(crate) async fn user_detail_render(
             .as_deref()
             .map(|t| format!("{}?format=sing-box", mihomo_sub_url(&base, t)))
     };
+    let pending_set: HashSet<vpnctl_core::ServerId> =
+        pending_deploy_servers.iter().cloned().collect();
+    // The plain `/sub/<token>` endpoint applies the desktop-core policy and
+    // omits chain targets. Use its server set so a hidden/restricted grant
+    // cannot make the primary recommendation look populated. Without a
+    // sub-token, the app-config primary uses the full granted set.
+    let token_subscription_ids: Option<HashSet<vpnctl_core::ServerId>> =
+        if tab == UserTab::Delivery && sub_token.is_some() {
+            match state.inv.subscription_servers_for_client(&uid, None).await {
+                Ok(servers) => Some(servers.into_iter().map(|server| server.id).collect()),
+                Err(error) => {
+                    tracing::warn!(
+                        target = "vpnctld::admin",
+                        user = %uid.0,
+                        error = %error,
+                        "delivery readiness: token subscription server read failed"
+                    );
+                    Some(HashSet::new())
+                }
+            }
+        } else {
+            None
+        };
+    let renderable_on_applied = |sid: &vpnctl_core::ServerId| {
+        deploy_evidence.contains(sid)
+            && !pending_set.contains(sid)
+            && token_subscription_ids
+                .as_ref()
+                .is_none_or(|ids| ids.contains(sid))
+    };
+    // Chain-only targets stay available in their own card below, but must not
+    // make the primary `/sub/<token>` recommendation look non-empty.
+    let has_renderable_applied_grants = tab == UserTab::Delivery
+        && (share_links
+            .iter()
+            .any(|(sid, _, _)| renderable_on_applied(sid))
+            || amnezia_links
+                .iter()
+                .any(|(sid, _)| renderable_on_applied(sid))
+            || awg_links.iter().any(|(sid, _)| renderable_on_applied(sid))
+            || amnezia_files
+                .iter()
+                .any(|(sid, _, ready)| *ready && renderable_on_applied(sid)));
     let mut chain_route_labels = Vec::with_capacity(chain_routes.len());
     for (target, entry) in &chain_routes {
         let target_name = state
@@ -588,6 +651,11 @@ pub(crate) async fn user_detail_render(
                 &state,
                 &user,
                 &servers,
+                &pending_deploy_servers,
+                delivery_history_known,
+                &deploy_evidence,
+                public_base_configured,
+                has_renderable_applied_grants,
                 app_config_url_str.as_deref(),
                 flow_a_sub_url_str.as_deref(),
                 sub_token.as_deref(),
@@ -614,6 +682,7 @@ pub(crate) async fn user_detail_render(
                 pending_deploy_known,
                 &user_grant_dates,
                 &access_protos,
+                &grant_readiness,
                 &hidden_per_server,
                 &user_overrides,
                 &names,

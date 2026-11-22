@@ -1,9 +1,11 @@
 use crate::handlers::admin::icons::icon;
 use maud::{Markup, html};
+use std::collections::HashSet;
 use vpnctl_core::{ProtocolId, Server, ServerId, User};
 
+use super::super::delivery_readiness::{primary_artifact, recipient_scope};
 use crate::AppState;
-use crate::handlers::admin::legacy::share_link_card;
+use crate::handlers::admin::legacy::{qr_svg, share_link_card};
 use crate::handlers::admin::users::mask_secret;
 use crate::http_util::path_segment_encode;
 use crate::i18n::Locale;
@@ -13,6 +15,11 @@ pub(crate) fn render_delivery_tab(
     _state: &AppState,
     user: &User,
     servers: &[Server],
+    pending_deploy_servers: &[ServerId],
+    delivery_history_known: bool,
+    deploy_evidence: &HashSet<ServerId>,
+    public_base_configured: bool,
+    has_renderable_applied_grants: bool,
     app_config_url_str: Option<&str>,
     sub_url_str: Option<&str>,
     sub_token: Option<&str>,
@@ -28,7 +35,246 @@ pub(crate) fn render_delivery_tab(
     names: &crate::handlers::admin::helpers::ServerNames,
     lang: Locale,
 ) -> Markup {
+    let primary = primary_artifact(app_config_url_str, sub_url_str);
+    let has_applied = servers.iter().any(|server| {
+        deploy_evidence.contains(&server.id) && !pending_deploy_servers.contains(&server.id)
+    });
+    let unconfirmed: Vec<&ServerId> = servers
+        .iter()
+        .map(|server| &server.id)
+        .filter(|sid| !deploy_evidence.contains(*sid) && !pending_deploy_servers.contains(*sid))
+        .collect();
     html! {
+        section #recommended-delivery style="margin: 0 0 18px; padding: 14px 16px; border: 1px solid var(--rule); background: var(--paper-2);" {
+            div.ed-art-eyebrow {
+                (crate::i18n::tr(lang, "Recommended share", "Ссылка для пользователя")) " "
+                span.ed-tip title=(crate::i18n::tr(
+                    lang,
+                    "One import-ready artefact. It is shown only when the user is enabled, an applied node has a renderable grant, deployment evidence exists, and the recipient host is not obviously local to this daemon. Private LAN/Tailscale addresses keep the copy action with a scope note. The other delivery methods stay available below.",
+                    "Передайте пользователю ссылку или QR-код. Для выдачи нужен хотя бы один доступный для импорта протокол на сервере с применёнными настройками.",
+                )) { (icon("info")) }
+            }
+            @if user.disabled {
+                div style="margin-top: 8px; font-family: var(--serif); font-size: 13px; line-height: 1.6; color: var(--ink);" {
+                    b { (crate::i18n::tr(lang, "This user is disabled.", "Пользователь отключён.")) }
+                    " "
+                    (crate::i18n::tr(
+                        lang,
+                        "The subscription and app-config endpoints return an empty config, so a ready link would not work. Enable the user first; keys and grants are preserved.",
+                        "Включите пользователя, чтобы подписка снова содержала настройки. Его ключи и доступы сохранены.",
+                    ))
+                    div style="margin-top: 10px;" {
+                        form method="post" action=(format!("/admin/users/{}/enable", path_segment_encode(&user.id.0))) style="display: inline;" {
+                            button type="submit" class="ed-abtn ed-abtn--primary ed-abtn--sm" {
+                                (icon("power")) (crate::i18n::tr(lang, "enable user", "включить пользователя"))
+                            }
+                        }
+                    }
+                }
+            } @else if servers.is_empty() {
+                div style="margin-top: 8px; font-family: var(--serif); font-size: 13px; line-height: 1.6; color: var(--ink);" {
+                    b { (crate::i18n::tr(lang, "No deliverable server grants yet.", "Грантов на серверы, готовых к выдаче, пока нет.")) }
+                    " "
+                    (crate::i18n::tr(
+                        lang,
+                        "Grant at least one ready server before handing out a link; an empty subscription is not a usable artefact.",
+                        "Выдай хотя бы один готовый сервер перед выдачей ссылки; пустая подписка — не рабочий артефакт.",
+                    ))
+                    div style="margin-top: 10px;" {
+                        a class="ed-abtn ed-abtn--primary ed-abtn--sm"
+                          href=(format!("/admin/users/{}/access#server-access", path_segment_encode(&user.id.0))) {
+                            (icon("plus")) (crate::i18n::tr(lang, "grant server access", "выдать доступ к серверу")) " " (icon("arrow-right"))
+                        }
+                    }
+                }
+            } @else if !delivery_history_known {
+                div style="margin-top: 8px; font-family: var(--serif); font-size: 13px; line-height: 1.6; color: var(--ink);" {
+                    b { (crate::i18n::tr(lang, "Application is not confirmed.", "Применение не подтверждено.")) }
+                    " "
+                    (crate::i18n::tr(
+                        lang,
+                        "The deployment history could not be read. Reload this page to check again before sharing the link.",
+                        "Не удалось прочитать историю деплоя. Обновите страницу, чтобы повторить проверку перед выдачей ссылки.",
+                    ))
+                    div style="margin-top: 10px;" {
+                        a class="ed-abtn ed-abtn--secondary ed-abtn--sm"
+                          href=(format!("/admin/users/{}/delivery", path_segment_encode(&user.id.0))) {
+                            (crate::i18n::tr(lang, "Check again", "Проверить ещё раз"))
+                        }
+                    }
+                }
+            } @else if pending_deploy_servers.len() >= servers.len() {
+                div style="margin-top: 8px; font-family: var(--serif); font-size: 13px; line-height: 1.6; color: var(--ink);" {
+                    b {
+                        (pending_deploy_servers.len()) " "
+                        (crate::i18n::noun_for(
+                            lang,
+                            pending_deploy_servers.len() as u64,
+                            "server is not applied yet.",
+                            "servers are not applied yet.",
+                            "сервер ещё не применён.",
+                            "сервера ещё не применены.",
+                            "серверов ещё не применены.",
+                        ))
+                    }
+                    " "
+                    (crate::i18n::tr(
+                        lang,
+                        "Access is saved, but none of the granted nodes carries this user yet. Use the deploy-pending action above, then reload before handing over the link.",
+                        "Доступ сохранён, но ни одна выданная нода ещё не знает пользователя. Нажми «задеплоить недостающие» выше и перезагрузи страницу перед выдачей ссылки.",
+                    ))
+                    div style="margin-top: 6px; font-family: var(--mono); font-size: 10px; color: var(--warm);" {
+                        @for (index, sid) in pending_deploy_servers.iter().enumerate() {
+                            @if index > 0 { ", " }
+                            (crate::handlers::admin::helpers::named_server(sid, names))
+                        }
+                    }
+                }
+            } @else if !has_applied {
+                b { (crate::i18n::tr(lang, "Deployment is not confirmed.", "Деплой не подтверждён.")) }
+            } @else if !has_renderable_applied_grants {
+                div style="margin-top: 8px; font-family: var(--serif); font-size: 13px; line-height: 1.6; color: var(--ink);" {
+                    b { (crate::i18n::tr(lang, "No renderable protocol is delivered on an applied node yet.", "Подписка пока пуста.")) }
+                    " "
+                    (crate::i18n::tr(
+                        lang,
+                        "The grants exist, but every protocol is hidden for this user, the node is suppressed, or the link renderer failed. A link would be empty, so it is not recommended. Review user access and the server protocol settings, then reload.",
+                        "Проверьте, что пользователю разрешён хотя бы один протокол и его показ в подписках включён на сервере.",
+                    ))
+                    div style="margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap;" {
+                        a class="ed-abtn ed-abtn--secondary ed-abtn--sm"
+                          href=(format!("/admin/users/{}/access#server-access", path_segment_encode(&user.id.0))) {
+                            (icon("users")) (crate::i18n::tr(lang, "review user access", "проверить доступ пользователя"))
+                        }
+                    }
+                }
+            } @else {
+                @match primary {
+                    Some(artifact) => {
+                        @let scope = recipient_scope(artifact.url);
+                        @if scope.blocks_copy() {
+                            div style="margin-top: 8px; font-family: var(--serif); font-size: 13px; line-height: 1.6; color: var(--ink);" {
+                                b { (scope.headline(lang)) }
+                                " "
+                                (scope.detail(lang, public_base_configured))
+                                div style="margin-top: 8px; font-family: var(--mono); font-size: 10px; color: var(--warm); word-break: break-all;" {
+                                    (artifact.url)
+                                }
+                                div style="margin-top: 10px;" {
+                                    a class="ed-abtn ed-abtn--primary ed-abtn--sm" href="/admin/settings/system#public-address" {
+                                        (icon("settings-2")) (crate::i18n::tr(lang, "set public address", "указать публичный адрес")) " " (icon("arrow-right"))
+                                    }
+                                }
+                            }
+                        } @else {
+                            div style="display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; margin-top: 8px;" {
+                                (qr_svg(artifact.url))
+                                div style="flex: 1; min-width: 260px; display: flex; flex-direction: column; gap: 8px;" {
+                                    div style="font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--mute);" {
+                                        (artifact.kind.label(lang))
+                                    }
+                                    textarea #recommended-share-url readonly="readonly" rows="3"
+                                              data-select-on-click
+                                              title=(crate::i18n::tr(lang, "Click to select, then copy — or use the copy button.", "Кликни, чтобы выделить, затем скопируй — или используй кнопку."))
+                                              style="width: 100%; box-sizing: border-box; padding: 8px 10px; font-family: var(--mono); font-size: 10px; line-height: 1.45; color: var(--ink); background: var(--paper); border: 1px solid var(--rule); resize: vertical; word-break: break-all;" {
+                                        (artifact.url)
+                                    }
+                                    div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;" {
+                                        button type="button"
+                                               data-copy-recommended="recommended-share-url"
+                                               data-copy-status="recommended-share-status"
+                                               class="ed-abtn ed-abtn--primary ed-abtn--sm" {
+                                            (icon("link")) (crate::i18n::tr(lang, "copy link", "скопировать ссылку"))
+                                        }
+                                        span #recommended-share-status role="status" aria-live="polite"
+                                             style="font-family: var(--mono); font-size: 10px; color: var(--green);" {}
+                                    }
+                                    div style="font-family: var(--serif); font-style: italic; color: var(--mute); font-size: 12px; line-height: 1.5;" {
+                                        (artifact.kind.note(lang))
+                                    }
+                                    @if let Some(hint) = scope.hint(lang, public_base_configured) {
+                                        div style="font-family: var(--mono); font-size: 10px; line-height: 1.55; color: var(--warm);" {
+                                            (icon("info")) " " (hint)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    None => {
+                        div style="margin-top: 8px; font-family: var(--serif); font-size: 13px; line-height: 1.6; color: var(--ink);" {
+                            b { (crate::i18n::tr(lang, "No ready share link yet.", "Готовой ссылки пока нет.")) }
+                            " "
+                            (crate::i18n::tr(
+                                lang,
+                                "This user has no subscription token and no app-config device ID. Mint a sub-token to create the universal import URL.",
+                                "У пользователя нет sub-token и device ID конфига приложения. Сгенерируй sub-token, чтобы создать универсальную ссылку для импорта.",
+                            ))
+                            div style="margin-top: 10px;" {
+                                form method="post"
+                                     action=(format!("/admin/users/{}/sub-token/regenerate", path_segment_encode(&user.id.0))) {
+                                    button type="submit" class="ed-abtn ed-abtn--primary ed-abtn--sm" {
+                                        (icon("key-round")) (crate::i18n::tr(lang, "mint sub-token", "сгенерировать sub-token"))
+                                    }
+                                }
+                            }
+                        }
+                    },
+                }
+                @if !pending_deploy_servers.is_empty() {
+                    div style="margin-top: 10px; border-top: 1px dotted var(--rule); padding-top: 8px; font-family: var(--serif); font-size: 12px; line-height: 1.55; color: var(--warm);" {
+                        (icon("triangle-alert")) " "
+                        b {
+                            (pending_deploy_servers.len()) " "
+                            (crate::i18n::noun_for(
+                                lang,
+                                pending_deploy_servers.len() as u64,
+                                "server is still pending.",
+                                "servers are still pending.",
+                                "сервер всё ещё ждёт деплоя.",
+                                "сервера всё ещё ждут деплоя.",
+                                "серверов всё ещё ждут деплоя.",
+                            ))
+                        }
+                        " "
+                        (crate::i18n::tr(
+                            lang,
+                            "Access for this user is still pending on these servers:",
+                            "Доступ пользователя ещё ожидает применения на серверах:",
+                        ))
+                        " "
+                        @for (index, sid) in pending_deploy_servers.iter().enumerate() {
+                            @if index > 0 { ", " }
+                            span.ed-mono { (crate::handlers::admin::helpers::named_server(sid, names)) }
+                        }
+                        (crate::i18n::tr(
+                            lang,
+                            ". Use the deploy-pending action above, then reload for the complete artifact.",
+                            ". Чтобы применить доступ, запустите деплой ожидающих серверов.",
+                        ))
+                    }
+                }
+            }
+            @if !user.disabled && delivery_history_known && !unconfirmed.is_empty() {
+                div style="margin-top: 10px;" {
+                    (icon("triangle-alert")) " "
+                    (crate::i18n::tr(lang, "Deployment is not confirmed on:", "Применение доступа пользователя не подтверждено на серверах:")) " "
+                    @for (index, sid) in unconfirmed.iter().enumerate() {
+                        @if index > 0 { ", " }
+                        a href=(format!("/admin/servers/{}#deploy-button", path_segment_encode(&sid.0))) {
+                            (crate::handlers::admin::helpers::named_server(sid, names))
+                        }
+                    }
+                    (crate::i18n::tr(
+                        lang,
+                        ". Open the server and deploy the configuration to apply this user’s access.",
+                        ". Чтобы применить доступ пользователя, откройте сервер и запустите деплой.",
+                    ))
+                }
+            }
+        }
+        details.ed-delivery-alternatives {
+        summary { (crate::i18n::tr(lang, "Other clients, formats and keys", "Другие клиенты, форматы и ключи")) }
         div.ed-inbar {
             span.ed-inbar__label { (crate::i18n::tr(lang, "subscription", "подписка")) }
             @match (app_config_url_str, sub_url_str) {
@@ -160,20 +406,20 @@ pub(crate) fn render_delivery_tab(
                                         div style="font-family: var(--mono); font-size: 11px; color: var(--mute); margin-bottom: 6px;" {
                                             (crate::i18n::tr(
                                                 lang,
-                                                "all granted servers · refreshes on its own",
-                                                "все выданные серверы · обновляется само",
+                                                "granted servers · visible protocols only · refreshes on its own",
+                                                "выданные серверы · только видимые протоколы · обновляется само",
                                             ))
                                         }
                                         (share_link_card(url, &html! {
                                             (crate::i18n::tr(
                                                 lang,
-                                                "Sing-box / Hiddify pulls the full config (every protocol on every granted server, including WireGuard with the private key embedded) and refreshes on its own schedule. ",
-                                                "Sing-box / Hiddify тянет полный конфиг (все протоколы на всех выданных серверах, включая WireGuard с приватным ключом) и обновляет сам по расписанию. ",
+                                                "Sing-box / Hiddify pulls the full config (visible protocols on granted servers, including WireGuard with the private key embedded when delivered) and refreshes on its own schedule. ",
+                                                "Sing-box / Hiddify тянет полный конфиг (видимые протоколы на выданных серверах, включая WireGuard с приватным ключом, когда он отдаётся) и обновляет сам по расписанию. ",
                                             ))
                                             b { (crate::i18n::tr(
                                                 lang,
-                                                "Recommended default — one URL covers everything.",
-                                                "Рекомендованный default — один URL покрывает всё.",
+                                                "Recommended default — one URL for the visible client config.",
+                                                "Рекомендованный default — один URL для видимого клиентского конфига.",
                                             )) }
                                         }))
                                     }
@@ -530,7 +776,6 @@ pub(crate) fn render_delivery_tab(
                     }
                 }
             }
-
-
+        }
     }
 }

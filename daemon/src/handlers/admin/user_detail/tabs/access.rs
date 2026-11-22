@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use vpnctl_core::{ProtocolId, Server, ServerId, User};
 
 use crate::AppState;
+use crate::handlers::admin::grant_targets::GrantReadiness;
 use crate::handlers::admin::helpers::format_msk_iso;
 use crate::handlers::admin::legacy::user_detail_per_protocol_grid;
 use crate::handlers::admin::users::mask_secret;
@@ -21,11 +22,22 @@ pub(crate) fn render_access_tab(
     pending_deploy_known: bool,
     user_grant_dates: &HashMap<ServerId, Option<DateTime<Utc>>>,
     access_protos: &HashMap<ServerId, Vec<String>>,
+    grant_readiness: &HashMap<ServerId, GrantReadiness>,
     hidden_per_server: &HashMap<ServerId, HashMap<ProtocolId, bool>>,
     user_overrides: &HashMap<(ServerId, ProtocolId), bool>,
     names: &crate::handlers::admin::helpers::ServerNames,
     lang: Locale,
 ) -> Markup {
+    let blocked_ungranted = all_servers
+        .iter()
+        .filter(|server| {
+            !granted_ids.contains(&server.id)
+                && !matches!(
+                    grant_readiness.get(&server.id),
+                    Some(GrantReadiness::Eligible | GrantReadiness::WorkloadOnly)
+                )
+        })
+        .count();
     html! {
         div.ed-art-eyebrow style="margin-top: 12px;" {
             (crate::i18n::tr(lang, "Grants · per-server key state", "Гранты · состояние ключей по серверам")) " "
@@ -40,6 +52,17 @@ pub(crate) fn render_access_tab(
             @if user.tuic_password.is_some() { " · tuic " (status("check", lang, "Key minted", "Ключ создан")) }
             @if user.wireguard_pubkey.is_some() { " · wg " (status("check", lang, "Key minted", "Ключ создан")) }
         };
+        @if blocked_ungranted > 0 {
+            div style="border: 1px solid var(--warm); border-left-width: 3px; background: color-mix(in oklab, var(--warm) 8%, var(--paper)); padding: 8px 11px; margin: 10px 0; font-family: var(--serif); font-size: 12px; line-height: 1.55; color: var(--ink);" {
+                (icon("triangle-alert"))
+                " "
+                (crate::i18n::tr(
+                    lang,
+                    "New grants are limited to servers with a verified SSH deploy-key path. A row without it shows the failed or missing check and a link to run it again.",
+                    "Новые гранты доступны только на серверах с проверенным SSH deploy-key путём. В строке без него показана причина и ссылка, чтобы запустить проверку снова.",
+                ))
+            }
+        }
         table.ed-grid style="margin-top: 8px;" {
             thead {
                 tr {
@@ -55,6 +78,12 @@ pub(crate) fn render_access_tab(
                 @for srv in all_servers {
                     @let is_granted = granted_ids.contains(&srv.id);
                     @let is_pending = pending_deploy_servers.contains(&srv.id);
+                    @let readiness = grant_readiness.get(&srv.id).copied();
+                    @let ready = readiness.is_some_and(|value| value.is_eligible());
+                    @let reason = match readiness {
+                        Some(value) => value.reason(lang),
+                        None => crate::i18n::tr(lang, "SSH not verified", "SSH не проверен").to_string(),
+                    };
                     @let sid_enc = path_segment_encode(&srv.id.0);
                     @let uid_enc = path_segment_encode(&user.id.0);
                     tr class=(if is_granted && is_pending { "on-warn" } else { "" }) {
@@ -102,13 +131,24 @@ pub(crate) fn render_access_tab(
                                         (icon("minus")) (crate::i18n::tr(lang, "revoke", "отозвать"))
                                     }
                                 }
-                            } @else {
+                            } @else if ready {
                                 form method="post"
                                      action=(format!("/admin/users/{uid_enc}/grants/{sid_enc}"))
                                      style="margin: 0; padding: 0; display: inline;" {
                                     button type="submit" class="ed-abtn ed-abtn--sm" {
                                         (icon("plus")) (crate::i18n::tr(lang, "grant", "выдать"))
                                     }
+                                }
+                            } @else if readiness == Some(GrantReadiness::WorkloadOnly) {
+                                span { (reason) }
+                            } @else {
+                                span.ed-grid__flag title=(reason) {
+                                    (icon("triangle-alert")) " " (crate::i18n::tr(lang, "SSH unverified", "SSH не проверен"))
+                                }
+                                " "
+                                a href=(crate::handlers::admin::grant_targets::GrantReadiness::check_href(&srv.id))
+                                  style="font-family: var(--mono); font-size: 10px; color: var(--acc);" {
+                                    (crate::i18n::tr(lang, "check", "проверить"))
                                 }
                             }
                         }
@@ -169,6 +209,12 @@ pub(crate) fn render_access_tab(
             } @else {
                 ul style="list-style: none; padding: 0; font-family: var(--serif); font-size: 14px; line-height: 1.8;" {
                     @for s in all_servers {
+                        @let readiness = grant_readiness.get(&s.id).copied();
+                        @let ready = readiness.is_some_and(|value| value.is_eligible());
+                        @let reason = match readiness {
+                            Some(value) => value.reason(lang),
+                            None => crate::i18n::tr(lang, "SSH not verified", "SSH не проверен").to_string(),
+                        };
                         li style="padding: 4px 0; border-bottom: 1px dotted var(--rule);" {
                             div style="display: flex; align-items: baseline; gap: 12px;" {
                                 span style="flex: 1;" {
@@ -206,7 +252,7 @@ pub(crate) fn render_access_tab(
                                             (icon("minus")) (crate::i18n::tr(lang, "revoke", "отозвать"))
                                         }
                                     }
-                                } @else {
+                                } @else if ready {
                                     span style="font-family: var(--mono); font-size: 11px; color: var(--mute);" { "—" }
                                     form method="post"
                                          action=(format!("/admin/users/{}/grants/{}",
@@ -222,6 +268,18 @@ pub(crate) fn render_access_tab(
                                                style="padding: 2px 8px; border: 1px solid var(--ink); background: transparent; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;" {
                                             (icon("plus")) (crate::i18n::tr(lang, "grant", "выдать"))
                                         }
+                                    }
+                                } @else if readiness == Some(GrantReadiness::WorkloadOnly) {
+                                    span { (reason) }
+                                } @else {
+                                    span title=(reason)
+                                          style="font-family: var(--mono); font-size: 11px; color: var(--warm);" {
+                                        (icon("triangle-alert")) " " (crate::i18n::tr(lang, "SSH unverified", "SSH не проверен"))
+                                    }
+                                    " "
+                                    a href=(crate::handlers::admin::grant_targets::GrantReadiness::check_href(&s.id))
+                                      style="font-family: var(--mono); font-size: 10px; color: var(--acc);" {
+                                        (crate::i18n::tr(lang, "check", "проверить"))
                                     }
                                 }
                             }
