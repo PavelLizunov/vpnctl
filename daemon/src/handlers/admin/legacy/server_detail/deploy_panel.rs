@@ -325,7 +325,7 @@ pub(super) fn view(facts: &DeployPanelFacts, lang: Locale) -> DeployPanelView {
                 .clone()
                 .or_else(|| activity.stage_message.clone())
         } else {
-            failure_audit.and_then(|row| failure_reason(row))
+            failure_audit.and_then(failure_reason)
         }
     } else {
         None
