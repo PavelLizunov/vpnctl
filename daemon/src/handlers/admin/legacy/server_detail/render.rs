@@ -700,16 +700,30 @@ pub(super) async fn server_detail_render(
         @if tab == ServerTab::Protocols {
             (server_detail_protocols_section(&server, &state.registry, &hidden_map, lang))
             (kernel_floor_rollup(&server_kernel_versions, lang))
-            (server_detail_drift_section(&server, &state.registry, &server_secrets, &observed, &missing, &extra, latest.is_some(), lang))
+            div data-protocol-setting="ports" {
+                (server_detail_drift_section(&server, &state.registry, &server_secrets, &observed, &missing, &extra, latest.is_some(), lang))
+            }
             (server_detail_kernels_section(&server, &state.registry, lang))
-            (server_detail_naive_config_section(&server, &server_secrets, lang))
-            (server_detail_vlessws_config_section(&server, &server_secrets, lang))
+            div data-protocol-setting="naive" {
+                (server_detail_naive_config_section(&server, &server_secrets, lang))
+            }
+            div data-protocol-setting="vless-ws" {
+                (server_detail_vlessws_config_section(&server, &server_secrets, lang))
+            }
             (server_detail_vmess_section(&server, &server_secrets, lang))
-            (server_detail_reality_config_section(&server, &server_secrets, lang))
-            (server_detail_hysteria2_obfs_section(&server, lang))
+            div data-protocol-setting="vless+reality" {
+                (server_detail_reality_config_section(&server, &server_secrets, lang))
+            }
+            div data-protocol-setting="hysteria2" {
+                (server_detail_hysteria2_obfs_section(&server, lang))
+            }
             (server_detail_user_bandwidth_section(&server, &server_secrets, boosty_roster.as_ref(), onboarding_default.as_ref(), lang))
-            (server_detail_ss2022_mode_section(&server, &server_secrets, lang))
-            (server_detail_dnstt_section(&server, &server_secrets, latest.as_ref(), lang))
+            div data-protocol-setting="shadowsocks-2022" {
+                (server_detail_ss2022_mode_section(&server, &server_secrets, lang))
+            }
+            div data-protocol-setting="dnstt" {
+                (server_detail_dnstt_section(&server, &server_secrets, latest.as_ref(), lang))
+            }
             @if udp_pair_enabled { (server_detail_udp_pair_section(lang)) }
             (server_detail_reserved_ports_section(&server, &reserved_ports, lang))
             (server_detail_drift_detail_section(&server, drift_live.as_ref(), query.drift_live(), lang))

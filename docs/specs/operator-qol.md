@@ -14,7 +14,11 @@ subscription formats retain their byte-level compatibility.
   Name and enabled state stay together at every width. Subscription visibility
   and DPI information are secondary. Compatible disabled protocols and protocols
   requiring another kernel are separate disclosures. An enabled legacy protocol
-  remains visible and manageable.
+  remains visible and manageable. With JavaScript, hide/show and enable/disable
+  apply in place. Preserve the scroll position of the active desktop or mobile
+  scroll container, disclosure state and keyboard focus; reflect the saved
+  protocol state and its configuration sections on the same page. Show rejected
+  changes by the control. Native forms remain available without JavaScript.
 - Deployment updates in place across tabs. The current phase, failure, retry and
   successful application agree with the server's state. New unsaved input,
   keyboard focus, selected tab and scroll position survive background updates.

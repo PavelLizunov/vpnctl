@@ -1210,6 +1210,9 @@ form[data-submitting] .ed-abtn,
 .ed-protocol__meta, .ed-protocols__hint { color: var(--soft); font-size: .81rem; }
 .ed-protocol__actions { align-items: center; gap: .4rem; }
 .ed-protocol__actions form { margin: 0; }
+[data-protocol-setting] { display: contents; }
+.ed-protocol > [role="status"] { flex-basis: 100%; }
+.ed-protocols[aria-busy="true"] .ed-protocol__actions { opacity: .65; pointer-events: none; }
 .ed-protocols__group { padding-block: .55rem; border-top: 1px solid var(--rule); }
 .ed-protocols__group summary { font-weight: 600; cursor: pointer; }
 .ed-protocols__group summary:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }

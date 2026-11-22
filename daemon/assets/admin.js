@@ -211,7 +211,18 @@
     }, delay);
   }
 
+  function pageScroller(element) {
+    const main = element.closest("main");
+    return main && /^(auto|scroll)$/.test(getComputedStyle(main).overflowY)
+      ? main : document.scrollingElement;
+  }
+
   function replaceDeployPanel(panel, next) {
+    const protocols = document.getElementById("enabled-protocols");
+    const scroller = pageScroller(panel);
+    const viewportTop = scroller === document.scrollingElement ? 0 : scroller.getBoundingClientRect().top;
+    const keepList = protocols && panel.getBoundingClientRect().bottom <= viewportTop;
+    const listTop = keepList ? protocols.getBoundingClientRect().top : 0;
     var active = document.activeElement;
     var focused = !!active && panel.contains(active);
     var focusKey = null;
@@ -221,6 +232,7 @@
       else if (active.hasAttribute("data-deploy-audit")) focusKey = "audit";
     }
     panel.replaceWith(next);
+    if (keepList) scroller.scrollTop += protocols.getBoundingClientRect().top - listTop;
     if (focused) {
       var replacement = focusKey
         ? next.querySelector("[data-deploy-" + focusKey + "]")
@@ -468,6 +480,115 @@
     });
   }
 
+
+  function protocolFocusTarget(section, next) {
+    const active = document.activeElement;
+    if (!section.contains(active)) return null;
+    if (active.matches("summary")) {
+      const index = Array.from(section.querySelectorAll("summary")).indexOf(active);
+      return next.querySelectorAll("summary")[index] || next.querySelector("summary");
+    }
+    if (active.matches("a")) return [...next.querySelectorAll("a")].find(link => link.href === active.href);
+    const action = active.form?.getAttribute("action");
+    if (!action) return null;
+
+    const opposite = { hide: "unhide", unhide: "hide", disable: "enable", enable: "disable" };
+    const alternate = action.replace(/[^/]+$/, verb => opposite[verb] || verb);
+    const match = Array.from(next.querySelectorAll("form button")).find(btn =>
+      [action, alternate].includes(btn.form.getAttribute("action")));
+    if (match) {
+      const closed = match.closest("details:not([open])");
+      return closed ? closed.querySelector("summary") : match;
+    }
+    // Some unsupported or legacy protocols have no control after disabling.
+    // A neutral heading keeps a second key press from toggling another row.
+    const heading = next.querySelector("h2");
+    if (heading) heading.tabIndex = -1;
+    return heading;
+  }
+
+  // Keep each native POST/redirect as the source of truth, but update the
+  // protocol controls without navigating to the redirect's section anchor.
+  function wireProtocolActions() {
+    const section = document.getElementById("enabled-protocols");
+    if (!section) return;
+    const feedback = document.createElement("div");
+    feedback.setAttribute("role", "status");
+    feedback.className = "ed-sr-only";
+    section.after(feedback);
+
+    section.addEventListener("submit", async function (event) {
+      const form = event.target;
+      if (event.defaultPrevented || !form.closest(".ed-protocol")) return;
+      const button = event.submitter || form.querySelector("button, input[type=submit]");
+      if (!button || !form.hasAttribute("action")) return;
+      event.preventDefault();
+      if (section.hasAttribute("aria-busy")) return;
+      section.setAttribute("aria-busy", "true");
+      button.classList.add("is-loading");
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15000);
+      const unknown = deployText(
+        "Could not verify the change. Refresh the page to check the saved state.",
+        "Не удалось проверить результат. Обновите страницу, чтобы увидеть сохранённое состояние."
+      );
+      let message = unknown;
+      try {
+        const response = await fetch(form.action, {
+          method: "POST", body: new URLSearchParams(new FormData(form)),
+          mode: "same-origin", credentials: "same-origin", cache: "no-store", signal: controller.signal
+        });
+        if (!response.ok) {
+          const plain = (response.headers.get("content-type") || "").startsWith("text/plain");
+          message = "HTTP " + response.status + ". " + unknown;
+          if (plain) message = (await response.text()).trim().slice(0, 500) || message;
+          throw new Error("Protocol request failed");
+        }
+        const doc = new DOMParser().parseFromString(await response.text(), "text/html");
+        const next = doc.getElementById(section.id);
+        if (!next) throw new Error(unknown);
+
+        const groups = section.querySelectorAll("details");
+        next.querySelectorAll("details").forEach((group, index) => {
+          group.open = !!groups[index] && groups[index].open;
+        });
+        const focusTarget = protocolFocusTarget(section, next);
+        const main = pageScroller(section);
+        const top = main.scrollTop;
+        const protocol = form.closest("li").querySelector("strong")?.textContent || "";
+        section.replaceChildren(...next.childNodes);
+        section.querySelectorAll("form[data-confirm]").forEach(wireConfirm);
+        // Only a membership change affects port diagnostics and this
+        // protocol’s settings. Other forms may contain unsaved edits.
+        document.querySelectorAll("[data-protocol-setting]").forEach(current => {
+          if (!/\/(enable|disable)$/.test(form.action)) return;
+          const key = current.dataset.protocolSetting;
+          if (key !== "ports" && key !== protocol) return;
+          const updated = doc.querySelector('[data-protocol-setting="' + key + '"]');
+          if (updated && !current.isEqualNode(updated)) {
+            current.replaceWith(updated);
+            updated.querySelectorAll("form[data-confirm]").forEach(wireConfirm);
+          }
+        });
+        if (focusTarget) focusTarget.focus({ preventScroll: true });
+        main.scrollTop = top;
+        feedback.className = "ed-sr-only";
+        section.after(feedback);
+        feedback.textContent = protocol + deployText(" — saved.", " — сохранено.");
+      } catch {
+        feedback.className = "ed-protocols__hint";
+        const main = pageScroller(section);
+        const top = button.getBoundingClientRect().top;
+        form.closest("li").append(feedback);
+        feedback.textContent = message;
+        main.scrollTop += button.getBoundingClientRect().top - top;
+      } finally {
+        clearTimeout(timer);
+        button.classList.remove("is-loading");
+        section.removeAttribute("aria-busy");
+      }
+    });
+  }
 
   function wireConfirm(form) {
     var msg = form.getAttribute("data-confirm");
@@ -905,6 +1026,7 @@
     wireSelectOnClick();
     wireRecommendedCopy();
     wireLowercaseId();
+    wireProtocolActions();
     wireFormSubmitFeedback();
     wireBoostyQuickConnect();
     var nodes = document.querySelectorAll("[data-sse-url]");
