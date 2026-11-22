@@ -11,7 +11,7 @@ use super::guard::{DEPLOY_ALREADY_RUNNING_PREFIX, DEPLOY_KEY_ABSENT_MSG, DeployG
 use super::types::BootstrapEvent;
 use crate::http_util::path_segment_encode;
 use crate::ssh_subprocess::SubprocessSshTransport;
-use vpnctl_core::{Registry, RenderCtx, Server};
+use vpnctl_core::{Registry, RenderCtx, Server, SshTransport};
 use vpnctl_inventory::{SqliteInventory, bootstrap_server_secrets};
 
 #[path = "autodeploy.rs"]
@@ -25,11 +25,21 @@ pub fn run_redeploy(
     registry: Arc<Registry>,
     deploy_key_path: PathBuf,
 ) -> impl Stream<Item = BootstrapEvent> + Send + 'static {
+    run_redeploy_with_transport(server, inv, registry, deploy_key_path, None)
+}
+
+pub(super) fn run_redeploy_with_transport(
+    server: Server,
+    inv: SqliteInventory,
+    registry: Arc<Registry>,
+    deploy_key_path: PathBuf,
+    transport: Option<Arc<dyn SshTransport>>,
+) -> impl Stream<Item = BootstrapEvent> + Send + 'static {
     let (tx, rx) = mpsc::channel::<BootstrapEvent>(64);
     match DeployGuard::try_acquire(&server.id.0) {
         Some(guard) => {
             tokio::spawn(async move {
-                redeploy_pipeline(server, inv, registry, deploy_key_path, tx).await;
+                redeploy_pipeline(server, inv, registry, deploy_key_path, tx, transport).await;
                 drop(guard);
             });
         }
@@ -101,7 +111,7 @@ pub(super) fn run_redeploy_after_wait(
             }
             tokio::time::sleep(DEPLOY_SLOT_POLL).await;
         };
-        redeploy_pipeline(server, inv, registry, deploy_key_path, tx).await;
+        redeploy_pipeline(server, inv, registry, deploy_key_path, tx, None).await;
         drop(guard);
     });
     ReceiverStream::new(rx)
@@ -257,6 +267,7 @@ async fn redeploy_pipeline(
     registry: Arc<Registry>,
     deploy_key_path: PathBuf,
     tx: mpsc::Sender<BootstrapEvent>,
+    transport: Option<Arc<dyn SshTransport>>,
 ) {
     macro_rules! send_step {
         ($phase:expr, $($arg:tt)*) => {{
@@ -384,6 +395,7 @@ async fn redeploy_pipeline(
     .port(server.ssh_port)
     .trusted_fingerprint(server.trusted_host_fingerprint.clone())
     .with_jump(jump);
+    let ssh = transport.as_deref().unwrap_or(&ssh);
 
     let users = match inv.users_for_server(&server.id).await {
         Ok(u) => u,
@@ -426,7 +438,7 @@ async fn redeploy_pipeline(
     match inv.retired_server_kernels(&server.id).await {
         Ok(retired) => {
             if let Err(e) =
-                vpnctl_kernels::reconcile_disabled_kernels(&registry, &server, &retired, &ssh).await
+                vpnctl_kernels::reconcile_disabled_kernels(&registry, &server, &retired, ssh).await
             {
                 ssh_errors.push(format!("kernel shutdown failed: {e}"));
             }
@@ -452,7 +464,7 @@ async fn redeploy_pipeline(
             continue;
         }
         send_step!("install", "{}: ensure_installed (apt + systemd)…", kid.0);
-        if let Err(e) = kernel.ensure_installed(&ssh).await {
+        if let Err(e) = kernel.ensure_installed(ssh).await {
             ssh_errors.push(format!("{}: ensure_installed failed: {e}", kid.0));
             send_step!("install", "✗ {} install failed: {e}", kid.0);
             continue;
@@ -508,7 +520,7 @@ async fn redeploy_pipeline(
         total_config_bytes += config.len();
         send_step!("apply", "{}: applying config + restart…", kid.0);
         if let Err(e) = kernel
-            .apply_config_with_known_users(&ssh, &config, &known_user_uuids)
+            .apply_config_with_known_users(ssh, &config, &known_user_uuids)
             .await
         {
             ssh_errors.push(format!("{}: apply_config failed: {e}", kid.0));
@@ -518,13 +530,13 @@ async fn redeploy_pipeline(
         ssh_kernels_pushed.push(kid.0.clone());
         configs_applied += 1;
         send_step!("apply", "✓ {} — config applied, service active.", kid.0);
-        if let Err(e) = kernel.open_firewall(&ssh, &ctx, &protocols).await {
+        if let Err(e) = kernel.open_firewall(ssh, &ctx, &protocols).await {
             ssh_errors.push(format!("{}: open_firewall failed: {e}", kid.0));
             send_step!("apply", "✗ {} firewall failed: {e}", kid.0);
             continue;
         }
         if let Err(e) = vpnctl_inventory::bootstrap::refresh_deployed_server_secrets(
-            &inv, kernel, &ssh, &ctx, "admin",
+            &inv, kernel, ssh, &ctx, "admin",
         )
         .await
         {
@@ -534,7 +546,7 @@ async fn redeploy_pipeline(
     }
 
     let firewall_warning = if ssh_errors.is_empty() {
-        match super::reconcile_firewall_if_current(&inv, &deploy_revision, &ssh, &registry, &ctx)
+        match super::reconcile_firewall_if_current(&inv, &deploy_revision, ssh, &registry, &ctx)
             .await
         {
             Ok(warning) => warning,

@@ -6,10 +6,13 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{Semaphore, watch};
 use tokio_stream::StreamExt;
-use vpnctl_core::{Registry, Server};
+use vpnctl_core::{Registry, Server, SshTransport};
 use vpnctl_inventory::SqliteInventory;
 
-use super::{BootstrapEvent, DEPLOY_ALREADY_RUNNING_PREFIX, DEPLOY_KEY_ABSENT_MSG, run_redeploy};
+use super::{
+    BootstrapEvent, DEPLOY_ALREADY_RUNNING_PREFIX, DEPLOY_KEY_ABSENT_MSG,
+    run_redeploy_with_transport,
+};
 
 const MAX_PASSES: usize = 4;
 const FAILURE_TTL: Duration = Duration::from_secs(15 * 60);
@@ -271,6 +274,7 @@ async fn attempt(
     inv: SqliteInventory,
     registry: Arc<Registry>,
     key: PathBuf,
+    transport: Option<Arc<dyn SshTransport>>,
 ) -> Outcome {
     if !key.exists() {
         return Err(Failure::MissingKey);
@@ -279,7 +283,9 @@ async fn attempt(
         .acquire()
         .await
         .map_err(|_| Failure::Interrupted)?;
-    let mut stream = Box::pin(run_redeploy(server, inv, registry, key));
+    let mut stream = Box::pin(run_redeploy_with_transport(
+        server, inv, registry, key, transport,
+    ));
     let mut terminal = None;
     while let Some(event) = stream.next().await {
         match event {
@@ -340,6 +346,7 @@ pub fn queue_servers_redeploy(
                         inv.clone(),
                         Arc::clone(&registry),
                         key.clone(),
+                        None,
                     )
                 },
                 || tokio::time::sleep(Duration::from_secs(5)),

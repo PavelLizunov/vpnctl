@@ -6,7 +6,7 @@
 
 - **Workspace Crates:** 10
 - **Tracked Rust Files:** 550 (352 prod / 198 test)
-- **Total Rust LOC:** 202,864 (106,857 prod / 96,007 test)
+- **Total Rust LOC:** 202,905 (106,882 prod / 96,023 test)
 - **Database Migrations:** 77
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 157
 
@@ -23,8 +23,8 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 6 tests, 1 examples | 7,287 (17) | 1,951 (8) | **9,238** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 13 tests | 4,575 (23) | 4,928 (13) | **9,503** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,825 (5) | 1,191 (5) | **4,016** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 30 tests | 63,257 (202) | 56,484 (97) | **119,741** |
-| **Total** | | | | **106,857 (352)** | **96,007 (198)** | **202,864** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 30 tests | 63,282 (202) | 56,500 (97) | **119,782** |
+| **Total** | | | | **106,882 (352)** | **96,023 (198)** | **202,905** |
 
 ## Largest Rust Modules (Top 25)
 

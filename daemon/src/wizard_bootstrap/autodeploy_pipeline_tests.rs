@@ -32,6 +32,7 @@ struct BarrierKernel {
     entered: Arc<Barrier>,
     released: Arc<Barrier>,
     applications: Arc<Mutex<Vec<serde_json::Value>>>,
+    ssh: Arc<vpnctl_ssh::MockTransport>,
     calls: AtomicUsize,
 }
 #[async_trait::async_trait]
@@ -58,6 +59,10 @@ impl Kernel for BarrierKernel {
         .unwrap())
     }
     async fn apply_config(&self, _: &dyn SshTransport, config: &[u8]) -> vpnctl_core::Result<()> {
+        assert!(
+            self.ssh.executed_commands()?.is_empty(),
+            "no firewall cleanup may precede the current deployment's config apply"
+        );
         self.applications
             .lock()
             .unwrap()
@@ -83,7 +88,7 @@ async fn revoke_during_remote_apply_converges_via_canonical_audit() {
         .await
         .unwrap();
     let key = dir.path().join("fake-key");
-    std::fs::write(&key, "not a real key; mock kernel never calls transport").unwrap();
+    std::fs::write(&key, "fixture key for the injected SSH transport").unwrap();
     let server = Server {
         id: ServerId("autodeploy-pipeline-revoke".into()),
         address: "203.0.113.7".into(),
@@ -112,6 +117,7 @@ async fn revoke_during_remote_apply_converges_via_canonical_audit() {
     let entered = Arc::new(Barrier::new(2));
     let released = Arc::new(Barrier::new(2));
     let applications = Arc::new(Mutex::new(Vec::new()));
+    let ssh = Arc::new(vpnctl_ssh::MockTransport::new());
     let mut registry = Registry::new();
     registry.register_protocol(Box::new(TestProtocol)).unwrap();
     registry
@@ -119,6 +125,7 @@ async fn revoke_during_remote_apply_converges_via_canonical_audit() {
             entered: Arc::clone(&entered),
             released: Arc::clone(&released),
             applications: Arc::clone(&applications),
+            ssh: Arc::clone(&ssh),
             calls: AtomicUsize::new(0),
         }))
         .unwrap();
@@ -131,12 +138,14 @@ async fn revoke_during_remote_apply_converges_via_canonical_audit() {
             let inv = inv.clone();
             let registry = Arc::clone(&registry);
             let key = key.clone();
+            let ssh = Arc::clone(&ssh);
             move || {
                 attempt(
                     server.clone(),
                     inv.clone(),
                     Arc::clone(&registry),
                     key.clone(),
+                    Some(ssh.clone()),
                 )
             }
         },
@@ -153,6 +162,13 @@ async fn revoke_during_remote_apply_converges_via_canonical_audit() {
     released.wait().await;
     task.await.unwrap();
     assert_eq!(*completion.borrow_and_update(), Some(Ok(())));
+    let commands = ssh.executed_commands().unwrap();
+    assert_eq!(
+        commands.len(),
+        1,
+        "only the current deployment should clean up"
+    );
+    assert!(commands[0].ends_with("vpnctl_ufw cleanup tcp:22\n"));
     {
         let applied = applications.lock().unwrap();
         assert_eq!(applied.len(), 2);
