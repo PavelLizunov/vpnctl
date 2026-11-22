@@ -303,12 +303,11 @@ async fn sub_text(state: &AppState, uri: &str, user_agent: &str) -> (StatusCode,
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
     let raw = String::from_utf8(body).expect("subscription body must be utf-8");
-    if content_type.starts_with("text/plain") {
-        if let Ok(decoded) = BASE64_STANDARD.decode(raw.trim().as_bytes()) {
-            if let Ok(text) = String::from_utf8(decoded) {
-                return (status, text);
-            }
-        }
+    if content_type.starts_with("text/plain")
+        && let Ok(decoded) = BASE64_STANDARD.decode(raw.trim().as_bytes())
+        && let Ok(text) = String::from_utf8(decoded)
+    {
+        return (status, text);
     }
     (status, raw)
 }
