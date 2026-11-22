@@ -6,7 +6,7 @@ use crate::handlers::admin::icons::icon;
 use axum::extract::{Path, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
-use maud::{Markup, html};
+use maud::html;
 use tokio::sync::watch;
 
 use super::super::helpers::{
