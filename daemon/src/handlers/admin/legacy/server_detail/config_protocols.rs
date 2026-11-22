@@ -785,3 +785,54 @@ pub(crate) fn server_detail_dnstt_section(
         }
     }
 }
+
+pub(crate) fn server_detail_vmess_section(
+    server: &vpnctl_core::Server,
+    secrets: &HashMap<String, String>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    if !server.kernels.iter().any(|kernel| kernel.0 == "sing-box") {
+        return html! {};
+    }
+    let sid = path_segment_encode(&server.id.0);
+    let domain = secrets
+        .get("vmess.domain")
+        .map(String::as_str)
+        .unwrap_or("");
+    let port = secrets
+        .get("vmess.listen_port")
+        .map(String::as_str)
+        .unwrap_or("443");
+    let detour = secrets
+        .get("vmess.preferred_entry")
+        .map(String::as_str)
+        .unwrap_or("");
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow id="vmess" { "VMess WebSocket + TLS" }
+        form method="post" action=(format!("/admin/servers/{sid}/vmess-config")) {
+            label { (tr(lang, "TLS hostname", "Имя хоста TLS"))
+                input type="text" name="domain" value=(domain) required maxlength="253";
+            }
+            label { (tr(lang, "TCP port", "Порт TCP"))
+                input type="number" name="listen_port" value=(port) min="1" max="65535" required;
+            }
+            label { (tr(lang, "Optional VLESS Reality entry server ID", "ID входного сервера VLESS Reality, если нужен"))
+                input type="text" name="detour_via" value=(detour);
+            }
+            div {
+                label { (tr(lang, "PEM certificate chain", "Цепочка сертификатов PEM"))
+                    textarea name="certificate" rows="4" autocomplete="off" {}
+                }
+                label { (tr(lang, "PEM private key", "Закрытый ключ PEM"))
+                    textarea name="key" rows="4" autocomplete="off" {}
+                }
+            }
+            @if secrets.contains_key("vmess.key") {
+                p.ed-muted { (tr(lang, "Leave both PEM fields blank to keep the saved pair.", "Оставьте оба поля PEM пустыми, чтобы сохранить действующую пару.")) }
+            }
+            button.ed-abtn type="submit" { (tr(lang, "Save VMess settings", "Сохранить настройки VMess")) }
+        }
+    }
+}

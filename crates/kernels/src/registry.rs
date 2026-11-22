@@ -28,6 +28,7 @@ pub fn build_registry() -> vpnctl_core::Result<Registry> {
     reg.register_protocol(Box::new(VlessWs::new()))?;
     reg.register_protocol(Box::new(VlessXhttp::new()))?;
     reg.register_protocol(Box::new(vpnctl_protocols::Dnstt))?;
+    reg.register_protocol(Box::new(vpnctl_protocols::Vmess))?;
 
     Ok(reg)
 }
@@ -54,6 +55,7 @@ mod tests {
                 "vless-ws",
                 "vless+xhttp",
                 "dnstt",
+                "vmess",
             ]
             .map(String::from)
             .to_vec(),

@@ -6,8 +6,8 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
 use super::collectors::{
-    collect_awg_subscription_uris, collect_extra_protocol_uris, collect_vless_uris_for_user,
-    make_config_blob,
+    collect_awg_subscription_uris, collect_extra_protocol_uris, collect_vless_uris_with_entries,
+    collect_vmess_uris, make_config_blob,
 };
 use super::compat::{is_vpn_client_ua, is_vpnrouter_client_ua};
 use crate::app::AppState;
@@ -131,6 +131,7 @@ pub(crate) async fn get_config(
     };
     let has_detour_cap = supports("detour-v1");
     let has_dnstt_cap = supports("dnstt-v1");
+    let has_vmess_cap = supports("vmess-v1");
     let now = now_unix_secs();
 
     let peer_ip: Option<std::net::IpAddr> = request
@@ -192,7 +193,13 @@ pub(crate) async fn get_config(
             return empty_response(want_raw, now);
         }
     };
-    let mut uris = collect_vless_uris_for_user(&inputs, &user.id.0, has_detour_cap);
+    let (vmess, vmess_entries) = if has_vmess_cap {
+        collect_vmess_uris(&state, &inputs, &user, has_detour_cap)
+    } else {
+        Default::default()
+    };
+    let mut uris =
+        collect_vless_uris_with_entries(&inputs, &user.id.0, has_detour_cap, &vmess_entries);
 
     const EXTRA_PROTOCOLS: &[(&str, &str, Option<&str>)] = &[
         ("naive", "NAIVE", Some("naive.domain")),
@@ -234,6 +241,8 @@ pub(crate) async fn get_config(
             Some("observed.dnstt.applied"),
         ));
     }
+
+    uris.extend(vmess);
 
     let Some(config) = make_config_blob(&uris) else {
         return empty_response(want_raw, now);

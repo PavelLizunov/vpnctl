@@ -166,7 +166,7 @@ async fn bootstrap_mints_reality_identity_for_an_xray_only_xhttp_server() {
 }
 
 #[tokio::test]
-async fn bootstrap_mints_every_secret_each_enabled_protocol_needs_to_render() {
+async fn bootstrap_provides_every_secret_each_enabled_protocol_needs_to_render() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("inv.db");
     let inv = vpnctl_inventory::SqliteInventory::open(&db).await.unwrap();
@@ -188,9 +188,29 @@ async fn bootstrap_mints_every_secret_each_enabled_protocol_needs_to_render() {
     };
     inv.add_server(&server).await.unwrap();
 
-    let (secrets, _minted) = bootstrap_server_secrets(&inv, &server, &registry)
+    for (key, value) in [
+        ("vmess.domain", "vmess.example.com"),
+        (
+            "vmess.certificate",
+            "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----",
+        ),
+        (
+            "vmess.key",
+            concat!(
+                "-----BEGIN ",
+                "PRIVATE KEY-----\nfixture\n-----END ",
+                "PRIVATE KEY-----"
+            ),
+        ),
+    ] {
+        inv.set_server_secret(&server.id, key, value).await.unwrap();
+    }
+
+    let (secrets, minted) = bootstrap_server_secrets(&inv, &server, &registry)
         .await
         .unwrap();
+
+    assert!(minted.iter().all(|key| !key.starts_with("vmess.")));
 
     let ctx = RenderCtx::new(&server, &secrets);
     for pid in &enabled {
@@ -207,7 +227,10 @@ async fn bootstrap_mints_every_secret_each_enabled_protocol_needs_to_render() {
         for spec in proto.server_secret_specs() {
             use vpnctl_core::ServerSecretSpec as S;
             let keys: Vec<&'static str> = match spec {
-                S::Password { key, .. } | S::Base64Key { key, .. } | S::ShortId { key } => {
+                S::Required { key }
+                | S::Password { key, .. }
+                | S::Base64Key { key, .. }
+                | S::ShortId { key } => {
                     vec![key]
                 }
                 S::X25519Keypair {
@@ -222,7 +245,7 @@ async fn bootstrap_mints_every_secret_each_enabled_protocol_needs_to_render() {
             for k in keys {
                 assert!(
                     secrets.contains_key(k),
-                    "{pid:?} declares secret `{k}` but bootstrap didn't mint it"
+                    "{pid:?} declares secret `{k}` but bootstrap returned without it"
                 );
             }
         }
@@ -488,7 +511,10 @@ fn declared_secret_keys(registry: &vpnctl_core::Registry, protocol_id: &str) -> 
         .server_secret_specs()
         .into_iter()
         .flat_map(|spec| match spec {
-            S::Password { key, .. } | S::Base64Key { key, .. } | S::ShortId { key } => {
+            S::Required { key }
+            | S::Password { key, .. }
+            | S::Base64Key { key, .. }
+            | S::ShortId { key } => {
                 vec![key]
             }
             S::X25519Keypair {

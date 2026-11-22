@@ -1,11 +1,14 @@
+use std::sync::Arc;
+
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use tempfile::TempDir;
 use tower::ServiceExt;
+use url::form_urlencoded;
 
 use vpnctl_core::{KernelId, ProtocolId, Server, ServerId};
-use vpnctld::router;
+use vpnctld::{AppState, router};
 
 use crate::common::*;
 
@@ -537,4 +540,250 @@ async fn enabled_retired_protocol_remains_visible_and_can_be_disabled() {
             .count(),
         1
     );
+}
+
+const VMESS_PROTOCOLS_PATH: &str = "/admin/servers/s0/protocols";
+const VMESS_CONFIG_PATH: &str = "/admin/servers/s0/vmess-config";
+const VMESS_DOMAIN: &str = "fixture.example.com";
+
+// Public test fixtures generated for fixture.example.com. The second key belongs to a different pair.
+const VMESS_CERTIFICATE_DER: &str = concat!(
+    "MIIBsjCCAVmgAwIBAgIUTJD2F7C8t8BA5VYR1U9z+swgqxAwCgYIKoZIzj0EAwIw\n",
+    "HjEcMBoGA1UEAwwTZml4dHVyZS5leGFtcGxlLmNvbTAgFw0yNjExMjEyMzA1NTFa\n",
+    "GA8yMTI2MTAyODIzMDU1MVowHjEcMBoGA1UEAwwTZml4dHVyZS5leGFtcGxlLmNv\n",
+    "bTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABD08KAugNhNse/JFC9PS0VfW1T7J\n",
+    "7kScLV5hs483qj/sBSeSTQaKZGaoS4vry2wH8Vr+s4YkHazRT8jfPJ2aCBOjczBx\n",
+    "MB0GA1UdDgQWBBSKOUk+b8bNZe1cdu+FDylvFuLzXjAfBgNVHSMEGDAWgBSKOUk+\n",
+    "b8bNZe1cdu+FDylvFuLzXjAPBgNVHRMBAf8EBTADAQH/MB4GA1UdEQQXMBWCE2Zp\n",
+    "eHR1cmUuZXhhbXBsZS5jb20wCgYIKoZIzj0EAwIDRwAwRAIgB7AuFkTtKxYS1E5T\n",
+    "SpucDbTAKSYh5GfoYKwIpSjk8rcCIBaDD/11xFHbGCjCLXw/FheA7ZsM2M5cYoEi\n",
+    "JFkKlCQk\n",
+);
+const VMESS_KEY_DER: &str = concat!(
+    "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgqyy87AfCmCa+KxoD\n",
+    "wxuKMb3YzQ1ueR1JlTY9jni4pTahRANCAAQ9PCgLoDYTbHvyRQvT0tFX1tU+ye5E\n",
+    "nC1eYbOPN6o/7AUnkk0GimRmqEuL68tsB/Fa/rOGJB2s0U/I3zydmggT\n",
+);
+const VMESS_UNRELATED_KEY_DER: &str = concat!(
+    "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgsETm5/4wW5smP8pe\n",
+    "S5fZBNRL5WXNTaR4t5k0HQzTjEOhRANCAASFYo1H4NmxZdsv+PfL7SacfJ2OEL7x\n",
+    "mza/c5HrAw0z0OpEFIp5CRsYQUGDWAWIxRZC4+yAbkN9rNTABLBfXyMs\n",
+);
+
+fn vmess_pem(label: &str, encoded_der: &str) -> String {
+    format!("-----BEGIN {label}-----\n{encoded_der}-----END {label}-----")
+}
+
+async fn vmess_state(dir: &TempDir) -> AppState {
+    let mut state = state(dir).await;
+    state.registry = Arc::new(vpnctl_kernels::build_registry().unwrap());
+    seed(&state.inv, 2, 0, &[]).await;
+    state
+}
+
+fn protocol_settings_post(path: &str, fields: &[(&str, &str)]) -> Request<Body> {
+    let body = form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(fields.iter().copied())
+        .finish();
+    add_same_origin(
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded"),
+    )
+    .body(Body::from(body))
+    .unwrap()
+}
+
+fn vmess_config_post(port: &str, certificate: &str, key: &str) -> Request<Body> {
+    protocol_settings_post(
+        VMESS_CONFIG_PATH,
+        &[
+            ("domain", VMESS_DOMAIN),
+            ("listen_port", port),
+            ("detour_via", "s1"),
+            ("certificate", certificate),
+            ("key", key),
+        ],
+    )
+}
+
+fn assert_vmess_tls_redacted(rendered: &str) {
+    for encoded in [VMESS_CERTIFICATE_DER, VMESS_KEY_DER] {
+        assert!(
+            encoded.lines().all(|line| !rendered.contains(line)),
+            "VMess TLS material leaked"
+        );
+    }
+}
+
+#[tokio::test]
+async fn vmess_config_persists_settings_and_keeps_tls_material_out_of_ui_and_audit() {
+    let dir = TempDir::new().unwrap();
+    let state = vmess_state(&dir).await;
+    let sid = ServerId("s0".into());
+    let app = router(state.clone());
+    let certificate = vmess_pem("CERTIFICATE", VMESS_CERTIFICATE_DER);
+    let key = vmess_pem("PRIVATE KEY", VMESS_KEY_DER);
+    let baseline = state.inv.recent_audit(100).await.unwrap().len();
+
+    let response = app
+        .clone()
+        .oneshot(vmess_config_post("8443", &certificate, &key))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = response.headers()[header::LOCATION].to_str().unwrap();
+    assert_eq!(location.split('#').next(), Some(VMESS_PROTOCOLS_PATH));
+
+    let settings = state.inv.list_server_secrets(&sid).await.unwrap();
+    for (field, expected) in [
+        ("vmess.domain", VMESS_DOMAIN),
+        ("vmess.listen_port", "8443"),
+        ("vmess.preferred_entry", "s1"),
+        ("vmess.certificate", certificate.as_str()),
+        ("vmess.key", key.as_str()),
+    ] {
+        assert!(
+            settings.get(field).is_some_and(|value| value == expected),
+            "{field}"
+        );
+    }
+
+    let html = fetch_html(app.clone(), VMESS_PROTOCOLS_PATH).await;
+    assert!(html.contains(VMESS_CONFIG_PATH));
+    assert!(html.contains(VMESS_DOMAIN));
+    assert_vmess_tls_redacted(&html);
+    let after_save = state.inv.recent_audit(100).await.unwrap().len();
+    assert!(after_save > baseline);
+
+    let response = app
+        .oneshot(vmess_config_post("9443", "", ""))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let updated = state.inv.list_server_secrets(&sid).await.unwrap();
+    assert_eq!(updated["vmess.listen_port"], "9443");
+    for field in ["vmess.certificate", "vmess.key"] {
+        assert!(
+            updated[field] == settings[field],
+            "blank input overwrote {field}"
+        );
+    }
+
+    let audit = state.inv.recent_audit(100).await.unwrap();
+    assert!(audit.len() > after_save);
+    let new_rows = &audit[..audit.len() - baseline];
+    let (update_rows, save_rows) = new_rows.split_at(audit.len() - after_save);
+    for rows in [save_rows, update_rows] {
+        assert!(rows.iter().any(|row| row.target.as_deref() == Some("s0")));
+    }
+    for row in new_rows {
+        if let Some(payload) = &row.payload {
+            assert_vmess_tls_redacted(&payload.to_string());
+        }
+    }
+}
+
+#[tokio::test]
+async fn vmess_config_rejects_partial_and_mismatched_tls_pairs_atomically() {
+    let dir = TempDir::new().unwrap();
+    let state = vmess_state(&dir).await;
+    let sid = ServerId("s0".into());
+    let app = router(state.clone());
+    let certificate = vmess_pem("CERTIFICATE", VMESS_CERTIFICATE_DER);
+    let key = vmess_pem("PRIVATE KEY", VMESS_KEY_DER);
+    let unrelated_key = vmess_pem("PRIVATE KEY", VMESS_UNRELATED_KEY_DER);
+    let response = app
+        .clone()
+        .oneshot(vmess_config_post("8443", &certificate, &key))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let settings = state.inv.list_server_secrets(&sid).await.unwrap();
+    let baseline = state.inv.recent_audit(100).await.unwrap().len();
+
+    for (certificate, key) in [
+        (certificate.as_str(), ""),
+        ("", key.as_str()),
+        (certificate.as_str(), unrelated_key.as_str()),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(vmess_config_post("9443", certificate, key))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(state.inv.list_server_secrets(&sid).await.unwrap() == settings);
+        assert_eq!(state.inv.recent_audit(100).await.unwrap().len(), baseline);
+    }
+}
+
+#[tokio::test]
+async fn vmess_enable_rejects_a_reserved_port_and_missing_config_without_mutation() {
+    let dir = TempDir::new().unwrap();
+    let state = vmess_state(&dir).await;
+    let app = router(state.clone());
+    let certificate = vmess_pem("CERTIFICATE", VMESS_CERTIFICATE_DER);
+    let key = vmess_pem("PRIVATE KEY", VMESS_KEY_DER);
+
+    let response = app
+        .clone()
+        .oneshot(protocol_settings_post(
+            "/admin/servers/s0/reserved-ports",
+            &[("ports", "8443")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let response = app
+        .clone()
+        .oneshot(vmess_config_post("8443", &certificate, &key))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+    // Leave the default VMess port free on the node with no VMess settings.
+    state
+        .inv
+        .set_server_secret(&ServerId("s1".into()), "vless.listen_port", "9443")
+        .await
+        .unwrap();
+    let baseline = state.inv.recent_audit(100).await.unwrap().len();
+    for id in ["s0", "s1"] {
+        let sid = ServerId(id.into());
+        let enabled = state
+            .inv
+            .get_server(&sid)
+            .await
+            .unwrap()
+            .unwrap()
+            .enabled_protocols;
+        let settings = state.inv.list_server_secrets(&sid).await.unwrap();
+        let response = app
+            .clone()
+            .oneshot(protocol_settings_post(
+                &format!("/admin/servers/{id}/protocols/vmess/enable"),
+                &[],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "server {id}");
+        if id == "s0" {
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert!(std::str::from_utf8(&body).unwrap().contains("8443"));
+        }
+        assert_eq!(
+            state
+                .inv
+                .get_server(&sid)
+                .await
+                .unwrap()
+                .unwrap()
+                .enabled_protocols,
+            enabled
+        );
+        assert!(state.inv.list_server_secrets(&sid).await.unwrap() == settings);
+        assert_eq!(state.inv.recent_audit(100).await.unwrap().len(), baseline);
+    }
 }
