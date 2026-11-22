@@ -874,7 +874,7 @@ pub(crate) async fn live_vpn_stats_section(
     html! {
         div.ed-rule {}
         div.ed-art-eyebrow {
-            (tr(lang, "Live VPN stats · ", "Живая VPN-статистика · "))
+            (tr(lang, "Live VPN stats · ", "Живая статистика VPN · "))
             (window_label)
             @if let Some(server) = selected_server {
                 " · " (server)

@@ -56,6 +56,17 @@ pub(crate) async fn user_detail_render(
             Vec::new()
         });
 
+    let deploy_evidence_result = if tab == UserTab::Delivery {
+        state.inv.servers_deployed_since_grant(&uid).await
+    } else {
+        Ok(HashSet::new())
+    };
+    let delivery_history_known = pending_deploy_known && deploy_evidence_result.is_ok();
+    let deploy_evidence = deploy_evidence_result.unwrap_or_else(|error| {
+        tracing::warn!(target = "vpnctld::admin", user = %uid, %error, "delivery readiness: deploy evidence read failed");
+        HashSet::new()
+    });
+
     let all_servers = state
         .inv
         .list_fleet_servers()
@@ -251,14 +262,15 @@ pub(crate) async fn user_detail_render(
             None
         };
     let renderable_on_applied = |sid: &vpnctl_core::ServerId| {
-        !pending_set.contains(sid)
+        deploy_evidence.contains(sid)
+            && !pending_set.contains(sid)
             && token_subscription_ids
                 .as_ref()
                 .is_none_or(|ids| ids.contains(sid))
     };
     // Chain-only targets stay available in their own card below, but must not
     // make the primary `/sub/<token>` recommendation look non-empty.
-    let has_renderable_grants = tab == UserTab::Delivery
+    let has_renderable_applied_grants = tab == UserTab::Delivery
         && (share_links
             .iter()
             .any(|(sid, _, _)| renderable_on_applied(sid))
@@ -640,9 +652,10 @@ pub(crate) async fn user_detail_render(
                 &user,
                 &servers,
                 &pending_deploy_servers,
-                pending_deploy_known,
+                delivery_history_known,
+                &deploy_evidence,
                 public_base_configured,
-                has_renderable_grants,
+                has_renderable_applied_grants,
                 app_config_url_str.as_deref(),
                 flow_a_sub_url_str.as_deref(),
                 sub_token.as_deref(),

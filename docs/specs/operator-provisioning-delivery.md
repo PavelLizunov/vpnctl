@@ -22,6 +22,11 @@
 - In an applied mixed fleet, the primary artefact remains available for the
   applied nodes and the pending nodes are named explicitly. If every granted
   node is pending, no primary artefact is recommended.
+- "Applied" requires a successful `server.deploy` row. Inventory deliberately
+  treats a grant with no user mutation audit as "not pending" (imports/legacy
+  rows); Delivery must not read that as applied. Such a grant is shown as
+  unconfirmed with the server's web deploy action, while any other confirmed
+  applied and renderable node keeps the primary artefact.
 - The recommended card passes the existing URL through byte-for-byte. It never
   edits `/sub`, `/api/v1/sub`, `/api/v1/app/config` or their responses. It does
   not promise that the subscription contains every grant; all existing client
@@ -54,6 +59,9 @@ delivery readiness
               recommendation; the chain card stays below)
   ready: !disabled && !servers.empty && pending_deploy_known && renderable
          && at least one applied node && recipient_scope(url).blocks_copy() == false
+  applied node: a successful `server.deploy` covers the current grant and the node is not in the
+                user-pending set; a grant with neither a relevant user mutation
+                audit nor a later deploy row is unconfirmed. Equal timestamps require ordered grant and deploy audits.
   recipient_scope: public | private | loopback | unspecified | invalid
     private (RFC1918, link-local, CGNAT/Tailscale, ULA, .lan/.internal):
       copy stays, network-scope hint is shown, no reachability claim
@@ -75,11 +83,14 @@ delivery readiness
 - [ ] Access tab omits the grant form for unverified servers and links to the
       SSH check.
 - [ ] Delivery recommends one copyable artefact for a ready user and explains
-      disabled, zero-grant, empty-artefact, all-pending and loopback states.
+      disabled, zero-grant, empty-artefact, all-pending, unconfirmed-legacy and
+      loopback states.
 - [ ] Private LAN/Tailscale origins keep copy with a scope hint; no text claims
       that syntax proves reachability.
 - [ ] A mixed applied/pending fleet keeps one primary item and names pending
       nodes; an all-pending fleet recommends nothing.
+- [ ] A legacy grant with no relevant user audit and no successful deploy gets no
+      primary artefact; another confirmed applied renderable node still keeps it.
 - [ ] Web-only deferred remediation: CLI/inventory grant still works while
       unverified, and a later successful SSH check enables the web grant.
 - [ ] Existing share-link/subscription/app-config bodies are byte-identical;

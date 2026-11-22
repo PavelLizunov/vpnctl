@@ -58,6 +58,15 @@ async fn add_fixture_user(st: &vpnctld::AppState, id: &str) {
         .unwrap();
 }
 
+async fn grant_for_delivery(st: &vpnctld::AppState, sid: &str) {
+    assert!(
+        st.inv
+            .grant_audited(&UserId("u0".into()), &ServerId(sid.into()), "admin", "test")
+            .await
+            .unwrap()
+    );
+}
+
 #[tokio::test]
 async fn servers_page_primary_action_is_the_wizard_and_register_is_demoted() {
     let dir = TempDir::new().unwrap();
@@ -416,9 +425,16 @@ async fn access_tab_hides_the_grant_button_and_names_the_ssh_check_when_unverifi
 
 async fn ready_delivery_state(dir: &TempDir) -> (vpnctld::AppState, String) {
     let st = state(dir).await;
-    seed(&st.inv, 1, 1, &[(0, 0)]).await;
+    seed(&st.inv, 1, 1, &[]).await;
+    // Real users are created with a WireGuard keypair; the Flow A/B/C blocks
+    // below the recommendation only render when that pair exists.
+    let (wg_private, wg_public) = vpnctl_crypto::gen_wireguard_keypair();
+    st.inv
+        .set_user_wireguard_keypair(&UserId("u0".into()), &wg_public, &wg_private)
+        .await
+        .unwrap();
     seed_vless_secrets(&st, &ServerId("s0".into())).await;
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    grant_for_delivery(&st, "s0").await;
     st.inv
         .audit("admin", "server.deploy", Some("s0"), None)
         .await
@@ -509,7 +525,8 @@ async fn delivery_explains_zero_grants_instead_of_a_dead_link() {
 async fn delivery_explains_pending_deploy_instead_of_a_dead_link() {
     let dir = TempDir::new().unwrap();
     let st = state(&dir).await;
-    seed(&st.inv, 1, 1, &[(0, 0)]).await;
+    seed(&st.inv, 1, 1, &[]).await;
+    grant_for_delivery(&st, "s0").await;
     st.inv
         .set_public_base_url(Some("https://vpn.example.com"))
         .await
@@ -521,6 +538,10 @@ async fn delivery_explains_pending_deploy_instead_of_a_dead_link() {
         "pending deploy explanation missing"
     );
     assert!(html.contains("deploy-pending action above"));
+    assert!(
+        !html.contains("Deployment is not confirmed."),
+        "a known pending deploy must not be reported as missing deploy evidence"
+    );
     assert!(!html.contains(r#"data-copy-recommended="recommended-share-url""#));
 }
 
@@ -601,9 +622,10 @@ async fn delivery_keeps_the_primary_artefact_in_an_applied_mixed_fleet_with_expl
  {
     let dir = TempDir::new().unwrap();
     let st = state(&dir).await;
-    seed(&st.inv, 2, 1, &[(0, 0), (0, 1)]).await;
+    seed(&st.inv, 2, 1, &[]).await;
+    grant_for_delivery(&st, "s0").await;
+    grant_for_delivery(&st, "s1").await;
     seed_vless_secrets(&st, &ServerId("s0".into())).await;
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     st.inv
         .audit("admin", "server.deploy", Some("s0"), None)
         .await
@@ -627,4 +649,101 @@ async fn delivery_keeps_the_primary_artefact_in_an_applied_mixed_fleet_with_expl
         "mixed fleet must explain what the artefact covers"
     );
     assert!(html.contains("s1"), "pending server must be named");
+}
+
+#[tokio::test]
+async fn delivery_refuses_a_primary_link_without_deploy_or_grant_evidence() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    // Legacy import: the grant row exists, but there is no user mutation audit
+    // and no successful deploy. Inventory rightly reports "not pending"; the
+    // delivery page must still refuse to call the node applied.
+    seed(&st.inv, 1, 1, &[(0, 0)]).await;
+    seed_vless_secrets(&st, &ServerId("s0".into())).await;
+    st.inv
+        .set_public_base_url(Some("https://vpn.example.com"))
+        .await
+        .unwrap();
+
+    let pending = st
+        .inv
+        .servers_pending_deploy_for_user(&UserId("u0".into()), &[ServerId("s0".into())])
+        .await
+        .unwrap();
+    assert!(
+        pending.is_empty(),
+        "inventory contract: a missing user mutation audit must stay 'not pending'"
+    );
+
+    let html = fetch_html(router(st), "/admin/users/u0/delivery").await;
+    assert!(
+        !html.contains(r#"data-copy-recommended="recommended-share-url""#),
+        "an unconfirmed grant must not expose a recommended live link"
+    );
+    assert!(
+        html.contains("Deployment is not confirmed."),
+        "missing deploy evidence must be named, not presented as applied"
+    );
+    assert!(
+        html.contains(r#"href="/admin/servers/s0#deploy-button""#),
+        "the remediation must be the web deploy action, not SSH guidance"
+    );
+    assert!(
+        !html.contains("No renderable protocol is delivered on an applied node yet."),
+        "an unconfirmed node must not be described as an applied node with hidden protocols"
+    );
+}
+
+#[tokio::test]
+async fn delivery_keeps_the_primary_link_for_an_applied_node_beside_an_unconfirmed_legacy_grant() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir).await;
+    seed(&st.inv, 2, 1, &[(0, 1)]).await;
+    seed_vless_secrets(&st, &ServerId("s0".into())).await;
+    grant_for_delivery(&st, "s0").await;
+    st.inv
+        .audit("admin", "server.deploy", Some("s0"), None)
+        .await
+        .unwrap();
+    st.inv
+        .set_public_base_url(Some("https://vpn.example.com"))
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(st), "/admin/users/u0/delivery").await;
+    assert!(
+        html.contains(r#"data-copy-recommended="recommended-share-url""#),
+        "one confirmed applied renderable node must keep the primary artefact"
+    );
+    assert!(
+        html.contains("Deployment is not confirmed on:"),
+        "the unconfirmed grant must be named instead of silently trusted"
+    );
+    assert!(
+        html.contains(r#"href="/admin/servers/s1#deploy-button""#),
+        "the unconfirmed server must link to its web deploy action"
+    );
+}
+
+#[tokio::test]
+async fn delivery_offers_a_read_only_retry_when_deploy_evidence_cannot_be_read() {
+    let dir = TempDir::new().unwrap();
+    let (st, _) = ready_delivery_state(&dir).await;
+    // Break just the evidence lookup in this disposable fixture. Other user
+    // and audit reads still work, so the page can explain how to retry.
+    let db = sqlx::SqlitePool::connect_with(
+        sqlx::sqlite::SqliteConnectOptions::new().filename(dir.path().join("inv.db")),
+    )
+    .await
+    .unwrap();
+    sqlx::query("ALTER TABLE grants RENAME COLUMN created_at TO unavailable_created_at")
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(st), "/admin/users/u0/delivery").await;
+    assert!(html.contains("The deployment history could not be read."));
+    assert!(html.contains("Check again"));
+    assert!(!html.contains("Deployment is not confirmed on:"));
+    assert!(!html.contains(r#"data-copy-recommended="recommended-share-url""#));
 }

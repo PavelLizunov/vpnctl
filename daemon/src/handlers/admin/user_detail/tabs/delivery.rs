@@ -1,5 +1,6 @@
 use crate::handlers::admin::icons::icon;
 use maud::{Markup, html};
+use std::collections::HashSet;
 use vpnctl_core::{ProtocolId, Server, ServerId, User};
 
 use super::super::delivery_readiness::{primary_artifact, recipient_scope};
@@ -15,9 +16,10 @@ pub(crate) fn render_delivery_tab(
     user: &User,
     servers: &[Server],
     pending_deploy_servers: &[ServerId],
-    pending_deploy_known: bool,
+    delivery_history_known: bool,
+    deploy_evidence: &HashSet<ServerId>,
     public_base_configured: bool,
-    has_renderable_grants: bool,
+    has_renderable_applied_grants: bool,
     app_config_url_str: Option<&str>,
     sub_url_str: Option<&str>,
     sub_token: Option<&str>,
@@ -34,6 +36,14 @@ pub(crate) fn render_delivery_tab(
     lang: Locale,
 ) -> Markup {
     let primary = primary_artifact(app_config_url_str, sub_url_str);
+    let has_applied = servers.iter().any(|server| {
+        deploy_evidence.contains(&server.id) && !pending_deploy_servers.contains(&server.id)
+    });
+    let unconfirmed: Vec<&ServerId> = servers
+        .iter()
+        .map(|server| &server.id)
+        .filter(|sid| !deploy_evidence.contains(*sid) && !pending_deploy_servers.contains(*sid))
+        .collect();
     html! {
         section #recommended-delivery style="margin: 0 0 18px; padding: 14px 16px; border: 1px solid var(--rule); background: var(--paper-2);" {
             div.ed-art-eyebrow {
@@ -77,19 +87,19 @@ pub(crate) fn render_delivery_tab(
                         }
                     }
                 }
-            } @else if !pending_deploy_known {
+            } @else if !delivery_history_known {
                 div style="margin-top: 8px; font-family: var(--serif); font-size: 13px; line-height: 1.6; color: var(--ink);" {
                     b { (crate::i18n::tr(lang, "Application is not confirmed.", "Применение не подтверждено.")) }
                     " "
                     (crate::i18n::tr(
                         lang,
-                        "The deployment audit could not be read, so this page cannot promise the link is live. Deploy the user's servers, then reload.",
-                        "Журнал деплоя не читается, поэтому страница не может обещать, что ссылка уже работает. Задеплой серверы пользователя и перезагрузи страницу.",
+                        "The deployment history could not be read. Reload this page to check again before sharing the link.",
+                        "Не удалось прочитать историю деплоя. Обновите страницу, чтобы повторить проверку перед выдачей ссылки.",
                     ))
                     div style="margin-top: 10px;" {
                         a class="ed-abtn ed-abtn--secondary ed-abtn--sm"
-                          href=(format!("/admin/users/{}/access", path_segment_encode(&user.id.0))) {
-                            (icon("server")) (crate::i18n::tr(lang, "review access", "проверить доступ"))
+                          href=(format!("/admin/users/{}/delivery", path_segment_encode(&user.id.0))) {
+                            (crate::i18n::tr(lang, "Check again", "Проверить ещё раз"))
                         }
                     }
                 }
@@ -120,7 +130,9 @@ pub(crate) fn render_delivery_tab(
                         }
                     }
                 }
-            } @else if !has_renderable_grants {
+            } @else if !has_applied {
+                b { (crate::i18n::tr(lang, "Deployment is not confirmed.", "Деплой не подтверждён.")) }
+            } @else if !has_renderable_applied_grants {
                 div style="margin-top: 8px; font-family: var(--serif); font-size: 13px; line-height: 1.6; color: var(--ink);" {
                     b { (crate::i18n::tr(lang, "No renderable protocol is delivered on an applied node yet.", "Подписка пока пуста.")) }
                     " "
@@ -241,6 +253,23 @@ pub(crate) fn render_delivery_tab(
                             ". Чтобы применить доступ, запустите деплой ожидающих серверов.",
                         ))
                     }
+                }
+            }
+            @if !user.disabled && delivery_history_known && !unconfirmed.is_empty() {
+                div style="margin-top: 10px;" {
+                    (icon("triangle-alert")) " "
+                    (crate::i18n::tr(lang, "Deployment is not confirmed on:", "Применение доступа пользователя не подтверждено на серверах:")) " "
+                    @for (index, sid) in unconfirmed.iter().enumerate() {
+                        @if index > 0 { ", " }
+                        a href=(format!("/admin/servers/{}#deploy-button", path_segment_encode(&sid.0))) {
+                            (crate::handlers::admin::helpers::named_server(sid, names))
+                        }
+                    }
+                    (crate::i18n::tr(
+                        lang,
+                        ". Open the server and deploy the configuration to apply this user’s access.",
+                        ". Чтобы применить доступ пользователя, откройте сервер и запустите деплой.",
+                    ))
                 }
             }
         }
