@@ -17,6 +17,10 @@ const PROMPT: &str = "Operate the VPNRouter application to fulfill the user's go
     Press, select and expand take no value. Do not repeat the previous control in the same state. \
     When the state shows the goal is complete, return {\"operation\":\"finish\"}. \
     When no listed control can make progress or the intent is unclear, return {\"operation\":\"clarify\"}.";
+const CRASH_PROMPT: &str = "Analyze the supplied VPNRouter crash evidence. Reply in the requested locale. \
+    The area and log signal are hints, not proof of root cause. State what the evidence supports and give \
+    one practical next step. Do not claim to have applied a change. Return only the JSON object \
+    {\"operation\":\"diagnosis\",\"summary\":\"...\"}. In summary use one short sentence on one line. +    Maximum 140 characters including spaces.";
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -46,6 +50,54 @@ struct Control {
 }
 
 #[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CrashFault {
+    Unknown,
+    NullReference,
+    InvalidOperation,
+    Io,
+    AccessDenied,
+    OutOfMemory,
+    Network,
+    Configuration,
+    Native,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CrashArea {
+    Unknown,
+    Ui,
+    Startup,
+    Routing,
+    Settings,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CrashSignal {
+    None,
+    ProxyUnreachable,
+    TunBusy,
+    StopUnconfirmed,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CrashEvidence {
+    fatal: bool,
+    fault: CrashFault,
+    area: CrashArea,
+    signal: CrashSignal,
+}
+
+fn read_crash_evidence<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<CrashEvidence>, D::Error> {
+    CrashEvidence::deserialize(deserializer).map(Some)
+}
+
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct StepRequest {
     schema: u8,
@@ -57,6 +109,12 @@ struct StepRequest {
     controls: Vec<Control>,
     #[serde(skip_serializing_if = "Option::is_none")]
     previous: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "read_crash_evidence",
+        skip_serializing_if = "Option::is_none"
+    )]
+    crash: Option<CrashEvidence>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -86,6 +144,9 @@ enum Step {
     },
     Finish {},
     Clarify {},
+    Diagnosis {
+        summary: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -119,6 +180,7 @@ impl StepRequest {
         self.schema == 2
             && (1..=768).contains(&self.goal.trim().len())
             && safe_text(&self.goal, credential)
+            && (self.crash.is_none() || (self.controls.is_empty() && self.previous.is_none()))
             && self
                 .previous
                 .as_deref()
@@ -133,8 +195,13 @@ impl StepRequest {
     }
 
     fn permits(&self, step: &Step, credential: &str) -> bool {
+        if self.crash.is_some() {
+            return matches!(step, Step::Diagnosis { summary } if
+                (1..=384).contains(&summary.len()) && safe_text(summary, credential)
+                    && !summary.chars().any(char::is_control));
+        }
         let Step::Act { id, value } = step else {
-            return true;
+            return matches!(step, Step::Finish {} | Step::Clarify {});
         };
         let Some(control) = self.controls.iter().find(|control| control.id == *id) else {
             return false;
@@ -173,17 +240,28 @@ pub(super) async fn step(
     limit_account(&state, b"vpnrouter:assistant:user", &user_id)?;
 
     let report = serde_json::to_string(&input).map_err(|_| ApiError::InvalidReport)?;
-    let request = gateway.chat_request(PROMPT, &report, "VPNRouter-Assistant/2.0");
+    let prompt = if input.crash.is_some() {
+        CRASH_PROMPT
+    } else {
+        PROMPT
+    };
+    let request = gateway.chat_request(prompt, &report, "VPNRouter-Assistant/2.0");
     let bytes = gateway.complete(request).await?;
     let payload: Value = serde_json::from_slice(&bytes).map_err(|_| ApiError::Gateway)?;
     let content = gateway.content(&payload, &credential)?;
-    let result: Step = serde_json::from_str(content).map_err(|_| ApiError::Gateway)?;
-    if let Step::Act {
-        value: Some(ActionValue::Text(value)),
-        ..
-    } = &result
-        && gateway.contains_secret(value, &credential)
-    {
+    let mut result: Step = serde_json::from_str(content).map_err(|_| ApiError::Gateway)?;
+    let text = match &mut result {
+        Step::Act {
+            value: Some(ActionValue::Text(value)),
+            ..
+        } => Some(value.as_str()),
+        Step::Diagnosis { summary } => {
+            *summary = summary.trim().to_owned();
+            Some(summary.as_str())
+        }
+        _ => None,
+    };
+    if text.is_some_and(|value| gateway.contains_secret(value, &credential)) {
         return Err(ApiError::Gateway);
     }
     if !input.permits(&result, &credential) {

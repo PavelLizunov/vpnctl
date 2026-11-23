@@ -838,3 +838,398 @@ async fn step_does_not_echo_an_escaped_gateway_credential() {
     assert!(!response_text(response).await.contains(GATEWAY_KEY));
     assert!(upstream.requests.try_recv().is_ok());
 }
+
+fn crash_observation() -> Value {
+    json!({
+        "fatal": true,
+        "fault": "null_reference",
+        "area": "startup",
+        "signal": "none"
+    })
+}
+
+fn crash_step_body() -> Value {
+    let mut body = step_body();
+    body["controls"] = json!([]);
+    body["crash"] = crash_observation();
+    body
+}
+
+fn diagnosis_reply(summary: &str) -> Value {
+    json!({"operation": "diagnosis", "summary": summary})
+}
+
+async fn step_model_reply(body: Value, reply: Value, status: StatusCode) -> String {
+    let (upstream, gateway) = Upstream::start(StatusCode::OK, completion(&reply)).await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let user = fixture.user(0xe8, false).await;
+    let [_, (identity, credential)] = credentials(&user);
+    let response = fixture
+        .send(request_at(
+            STEP_PATH,
+            identity,
+            credential,
+            body.to_string(),
+        ))
+        .await;
+    assert_eq!(response.status(), status, "model reply: {reply}");
+    assert_no_store(&response);
+    let text = response_text(response).await;
+    assert!(!text.contains(credential));
+    assert!(!text.contains(GATEWAY_KEY));
+    assert_eq!(upstream.requests.try_iter().count(), 1);
+    text
+}
+
+async fn assert_crash_step_bad_request(case: &str, body: Value) {
+    let (upstream, gateway) = Upstream::start(
+        StatusCode::OK,
+        completion(&diagnosis_reply("Synthetic unused diagnosis.")),
+    )
+    .await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let user = fixture.user(0xe9, false).await;
+    let [_, (identity, credential)] = credentials(&user);
+    let response = fixture
+        .send(request_at(
+            STEP_PATH,
+            identity,
+            credential,
+            body.to_string(),
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{case}");
+    assert_no_store(&response);
+    let text = response_text(response).await;
+    assert!(!text.contains(credential));
+    assert!(!text.contains(GATEWAY_KEY));
+    assert!(upstream.requests.try_recv().is_err(), "{case}");
+}
+
+#[tokio::test]
+async fn step_accepts_crash_diagnosis_for_both_identities_and_forwards_the_evidence() {
+    let summary = "The VPN service stopped after a routing failure.";
+    let reply = diagnosis_reply(summary);
+    let (upstream, gateway) = Upstream::start(StatusCode::OK, completion(&reply)).await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let user = fixture.user(0xe0, false).await;
+    let body = crash_step_body();
+    let expected = json!({"schema": 2, "result": reply});
+
+    for (identity, credential) in credentials(&user) {
+        let response = fixture
+            .send(request_at(
+                STEP_PATH,
+                identity,
+                credential,
+                body.to_string(),
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_no_store(&response);
+        let text = response_text(response).await;
+        assert!(!text.contains(credential));
+        assert!(!text.contains(GATEWAY_KEY));
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), expected);
+
+        let (headers, payload) = upstream.requests.try_recv().unwrap();
+        assert_upstream_request(&headers, &payload, &body, &user);
+    }
+    assert!(upstream.requests.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn step_accepts_every_advertised_crash_value() {
+    let summary = "Synthetic crash diagnosis.";
+    let reply = diagnosis_reply(summary);
+    let (upstream, gateway) = Upstream::start(StatusCode::OK, completion(&reply)).await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let expected = json!({"schema": 2, "result": reply});
+    let faults = [
+        "unknown",
+        "null_reference",
+        "invalid_operation",
+        "io",
+        "access_denied",
+        "out_of_memory",
+        "network",
+        "configuration",
+        "native",
+    ];
+    let areas = ["unknown", "ui", "startup", "routing", "settings"];
+    let signals = ["none", "proxy_unreachable", "tun_busy", "stop_unconfirmed"];
+    let mut cases = vec![(false, "unknown", "unknown", "none")];
+    cases.extend(faults.iter().map(|fault| (true, *fault, "unknown", "none")));
+    cases.extend(areas.iter().map(|area| (true, "unknown", *area, "none")));
+    cases.extend(
+        signals
+            .iter()
+            .map(|signal| (true, "unknown", "unknown", *signal)),
+    );
+
+    for (index, (fatal, fault, area, signal)) in cases.into_iter().enumerate() {
+        let mut body = step_body();
+        body["controls"] = json!([]);
+        body["crash"] = json!({"fatal": fatal, "fault": fault, "area": area, "signal": signal});
+        let user = fixture.user(0x200 + index as u32, false).await;
+        let [_, (identity, credential)] = credentials(&user);
+        let response = fixture
+            .send(request_at(
+                STEP_PATH,
+                identity,
+                credential,
+                body.to_string(),
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK, "{fault}/{area}/{signal}");
+        assert_no_store(&response);
+        let text = response_text(response).await;
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), expected);
+
+        let (headers, payload) = upstream.requests.try_recv().unwrap();
+        assert_upstream_request(&headers, &payload, &body, &user);
+    }
+    assert!(upstream.requests.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn step_rejects_invalid_crash_observations_before_the_model() {
+    let mut unknown_nested = crash_step_body();
+    unknown_nested["crash"]["backtrace"] = json!("synthetic-private-backtrace");
+
+    let mut unknown_fault = crash_step_body();
+    unknown_fault["crash"]["fault"] = json!("segfault");
+
+    let mut unknown_area = crash_step_body();
+    unknown_area["crash"]["area"] = json!("daemon");
+
+    let mut unknown_signal = crash_step_body();
+    unknown_signal["crash"]["signal"] = json!("stopped");
+
+    let mut uppercase_fault = crash_step_body();
+    uppercase_fault["crash"]["fault"] = json!("IO");
+
+    let mut wrong_fatal = crash_step_body();
+    wrong_fatal["crash"]["fatal"] = json!("true");
+
+    let mut missing_fatal = crash_step_body();
+    missing_fatal["crash"]
+        .as_object_mut()
+        .unwrap()
+        .remove("fatal");
+
+    let mut missing_fault = crash_step_body();
+    missing_fault["crash"]
+        .as_object_mut()
+        .unwrap()
+        .remove("fault");
+
+    let mut missing_area = crash_step_body();
+    missing_area["crash"]
+        .as_object_mut()
+        .unwrap()
+        .remove("area");
+
+    let mut missing_signal = crash_step_body();
+    missing_signal["crash"]
+        .as_object_mut()
+        .unwrap()
+        .remove("signal");
+
+    let mut scalar_crash = step_body();
+    scalar_crash["controls"] = json!([]);
+    scalar_crash["crash"] = json!(true);
+
+    let mut non_empty_controls = step_body();
+    non_empty_controls["crash"] = crash_observation();
+
+    let mut crash_with_previous = crash_step_body();
+    crash_with_previous["previous"] = json!("SettingsMenu");
+
+    let mut missing_controls = crash_step_body();
+    missing_controls.as_object_mut().unwrap().remove("controls");
+
+    for (case, body) in [
+        ("unknown nested field", unknown_nested),
+        ("unknown fault", unknown_fault),
+        ("unknown area", unknown_area),
+        ("unknown signal", unknown_signal),
+        ("case-sensitive fault", uppercase_fault),
+        ("wrong fatal type", wrong_fatal),
+        ("missing fatal", missing_fatal),
+        ("missing fault", missing_fault),
+        ("missing area", missing_area),
+        ("missing signal", missing_signal),
+        ("scalar crash", scalar_crash),
+        ("non-empty controls", non_empty_controls),
+        ("previous with crash", crash_with_previous),
+        ("missing controls", missing_controls),
+    ] {
+        assert_crash_step_bad_request(case, body).await;
+    }
+}
+
+#[tokio::test]
+async fn step_rejects_diagnosis_without_crash_evidence() {
+    step_model_reply(
+        step_body(),
+        diagnosis_reply("Synthetic uncorroborated diagnosis."),
+        StatusCode::BAD_GATEWAY,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn step_rejects_non_diagnosis_replies_with_crash_evidence() {
+    for reply in [
+        json!({"operation": "act", "id": 1}),
+        json!({"operation": "act", "id": 2, "value": true}),
+        json!({"operation": "finish"}),
+        json!({"operation": "clarify"}),
+    ] {
+        step_model_reply(crash_step_body(), reply, StatusCode::BAD_GATEWAY).await;
+    }
+}
+
+#[tokio::test]
+async fn step_accepts_diagnosis_summary_within_the_byte_bound() {
+    for summary in ["a".to_string(), "a".repeat(384), "\u{e9}".repeat(192)] {
+        let text =
+            step_model_reply(crash_step_body(), diagnosis_reply(&summary), StatusCode::OK).await;
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap(),
+            json!({"schema": 2, "result": {"operation": "diagnosis", "summary": summary}})
+        );
+    }
+}
+
+#[tokio::test]
+async fn step_rejects_invalid_diagnosis_summaries() {
+    let long_utf8 = format!("{}a", "\u{e9}".repeat(192));
+    assert_eq!(long_utf8.len(), 385);
+
+    for summary in [
+        String::new(),
+        " \t\n ".to_string(),
+        "a".repeat(385),
+        long_utf8,
+        "diagnosis\u{0007}synthetic".to_string(),
+        "diagnosis\nsynthetic".to_string(),
+        "\u{202e}diagnosis".to_string(),
+    ] {
+        step_model_reply(
+            crash_step_body(),
+            diagnosis_reply(&summary),
+            StatusCode::BAD_GATEWAY,
+        )
+        .await;
+    }
+
+    for reply in [
+        json!({"operation": "diagnosis"}),
+        json!({"operation": "diagnosis", "summary": 7}),
+        json!({"operation": "diagnosis", "summary": "Synthetic.", "fatal": true}),
+        json!({"operation": "diagnosis", "summary": "Synthetic.", "extra": "synthetic"}),
+    ] {
+        step_model_reply(crash_step_body(), reply, StatusCode::BAD_GATEWAY).await;
+    }
+}
+
+#[tokio::test]
+async fn step_diagnosis_summary_cannot_echo_account_credentials() {
+    for (index, number) in [0xe9_u32, 0xea].into_iter().enumerate() {
+        let subscription = format!("synthetic-vpnrouter-subscription_{number}");
+        let device = format!("{number:032x}");
+        let summary = if index == 0 {
+            format!("Synthetic diagnosis for {subscription}.")
+        } else {
+            format!("Synthetic diagnosis for {device}.")
+        };
+        let (upstream, gateway) =
+            Upstream::start(StatusCode::OK, completion(&diagnosis_reply(&summary))).await;
+        let fixture = Fixture::new(Some(gateway)).await;
+        let user = fixture.user(number, false).await;
+        let [subscription_pair, device_pair] = credentials(&user);
+        let (identity, credential) = if index == 0 {
+            subscription_pair
+        } else {
+            device_pair
+        };
+
+        let response = fixture
+            .send(request_at(
+                STEP_PATH,
+                identity,
+                credential,
+                crash_step_body().to_string(),
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{summary}");
+        assert_no_store(&response);
+        let text = response_text(response).await;
+        assert!(!text.contains(summary.as_str()));
+        assert!(!text.contains(subscription.as_str()));
+        assert!(!text.contains(device.as_str()));
+        assert!(!text.contains(credential));
+        assert!(!text.contains(GATEWAY_KEY));
+        assert_eq!(upstream.requests.try_iter().count(), 1);
+    }
+}
+
+#[tokio::test]
+async fn step_diagnosis_summary_cannot_echo_the_gateway_credential() {
+    let summary = format!("Synthetic diagnosis for {GATEWAY_KEY}.");
+    let text = step_model_reply(
+        crash_step_body(),
+        diagnosis_reply(&summary),
+        StatusCode::BAD_GATEWAY,
+    )
+    .await;
+    assert!(!text.contains(GATEWAY_KEY));
+}
+
+#[tokio::test]
+async fn step_diagnosis_summary_cannot_hide_the_gateway_credential() {
+    let secret = format!(
+        r"\u{:04x}{}",
+        u32::from(GATEWAY_KEY.as_bytes()[0]),
+        &GATEWAY_KEY[1..]
+    );
+    let content = format!(r#"{{"operation":"diagnosis","summary":"{secret}"}}"#);
+    let (upstream, gateway) = Upstream::start(
+        StatusCode::OK,
+        json!({"choices": [{"message": {"content": content}}]}),
+    )
+    .await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let user = fixture.user(0xeb, false).await;
+    let [_, (identity, credential)] = credentials(&user);
+    let response = fixture
+        .send(request_at(
+            STEP_PATH,
+            identity,
+            credential,
+            crash_step_body().to_string(),
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_no_store(&response);
+    assert!(!response_text(response).await.contains(GATEWAY_KEY));
+    assert_eq!(upstream.requests.try_iter().count(), 1);
+}
+
+#[tokio::test]
+async fn step_keeps_existing_actions_without_crash_evidence() {
+    for reply in [
+        json!({"operation": "act", "id": 1}),
+        json!({"operation": "finish"}),
+        json!({"operation": "clarify"}),
+    ] {
+        let body = step_body();
+        let text = step_model_reply(body, reply.clone(), StatusCode::OK).await;
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap(),
+            json!({"schema": 2, "result": reply})
+        );
+    }
+}

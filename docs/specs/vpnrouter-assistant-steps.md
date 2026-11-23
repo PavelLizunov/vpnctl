@@ -40,3 +40,23 @@ action IDs, unexpected fields or wrong value types return 502. Terminal
 model operations are the exact objects `{"operation":"finish"}` and
 `{"operation":"clarify"}`. The desktop holds the control handles and checks
 the window again before executing the reply.
+
+For an explicitly requested crash analysis, the desktop sends the same
+envelope with empty controls, no previous action, and an additional
+`crash` object:
+
+```json
+{"fatal":true,"fault":"invalid_operation","area":"startup","signal":"tun_busy"}
+```
+
+The allowed faults are `unknown`, `null_reference`, `invalid_operation`,
+`io`, `access_denied`, `out_of_memory`, `network`, `configuration`, and
+`native`. Areas are `unknown`, `ui`, `startup`, `routing`, and `settings`.
+Signals are `none`, `proxy_unreachable`, `tun_busy`, and `stop_unconfirmed`.
+All four fields are required. The gateway rejects other fields and codes.
+The original report and raw log messages stay on the device.
+
+The only permitted result for this request is
+`{"operation":"diagnosis","summary":"..."}`. The summary is 1 to 384 UTF-8
+bytes after trimming and permits no control or bidirectional formatting
+characters or credential echoes. Other requests cannot return a diagnosis.
