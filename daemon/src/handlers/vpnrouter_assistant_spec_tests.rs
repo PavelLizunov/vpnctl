@@ -17,6 +17,7 @@ use super::vpnrouter_assistant::router;
 
 const IDENTITY: &str = "x-vpnctl-identity";
 const PATH: &str = "/api/v1/assistant/vpnrouter/plan";
+const STEP_PATH: &str = "/api/v1/assistant/vpnrouter/step";
 const MODEL: &str = "synthetic-vpnrouter-model";
 const GATEWAY_KEY: &str = "synthetic-vpnrouter-server-key";
 
@@ -126,7 +127,11 @@ fn credentials(user: &User) -> [(&str, &str); 2] {
 }
 
 fn request(identity: &str, credential: &str, body: String) -> Request<Body> {
-    Request::post(PATH)
+    request_at(PATH, identity, credential, body)
+}
+
+fn request_at(path: &str, identity: &str, credential: &str, body: String) -> Request<Body> {
+    Request::post(path)
         .header(CONTENT_TYPE, "application/json")
         .header(AUTHORIZATION, format!("Bearer {credential}"))
         .header(IDENTITY, identity)
@@ -539,4 +544,297 @@ async fn a_valid_request_without_a_gateway_is_unavailable() {
     let text = response_text(response).await;
     assert!(!text.contains(credential));
     assert!(!text.contains(GATEWAY_KEY));
+}
+
+fn step_body() -> Value {
+    json!({
+        "schema": 2,
+        "locale": "en",
+        "goal": "Enable VPN",
+        "connected": false,
+        "busy": false,
+        "simple": true,
+        "controls": [
+            {"id": 1, "name": "SmpToggleConnectCommand", "kind": "press"},
+            {"id": 2, "name": "ChangeMode", "kind": "toggle", "active": false},
+            {"id": 3, "name": "ServerRow", "kind": "select", "active": false},
+            {"id": 4, "name": "SearchField", "kind": "text"},
+            {"id": 32, "name": "SettingsMenu", "kind": "expand"}
+        ]
+    })
+}
+
+#[tokio::test]
+async fn step_requires_an_enabled_subscription_or_device_identity() {
+    let (upstream, gateway) =
+        Upstream::start(StatusCode::OK, completion(&json!({"operation": "finish"}))).await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let disabled = fixture.user(0xd1, true).await;
+    let body = step_body().to_string();
+    for (identity, credential) in credentials(&disabled) {
+        let response = fixture
+            .send(request_at(STEP_PATH, identity, credential, body.clone()))
+            .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_no_store(&response);
+
+        let mut missing = request_at(STEP_PATH, identity, credential, body.clone());
+        missing.headers_mut().remove(AUTHORIZATION);
+        let response = fixture.send(missing).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_no_store(&response);
+    }
+    assert!(upstream.requests.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn step_forwards_only_the_public_request_and_returns_a_typed_action_for_both_identities() {
+    let action = json!({"operation": "act", "id": 2, "value": true});
+    let (upstream, gateway) = Upstream::start(StatusCode::OK, completion(&action)).await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let user = fixture.user(0xd2, false).await;
+    let mut body = step_body();
+    body["goal"] = json!("Change the mode");
+    body["controls"] = json!([{"id": 2, "name": "ChangeMode", "kind": "toggle", "active": false}]);
+    body["previous"] = json!("SettingsMenu");
+    for (identity, credential) in credentials(&user) {
+        let response = fixture
+            .send(request_at(
+                STEP_PATH,
+                identity,
+                credential,
+                body.to_string(),
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_no_store(&response);
+        let text = response_text(response).await;
+        assert!(!text.contains(credential));
+        assert!(!text.contains(GATEWAY_KEY));
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap(),
+            json!({"schema": 2, "result": action})
+        );
+
+        let (headers, payload) = upstream.requests.try_recv().unwrap();
+        assert_upstream_request(&headers, &payload, &body, &user);
+    }
+    assert!(upstream.requests.try_recv().is_err());
+}
+
+async fn assert_step_result(action: Value, status: StatusCode) {
+    let (upstream, gateway) = Upstream::start(StatusCode::OK, completion(&action)).await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let user = fixture.user(0xd3, false).await;
+    let [_, (identity, credential)] = credentials(&user);
+    let response = fixture
+        .send(request_at(
+            STEP_PATH,
+            identity,
+            credential,
+            step_body().to_string(),
+        ))
+        .await;
+    assert_eq!(response.status(), status, "model reply: {action}");
+    assert_no_store(&response);
+    let text = response_text(response).await;
+    assert!(!text.contains(credential));
+    assert!(!text.contains(GATEWAY_KEY));
+    if status == StatusCode::OK {
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap(),
+            json!({"schema": 2, "result": action})
+        );
+    }
+    assert_eq!(upstream.requests.try_iter().count(), 1);
+}
+
+#[tokio::test]
+async fn step_accepts_the_advertised_action_types_and_exact_terminal_replies() {
+    for reply in [
+        json!({"operation": "act", "id": 1}),
+        json!({"operation": "act", "id": 2, "value": false}),
+        json!({"operation": "act", "id": 3}),
+        json!({"operation": "act", "id": 4, "value": "\u{e9}".repeat(192)}),
+        json!({"operation": "act", "id": 32}),
+        json!({"operation": "finish"}),
+        json!({"operation": "clarify"}),
+    ] {
+        assert_step_result(reply, StatusCode::OK).await;
+    }
+}
+
+#[tokio::test]
+async fn step_rejects_unadvertised_controls_and_invalid_action_values() {
+    for reply in [
+        json!({"operation": "act", "id": 31}),
+        json!({"operation": "act", "id": 1, "value": true}),
+        json!({"operation": "act", "id": 1, "value": null}),
+        json!({"operation": "act", "id": 2}),
+        json!({"operation": "act", "id": 2, "value": "true"}),
+        json!({"operation": "act", "id": 3, "value": false}),
+        json!({"operation": "act", "id": 4, "value": false}),
+        json!({"operation": "act", "id": 4, "value": "\u{e9}".repeat(193)}),
+        json!({"operation": "act", "id": 4, "value": "\ttext"}),
+        json!({"operation": "act", "id": 4, "value": "\u{202e}text"}),
+        json!({"operation": "act", "id": 32, "value": 1}),
+        json!({"operation": "act", "id": "1"}),
+        json!({"operation": "act", "id": 1, "target": "another-control"}),
+        json!({"operation": "finish", "id": 1}),
+        json!({"operation": "clarify", "reason": "unknown-control"}),
+        json!({"operation": "route_only_app"}),
+    ] {
+        assert_step_result(reply, StatusCode::BAD_GATEWAY).await;
+    }
+}
+
+#[tokio::test]
+async fn step_checks_the_inventory_before_forwarding_and_keeps_v1_on_plan() {
+    let (upstream, gateway) =
+        Upstream::start(StatusCode::OK, completion(&json!({"operation": "finish"}))).await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let user = fixture.user(0xd4, false).await;
+    let [(identity, credential), _] = credentials(&user);
+
+    for (path, body) in [
+        (STEP_PATH, plan_body("en", "Enable VPN", true)),
+        (PATH, step_body()),
+    ] {
+        let response = fixture
+            .send(request_at(path, identity, credential, body.to_string()))
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        assert_no_store(&response);
+    }
+
+    for (field, value) in [
+        ("busy", json!("false")),
+        ("previous", json!("Settings Menu")),
+        (
+            "raw_fields",
+            json!({"SearchField": "synthetic-private-text"}),
+        ),
+    ] {
+        let mut body = step_body();
+        body[field] = value;
+        let response = fixture
+            .send(request_at(
+                STEP_PATH,
+                identity,
+                credential,
+                body.to_string(),
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{field}");
+        assert_no_store(&response);
+    }
+
+    for (field, value) in [
+        ("id", json!(0)),
+        ("id", json!(2)),
+        ("id", json!(33)),
+        ("kind", json!("unadvertised-kind")),
+        ("name", json!("")),
+        ("name", json!("a".repeat(73))),
+        ("name", json!("settings/menu")),
+        ("value", json!("synthetic-private-field-text")),
+    ] {
+        let mut body = step_body();
+        body["controls"][0][field] = value;
+        let response = fixture
+            .send(request_at(
+                STEP_PATH,
+                identity,
+                credential,
+                body.to_string(),
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{field}");
+        assert_no_store(&response);
+    }
+
+    assert!(upstream.requests.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn step_body_limit_is_exactly_2048_bytes() {
+    let (upstream, gateway) =
+        Upstream::start(StatusCode::OK, completion(&json!({"operation": "finish"}))).await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let user = fixture.user(0xd5, false).await;
+    let [(identity, credential), _] = credentials(&user);
+    let compact = step_body().to_string();
+    assert!(compact.len() < 2048);
+
+    for (length, status) in [
+        (2048, StatusCode::OK),
+        (2049, StatusCode::PAYLOAD_TOO_LARGE),
+    ] {
+        let body = format!("{compact:<length$}");
+        assert_eq!(body.len(), length);
+        let response = fixture
+            .send(request_at(STEP_PATH, identity, credential, body))
+            .await;
+        assert_eq!(response.status(), status);
+        assert_no_store(&response);
+    }
+    assert_eq!(upstream.requests.try_iter().count(), 1);
+}
+
+#[tokio::test]
+async fn step_and_plan_share_the_account_quota_across_identity_forms() {
+    let (upstream, gateway) =
+        Upstream::start(StatusCode::OK, completion(&json!({"operation": "finish"}))).await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let user = fixture.user(0xd6, false).await;
+    let [(subscription, token), (device, device_id)] = credentials(&user);
+    let body = step_body();
+    for _ in 0..6 {
+        let response = fixture
+            .send(request_at(STEP_PATH, device, device_id, body.to_string()))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let response = fixture
+        .send(request(
+            subscription,
+            token,
+            plan_body("en", "Enable VPN", true).to_string(),
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_no_store(&response);
+    assert!(response.headers().contains_key(RETRY_AFTER));
+    assert_eq!(upstream.requests.try_iter().count(), 6);
+}
+
+#[tokio::test]
+async fn step_does_not_echo_an_escaped_gateway_credential() {
+    let secret = format!(
+        r"\u{:04x}{}",
+        u32::from(GATEWAY_KEY.as_bytes()[0]),
+        &GATEWAY_KEY[1..]
+    );
+    let content = format!(r#"{{"operation":"act","id":4,"value":"{secret}"}}"#);
+    let (upstream, gateway) = Upstream::start(
+        StatusCode::OK,
+        json!({"choices": [{"message": {"content": content}}]}),
+    )
+    .await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let user = fixture.user(0xdf, false).await;
+    let [(identity, credential), _] = credentials(&user);
+    let response = fixture
+        .send(request_at(
+            STEP_PATH,
+            identity,
+            credential,
+            step_body().to_string(),
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_no_store(&response);
+    assert!(!response_text(response).await.contains(GATEWAY_KEY));
+    assert!(upstream.requests.try_recv().is_ok());
 }

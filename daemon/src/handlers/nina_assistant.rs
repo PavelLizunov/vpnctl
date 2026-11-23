@@ -212,13 +212,14 @@ impl Gateway {
             .as_str()
             .ok_or(ApiError::Gateway)?
             .trim();
-        if explanation.is_empty()
-            || (credential.len() >= 8 && explanation.contains(credential))
-            || explanation.contains(self.key.as_str())
-        {
+        if explanation.is_empty() || self.contains_secret(explanation, credential) {
             return Err(ApiError::Gateway);
         }
         Ok(explanation)
+    }
+
+    pub(super) fn contains_secret(&self, text: &str, credential: &str) -> bool {
+        (credential.len() >= 8 && text.contains(credential)) || text.contains(self.key.as_str())
     }
 }
 

@@ -79,7 +79,13 @@ pub(crate) fn from_env() -> Router<AppState> {
 }
 
 pub(super) fn router(gateway: Option<Gateway>) -> Router<AppState> {
-    configure_route(Router::new().route(PATH, post(plan)), gateway)
+    configure_route(
+        Router::new().route(PATH, post(plan)).route(
+            super::vpnrouter_assistant_step::PATH,
+            post(super::vpnrouter_assistant_step::step),
+        ),
+        gateway,
+    )
 }
 
 async fn plan(
