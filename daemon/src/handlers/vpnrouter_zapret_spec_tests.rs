@@ -121,7 +121,7 @@ impl Drop for Upstream {
     }
 }
 
-fn pick_body(target: &str, candidates: &[&str], attempts: Value) -> Value {
+fn pick_body(target: &str, candidates: &[&str], attempts: &Value) -> Value {
     json!({"schema": 1, "target": target, "candidates": candidates, "attempts": attempts})
 }
 
@@ -183,7 +183,7 @@ async fn both_identities_reach_the_gateway_with_only_the_typed_pick_request() {
         ],
         attempts,
     );
-    let youtube_body = pick_body("youtube_media", &["safe"], json!([]));
+    let youtube_body = pick_body("youtube_media", &["safe"], &json!([]));
 
     for ((identity, credential), body, profile) in [
         (subscription, discord_body, json!("fragment-2")),
@@ -236,7 +236,7 @@ async fn both_identities_reach_the_gateway_with_only_the_typed_pick_request() {
 async fn malformed_pick_requests_are_rejected_before_the_gateway() {
     let upstream = Upstream::start([]).await;
     let fixture = Fixture::new(Some(&upstream)).await;
-    let valid = pick_body("discord_gateway", &["safe"], json!([]));
+    let valid = pick_body("discord_gateway", &["safe"], &json!([]));
     let mut cases = Vec::new();
     for (case, key, value) in [
         ("unsupported schema", "schema", json!(2)),
@@ -304,7 +304,7 @@ async fn malformed_pick_requests_are_rejected_before_the_gateway() {
         "façade",
         "abcdefghijklmnopqrstuvwxyz0123456",
     ] {
-        let body = pick_body("discord_gateway", &[id], json!([]));
+        let body = pick_body("discord_gateway", &[id], &json!([]));
         cases.push(("invalid candidate profile", body.to_string()));
     }
     cases.extend([
@@ -333,11 +333,11 @@ async fn a_profile_id_cannot_carry_the_callers_credential() {
 
     for (identity, credential) in credentials(&user) {
         for body in [
-            pick_body("discord_gateway", &[credential], json!([])),
+            pick_body("discord_gateway", &[credential], &json!([])),
             pick_body(
                 "discord_gateway",
                 &["safe"],
-                json!([attempt(credential, false, true)]),
+                &json!([attempt(credential, false, true)]),
             ),
         ] {
             let response = fixture
@@ -368,7 +368,7 @@ async fn the_gateway_must_return_one_explicit_choice_from_the_remaining_candidat
     let body = pick_body(
         "youtube_media",
         &["safe"],
-        json!([attempt("already-tried", false, true)]),
+        &json!([attempt("already-tried", false, true)]),
     )
     .to_string();
 
@@ -390,7 +390,7 @@ async fn authorization_rejects_unknown_and_disabled_identities() {
     let upstream = Upstream::start([]).await;
     let fixture = Fixture::new(Some(&upstream)).await;
     let user = fixture.user(1, true).await;
-    let body = pick_body("discord_gateway", &["safe"], json!([])).to_string();
+    let body = pick_body("discord_gateway", &["safe"], &json!([])).to_string();
     let [subscription, device] = credentials(&user);
 
     for ((identity, credential), expected) in [
@@ -421,7 +421,7 @@ async fn accepts_exactly_2048_request_bytes_and_rejects_one_more() {
     let fixture = Fixture::new(Some(&upstream)).await;
     let user = fixture.user(1, false).await;
     let [(identity, credential), _] = credentials(&user);
-    let mut body = pick_body("discord_gateway", &["safe"], json!([])).to_string();
+    let mut body = pick_body("discord_gateway", &["safe"], &json!([])).to_string();
     body.push_str(&" ".repeat(2048 - body.len()));
 
     let response = fixture
@@ -448,7 +448,7 @@ async fn account_quota_is_shared_by_credentials_and_independent_of_the_plan_rout
     let fixture = Fixture::new(Some(&upstream)).await;
     let user = fixture.user(1, false).await;
     let identities = credentials(&user);
-    let body = pick_body("discord_gateway", &["safe"], json!([])).to_string();
+    let body = pick_body("discord_gateway", &["safe"], &json!([])).to_string();
 
     for (identity, credential) in identities.into_iter().cycle().take(6) {
         let response = fixture
