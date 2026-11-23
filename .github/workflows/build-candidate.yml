@@ -1,27 +1,134 @@
-name: VPNRouter assistant gateway verification
+name: VPNRouter assistant full gateway checks
+
 on:
   workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact gateway commit
+        type: string
+        required: true
 
 permissions:
   contents: read
 
+env:
+  VPNCTL_VERIFY_SOURCE: ${{ inputs.source_sha }}
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
-  contract:
+  check:
+    name: cargo check
     runs-on: ubuntu-latest
-    timeout-minutes: 35
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - uses: actions/checkout@v5
         with:
-          ref: d6128ad3a5e5530c2421e438df8d311299427734
+          ref: ${{ inputs.source_sha }}
           persist-credentials: false
+      - name: Confirm exact source
+        run: test "$(git rev-parse HEAD)" = "$VPNCTL_VERIFY_SOURCE"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: project map is current
+        run: python3 scripts/project-map.py --check
+      - name: bundled CSS is current
+        run: python3 scripts/bundle-css.py --check
+      - name: cargo check
+        run: |
+          set +e
+          cargo check --workspace --all-targets
+          status=$?
+          echo "cargo check --workspace --all-targets exit_code=$status"
+          exit "$status"
+
+  fmt:
+    name: cargo fmt --check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Confirm exact source
+        run: test "$(git rev-parse HEAD)" = "$VPNCTL_VERIFY_SOURCE"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - name: Check revision, inventory and formatting
-        run: |
-          test "$(git rev-parse HEAD)" = d6128ad3a5e5530c2421e438df8d311299427734
-          python3 scripts/project-map.py --check
+      - run: |
+          set +e
           cargo fmt --all -- --check
-      - name: Exercise v1 planning and the new step contract
-        run: cargo test --locked -p vpnctld --lib vpnrouter_assistant_spec_tests
+          status=$?
+          echo "cargo fmt --all -- --check exit_code=$status"
+          exit "$status"
+
+  clippy:
+    name: cargo clippy -D warnings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Confirm exact source
+        run: test "$(git rev-parse HEAD)" = "$VPNCTL_VERIFY_SOURCE"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          set +e
+          cargo clippy --workspace --all-targets -- -D warnings
+          status=$?
+          echo "cargo clippy --workspace --all-targets -- -D warnings exit_code=$status"
+          exit "$status"
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Confirm exact source
+        run: test "$(git rev-parse HEAD)" = "$VPNCTL_VERIFY_SOURCE"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: backup script regression tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd sqlite3
+          bash -n scripts/vpnctl-backup.sh scripts/tests/test_vpnctl_backup.sh
+          bash scripts/tests/test_vpnctl_backup.sh
+      - name: script and docs regression tests
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
+      - run: |
+          set +e
+          cargo test --workspace --all-targets
+          status=$?
+          echo "cargo test --workspace --all-targets exit_code=$status"
+          exit "$status"
+
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Confirm exact source
+        run: test "$(git rev-parse HEAD)" = "$VPNCTL_VERIFY_SOURCE"
+      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.23.0
+      - name: Verify inherited advisory coverage
+        run: python3 -m unittest discover -s scripts/tests -p 'test_date_fork_advisories.py' -v
+      - name: Audit upstream ancestry of maintained date forks
+        run: python3 scripts/audit-date-forks.py --output "$RUNNER_TEMP/date-fork-audit.lock"
+      - name: record successful deny gate
+        run: echo 'cargo deny check exit_code=0 (cargo-deny action)'
