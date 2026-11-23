@@ -622,6 +622,48 @@ async fn step_forwards_only_the_public_request_and_returns_a_typed_action_for_bo
     assert!(upstream.requests.try_recv().is_err());
 }
 
+#[tokio::test]
+async fn step_selects_action_instructions_only_when_the_desired_state_toggle_is_available() {
+    let action = json!({"operation": "act", "id": 2, "value": true});
+    let (upstream, gateway) = Upstream::start(StatusCode::OK, completion(&action)).await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let user = fixture.user(0xd2, false).await;
+    let [(identity, credential), _] = credentials(&user);
+
+    for (name, has_semantic_actions, has_route) in [
+        ("ChangeMode", false, false),
+        ("SetVpnConnected", true, false),
+        ("SetVpnConnected", true, true),
+    ] {
+        let mut body = step_body();
+        let mut controls = vec![json!({"id": 2, "name": name, "kind": "toggle", "active": false})];
+        if has_route {
+            controls.push(json!({"id": 3, "name": "RouteApplicationDirectByWindowsExecutableName", "kind": "text"}));
+        }
+        body["controls"] = json!(controls);
+        let response = fixture
+            .send(request_at(
+                STEP_PATH,
+                identity,
+                credential,
+                body.to_string(),
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let (headers, payload) = upstream.requests.try_recv().unwrap();
+        assert_upstream_request(&headers, &payload, &body, &user);
+        let instructions = payload["messages"][0]["content"].as_str().unwrap();
+        assert_eq!(
+            instructions.contains("RouteApplicationDirect"),
+            has_semantic_actions
+        );
+        assert_eq!(
+            instructions.contains("Per-app routing is unavailable in this inventory."),
+            has_semantic_actions && !has_route,
+        );
+    }
+}
+
 async fn assert_step_result(action: Value, status: StatusCode) {
     let (upstream, gateway) = Upstream::start(StatusCode::OK, completion(&action)).await;
     let fixture = Fixture::new(Some(gateway)).await;

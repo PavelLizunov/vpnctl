@@ -26,6 +26,16 @@ underscores. The inventory contains at most 32 entries. Optional
 report its optional boolean `active` state. The desktop sends no text field
 values in observations.
 
+An inventory with the `SetVpnConnected` toggle opts into instructions for
+desktop commands that accept a desired state. `RouteApplicationDirect`
+keeps unrelated app routes. `RouteOnlyApplication` sets exclusive VPN
+routing. Both take a process basename as text and are available only when
+advertised. When neither route control is advertised, the instructions
+require a clarification for a routing request. Setters take the requested
+boolean state. The desktop verifies the result locally. Inventories without
+the marker retain the original instructions. Crash diagnosis uses its own
+instructions.
+
 The gateway can return a single advertised control action.
 
 ```json
