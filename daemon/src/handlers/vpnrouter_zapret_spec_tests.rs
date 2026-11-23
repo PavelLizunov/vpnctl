@@ -181,7 +181,7 @@ async fn both_identities_reach_the_gateway_with_only_the_typed_pick_request() {
             "fragment-2",
             "safe",
         ],
-        attempts,
+        &attempts,
     );
     let youtube_body = pick_body("youtube_media", &["safe"], &json!([]));
 
