@@ -35,7 +35,7 @@ impl PollLimits {
         let now = Instant::now();
         let anonymous = matches!(
             namespace,
-            b"nodes:ip" | b"nina:ip" | b"vpnrouter:assistant:ip"
+            b"nodes:ip" | b"nina:ip" | b"vpnrouter:assistant:ip" | b"vpnrouter:assistant:zapret:ip"
         );
         let (buckets, max_buckets) = if anonymous {
             (&mut self.anonymous_ips, MAX_IP_BUCKETS)
@@ -128,17 +128,23 @@ mod tests {
     fn vpnrouter_assistant_has_isolated_ip_and_account_capacity() {
         let ip = b"vpnrouter:assistant:ip";
         let user = b"vpnrouter:assistant:user";
+        let zapret_ip = b"vpnrouter:assistant:zapret:ip";
+        let zapret_user = b"vpnrouter:assistant:zapret:user";
         assert!(std::ptr::eq(pool(ip), pool(user)));
+        assert!(std::ptr::eq(pool(zapret_ip), pool(ip)));
+        assert!(std::ptr::eq(pool(zapret_user), pool(user)));
         assert!(!std::ptr::eq(pool(ip), pool(b"nina:ip")));
         assert!(!std::ptr::eq(pool(user), pool(b"nodes:device")));
 
         let owner = Arc::new(RateLimiter::default());
         let mut limits = PollLimits::default();
         assert!(limits.acquire(&owner, ip, [1; 32], 120).is_ok());
-        assert_eq!(limits.anonymous_ips.len(), 1);
+        assert!(limits.acquire(&owner, zapret_ip, [3; 32], 120).is_ok());
+        assert_eq!(limits.anonymous_ips.len(), 2);
         assert!(limits.credentials.is_empty());
         assert!(limits.acquire(&owner, user, [2; 32], 6).is_ok());
-        assert_eq!(limits.credentials.len(), 1);
+        assert!(limits.acquire(&owner, zapret_user, [4; 32], 6).is_ok());
+        assert_eq!(limits.credentials.len(), 2);
     }
 
     #[test]

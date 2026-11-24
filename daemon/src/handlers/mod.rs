@@ -12,3 +12,5 @@ pub(crate) mod vpn_router;
 pub(crate) mod vpnrouter_assistant;
 #[cfg(test)]
 mod vpnrouter_assistant_spec_tests;
+#[cfg(test)]
+mod vpnrouter_zapret_spec_tests;
