@@ -3,6 +3,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::Response;
 use maud::{Markup, html};
+use std::collections::HashSet;
 
 use super::grant_targets;
 use super::helpers::{
@@ -118,6 +119,7 @@ fn user_row(
 pub(crate) struct UsersQuery {
     pub q: Option<String>,
     pub sort: Option<String>,
+    pub server: Option<String>,
 }
 
 pub(crate) async fn users(
@@ -134,6 +136,22 @@ pub(crate) async fn users(
         state.inv.list_fleet_servers(),
     )
     .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let server_filter = query.server.as_deref().filter(|id| !id.is_empty());
+    let selected_server =
+        server_filter.and_then(|id| fleet_servers.iter().find(|server| server.id.0 == id));
+    let server_unavailable = server_filter.is_some() && selected_server.is_none();
+    let granted_users: HashSet<_> = if let Some(server) = selected_server {
+        state
+            .inv
+            .grant_dates_for_server(&server.id)
+            .await
+            .map_err(|e| internal_error(anyhow::Error::new(e)))?
+            .into_iter()
+            .map(|(user_id, _)| user_id)
+            .collect()
+    } else {
+        HashSet::new()
+    };
     let readiness_by_server = grant_targets::read_many(&state, &fleet_servers).await;
     let grant_names = server_names(&state.inv, &fleet_servers).await?;
     let ready_grant_servers: Vec<&vpnctl_core::Server> = fleet_servers
@@ -188,6 +206,7 @@ pub(crate) async fn users(
         .unwrap_or_default();
     let mut pairs: Vec<UserListRow<'_>> = user_rows
         .iter()
+        .filter(|entry| server_filter.is_none() || granted_users.contains(&entry.user.id))
         .filter(|entry| {
             q_lower.is_empty()
                 || entry
@@ -245,15 +264,17 @@ pub(crate) async fn users(
         }),
         _ => pairs.sort_by(|a, b| a.user.id.0.cmp(&b.user.id.0)),
     }
-    let make_sort_href = |kind: &str| -> String {
-        if q_lower.is_empty() {
-            format!("/admin/users?sort={kind}")
-        } else {
-            format!(
-                "/admin/users?sort={kind}&q={}",
-                path_segment_encode(&q_lower)
-            )
+    let make_list_href = |sort: &str, search: &str, server: Option<&str>| -> String {
+        let mut href = format!("/admin/users?sort={}", path_segment_encode(sort));
+        if !search.is_empty() {
+            href.push_str("&q=");
+            href.push_str(&path_segment_encode(search));
         }
+        if let Some(id) = server {
+            href.push_str("&server=");
+            href.push_str(&path_segment_encode(id));
+        }
+        href
     };
     let total_users = user_rows.len();
     let visible_users = pairs.len();
@@ -271,7 +292,7 @@ pub(crate) async fn users(
         };
         html! {
             th class=[numeric.then_some("num")] aria-sort=(aria_sort) {
-                a href=(make_sort_href(target))
+                a href=(make_list_href(target, &q_lower, server_filter))
                   style=(if aria_sort == "none" { "display: block; color: inherit;" } else { "display: block; color: var(--ink); text-decoration: underline;" })
                   title=(crate::i18n::tr(lang, action_en, action_ru)) {
                     (label) " " (icon(arrow))
@@ -298,18 +319,40 @@ pub(crate) async fn users(
         div.ed-inbar {
             @if !user_rows.is_empty() {
                 form method="get" action="/admin/users"
-                     style="display: flex; gap: 6px; align-items: center;" {
-                    span.ed-inbar__label { (crate::i18n::tr(lang, "search", "поиск")) }
-                    input type="text" name="q" value=(q_lower)
+                     style="display: flex; flex-wrap: wrap; gap: 6px; align-items: center;" {
+                    label.ed-inbar__label for="users-search" { (crate::i18n::tr(lang, "search", "поиск")) }
+                    input id="users-search" type="text" name="q" value=(q_lower)
                           placeholder=(crate::i18n::tr(lang, "user id substring", "подстрока user id"))
                           autofocus;
+                    @if !fleet_servers.is_empty() || server_filter.is_some() {
+                        label style="display: inline-flex; align-items: center; gap: 6px; max-width: 100%;" {
+                            span.ed-inbar__label { (crate::i18n::tr(lang, "server", "сервер")) }
+                            select name="server"
+                                   style="min-width: 0; max-width: 13rem; padding: 5px 8px; border: 1px solid var(--rule-s); background: var(--paper); color: var(--ink); font: inherit;" {
+                                option value="" selected[server_filter.is_none()] { (crate::i18n::tr(lang, "All servers", "Все серверы")) }
+                                @if let Some(id) = server_filter.filter(|_| server_unavailable) {
+                                    option value=(id) selected disabled {
+                                        (crate::i18n::tr(lang, "Unavailable server", "Недоступный сервер")) " · " (id)
+                                    }
+                                }
+                                @for server in &fleet_servers {
+                                    @let id = server.id.0.as_str();
+                                    @let name = grant_names.get(&server.id).map_or(id, String::as_str);
+                                    option value=(id) selected[server_filter == Some(id)] {
+                                        (name)
+                                        @if name != id { " · " (id) }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     @if sort_kind != "id" { input type="hidden" name="sort" value=(sort_kind); }
                     button.ed-abtn.ed-abtn--secondary.ed-abtn--sm type="submit" {
-                        (icon("search")) (crate::i18n::tr(lang, "go", "ок"))
+                        (icon("search")) (crate::i18n::tr(lang, "Apply", "Применить"))
                     }
-                    @if !q_lower.is_empty() {
-                        a href=(make_sort_href(sort_kind)) style="color: var(--mute);" {
-                            (icon("x")) (crate::i18n::tr(lang, "clear", "очистить"))
+                    @if !q_lower.is_empty() || server_filter.is_some() {
+                        a href=(make_list_href(sort_kind, "", None)) style="color: var(--mute);" {
+                            (icon("x")) (crate::i18n::tr(lang, "Reset filters", "Сбросить фильтры"))
                         }
                     }
                 }
@@ -429,13 +472,11 @@ pub(crate) async fn users(
             }
         } @else if pairs.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 12px 0;" {
-                (crate::i18n::tr(lang, "No users match ", "Под фильтр не подошёл никто: "))
-                span.ed-mono { "q=" (q_lower) }
-                (crate::i18n::tr(lang, ". Loosen the search above or ", ". Расслабь поиск выше или "))
-                a href="/admin/users" style="color: var(--ink);" {
-                    (icon("x")) (crate::i18n::tr(lang, "clear it", "очисти его"))
+                @if server_unavailable {
+                    (crate::i18n::tr(lang, "The selected server is unavailable. Choose another server or reset the filters.", "Выбранный сервер недоступен. Выбери другой сервер или сбрось фильтры."))
+                } @else {
+                    (crate::i18n::tr(lang, "No users match the selected filters.", "По выбранным фильтрам пользователи не найдены."))
                 }
-                "."
             }
         } @else {
             table.ed-grid id="users-grid" {

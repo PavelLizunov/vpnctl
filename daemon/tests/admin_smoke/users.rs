@@ -168,6 +168,79 @@ async fn admin_users_renders_search_form_before_add_user_form() {
 }
 
 #[tokio::test]
+async fn admin_users_filters_by_server_grant_and_preserves_search_and_sort() {
+    use vpnctl_core::ServerId;
+    use vpnctl_inventory::ServerRole;
+
+    fn rows(html: &str) -> &str {
+        let (_, table) = html.split_once("id=\"users-grid\"").expect("users table");
+        let (_, tbody) = table.split_once("<tbody>").expect("table body");
+        tbody.split_once("</tbody>").expect("end of table body").0
+    }
+
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 3, 4, &[(0, 0), (1, 0), (1, 1), (2, 1)]).await;
+    s.inv
+        .set_server_role(&ServerId("s2".into()), ServerRole::WorkloadOnly)
+        .await
+        .unwrap();
+    s.inv
+        .set_server_display_name(&ServerId("s0".into()), Some("North & West"))
+        .await
+        .unwrap();
+    s.inv
+        .set_user_disabled(&UserId("u1".into()), true)
+        .await
+        .unwrap();
+
+    let app = router(s);
+    let html = fetch_html(app.clone(), "/admin/users?sort=id-desc&server=s0").await;
+    assert!(html.contains("name=\"server\""));
+    assert!(html.contains("<option value=\"s0\" selected>North &amp; West · s0</option>"));
+    assert!(!html.contains("<option value=\"s2\""));
+    let filtered = rows(&html);
+    assert!(
+        filtered.find(">u1<").expect("disabled grantee shown") < filtered.find(">u0<").unwrap()
+    );
+    assert!(!filtered.contains(">u2<") && !filtered.contains(">u3<"));
+    let u1_row = filtered
+        .split("</tr>")
+        .find(|row| row.contains(">u1<"))
+        .expect("u1 row");
+    assert!(u1_row.contains(r#"<td class="num"><b>2</b></td>"#));
+
+    let html = fetch_html(app.clone(), "/admin/users?sort=id-desc&q=u1&server=s0").await;
+    assert!(rows(&html).contains(">u1<") && !rows(&html).contains(">u0<"));
+    assert!(html.contains("name=\"sort\" value=\"id-desc\""));
+    assert!(html.contains("href=\"/admin/users?sort=id&amp;q=u1&amp;server=s0\""));
+    assert!(html.contains("href=\"/admin/users?sort=id-desc\""));
+
+    let html = fetch_html(app, "/admin/users?sort=id-desc&server=").await;
+    let unfiltered = rows(&html);
+    assert_eq!(unfiltered.matches("</tr>").count(), 4);
+    assert!(unfiltered.find(">u3<").unwrap() < unfiltered.find(">u0<").unwrap());
+}
+
+#[tokio::test]
+async fn admin_users_server_filter_shows_empty_and_unavailable_states() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 2, 1, &[(0, 0)]).await;
+    let app = router(s);
+
+    let html = fetch_html(app.clone(), "/admin/users?server=s1").await;
+    assert!(html.contains("No users match the selected filters."));
+    assert!(html.contains("<option value=\"s1\" selected>"));
+    assert!(!html.contains("id=\"users-grid\""));
+
+    let html = fetch_html(app, "/admin/users?server=removed%26node").await;
+    assert!(html.contains("The selected server is unavailable."));
+    assert!(html.contains("<option value=\"removed&amp;node\" selected disabled>Unavailable server · removed&amp;node</option>"));
+    assert!(!html.contains("id=\"users-grid\""));
+}
+
+#[tokio::test]
 async fn admin_user_create_happy_path() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
