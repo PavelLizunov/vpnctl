@@ -3,7 +3,8 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::Response;
 use maud::{Markup, html};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use vpnctl_core::UserId;
 
 use super::grant_targets;
 use super::helpers::{
@@ -61,6 +62,7 @@ fn user_row(
     row: &UserListRow<'_>,
     live_conns: u32,
     traffic_24h: u64,
+    traffic_server: Option<&str>,
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
@@ -69,7 +71,11 @@ fn user_row(
     let sub_token_preview = u.sub_token.as_deref().map(mask_secret);
     let uuid_preview: String = u.uuid.chars().take(8).collect();
     let detail_href = format!("/admin/users/{}", path_segment_encode(&u.id.0));
-    let traffic_href = format!("/admin/users/{}/traffic", path_segment_encode(&u.id.0));
+    let mut traffic_href = format!("/admin/users/{}/traffic", path_segment_encode(&u.id.0));
+    if let Some(server) = traffic_server {
+        traffic_href.push_str("?vpn_window=24h&vpn_server=");
+        traffic_href.push_str(&path_segment_encode(server));
+    }
     html! {
         tr class=(if live_conns > 0 { "on-green" } else { "" }) {
             td.ed-grid__mut { (format!("{:02}", idx + 1)) }
@@ -173,23 +179,31 @@ pub(crate) async fn users(
                     .map(|readiness| (server, readiness))
             })
             .collect();
-    let heavy = state
-        .inv
-        .top_users_by_traffic(24, u32::MAX)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "users list: 24h traffic query failed; column left empty");
-            Vec::new()
-        });
-    let traffic_24h: std::collections::HashMap<String, u64> = heavy
-        .into_iter()
-        .map(|h| (h.user_id.0, h.total_bytes))
-        .collect();
-    let traffic_of = |id: &str| traffic_24h.get(id).copied().unwrap_or(0);
+    let traffic_24h: HashMap<UserId, u64> = match selected_server {
+        Some(server) => state
+            .inv
+            .top_users_by_traffic_for_server(&server.id, 24, u32::MAX)
+            .await
+            .map(|rows| rows.into_iter().collect()),
+        None => state
+            .inv
+            .top_users_by_traffic(24, u32::MAX)
+            .await
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| (row.user_id, row.total_bytes))
+                    .collect()
+            }),
+    }
+    .unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "users list: 24h traffic query failed; column left empty");
+        HashMap::new()
+    });
+    let traffic_of = |id: &UserId| traffic_24h.get(id).copied().unwrap_or(0);
 
-    let mut live_conns_per_user: std::collections::HashMap<String, u32> =
-        std::collections::HashMap::new();
-    for server in &servers_list {
+    let presence_servers = selected_server.map_or(servers_list.as_slice(), std::slice::from_ref);
+    let mut live_conns_per_user: HashMap<String, u32> = HashMap::new();
+    for server in presence_servers {
         if let Some(snap) = state.snapshot_cache.get_live(&server.id) {
             for connection in &snap.snapshot.connections {
                 if let Some(user_id) = connection.metadata.user.as_deref() {
@@ -254,7 +268,7 @@ pub(crate) async fn users(
                 .then_with(|| a.user.id.0.cmp(&b.user.id.0))
         }),
         "traffic" | "traffic-asc" => pairs.sort_by(|a, b| {
-            let order = traffic_of(&a.user.id.0).cmp(&traffic_of(&b.user.id.0));
+            let order = traffic_of(&a.user.id).cmp(&traffic_of(&b.user.id));
             let order = if sort_kind == "traffic" {
                 order.reverse()
             } else {
@@ -292,7 +306,7 @@ pub(crate) async fn users(
         };
         html! {
             th class=[numeric.then_some("num")] aria-sort=(aria_sort) {
-                a href=(make_list_href(target, &q_lower, server_filter))
+                a href=(make_list_href(target, &q_lower, server_filter)) data-users-sort
                   style=(if aria_sort == "none" { "display: block; color: inherit;" } else { "display: block; color: var(--ink); text-decoration: underline;" })
                   title=(crate::i18n::tr(lang, action_en, action_ru)) {
                     (label) " " (icon(arrow))
@@ -318,48 +332,39 @@ pub(crate) async fn users(
 
         div.ed-inbar {
             @if !user_rows.is_empty() {
-                form method="get" action="/admin/users"
+                form method="get" action="/admin/users" data-users-filter
                      style="display: flex; flex-wrap: wrap; gap: 6px; align-items: center;" {
                     label.ed-inbar__label for="users-search" { (crate::i18n::tr(lang, "search", "поиск")) }
                     input id="users-search" type="text" name="q" value=(q_lower)
                           placeholder=(crate::i18n::tr(lang, "user id substring", "подстрока user id"))
                           autofocus;
-                    @if !fleet_servers.is_empty() || server_filter.is_some() {
-                        label style="display: inline-flex; align-items: center; gap: 6px; max-width: 100%;" {
-                            span.ed-inbar__label { (crate::i18n::tr(lang, "server", "сервер")) }
-                            select name="server"
-                                   style="min-width: 0; max-width: 13rem; padding: 5px 8px; border: 1px solid var(--rule-s); background: var(--paper); color: var(--ink); font: inherit;" {
-                                option value="" selected[server_filter.is_none()] { (crate::i18n::tr(lang, "All servers", "Все серверы")) }
-                                @if let Some(id) = server_filter.filter(|_| server_unavailable) {
-                                    option value=(id) selected disabled {
-                                        (crate::i18n::tr(lang, "Unavailable server", "Недоступный сервер")) " · " (id)
-                                    }
+                    label style="display: inline-flex; align-items: center; gap: 6px; max-width: 100%;" {
+                        span.ed-inbar__label { (crate::i18n::tr(lang, "server", "сервер")) }
+                        select name="server" disabled[fleet_servers.is_empty() && server_filter.is_none()]
+                               style="min-width: 0; max-width: 13rem; padding: 5px 8px; border: 1px solid var(--rule-s); background: var(--paper); color: var(--ink); font: inherit;" {
+                            option value="" selected[server_filter.is_none()] { (crate::i18n::tr(lang, "All servers", "Все серверы")) }
+                            @if let Some(id) = server_filter.filter(|_| server_unavailable) {
+                                option value=(id) selected disabled {
+                                    (crate::i18n::tr(lang, "Unavailable server", "Недоступный сервер")) " · " (id)
                                 }
-                                @for server in &fleet_servers {
-                                    @let id = server.id.0.as_str();
-                                    @let name = grant_names.get(&server.id).map_or(id, String::as_str);
-                                    option value=(id) selected[server_filter == Some(id)] {
-                                        (name)
-                                        @if name != id { " · " (id) }
-                                    }
+                            }
+                            @for server in &fleet_servers {
+                                @let id = server.id.0.as_str();
+                                @let name = grant_names.get(&server.id).map_or(id, String::as_str);
+                                option value=(id) selected[server_filter == Some(id)] {
+                                    (name)
+                                    @if name != id { " · " (id) }
                                 }
                             }
                         }
                     }
-                    @if sort_kind != "id" { input type="hidden" name="sort" value=(sort_kind); }
+                    input type="hidden" name="sort" value=(sort_kind);
                     button.ed-abtn.ed-abtn--secondary.ed-abtn--sm type="submit" {
                         (icon("search")) (crate::i18n::tr(lang, "Apply", "Применить"))
                     }
-                    @if !q_lower.is_empty() || server_filter.is_some() {
-                        a href=(make_list_href(sort_kind, "", None)) style="color: var(--mute);" {
-                            (icon("x")) (crate::i18n::tr(lang, "Reset filters", "Сбросить фильтры"))
-                        }
-                    }
-                }
-                @if visible_users != total_users {
-                    span.ed-grid__mut {
-                        (crate::i18n::tr(lang, "showing ", "показано ")) (visible_users)
-                        (crate::i18n::tr(lang, " of ", " из ")) (total_users)
+                    a href=[(!q_lower.is_empty() || server_filter.is_some()).then(|| make_list_href(sort_kind, "", None))] data-users-reset
+                      hidden[q_lower.is_empty() && server_filter.is_none()] style="color: var(--mute);" {
+                        (icon("x")) (crate::i18n::tr(lang, "Reset filters", "Сбросить фильтры"))
                     }
                 }
             }
@@ -464,52 +469,71 @@ pub(crate) async fn users(
             }
         }
 
-        @if user_rows.is_empty() {
-            p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 24px 0;" {
-                (crate::i18n::tr(lang, "No users yet. Type an id above and hit ", "Пользователей пока нет. Введи id выше и нажми "))
-                span.ed-mono { (crate::i18n::tr(lang, "create", "создать")) }
-                (crate::i18n::tr(lang, ". Then grant server access with the per-server toggles on the user's page.", ". Затем выдай доступ к серверу переключателями на странице юзера."))
-            }
-        } @else if pairs.is_empty() {
-            p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 12px 0;" {
-                @if server_unavailable {
-                    (crate::i18n::tr(lang, "The selected server is unavailable. Choose another server or reset the filters.", "Выбранный сервер недоступен. Выбери другой сервер или сбрось фильтры."))
-                } @else {
-                    (crate::i18n::tr(lang, "No users match the selected filters.", "По выбранным фильтрам пользователи не найдены."))
+        p.ed-sr-only id="users-filter-status" role="status"
+          data-users-error=(crate::i18n::tr(lang, "Could not update users. Try again.", "Не удалось обновить список. Попробуй ещё раз.")) {}
+        div id="users-results" {
+            @if user_rows.is_empty() {
+                p data-users-summary style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 24px 0;" {
+                    (crate::i18n::tr(lang, "No users yet. Type an id above and hit ", "Пользователей пока нет. Введи id выше и нажми "))
+                    span.ed-mono { (crate::i18n::tr(lang, "create", "создать")) }
+                    (crate::i18n::tr(lang, ". Then grant server access with the per-server toggles on the user's page.", ". Затем выдай доступ к серверу переключателями на странице юзера."))
                 }
-            }
-        } @else {
-            table.ed-grid id="users-grid" {
-                thead {
-                    tr {
-                        th { "№" }
-                        (sort_header(crate::i18n::tr(lang, "user", "пользователь"), "id", "id-desc", false))
-                        th { (crate::i18n::tr(lang, "presence", "присутствие")) }
-                        (sort_header(crate::i18n::tr(lang, "date added", "дата добавления"), "created", "created-desc", false))
-                        (sort_header(crate::i18n::tr(lang, "last activity", "последняя активность"), "activity", "activity-desc", false))
-                        (sort_header(crate::i18n::tr(lang, "weighted traffic 24h", "взвеш. трафик 24ч"), "traffic-asc", "traffic", true))
-                        th { "uuid" }
-                        th { "sub-token" }
-                        (sort_header(crate::i18n::tr(lang, "servers", "серверы"), "servers", "servers-desc", true))
-                        th { (crate::i18n::tr(lang, "keys", "ключи")) }
-                        th {}
+            } @else if pairs.is_empty() {
+                p data-users-summary style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 12px 0;" {
+                    @if server_unavailable {
+                        (crate::i18n::tr(lang, "The selected server is unavailable. Choose another server or reset the filters.", "Выбранный сервер недоступен. Выбери другой сервер или сбрось фильтры."))
+                    } @else {
+                        (crate::i18n::tr(lang, "No users match the selected filters.", "По выбранным фильтрам пользователи не найдены."))
                     }
                 }
-                tbody {
-                    @for (display_idx, row) in pairs.iter().enumerate() {
-                        (user_row(
-                            display_idx,
-                            row,
-                            live_conns_per_user.get(&row.user.id.0).copied().unwrap_or(0),
-                            traffic_of(&row.user.id.0),
-                            lang,
-                        ))
+            } @else {
+                table.ed-grid id="users-grid" {
+                    thead {
+                        tr {
+                            th { "№" }
+                            (sort_header(crate::i18n::tr(lang, "user", "пользователь"), "id", "id-desc", false))
+                            th {
+                                @if selected_server.is_some() {
+                                    (crate::i18n::tr(lang, "presence on server", "онлайн на сервере"))
+                                } @else { (crate::i18n::tr(lang, "presence", "присутствие")) }
+                            }
+                            (sort_header(crate::i18n::tr(lang, "date added", "дата добавления"), "created", "created-desc", false))
+                            (sort_header(
+                                if selected_server.is_some() {
+                                    crate::i18n::tr(lang, "last activity (all)", "активность (общая)")
+                                } else { crate::i18n::tr(lang, "last activity", "последняя активность") },
+                                "activity", "activity-desc", false,
+                            ))
+                            (sort_header(
+                                if selected_server.is_some() {
+                                    crate::i18n::tr(lang, "weighted server traffic 24h", "взвеш. трафик сервера 24ч")
+                                } else { crate::i18n::tr(lang, "weighted traffic 24h", "взвеш. трафик 24ч") },
+                                "traffic-asc", "traffic", true,
+                            ))
+                            th { "uuid" }
+                            th { "sub-token" }
+                            (sort_header(crate::i18n::tr(lang, "servers", "серверы"), "servers", "servers-desc", true))
+                            th { (crate::i18n::tr(lang, "keys", "ключи")) }
+                            th {}
+                        }
+                    }
+                    tbody {
+                        @for (display_idx, row) in pairs.iter().enumerate() {
+                            (user_row(
+                                display_idx,
+                                row,
+                                live_conns_per_user.get(&row.user.id.0).copied().unwrap_or(0),
+                                traffic_of(&row.user.id),
+                                selected_server.map(|server| server.id.0.as_str()),
+                                lang,
+                            ))
+                        }
                     }
                 }
-            }
-            p.ed-grid__mut style="font-family: var(--mono); font-size: 10px; margin-top: 8px;" {
-                (crate::i18n::tr(lang, "showing ", "показано ")) (visible_users)
-                (crate::i18n::tr(lang, " of ", " из ")) (total_users)
+                p.ed-grid__mut data-users-summary style="font-family: var(--mono); font-size: 10px; margin-top: 8px;" {
+                    (crate::i18n::tr(lang, "showing ", "показано ")) (visible_users)
+                    (crate::i18n::tr(lang, " of ", " из ")) (total_users)
+                }
             }
         }
     };

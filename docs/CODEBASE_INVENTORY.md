@@ -6,7 +6,7 @@
 
 - **Workspace Crates:** 10
 - **Tracked Rust Files:** 568 (362 prod / 206 test)
-- **Total Rust LOC:** 216,565 (112,793 prod / 103,772 test)
+- **Total Rust LOC:** 216,676 (112,817 prod / 103,859 test)
 - **Database Migrations:** 79
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 159
 
@@ -23,8 +23,8 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 7 tests, 1 examples | 7,368 (17) | 2,346 (9) | **9,714** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 13 tests | 4,575 (23) | 4,928 (13) | **9,503** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,825 (5) | 1,191 (5) | **4,016** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 32 tests | 68,710 (211) | 63,342 (104) | **132,052** |
-| **Total** | | | | **112,793 (362)** | **103,772 (206)** | **216,565** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 32 tests | 68,734 (211) | 63,429 (104) | **132,163** |
+| **Total** | | | | **112,817 (362)** | **103,859 (206)** | **216,676** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -39,8 +39,8 @@
 | `daemon/src/health_monitor/tests.rs` | 1,845 | `daemon` | Prod |
 | `vendor/sqlx-sqlite/src/connection/explain.rs` | 1,779 | `other` | Prod |
 | `crates/kernels/src/caddy/tests.rs` | 1,772 | `crates/kernels` | Prod |
+| `daemon/tests/admin_smoke/users.rs` | 1,739 | `daemon` | Test |
 | `daemon/src/handlers/vpnrouter_assistant_spec_tests.rs` | 1,663 | `daemon` | Test |
-| `daemon/tests/admin_smoke/users.rs` | 1,652 | `daemon` | Test |
 | `daemon/tests/admin_smoke/servers.rs` | 1,613 | `daemon` | Test |
 | `daemon/tests/spec_vpnrouter_source_diagnosis.rs` | 1,554 | `daemon` | Test |
 | `daemon/tests/spec_corp_egress.rs` | 1,531 | `daemon` | Test |

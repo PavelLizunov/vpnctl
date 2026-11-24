@@ -241,6 +241,93 @@ async fn admin_users_server_filter_shows_empty_and_unavailable_states() {
 }
 
 #[tokio::test]
+async fn admin_users_selected_server_scopes_traffic_sort_links_and_presence() {
+    use vpnctl_core::ServerId;
+    use vpnctl_inventory::VpnStatsDelta;
+    use vpnctld::clash_api::{Connection, ConnectionMeta, Snapshot};
+
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(
+        &s.inv,
+        2,
+        3,
+        &[(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)],
+    )
+    .await;
+
+    for (id, traffic, connected) in [
+        ("s0", [4096, 0, 2048], vec!["u0"]),
+        ("s1", [1024, 16384, 32768], vec!["u0", "u0", "u1"]),
+    ] {
+        let server = ServerId(id.into());
+        let deltas: Vec<_> = traffic
+            .into_iter()
+            .enumerate()
+            .filter(|(_, bytes)| *bytes > 0)
+            .map(|(i, bytes)| VpnStatsDelta {
+                user_id: Some(UserId(format!("u{i}"))),
+                upload_bytes: 0,
+                download_bytes: bytes,
+                active_connections: 1,
+            })
+            .collect();
+        s.inv.record_vpn_stats(&server, &deltas).await.unwrap();
+        s.snapshot_cache.store(
+            server,
+            Snapshot {
+                connections: connected
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, user)| Connection {
+                        id: i.to_string(),
+                        upload: 0,
+                        download: 0,
+                        start: chrono::Utc::now().to_rfc3339(),
+                        metadata: ConnectionMeta {
+                            user: Some(user.to_owned()),
+                            ..ConnectionMeta::default()
+                        },
+                    })
+                    .collect(),
+                ..Snapshot::default()
+            },
+        );
+    }
+
+    let app = router(s);
+    let html = fetch_html(app.clone(), "/admin/users?sort=traffic&server=s0").await;
+    let (_, table) = html.split_once("id=\"users-grid\"").unwrap();
+    assert!(table.find(">u0<").unwrap() < table.find(">u2<").unwrap());
+    assert!(table.find(">u2<").unwrap() < table.find(">u1<").unwrap());
+    let u0 = table.split("</tr>").find(|r| r.contains(">u0<")).unwrap();
+    let u1 = table.split("</tr>").find(|r| r.contains(">u1<")).unwrap();
+    assert!(u0.contains("4.0 KiB"));
+    assert!(u0.contains("online · 1 "));
+    assert!(u1.contains("offline") && !u1.contains("/admin/users/u1/traffic"));
+    let traffic_href = u0
+        .split("href=\"")
+        .skip(1)
+        .filter_map(|attrs| attrs.split_once('"').map(|(href, _)| href))
+        .find(|href| href.starts_with("/admin/users/u0/traffic"))
+        .expect("traffic link on the selected server");
+    assert_eq!(
+        traffic_href,
+        "/admin/users/u0/traffic?vpn_window=24h&amp;vpn_server=s0"
+    );
+    let html = fetch_html(app.clone(), &traffic_href.replace("&amp;", "&")).await;
+    assert!(html.contains(r#"name="vpn_window" value="24h""#));
+    assert!(html.contains(r#"value="s0" selected"#));
+
+    let html = fetch_html(app, "/admin/users?sort=traffic").await;
+    let (_, table) = html.split_once("id=\"users-grid\"").unwrap();
+    assert!(table.find(">u2<").unwrap() < table.find(">u1<").unwrap());
+    assert!(table.find(">u1<").unwrap() < table.find(">u0<").unwrap());
+    let u0 = table.split("</tr>").find(|r| r.contains(">u0<")).unwrap();
+    assert!(u0.contains("5.0 KiB") && u0.contains("online · 3 "));
+}
+
+#[tokio::test]
 async fn admin_user_create_happy_path() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
