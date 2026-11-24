@@ -685,7 +685,7 @@ async fn admin_users_sort_traffic_orders_by_24h_bytes_and_links_traffic_tab() {
         .await
         .unwrap();
 
-    let html = fetch_html(router(s), "/admin/users?sort=traffic").await;
+    let html = fetch_html(router(s.clone()), "/admin/users?sort=traffic").await;
     let pos_alice = html.find(">alice<").expect("alice rendered");
     let pos_bob = html.find(">bob<").expect("bob rendered");
     let pos_carol = html.find(">carol<").expect("carol rendered");
@@ -701,10 +701,18 @@ async fn admin_users_sort_traffic_orders_by_24h_bytes_and_links_traffic_tab() {
         !html.contains("href=\"/admin/users/carol/traffic\""),
         "a user without traffic shows a dash, not a link"
     );
+    assert!(html.contains("href=\"/admin/users?sort=traffic-asc\""));
+
+    let html = fetch_html(router(s), "/admin/users?sort=traffic-asc&q=a").await;
+    let pos_alice = html.find(">alice<").expect("alice rendered");
+    let pos_carol = html.find(">carol<").expect("carol rendered");
+    assert!(pos_carol < pos_alice);
+    assert!(!html.contains(">bob<"));
+    assert!(html.contains("href=\"/admin/users?sort=traffic&amp;q=a\""));
 }
 
 #[tokio::test]
-async fn admin_users_shows_created_and_last_activity_in_msk_with_sort_headers() {
+async fn admin_users_shows_dates_in_msk_and_sorts_only_from_table_headers() {
     let dir = TempDir::new().unwrap();
     let s = state(&dir).await;
     seed(&s.inv, 0, 2, &[]).await;
@@ -724,7 +732,7 @@ async fn admin_users_shows_created_and_last_activity_in_msk_with_sort_headers() 
     .await
     .unwrap();
 
-    let html = fetch_html(router(s), "/admin/users").await;
+    let html = fetch_html(router(s.clone()), "/admin/users").await;
     assert!(
         html.contains("2026-05-21 15:00 MSK"),
         "created column must show the creation instant in Moscow time"
@@ -733,19 +741,36 @@ async fn admin_users_shows_created_and_last_activity_in_msk_with_sort_headers() 
         html.contains("2026-05-22 12:30 MSK"),
         "last-activity column must show subscription access in Moscow time"
     );
-    assert!(
-        html.contains("href=\"/admin/users?sort=created-desc\""),
-        "created header must offer newest first on first click"
-    );
-    assert!(
-        html.contains("href=\"/admin/users?sort=activity-desc\""),
-        "last-activity header must offer newest first on first click"
-    );
+    let (before_header, table) = html.split_once("<thead>").expect("users table header");
+    let (headers, _) = table.split_once("</thead>").expect("end of users headers");
+    for sort in [
+        "id-desc",
+        "created-desc",
+        "activity-desc",
+        "traffic",
+        "servers-desc",
+    ] {
+        let link = format!("href=\"/admin/users?sort={sort}\"");
+        assert!(headers.contains(&link), "missing sort link for {sort}");
+    }
+    assert!(!before_header.contains("href=\"/admin/users?sort="));
+    assert_eq!(headers.matches("aria-sort=\"ascending\"").count(), 1);
     assert_eq!(
-        html.matches("aria-sort=\"none\"").count(),
-        2,
-        "both date headers must be exposed as sortable while another column drives the order"
+        headers.matches("aria-sort=\"none\"").count(),
+        4,
+        "only the user column drives the initial sort order"
     );
+    assert!(headers.split("</th>").any(|header| {
+        header.contains("aria-sort=\"ascending\"")
+            && header.contains("href=\"/admin/users?sort=id-desc\"")
+    }));
+
+    let html = fetch_html(router(s), "/admin/users?sort=id-desc").await;
+    assert!(html.find(">u1<").expect("u1 rendered") < html.find(">u0<").expect("u0 rendered"));
+    assert!(html.split("</th>").any(|header| {
+        header.contains("aria-sort=\"descending\"")
+            && header.contains("href=\"/admin/users?sort=id\"")
+    }));
 }
 
 #[tokio::test]

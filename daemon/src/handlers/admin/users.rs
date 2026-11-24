@@ -234,10 +234,14 @@ pub(crate) async fn users(
                 .cmp(&a.grants_count)
                 .then_with(|| a.user.id.0.cmp(&b.user.id.0))
         }),
-        "traffic" => pairs.sort_by(|a, b| {
-            traffic_of(&b.user.id.0)
-                .cmp(&traffic_of(&a.user.id.0))
-                .then_with(|| a.user.id.0.cmp(&b.user.id.0))
+        "traffic" | "traffic-asc" => pairs.sort_by(|a, b| {
+            let order = traffic_of(&a.user.id.0).cmp(&traffic_of(&b.user.id.0));
+            let order = if sort_kind == "traffic" {
+                order.reverse()
+            } else {
+                order
+            };
+            order.then_with(|| a.user.id.0.cmp(&b.user.id.0))
         }),
         _ => pairs.sort_by(|a, b| a.user.id.0.cmp(&b.user.id.0)),
     }
@@ -253,45 +257,24 @@ pub(crate) async fn users(
     };
     let total_users = user_rows.len();
     let visible_users = pairs.len();
-    let sort_link = |kind: &str, label: &str| -> Markup {
-        let active = sort_kind == kind;
-        html! {
-            a href=(make_sort_href(kind))
-              style=(if active { "color: var(--ink); text-decoration: underline; margin-left: 8px;" } else { "color: var(--mute); margin-left: 8px;" }) {
-                (label) (status(if kind.ends_with("-desc") { "arrow-down" } else { "arrow-up" }, lang, if kind.ends_with("-desc") { "Descending" } else { "Ascending" }, if kind.ends_with("-desc") { "По убыванию" } else { "По возрастанию" }))
-            }
-        }
-    };
-    let date_sort_header = |label: &str, asc_kind: &str, desc_kind: &str| -> Markup {
-        let active_asc = sort_kind == asc_kind;
-        let active_desc = sort_kind == desc_kind;
-        let active = active_asc || active_desc;
-        // First click sorts newest-first; while active the link toggles.
-        let (target, aria_sort, arrow) = if active_asc {
-            (desc_kind, "ascending", "arrow-up")
-        } else if active_desc {
-            (asc_kind, "descending", "arrow-down")
-        } else {
-            (desc_kind, "none", "arrow-down")
-        };
-        let (state_en, state_ru) = if active_asc {
-            ("Sorted ascending", "Сортировка по возрастанию")
-        } else if active_desc {
-            ("Sorted descending", "Сортировка по убыванию")
-        } else {
-            ("Newest first", "Сначала новые")
+    let sort_header = |label: &str, asc_kind: &str, desc_kind: &str, numeric: bool| -> Markup {
+        let (target, aria_sort, arrow) = match sort_kind {
+            sort if sort == asc_kind => (desc_kind, "ascending", "arrow-up"),
+            sort if sort == desc_kind => (asc_kind, "descending", "arrow-down"),
+            _ if asc_kind == "id" => (asc_kind, "none", "arrow-up"),
+            _ => (desc_kind, "none", "arrow-down"),
         };
         let (action_en, action_ru) = if target == asc_kind {
-            ("Sort oldest first", "Сортировать: сначала старые")
+            ("Sort ascending", "Сортировать по возрастанию")
         } else {
-            ("Sort newest first", "Сортировать: сначала новые")
+            ("Sort descending", "Сортировать по убыванию")
         };
         html! {
-            th aria-sort=(aria_sort) {
+            th class=[numeric.then_some("num")] aria-sort=(aria_sort) {
                 a href=(make_sort_href(target))
-                  style=(if active { "color: var(--ink); text-decoration: underline;" } else { "color: inherit;" })
+                  style=(if aria_sort == "none" { "display: block; color: inherit;" } else { "display: block; color: var(--ink); text-decoration: underline;" })
                   title=(crate::i18n::tr(lang, action_en, action_ru)) {
-                    (label) " " (status(arrow, lang, state_en, state_ru))
+                    (label) " " (icon(arrow))
                 }
             }
         }
@@ -310,18 +293,6 @@ pub(crate) async fn users(
                 "Each user has a public subscription URL at <public address>/api/v1/app/config/<device_id> (address in Settings → System); /sub/<token> remains the LAN-only fallback. Open a row for the QR you'll point a phone at.",
                 "У каждого пользователя есть публичный URL подписки <публичный адрес>/api/v1/app/config/<device_id> (адрес в Настройки → Система); /sub/<token> остаётся LAN-only fallback. Открой строку — там QR для телефона.",
             )) { (icon("info")) }
-            @if !user_rows.is_empty() {
-                div.ed-headrow__actions style="font-family: var(--mono); font-size: 11px;" {
-                    (crate::i18n::tr(lang, "sort:", "сортировка:"))
-                    (sort_link("id", "id"))
-                    (sort_link("traffic", crate::i18n::tr(lang, "weighted traffic 24h", "взвеш. трафик 24ч")))
-                    @if sort_kind == "servers-desc" {
-                        (sort_link("servers", crate::i18n::tr(lang, "servers", "серверы")))
-                    } @else {
-                        (sort_link("servers-desc", crate::i18n::tr(lang, "servers", "серверы")))
-                    }
-                }
-            }
         }
 
         div.ed-inbar {
@@ -471,14 +442,14 @@ pub(crate) async fn users(
                 thead {
                     tr {
                         th { "№" }
-                        th { (crate::i18n::tr(lang, "user", "пользователь")) }
+                        (sort_header(crate::i18n::tr(lang, "user", "пользователь"), "id", "id-desc", false))
                         th { (crate::i18n::tr(lang, "presence", "присутствие")) }
-                        (date_sort_header(crate::i18n::tr(lang, "date added", "дата добавления"), "created", "created-desc"))
-                        (date_sort_header(crate::i18n::tr(lang, "last activity", "последняя активность"), "activity", "activity-desc"))
-                        th.num { (crate::i18n::tr(lang, "weighted traffic 24h", "взвеш. трафик 24ч")) }
+                        (sort_header(crate::i18n::tr(lang, "date added", "дата добавления"), "created", "created-desc", false))
+                        (sort_header(crate::i18n::tr(lang, "last activity", "последняя активность"), "activity", "activity-desc", false))
+                        (sort_header(crate::i18n::tr(lang, "weighted traffic 24h", "взвеш. трафик 24ч"), "traffic-asc", "traffic", true))
                         th { "uuid" }
                         th { "sub-token" }
-                        th.num { (crate::i18n::tr(lang, "servers", "серверы")) }
+                        (sort_header(crate::i18n::tr(lang, "servers", "серверы"), "servers", "servers-desc", true))
                         th { (crate::i18n::tr(lang, "keys", "ключи")) }
                         th {}
                     }
