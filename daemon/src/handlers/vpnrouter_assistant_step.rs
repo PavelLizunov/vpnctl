@@ -57,9 +57,9 @@ struct Control {
     active: Option<bool>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Hash, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum CrashFault {
+pub(super) enum CrashFault {
     Unknown,
     NullReference,
     InvalidOperation,
@@ -71,9 +71,9 @@ enum CrashFault {
     Native,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Hash, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum CrashArea {
+pub(super) enum CrashArea {
     Unknown,
     Ui,
     Startup,
@@ -81,9 +81,9 @@ enum CrashArea {
     Settings,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Hash, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum CrashSignal {
+pub(super) enum CrashSignal {
     None,
     ProxyUnreachable,
     TunBusy,
@@ -92,11 +92,19 @@ enum CrashSignal {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct CrashEvidence {
-    fatal: bool,
-    fault: CrashFault,
-    area: CrashArea,
-    signal: CrashSignal,
+pub(super) struct CrashEvidence {
+    pub(super) fatal: bool,
+    pub(super) fault: CrashFault,
+    pub(super) area: CrashArea,
+    pub(super) signal: CrashSignal,
+}
+
+impl CrashEvidence {
+    pub(super) fn is_unknown(&self) -> bool {
+        matches!(self.fault, CrashFault::Unknown)
+            && matches!(self.area, CrashArea::Unknown)
+            && matches!(self.signal, CrashSignal::None)
+    }
 }
 
 fn read_crash_evidence<'de, D: serde::Deserializer<'de>>(

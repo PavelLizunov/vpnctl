@@ -38,6 +38,7 @@ pub(super) enum ApiError {
     InvalidReport,
     TooLarge,
     Quota(Option<u64>),
+    DiagnosisBusy,
     Unavailable,
     Gateway,
 }
@@ -50,12 +51,18 @@ impl IntoResponse for ApiError {
             Self::Disabled => (Status::FORBIDDEN, "subscription_disabled"),
             Self::InvalidReport => (Status::BAD_REQUEST, "invalid_report"),
             Self::TooLarge => (Status::PAYLOAD_TOO_LARGE, "report_too_large"),
+            Self::DiagnosisBusy => (Status::TOO_MANY_REQUESTS, "diagnosis_busy"),
             Self::Quota(_) => (Status::TOO_MANY_REQUESTS, "quota_exceeded"),
             Self::Unavailable => (Status::SERVICE_UNAVAILABLE, "unavailable"),
             Self::Gateway => (Status::BAD_GATEWAY, "gateway_error"),
         };
         let mut response = (status, Json(json!({"error": code}))).into_response();
-        if let Self::Quota(Some(retry)) = self
+        let retry = match self {
+            Self::DiagnosisBusy => Some(1),
+            Self::Quota(retry) => retry,
+            _ => None,
+        };
+        if let Some(retry) = retry
             && let Ok(retry) = header::HeaderValue::from_str(&retry.to_string())
         {
             response.headers_mut().insert(header::RETRY_AFTER, retry);
@@ -146,13 +153,23 @@ impl Gateway {
         report: &str,
         user_agent: &str,
     ) -> reqwest::RequestBuilder {
+        self.chat_request_with_limit(prompt, report, user_agent, 400)
+    }
+
+    pub(super) fn chat_request_with_limit(
+        &self,
+        prompt: &str,
+        report: &str,
+        user_agent: &str,
+        max_tokens: u32,
+    ) -> reqwest::RequestBuilder {
         let mut body = json!({
             "model": self.model,
             "messages": [
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": report},
             ],
-            "max_tokens": 400,
+            "max_tokens": max_tokens,
             "stream": false,
         });
         let mut request = self
@@ -219,7 +236,11 @@ impl Gateway {
     }
 
     pub(super) fn contains_secret(&self, text: &str, credential: &str) -> bool {
-        (credential.len() >= 8 && text.contains(credential)) || text.contains(self.key.as_str())
+        (credential.len() >= 8 && text.contains(credential)) || self.contains_key(text)
+    }
+
+    pub(super) fn contains_key(&self, text: &str) -> bool {
+        text.contains(self.key.as_str())
     }
 }
 
@@ -395,6 +416,22 @@ pub(super) async fn authorize(
     extensions: &Extensions,
     ip_bucket: &[u8],
 ) -> Result<(String, Zeroizing<String>)> {
+    let account = authorized_account(state, headers, extensions, ip_bucket).await?;
+    Ok((account.id, account.presented))
+}
+
+pub(super) struct AuthorizedAccount {
+    pub(super) id: String,
+    pub(super) presented: Zeroizing<String>,
+    pub(super) alternate: Option<Zeroizing<String>>,
+}
+
+pub(super) async fn authorized_account(
+    state: &AppState,
+    headers: &HeaderMap,
+    extensions: &Extensions,
+    ip_bucket: &[u8],
+) -> Result<AuthorizedAccount> {
     if let Some(ConnectInfo(peer)) = extensions.get::<ConnectInfo<SocketAddr>>() {
         let ip = crate::real_ip::resolve_peer_real_ip(headers, peer.ip());
         limits::acquire(&state.rate_limiter, ip_bucket, &ip.to_string(), 120)
@@ -409,7 +446,15 @@ pub(super) async fn authorize(
     if user.disabled {
         return Err(ApiError::Disabled);
     }
-    Ok((user.id.0, Zeroizing::new(token.to_owned())))
+    let alternate = match identity {
+        Identity::Device => user.sub_token,
+        Identity::Subscription => user.vpn_router_device_id,
+    };
+    Ok(AuthorizedAccount {
+        id: user.id.0,
+        presented: Zeroizing::new(token.to_owned()),
+        alternate: alternate.map(Zeroizing::new),
+    })
 }
 
 pub(super) async fn read_report<T: DeserializeOwned>(

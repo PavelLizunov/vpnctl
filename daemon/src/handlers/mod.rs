@@ -13,3 +13,5 @@ pub(crate) mod vpnrouter_assistant;
 #[cfg(test)]
 mod vpnrouter_assistant_spec_tests;
 mod vpnrouter_assistant_step;
+pub(crate) mod vpnrouter_source_catalog;
+pub(crate) mod vpnrouter_source_diagnosis;

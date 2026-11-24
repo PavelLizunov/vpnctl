@@ -5,8 +5,8 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 565 (360 prod / 205 test)
-- **Total Rust LOC:** 211,566 (110,539 prod / 101,027 test)
+- **Tracked Rust Files:** 568 (362 prod / 206 test)
+- **Total Rust LOC:** 215,426 (112,459 prod / 102,967 test)
 - **Database Migrations:** 78
 - **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 158
 
@@ -23,8 +23,8 @@
 | `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 7 tests, 1 examples | 7,368 (17) | 2,346 (9) | **9,714** |
 | `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 13 tests | 4,575 (23) | 4,928 (13) | **9,503** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,825 (5) | 1,191 (5) | **4,016** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 31 tests | 66,591 (209) | 60,697 (103) | **127,288** |
-| **Total** | | | | **110,539 (360)** | **101,027 (205)** | **211,566** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 32 tests | 68,511 (211) | 62,637 (104) | **131,148** |
+| **Total** | | | | **112,459 (362)** | **102,967 (206)** | **215,426** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -39,7 +39,9 @@
 | `daemon/src/health_monitor/tests.rs` | 1,845 | `daemon` | Prod |
 | `vendor/sqlx-sqlite/src/connection/explain.rs` | 1,779 | `other` | Prod |
 | `crates/kernels/src/caddy/tests.rs` | 1,772 | `crates/kernels` | Prod |
+| `daemon/src/handlers/vpnrouter_assistant_spec_tests.rs` | 1,663 | `daemon` | Test |
 | `daemon/tests/admin_smoke/servers.rs` | 1,613 | `daemon` | Test |
+| `daemon/tests/spec_vpnrouter_source_diagnosis.rs` | 1,554 | `daemon` | Test |
 | `daemon/tests/spec_corp_egress.rs` | 1,531 | `daemon` | Test |
 | `daemon/tests/admin_smoke/alerts_health.rs` | 1,514 | `daemon` | Test |
 | `daemon/tests/spec_corp_policy_eligibility.rs` | 1,404 | `daemon` | Test |
@@ -51,10 +53,8 @@
 | `daemon/tests/admin_smoke/dashboard.rs` | 1,286 | `daemon` | Test |
 | `crates/boosty-bridge/tests/sync_integration.rs` | 1,285 | `crates/boosty-bridge` | Test |
 | `daemon/src/handlers/admin/boosty.rs` | 1,283 | `daemon` | Prod |
-| `daemon/src/handlers/vpnrouter_assistant_spec_tests.rs` | 1,277 | `daemon` | Test |
 | `daemon/src/protocol_assurance_poller.rs` | 1,253 | `daemon` | Prod |
 | `daemon/tests/admin_smoke/user_detail/traffic_activity.rs` | 1,224 | `daemon` | Test |
-| `daemon/tests/admin_smoke/grants/protocol_overrides.rs` | 1,204 | `daemon` | Test |
 
 ## Database Migrations (78)
 

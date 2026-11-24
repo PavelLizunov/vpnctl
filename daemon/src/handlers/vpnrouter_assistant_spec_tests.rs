@@ -8,16 +8,19 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::Response;
 use axum::{Json, Router, routing::post};
 use serde_json::{Value, json};
+use tokio::sync::Semaphore;
 use tower::ServiceExt;
 use vpnctl_core::{User, UserId};
 use vpnctl_inventory::SqliteInventory;
 
 use super::nina_assistant::Gateway;
-use super::vpnrouter_assistant::router;
+use super::vpnrouter_assistant::{router, router_with_catalog};
+use super::vpnrouter_source_catalog::{CatalogStatus, SourceCatalog};
 
 const IDENTITY: &str = "x-vpnctl-identity";
 const PATH: &str = "/api/v1/assistant/vpnrouter/plan";
 const STEP_PATH: &str = "/api/v1/assistant/vpnrouter/step";
+const SOURCE_PATH: &str = "/api/v1/assistant/vpnrouter/source-diagnosis";
 const MODEL: &str = "synthetic-vpnrouter-model";
 const GATEWAY_KEY: &str = "synthetic-vpnrouter-server-key";
 
@@ -30,6 +33,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new(gateway: Option<Gateway>) -> Self {
+        Self::with_routes(router(gateway)).await
+    }
+
+    async fn with_routes(routes: Router<crate::app::AppState>) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let inventory = SqliteInventory::open(&directory.path().join("inventory.db"))
             .await
@@ -37,7 +44,7 @@ impl Fixture {
         let registry = Arc::new(crate::app::build_registry().unwrap());
         let (state, writer) = crate::app::make_app_state_for_tests(inventory.clone(), registry);
         Self {
-            app: router(gateway).with_state(state),
+            app: routes.with_state(state),
             inventory,
             writer,
             _directory: directory,
@@ -77,14 +84,27 @@ struct Upstream {
 
 impl Upstream {
     async fn start(status: StatusCode, body: Value) -> (Self, Gateway) {
+        Self::with_gate(status, body, None).await
+    }
+
+    async fn with_gate(
+        status: StatusCode,
+        body: Value,
+        gate: Option<(Arc<Semaphore>, Arc<Semaphore>)>,
+    ) -> (Self, Gateway) {
         let (record, requests) = mpsc::channel();
         let app = Router::new().route(
             "/synthetic/chat/completions",
             post(move |headers: HeaderMap, Json(payload): Json<Value>| {
                 let record = record.clone();
                 let body = body.clone();
+                let gate = gate.clone();
                 async move {
                     record.send((headers, payload)).unwrap();
+                    if let Some((entered, release)) = gate {
+                        entered.add_permits(1);
+                        release.acquire().await.unwrap().forget();
+                    }
                     (status, Json(body))
                 }
             }),
@@ -1274,4 +1294,370 @@ async fn step_keeps_existing_actions_without_crash_evidence() {
             json!({"schema": 2, "result": reply})
         );
     }
+}
+
+#[tokio::test]
+async fn registered_build_binds_the_provider_prompt_and_reply_to_selected_source() {
+    const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+    const SOURCE_PATH: &str = "/api/v1/assistant/vpnrouter/source-diagnosis";
+    let matched = json!({"path":"VPNRouter.Core/Services/SettingsLoader.cs","first":51,"last":51,"text":"return ReadSettings();"});
+    let mut tagged = matched.clone();
+    tagged["areas"] = json!(["settings"]);
+    let catalog = json!({"schema":1,"releases":[{
+        "version":"2.51.1-r1","commit":COMMIT,"targets":[{"platform":"windows","arch":"x64"}],
+        "excerpts":[tagged,{"path":"VPNRouter.App/Program.cs","first":10,"last":10,
+            "text":"return Start();","areas":["startup"]}]
+    }]});
+    let catalog = Arc::new(SourceCatalog::parse(&serde_json::to_vec(&catalog).unwrap()).unwrap());
+    let model = json!({"operation":"source_diagnosis","hypothesis":"Reading settings failed.",
+        "basis":"The report records an I/O error.","confidence":"low","check":"review_settings",
+        "citations":[{"path":matched["path"],"first":51,"last":51}]});
+    let crash = json!({"fatal":false,"fault":"io","area":"settings","signal":"none"});
+    let input = json!({"schema":1,"locale":"en","version":"2.51.1-r1","commit":COMMIT,
+        "platform":"windows","arch":"x64","crash":crash});
+    let mut forged = model.clone();
+    forged["citations"][0]["last"] = json!(52);
+    for (answer, expected_status) in [
+        (model.clone(), StatusCode::OK),
+        (forged, StatusCode::BAD_GATEWAY),
+    ] {
+        let (upstream, gateway) = Upstream::start(StatusCode::OK, completion(&answer)).await;
+        let app = Fixture::with_routes(router_with_catalog(
+            Some(gateway),
+            CatalogStatus::Ready(catalog.clone()),
+        ))
+        .await;
+        let user = app.user(0xddd, false).await;
+        let [(kind, credential), _] = credentials(&user);
+        for (field, other) in [("version", "2.51.1-r2"), ("arch", "arm64")] {
+            let mut mismatch = input.clone();
+            mismatch[field] = json!(other);
+            let response = app
+                .send(request_at(
+                    SOURCE_PATH,
+                    kind,
+                    credential,
+                    mismatch.to_string(),
+                ))
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let value: Value = serde_json::from_str(&response_text(response).await).unwrap();
+            assert_eq!(
+                value,
+                json!({"schema":1,"result":{"operation":"unknown_build"}})
+            );
+        }
+        let mut no_match = input.clone();
+        no_match["crash"] =
+            json!({"fatal":false,"fault":"network","area":"routing","signal":"none"});
+        let no_match_response = app
+            .send(request_at(
+                SOURCE_PATH,
+                kind,
+                credential,
+                no_match.to_string(),
+            ))
+            .await;
+        assert_eq!(no_match_response.status(), StatusCode::OK);
+        let no_match_value: Value =
+            serde_json::from_str(&response_text(no_match_response).await).unwrap();
+        assert_eq!(
+            no_match_value,
+            json!({"schema":1,"result":{"operation":"insufficient_evidence"}})
+        );
+        assert!(upstream.requests.try_recv().is_err());
+
+        let response = app
+            .send(request_at(SOURCE_PATH, kind, credential, input.to_string()))
+            .await;
+        assert_eq!(response.status(), expected_status);
+        assert_no_store(&response);
+        let value: Value = serde_json::from_str(&response_text(response).await).unwrap();
+        if expected_status == StatusCode::OK {
+            let mut expected = model.clone();
+            expected["citations"][0]["commit"] = json!(COMMIT);
+            assert_eq!(value, json!({"schema":1,"result":expected}));
+        } else {
+            assert_eq!(value, json!({"error":"gateway_error"}));
+        }
+        let (headers, payload) = upstream.requests.try_recv().unwrap();
+        assert_upstream_request(
+            &headers,
+            &payload,
+            &json!({"locale":"en","version":"2.51.1-r1",
+            "platform":"windows","arch":"x64","crash":crash,"sources":[matched]}),
+            &user,
+        );
+        assert!(upstream.requests.try_recv().is_err());
+    }
+
+    let mut connection = input;
+    connection.as_object_mut().unwrap().remove("crash");
+    connection["connection"] = json!("startup_timeout");
+    let mut answer = model;
+    let source =
+        json!({"path":"VPNRouter.App/Program.cs","first":10,"last":10,"text":"return Start();"});
+    answer["citations"] = json!([{"path":source["path"],"first":10,"last":10}]);
+    let (upstream, gateway) = Upstream::start(StatusCode::OK, completion(&answer)).await;
+    let app = Fixture::with_routes(router_with_catalog(
+        Some(gateway),
+        CatalogStatus::Ready(catalog),
+    ))
+    .await;
+    let user = app.user(0xdde, false).await;
+    let [_, (kind, credential)] = credentials(&user);
+    let response = app
+        .send(request_at(
+            SOURCE_PATH,
+            kind,
+            credential,
+            connection.to_string(),
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    answer["citations"][0]["commit"] = json!(COMMIT);
+    let reply: Value = serde_json::from_str(&response_text(response).await).unwrap();
+    assert_eq!(reply, json!({"schema":1,"result":answer}));
+    let (headers, payload) = upstream.requests.try_recv().unwrap();
+    assert_upstream_request(
+        &headers,
+        &payload,
+        &json!({"locale":"en","version":"2.51.1-r1","platform":"windows","arch":"x64",
+            "connection":"startup_timeout","sources":[source]}),
+        &user,
+    );
+}
+
+const SOURCE_VERSION: &str = "2.51.1-r1";
+const SOURCE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+fn source_catalog(text: &str) -> Arc<SourceCatalog> {
+    let catalog = json!({"schema":1,"releases":[{
+        "version":SOURCE_VERSION,
+        "commit":SOURCE_COMMIT,
+        "targets":[{"platform":"windows","arch":"x64"}],
+        "excerpts":[{
+            "path":"VPNRouter.Core/Services/SettingsLoader.cs",
+            "first":51,
+            "last":51,
+            "text":text,
+            "areas":["settings"]
+        }]
+    }]});
+    Arc::new(SourceCatalog::parse(&serde_json::to_vec(&catalog).unwrap()).unwrap())
+}
+
+fn source_body() -> Value {
+    json!({
+        "schema": 1,
+        "locale": "en",
+        "version": SOURCE_VERSION,
+        "commit": SOURCE_COMMIT,
+        "platform": "windows",
+        "arch": "x64",
+        "crash": {"fatal": false, "fault": "io", "area": "settings", "signal": "none"}
+    })
+}
+
+async fn assert_source_unavailable(fixture: &Fixture, number: u32, case: &str) -> String {
+    let user = fixture.user(number, false).await;
+    let [(identity, credential), _] = credentials(&user);
+    let response = fixture
+        .send(request_at(
+            SOURCE_PATH,
+            identity,
+            credential,
+            source_body().to_string(),
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{case}");
+    assert_no_store(&response);
+    let text = response_text(response).await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&text).unwrap(),
+        json!({"error": "unavailable"}),
+        "{case}"
+    );
+    assert!(!text.contains(credential), "{case}");
+    assert!(!text.contains(GATEWAY_KEY), "{case}");
+    text
+}
+
+#[tokio::test]
+async fn source_diagnosis_catalog_gateway_and_secret_source_failures_skip_the_provider() {
+    let (upstream, gateway) = Upstream::start(
+        StatusCode::OK,
+        completion(&json!({"operation": "source_diagnosis"})),
+    )
+    .await;
+    let fixture = Fixture::with_routes(router_with_catalog(
+        Some(gateway),
+        CatalogStatus::Unavailable,
+    ))
+    .await;
+    assert_source_unavailable(&fixture, 0xdc0, "catalog unavailable").await;
+    assert!(upstream.requests.try_recv().is_err());
+
+    let catalog = source_catalog("return ReadSettings();");
+    let fixture =
+        Fixture::with_routes(router_with_catalog(None, CatalogStatus::Ready(catalog))).await;
+    assert_source_unavailable(&fixture, 0xdc1, "gateway unavailable").await;
+
+    let catalog = source_catalog(&format!("return \"{GATEWAY_KEY}\";"));
+    let (upstream, gateway) = Upstream::start(
+        StatusCode::OK,
+        completion(&json!({"operation": "source_diagnosis"})),
+    )
+    .await;
+    let fixture = Fixture::with_routes(router_with_catalog(
+        Some(gateway),
+        CatalogStatus::Ready(catalog),
+    ))
+    .await;
+    assert_source_unavailable(&fixture, 0xdc2, "source carries the gateway key").await;
+    assert!(upstream.requests.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn source_diagnosis_hides_known_build_provider_failures() {
+    const PRIVATE_ERROR: &str = "synthetic-private-source-provider-error";
+    let catalog = source_catalog("return ReadSettings();");
+    for (index, (status, upstream_body)) in [
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"error": PRIVATE_ERROR}),
+        ),
+        (
+            StatusCode::OK,
+            json!({"choices": [{"message": {"content": "not json"}}]}),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (upstream, gateway) = Upstream::start(status, upstream_body).await;
+        let fixture = Fixture::with_routes(router_with_catalog(
+            Some(gateway),
+            CatalogStatus::Ready(catalog.clone()),
+        ))
+        .await;
+        let user = fixture.user(0xdc3 + index as u32, false).await;
+        let [(identity, credential), _] = credentials(&user);
+        let response = fixture
+            .send(request_at(
+                SOURCE_PATH,
+                identity,
+                credential,
+                source_body().to_string(),
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_no_store(&response);
+        let text = response_text(response).await;
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap(),
+            json!({"error": "gateway_error"})
+        );
+        assert!(!text.contains(PRIVATE_ERROR));
+        assert!(!text.contains(credential));
+        assert!(!text.contains(GATEWAY_KEY));
+        assert_eq!(upstream.requests.try_iter().count(), 1);
+    }
+}
+
+#[tokio::test]
+async fn source_diagnosis_blocks_alternate_account_credentials_before_forwarding() {
+    let number = 0x7abu32;
+    for (index, alternate) in [
+        format!("{number:032x}"),
+        format!("synthetic-vpnrouter-subscription_{number}"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let catalog = source_catalog(&format!("return \"{alternate}\";"));
+        let (upstream, gateway) = Upstream::start(StatusCode::OK, json!({})).await;
+        let fixture = Fixture::with_routes(router_with_catalog(
+            Some(gateway),
+            CatalogStatus::Ready(catalog),
+        ))
+        .await;
+        let user = fixture.user(number, false).await;
+        let identities = credentials(&user);
+        let (kind, credential) = identities[index];
+        assert_eq!(identities[1 - index].1, alternate);
+        let response = fixture
+            .send(request_at(
+                SOURCE_PATH,
+                kind,
+                credential,
+                source_body().to_string(),
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_no_store(&response);
+        let text = response_text(response).await;
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap(),
+            json!({"error":"unavailable"})
+        );
+        assert_eq!(upstream.requests.try_iter().count(), 0);
+    }
+}
+
+#[tokio::test]
+async fn busy_diagnoses_preserve_the_other_account_slot_and_recover() {
+    let entered = Arc::new(Semaphore::new(0));
+    let release = Arc::new(Semaphore::new(0));
+    let (upstream, gateway) = Upstream::with_gate(
+        StatusCode::OK, completion(&json!({
+            "operation":"source_diagnosis", "hypothesis":"Settings read failed.",
+            "basis":"The crash report indicates an IO error.", "confidence":"low", "check":"review_settings",
+            "citations":[{"path":"VPNRouter.Core/Services/SettingsLoader.cs","first":51,"last":51}]
+        })),
+        Some((entered.clone(), release.clone())),
+    ).await;
+    let fixture = Fixture::with_routes(router_with_catalog(
+        Some(gateway),
+        CatalogStatus::Ready(source_catalog("return ReadSettings();")),
+    ))
+    .await;
+    let alice = fixture.user(0x7ac, false).await;
+    let bob = fixture.user(0x7ad, false).await;
+    let carol = fixture.user(0x7ae, false).await;
+    let request = |(kind, credential): (&str, &str)| {
+        request_at(SOURCE_PATH, kind, credential, source_body().to_string())
+    };
+    let start =
+        |user: &User| tokio::spawn(fixture.app.clone().oneshot(request(credentials(user)[0])));
+    let wait_for_provider = || async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.acquire())
+            .await
+            .expect("request reached the provider")
+            .unwrap()
+            .forget();
+    };
+    let assert_busy = |request| async {
+        let response = fixture.send(request).await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()[RETRY_AFTER], "1");
+        assert_no_store(&response);
+        assert_eq!(
+            serde_json::from_str::<Value>(&response_text(response).await).unwrap(),
+            json!({"error":"diagnosis_busy"})
+        );
+    };
+    let first = start(&alice);
+    wait_for_provider().await;
+    assert_busy(request(credentials(&alice)[1])).await;
+    let second = start(&bob);
+    wait_for_provider().await;
+    assert_busy(request(credentials(&carol)[0])).await;
+    release.add_permits(2);
+    assert_eq!(second.await.unwrap().unwrap().status(), StatusCode::OK);
+    assert_eq!(first.await.unwrap().unwrap().status(), StatusCode::OK);
+    release.add_permits(1);
+    let response = fixture.send(request(credentials(&carol)[0])).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(upstream.requests.try_iter().count(), 3);
 }
