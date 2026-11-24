@@ -10,7 +10,27 @@ use crate::handlers::admin::legacy::{qr_svg, user_traffic_limit_section};
 use crate::handlers::admin::user_detail::overview::user_overview_summary;
 use crate::handlers::admin::users::mask_secret;
 use crate::http_util::path_segment_encode;
-use crate::i18n::Locale;
+use crate::i18n::{Locale, tr};
+
+pub(in crate::handlers::admin::user_detail) fn render_admin_note(
+    tab_base: &str,
+    note: &str,
+    lang: Locale,
+) -> Markup {
+    html! {
+        form #user-note method="post" action=(format!("{tab_base}/note"))
+             style="max-width: 42rem; margin: 20px 0;" {
+            label for="user-admin-note" { (tr(lang, "Note about this user", "Заметка о пользователе")) }
+            textarea #user-admin-note name="admin_note" rows="3"
+                style="box-sizing: border-box; width: 100%; display: block; resize: vertical; margin: 6px 0 10px;" {
+                (note)
+            }
+            button type="submit" class="ed-abtn ed-abtn--sm" {
+                (tr(lang, "Save note", "Сохранить заметку"))
+            }
+        }
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn render_overview_tab(

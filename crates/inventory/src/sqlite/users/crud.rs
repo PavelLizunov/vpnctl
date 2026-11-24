@@ -24,13 +24,30 @@ pub(crate) fn row_to_user(r: SqliteRow) -> Result<User> {
     })
 }
 
+fn normalize_admin_note(value: &str) -> Result<String> {
+    let value = value.trim().replace("\r\n", "\n").replace('\r', "\n");
+    if value.contains('\0') || value.chars().take(2_001).count() > 2_000 {
+        return Err(SqliteInventoryError::Invalid("invalid user note".into()));
+    }
+    Ok(value)
+}
+
+const USER_ADMIN_NOTE_QUERY: &str = "SELECT coalesce(n.note, '')
+    FROM users u LEFT JOIN user_admin_notes n ON n.user_id = u.id WHERE u.id = ?1";
+
 impl SqliteInventory {
     pub async fn add_user(&self, u: &User) -> Result<()> {
+        self.add_user_with_admin_note(u, "").await
+    }
+
+    pub async fn add_user_with_admin_note(&self, u: &User, note: &str) -> Result<()> {
+        let note = normalize_admin_note(note)?;
         let token = match u.sub_token.as_deref() {
             Some(t) if !t.is_empty() => t.to_string(),
             _ => vpnctl_crypto::gen_sub_token().map_err(SqliteInventoryError::CryptoIo)?,
         };
         let disabled_i: i64 = if u.disabled { 1 } else { 0 };
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let res = sqlx::query(
             "INSERT INTO users (id, uuid, tuic_password, wireguard_pubkey, wireguard_private, sub_token, vpn_router_device_id, disabled)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -43,10 +60,65 @@ impl SqliteInventory {
         .bind(&token)
         .bind(u.vpn_router_device_id.as_deref())
         .bind(disabled_i)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await;
         map_unique(res, format!("user {}", u.id.0))?;
+        if !note.is_empty() {
+            sqlx::query("INSERT INTO user_admin_notes (user_id, note) VALUES (?1, ?2)")
+                .bind(&u.id.0)
+                .bind(note)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
         Ok(())
+    }
+
+    pub async fn user_admin_note(&self, id: &UserId) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar(USER_ADMIN_NOTE_QUERY)
+            .bind(&id.0)
+            .fetch_optional(&self.pool)
+            .await?)
+    }
+
+    pub async fn set_user_admin_note(&self, id: &UserId, note: &str, actor: &str) -> Result<bool> {
+        let note = normalize_admin_note(note)?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let previous: Option<String> = sqlx::query_scalar(USER_ADMIN_NOTE_QUERY)
+            .bind(&id.0)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(previous) = previous else {
+            return Ok(false);
+        };
+        if previous != note {
+            let cleared = note.is_empty();
+            if cleared {
+                sqlx::query("DELETE FROM user_admin_notes WHERE user_id = ?1")
+                    .bind(&id.0)
+                    .execute(&mut *tx)
+                    .await?;
+            } else {
+                sqlx::query(
+                    "INSERT INTO user_admin_notes (user_id, note) VALUES (?1, ?2)
+                     ON CONFLICT(user_id) DO UPDATE SET note = excluded.note",
+                )
+                .bind(&id.0)
+                .bind(note)
+                .execute(&mut *tx)
+                .await?;
+            }
+            sqlx::query(
+                "INSERT INTO audit_log (actor, action, target, payload) VALUES (?1, 'user.note.set', ?2, ?3)",
+            )
+            .bind(actor)
+            .bind(&id.0)
+            .bind(serde_json::json!({ "cleared": cleared }).to_string())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(true)
     }
 
     pub async fn find_user_by_sub_token(&self, token: &str) -> Result<Option<User>> {

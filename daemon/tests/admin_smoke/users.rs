@@ -704,6 +704,199 @@ async fn admin_users_sort_traffic_orders_by_24h_bytes_and_links_traffic_tab() {
 }
 
 #[tokio::test]
+async fn admin_users_shows_created_and_last_activity_in_msk_with_sort_headers() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 2, &[]).await;
+    let pool =
+        sqlx::SqlitePool::connect(&format!("sqlite://{}", dir.path().join("inv.db").display()))
+            .await
+            .unwrap();
+    sqlx::query("UPDATE users SET created_at = '2026-05-21T12:00:00.000Z' WHERE id = 'u0'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO sub_access_log (ts, user_id, ip, status, bytes)
+         VALUES ('2026-05-22T09:30:00.000Z', 'u0', '1.1.1.1', 200, 100)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let html = fetch_html(router(s), "/admin/users").await;
+    assert!(
+        html.contains("2026-05-21 15:00 MSK"),
+        "created column must show the creation instant in Moscow time"
+    );
+    assert!(
+        html.contains("2026-05-22 12:30 MSK"),
+        "last-activity column must show subscription access in Moscow time"
+    );
+    assert!(
+        html.contains("href=\"/admin/users?sort=created-desc\""),
+        "created header must offer newest first on first click"
+    );
+    assert!(
+        html.contains("href=\"/admin/users?sort=activity-desc\""),
+        "last-activity header must offer newest first on first click"
+    );
+    assert_eq!(
+        html.matches("aria-sort=\"none\"").count(),
+        2,
+        "both date headers must be exposed as sortable while another column drives the order"
+    );
+}
+
+#[tokio::test]
+async fn admin_users_sort_created_respects_direction_ties_and_search() {
+    use vpnctl_core::{User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    for uid in ["alice", "bob", "carol", "aaron"] {
+        s.inv
+            .add_user(&User {
+                id: UserId(uid.into()),
+                uuid: format!("uuid-{uid}"),
+                tuic_password: None,
+                wireguard_pubkey: None,
+                wireguard_private: None,
+                sub_token: None,
+                vpn_router_device_id: None,
+                disabled: false,
+            })
+            .await
+            .unwrap();
+    }
+    let pool =
+        sqlx::SqlitePool::connect(&format!("sqlite://{}", dir.path().join("inv.db").display()))
+            .await
+            .unwrap();
+    for (uid, created) in [
+        ("alice", "2026-03-01T00:00:00.000Z"),
+        ("bob", "2026-03-01T00:00:00.000Z"),
+        ("carol", "2026-02-01T00:00:00.000Z"),
+        ("aaron", "2026-01-01T00:00:00.000Z"),
+    ] {
+        sqlx::query("UPDATE users SET created_at = ?1 WHERE id = ?2")
+            .bind(created)
+            .bind(uid)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    let html = fetch_html(router(s.clone()), "/admin/users?sort=created-desc").await;
+    let order = |html: &str, id: &str| html.find(&format!(">{id}<"));
+    let (alice, bob, carol, aaron) = (
+        order(&html, "alice").expect("alice rendered"),
+        order(&html, "bob").expect("bob rendered"),
+        order(&html, "carol").expect("carol rendered"),
+        order(&html, "aaron").expect("aaron rendered"),
+    );
+    assert!(
+        alice < bob && bob < carol && carol < aaron,
+        "created-desc must render newest first with id tie break; got alice={alice} bob={bob} carol={carol} aaron={aaron}"
+    );
+    assert!(
+        html.contains("aria-sort=\"descending\""),
+        "the active created header must expose aria-sort=descending"
+    );
+
+    let html = fetch_html(router(s.clone()), "/admin/users?sort=created").await;
+    let (alice, bob, carol, aaron) = (
+        order(&html, "alice").expect("alice rendered"),
+        order(&html, "bob").expect("bob rendered"),
+        order(&html, "carol").expect("carol rendered"),
+        order(&html, "aaron").expect("aaron rendered"),
+    );
+    assert!(
+        aaron < carol && carol < alice && alice < bob,
+        "created ascending must render oldest first with id tie break; got alice={alice} bob={bob} carol={carol} aaron={aaron}"
+    );
+    assert!(
+        html.contains("aria-sort=\"ascending\""),
+        "the active created header must expose aria-sort=ascending"
+    );
+
+    let html = fetch_html(router(s), "/admin/users?sort=created-desc&q=car").await;
+    assert!(
+        html.contains(">carol<") && !html.contains(">alice<") && !html.contains(">bob<"),
+        "created sort must preserve the q filter"
+    );
+    assert!(
+        html.contains("href=\"/admin/users?sort=created&amp;q=car\""),
+        "the opposite direction link must preserve the q filter"
+    );
+}
+
+#[tokio::test]
+async fn admin_users_sort_activity_keeps_missing_activity_last_in_both_directions() {
+    use vpnctl_core::{User, UserId};
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    for uid in ["alice", "bob", "carol", "aaron"] {
+        s.inv
+            .add_user(&User {
+                id: UserId(uid.into()),
+                uuid: format!("uuid-{uid}"),
+                tuic_password: None,
+                wireguard_pubkey: None,
+                wireguard_private: None,
+                sub_token: None,
+                vpn_router_device_id: None,
+                disabled: false,
+            })
+            .await
+            .unwrap();
+    }
+    let pool =
+        sqlx::SqlitePool::connect(&format!("sqlite://{}", dir.path().join("inv.db").display()))
+            .await
+            .unwrap();
+    for (uid, ts) in [
+        ("alice", "2026-09-01T10:00:00.000Z"),
+        ("bob", "2026-09-01T10:00:00.000Z"),
+        ("carol", "2026-09-02T10:00:00.000Z"),
+    ] {
+        sqlx::query(
+            "INSERT INTO sub_access_log (ts, user_id, ip, status, bytes)
+             VALUES (?1, ?2, '1.1.1.1', 200, 100)",
+        )
+        .bind(ts)
+        .bind(uid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let html = fetch_html(router(s.clone()), "/admin/users?sort=activity-desc").await;
+    let order = |html: &str, id: &str| html.find(&format!(">{id}<"));
+    let (alice, bob, carol, aaron) = (
+        order(&html, "alice").expect("alice rendered"),
+        order(&html, "bob").expect("bob rendered"),
+        order(&html, "carol").expect("carol rendered"),
+        order(&html, "aaron").expect("aaron rendered"),
+    );
+    assert!(
+        carol < alice && alice < bob && bob < aaron,
+        "activity-desc must render newest first, id-tie alice<bob, and no-activity aaron last; got alice={alice} bob={bob} carol={carol} aaron={aaron}"
+    );
+
+    let html = fetch_html(router(s), "/admin/users?sort=activity").await;
+    let (alice, bob, carol, aaron) = (
+        order(&html, "alice").expect("alice rendered"),
+        order(&html, "bob").expect("bob rendered"),
+        order(&html, "carol").expect("carol rendered"),
+        order(&html, "aaron").expect("aaron rendered"),
+    );
+    assert!(
+        alice < bob && bob < carol && carol < aaron,
+        "activity ascending must render oldest first with id tie break and keep no-activity aaron last; got alice={alice} bob={bob} carol={carol} aaron={aaron}"
+    );
+}
+
+#[tokio::test]
 async fn user_disable_then_enable_round_trip_flips_flag_and_audits() {
     let dir = TempDir::new().unwrap();
     let st = state(&dir).await;
@@ -943,5 +1136,419 @@ async fn sharing_page_invalid_or_empty_filters_stay_readable() {
     assert!(
         empty.contains("No flagged users match these filters."),
         "{empty}"
+    );
+}
+
+// ---- user admin-note contract -------------------------------------------------
+
+fn form_encode(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-' | b'_' | b'~' => {
+                encoded.push(char::from(byte));
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+async fn post_form(app: &axum::Router, path: &str, body: &str) -> (StatusCode, Option<String>) {
+    let resp = app
+        .clone()
+        .oneshot(
+            add_same_origin(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/x-www-form-urlencoded"),
+            )
+            .body(Body::from(body.to_owned()))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let location = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    (status, location)
+}
+
+/// Returns the raw (HTML-escaped) text between `<textarea name="admin_note">`
+/// and its closing tag.
+fn note_textarea(html: &str) -> String {
+    let marker = if html.contains(r#"name="admin_note""#) {
+        r#"name="admin_note""#
+    } else {
+        "name=admin_note"
+    };
+    let idx = html
+        .find(marker)
+        .unwrap_or_else(|| panic!("overview has no textarea {marker}"));
+    let after_name = &html[idx + marker.len()..];
+    let body_start = after_name
+        .find('>')
+        .expect("admin_note textarea start tag has no closing '>'")
+        + 1;
+    let body = &after_name[body_start..];
+    let end = body
+        .find("</textarea>")
+        .expect("admin_note textarea has no closing tag");
+    body[..end].to_owned()
+}
+
+async fn note_audit_rows(
+    inv: &vpnctl_inventory::SqliteInventory,
+) -> Vec<vpnctl_inventory::AuditEntry> {
+    inv.recent_audit(200)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.action == "user.note.set")
+        .collect()
+}
+
+#[tokio::test]
+async fn admin_user_create_accepts_optional_admin_note() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    let (status, _) = post_form(
+        &app,
+        "/admin/users",
+        &format!("id=noted&admin_note={}", form_encode("vip customer")),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::SEE_OTHER,
+        "create with admin_note must still redirect with 303"
+    );
+    let html = fetch_html(app.clone(), "/admin/users/noted/overview").await;
+    assert_eq!(
+        note_textarea(&html),
+        "vip customer",
+        "note submitted on create must be the current note on the overview"
+    );
+
+    let (status, _) = post_form(&app, "/admin/users", "id=quiet").await;
+    assert_eq!(
+        status,
+        StatusCode::SEE_OTHER,
+        "create without admin_note must still redirect with 303"
+    );
+    let html = fetch_html(app, "/admin/users/quiet/overview").await;
+    assert_eq!(
+        note_textarea(&html),
+        "",
+        "create without admin_note must leave the note empty"
+    );
+}
+
+#[tokio::test]
+async fn recreated_user_does_not_inherit_the_deleted_users_note() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    let app = router(s.clone());
+    let (status, _) = post_form(&app, "/admin/users", "id=reused&admin_note=old+note").await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    s.inv.remove_user(&UserId("reused".into())).await.unwrap();
+    let (status, _) = post_form(&app, "/admin/users", "id=reused").await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let html = fetch_html(app, "/admin/users/reused/overview").await;
+    assert_eq!(note_textarea(&html), "");
+}
+
+#[tokio::test]
+async fn admin_user_note_save_trims_outer_whitespace_and_normalizes_line_endings() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    let app = router(s);
+
+    let (status, location) = post_form(
+        &app,
+        "/admin/users/u0/note",
+        &format!("admin_note={}", form_encode("  hello\r\nworld\rdone \n")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        location.as_deref(),
+        Some("/admin/users/u0/overview#user-note"),
+        "successful save must land on the note section of the overview"
+    );
+
+    let html = fetch_html(app, "/admin/users/u0/overview").await;
+    assert_eq!(
+        note_textarea(&html),
+        "hello\nworld\ndone",
+        "outer whitespace must be trimmed and CRLF/CR normalized to LF"
+    );
+}
+
+#[tokio::test]
+async fn admin_user_note_renders_current_value_as_escaped_plain_text() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    let app = router(s);
+
+    let payload = "<script>alert(1)</script> & <b>x</b>";
+    let (status, _) = post_form(
+        &app,
+        "/admin/users/u0/note",
+        &format!("admin_note={}", form_encode(payload)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+
+    let html = fetch_html(app.clone(), "/admin/users/u0/overview").await;
+    assert_eq!(
+        note_textarea(&html),
+        "&lt;script&gt;alert(1)&lt;/script&gt; &amp; &lt;b&gt;x&lt;/b&gt;",
+        "textarea content must be HTML-escaped plain text"
+    );
+    assert!(
+        !html.contains(payload),
+        "raw markup from the note leaked into the overview page"
+    );
+}
+
+#[tokio::test]
+async fn admin_user_note_empty_value_clears_the_note() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    let app = router(s);
+
+    let (status, _) = post_form(
+        &app,
+        "/admin/users/u0/note",
+        &format!("admin_note={}", form_encode("temporary note")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let html = fetch_html(app.clone(), "/admin/users/u0/overview").await;
+    assert_eq!(note_textarea(&html), "temporary note");
+
+    let (status, location) = post_form(&app, "/admin/users/u0/note", "admin_note=").await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        location.as_deref(),
+        Some("/admin/users/u0/overview#user-note"),
+        "clearing must redirect like any other successful save"
+    );
+    let html = fetch_html(app.clone(), "/admin/users/u0/overview").await;
+    assert_eq!(note_textarea(&html), "", "empty value must clear the note");
+
+    let (status, _) = post_form(
+        &app,
+        "/admin/users/u0/note",
+        &format!("admin_note={}", form_encode("second note")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let (status, _) = post_form(
+        &app,
+        "/admin/users/u0/note",
+        &format!("admin_note={}", form_encode("   ")),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::SEE_OTHER,
+        "whitespace-only notes trim to empty and are allowed"
+    );
+    let html = fetch_html(app, "/admin/users/u0/overview").await;
+    assert_eq!(
+        note_textarea(&html),
+        "",
+        "whitespace-only value must clear the note"
+    );
+}
+
+#[tokio::test]
+async fn admin_user_note_rejects_missing_nul_and_over_limit() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    let app = router(s);
+
+    for body in ["", "other=1", "admin_note=abc%00def"] {
+        let (status, _) = post_form(&app, "/admin/users/u0/note", body).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "note body {body:?} must be rejected with 400"
+        );
+    }
+
+    let too_long = "я".repeat(2001);
+    let (status, _) = post_form(
+        &app,
+        "/admin/users/u0/note",
+        &format!("admin_note={}", form_encode(&too_long)),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "2001 Unicode characters must be rejected (limit counts characters, not bytes)"
+    );
+
+    let at_limit = "🧭".repeat(2000);
+    let (status, location) = post_form(
+        &app,
+        "/admin/users/u0/note",
+        &format!("admin_note={}", form_encode(&at_limit)),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::SEE_OTHER,
+        "2000 Unicode characters must be accepted"
+    );
+    assert_eq!(
+        location.as_deref(),
+        Some("/admin/users/u0/overview#user-note")
+    );
+    let html = fetch_html(app, "/admin/users/u0/overview").await;
+    assert_eq!(note_textarea(&html), at_limit);
+}
+
+#[tokio::test]
+async fn admin_user_note_unknown_user_returns_404() {
+    let dir = TempDir::new().unwrap();
+    let app = router(state(&dir).await);
+
+    let (status, _) = post_form(&app, "/admin/users/no-such/note", "admin_note=hello").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn admin_user_note_audit_writes_one_row_per_change_without_the_text() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    let app = router(s.clone());
+
+    let first = "audit-secret-alpha-51c0";
+    let (status, _) = post_form(
+        &app,
+        "/admin/users/u0/note",
+        &format!("admin_note={}", form_encode(first)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+
+    let rows = note_audit_rows(&s.inv).await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "one changed note must write exactly one user.note.set row"
+    );
+    let payload = rows[0]
+        .payload
+        .as_ref()
+        .expect("user.note.set row should carry a payload");
+    let rendered = payload.to_string();
+    assert!(
+        !rendered.contains(first),
+        "audit payload must not contain the note text, got: {rendered}"
+    );
+
+    let (status, _) = post_form(
+        &app,
+        "/admin/users/u0/note",
+        &format!("admin_note={}", form_encode(first)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        note_audit_rows(&s.inv).await.len(),
+        1,
+        "saving the same note must not write another audit row"
+    );
+
+    let (status, _) = post_form(
+        &app,
+        "/admin/users/u0/note",
+        &format!("admin_note={}", form_encode(&format!("  {first}  "))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        note_audit_rows(&s.inv).await.len(),
+        1,
+        "a submission that normalizes to the current note is unchanged and must not write audit"
+    );
+
+    let second = "audit-secret-beta-9d2e";
+    let (status, _) = post_form(
+        &app,
+        "/admin/users/u0/note",
+        &format!("admin_note={}", form_encode(second)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        note_audit_rows(&s.inv).await.len(),
+        2,
+        "a changed note must write exactly one more audit row"
+    );
+
+    let (status, _) = post_form(&app, "/admin/users/u0/note", "admin_note=").await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        note_audit_rows(&s.inv).await.len(),
+        3,
+        "clearing a set note must write one audit row"
+    );
+
+    let (status, _) = post_form(&app, "/admin/users/u0/note", "admin_note=").await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        note_audit_rows(&s.inv).await.len(),
+        3,
+        "clearing an already empty note is unchanged and must not write audit"
+    );
+}
+
+#[tokio::test]
+async fn admin_user_note_does_not_leak_into_public_subscription() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir).await;
+    seed(&s.inv, 0, 1, &[]).await;
+    let token = s
+        .inv
+        .get_user(&UserId("u0".into()))
+        .await
+        .unwrap()
+        .unwrap()
+        .sub_token
+        .expect("seed backfills a sub_token");
+    let app = router(s);
+
+    let note = "operator-only-note-4f8b1d";
+    let (status, _) = post_form(
+        &app,
+        "/admin/users/u0/note",
+        &format!("admin_note={}", form_encode(note)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+
+    let overview = fetch_html(app.clone(), "/admin/users/u0/overview").await;
+    assert_eq!(note_textarea(&overview), note);
+
+    let sub = fetch_html(app, &format!("/sub/{token}")).await;
+    assert!(
+        !sub.contains(note),
+        "operator-only note leaked into the user-facing subscription response"
     );
 }
