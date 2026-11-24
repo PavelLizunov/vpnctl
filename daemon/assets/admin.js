@@ -712,6 +712,116 @@
     });
   }
 
+  function wireUsersFilters() {
+    var form = document.querySelector("[data-users-filter]");
+    var results = document.getElementById("users-results");
+    if (!form || !results || !window.fetch || !window.AbortController) return;
+
+    var search = form.elements.q;
+    var server = form.elements.server;
+    var sort = form.elements.sort;
+    var reset = form.querySelector("[data-users-reset]");
+    var status = document.getElementById("users-filter-status");
+    var applied = new URL(location.href);
+    var request = null;
+
+    function formUrl() {
+      var url = new URL(form.action);
+      new FormData(form).forEach(function (value, name) {
+        if (value && (name !== "sort" || value !== "id")) url.searchParams.set(name, value);
+      });
+      return url;
+    }
+
+    async function update(url, push) {
+      if (request) request.abort();
+      var pending = new AbortController();
+      request = pending;
+      var submittedSearch = search.value;
+      results.setAttribute("aria-busy", "true");
+      status.classList.add("ed-sr-only");
+      status.textContent = "";
+      try {
+        var response = await fetch(url, { signal: pending.signal, cache: "no-store" });
+        if (!response.ok || response.redirected) throw new Error("Users response failed");
+        var page = new DOMParser().parseFromString(await response.text(), "text/html");
+        if (request !== pending) return;
+        var nextResults = page.getElementById("users-results");
+        if (!nextResults) throw new Error("Users results missing");
+        var nextForm = page.querySelector("[data-users-filter]");
+        var focus = document.activeElement;
+        var oldGrid = results.querySelector("#users-grid");
+        var scrollLeft = oldGrid ? oldGrid.scrollLeft : 0;
+
+        if (nextForm) {
+          if (search.value === submittedSearch) search.value = nextForm.elements.q.value;
+          var nextServer = nextForm.elements.server;
+          var selected = nextServer.value;
+          var options = Array.from(nextServer.options);
+          if (options.length !== server.options.length || options.some(function (option, index) {
+            var current = server.options[index];
+            return option.value !== current.value || option.text !== current.text || option.disabled !== current.disabled;
+          })) server.replaceChildren(...options);
+          server.value = selected;
+          server.disabled = nextServer.disabled;
+          sort.value = nextForm.elements.sort.value;
+          var nextReset = nextForm.querySelector("[data-users-reset]");
+          reset.hidden = nextReset.hidden;
+          if (nextReset.hasAttribute("href")) reset.setAttribute("href", nextReset.getAttribute("href"));
+          else reset.removeAttribute("href");
+        }
+        form.style.display = nextForm ? "flex" : "none";
+        results.replaceChildren(...nextResults.childNodes);
+        var grid = results.querySelector("#users-grid");
+        if (grid) grid.scrollLeft = scrollLeft;
+        if (focus === reset && reset.hidden) search.focus({ preventScroll: true });
+        if (focus && focus.matches("[data-users-sort]")) {
+          var activeSort = results.querySelector('th[aria-sort]:not([aria-sort="none"]) a[data-users-sort]');
+          (activeSort || search).focus({ preventScroll: true });
+        }
+        if (push && url.href !== location.href) history.pushState(null, "", url);
+        applied = url;
+        var summary = results.querySelector("[data-users-summary]");
+        if (summary) status.textContent = summary.textContent.trim();
+      } catch (_) {
+        if (request !== pending) return;
+        server.value = applied.searchParams.get("server") || "";
+        sort.value = applied.searchParams.get("sort") || "id";
+        status.classList.remove("ed-sr-only");
+        status.textContent = status.getAttribute("data-users-error");
+      } finally {
+        if (request === pending) {
+          results.removeAttribute("aria-busy");
+          request = null;
+        }
+      }
+    }
+
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      update(formUrl(), true);
+    });
+    server.addEventListener("change", function () {
+      update(formUrl(), true);
+    });
+    document.addEventListener("click", function (e) {
+      if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey ||
+          !e.target.closest) return;
+      var link = e.target.closest("a[data-users-sort], a[data-users-reset]");
+      if (!link || !link.hasAttribute("href")) return;
+      e.preventDefault();
+      var url = new URL(link.href);
+      if (link.hasAttribute("data-users-sort")) {
+        sort.value = url.searchParams.get("sort");
+        url = formUrl();
+      }
+      update(url, true);
+    });
+    window.addEventListener("popstate", function () {
+      update(new URL(location.href), false);
+    });
+  }
+
   function wireFormSubmitFeedback() {
     document.addEventListener("submit", function (e) {
       if (e.defaultPrevented) return;
@@ -1027,6 +1137,7 @@
     wireRecommendedCopy();
     wireLowercaseId();
     wireProtocolActions();
+    wireUsersFilters();
     wireFormSubmitFeedback();
     wireBoostyQuickConnect();
     var nodes = document.querySelectorAll("[data-sse-url]");
