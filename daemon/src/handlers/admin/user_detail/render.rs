@@ -35,6 +35,16 @@ pub(crate) async fn user_detail_render(
     let Some(user) = user else {
         return Err(user_not_found(&user_id_str));
     };
+    let admin_note = if tab == UserTab::Overview {
+        state
+            .inv
+            .user_admin_note(&uid)
+            .await
+            .map_err(|e| internal_error(anyhow::Error::new(e)))?
+            .ok_or_else(|| user_not_found(&user_id_str))?
+    } else {
+        String::new()
+    };
 
     let servers = state
         .inv
@@ -628,6 +638,7 @@ pub(crate) async fn user_detail_render(
     (detail_tabs(&tab_base, tab.slug(), &[("overview", crate::i18n::tr(lang, "Overview", "Обзор")), ("delivery", crate::i18n::tr(lang, "Delivery", "Выдача")), ("access", access_tab_label.as_str()), ("activity", crate::i18n::tr(lang, "Activity", "Активность")), ("traffic", crate::i18n::tr(lang, "Traffic", "Трафик"))], lang))
     @match tab {
         UserTab::Overview => {
+            (tabs::overview::render_admin_note(&tab_base, &admin_note, lang))
             (tabs::overview::render_overview_tab(
                 &state,
                 &user,

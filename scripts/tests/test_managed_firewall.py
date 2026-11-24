@@ -218,10 +218,41 @@ class ManagedFirewallTest(unittest.TestCase):
                 self.firewall.cleanup(self.backend, set())
         self.backend.set_rule.assert_not_called()
 
+    def test_stdin_passes_the_ufw_path_to_backend_checks(self):
+        ufw_path = "/sbin/ufw"
+        ufw = Mock()
+        ufw.get_status.return_value = "Status: active"
+
+        def frontend(_dryrun):
+            self.assertEqual(sys.argv, [ufw_path, "allow", "tcp:443"])
+            return ufw
+
+        self.firewall.UFWFrontend.side_effect = frontend
+        with (
+            patch.object(sys, "argv", ["-", "allow", "tcp:443"]),
+            patch.object(self.firewall.shutil, "which", return_value=ufw_path),
+            patch.object(self.firewall, "open_ports") as open_ports,
+        ):
+            self.firewall.main()
+        open_ports.assert_called_once_with(ufw.backend, [("tcp", 443)], None)
+
+    def test_missing_ufw_path_fails_before_locking(self):
+        with (
+            patch.object(sys, "argv", ["-", "allow", "tcp:443"]),
+            patch.object(self.firewall.shutil, "which", return_value=None),
+            self.assertRaisesRegex(RuntimeError, "UFW executable not found on PATH"),
+        ):
+            self.firewall.main()
+        self.firewall.create_lock.assert_not_called()
+        self.firewall.UFWFrontend.assert_not_called()
+
     def test_inactive_ufw_is_unchanged_and_status_errors_are_reported(self):
         ufw = self.firewall.UFWFrontend.return_value
         ufw.get_status.side_effect = ["Status: inactive", RuntimeError("status failed")]
-        with patch.object(sys, "argv", ["ufw.py", "cleanup", "tcp:22"]):
+        with (
+            patch.object(sys, "argv", ["-", "cleanup", "tcp:22"]),
+            patch.object(self.firewall.shutil, "which", return_value="/usr/sbin/ufw"),
+        ):
             self.firewall.main()
             with self.assertRaisesRegex(RuntimeError, "status failed"):
                 self.firewall.main()

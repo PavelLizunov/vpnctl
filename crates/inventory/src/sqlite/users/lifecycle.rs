@@ -1,9 +1,28 @@
 use super::crud::row_to_user;
 use crate::sqlite::base::{SqliteInventory, escape_like};
-use crate::sqlite::models::{Result, SqliteInventoryError, UserLifecycle};
+use crate::sqlite::models::{Result, SqliteInventoryError, UserLifecycle, UserListEntry};
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 use vpnctl_core::{ServerId, User, UserId};
+
+/// Indexed per-user activity probe, shared by the overview (one user) and the
+/// user list (one scalar per row in the same SELECT). Each branch uses the
+/// existing `user_id` indexes, so the list stays fast on large fleets.
+///
+/// `users.last_activity_at` preserves the instant once the source history is
+/// purged by retention.
+const USER_LAST_ACTIVITY_SCALAR: &str = "\
+    (SELECT MAX(activity_at) FROM (
+         SELECT MAX(ts) AS activity_at FROM sub_access_log WHERE user_id = u.id
+         UNION ALL
+         SELECT MAX(ts) AS activity_at FROM vpn_connection_stats
+          WHERE user_id = u.id
+            AND (upload_bytes > 0 OR download_bytes > 0 OR active_connections > 0)
+         UNION ALL
+         SELECT MAX(last_seen) AS activity_at FROM vpn_user_sessions WHERE user_id = u.id
+         UNION ALL
+         SELECT u.last_activity_at AS activity_at
+     ))";
 
 impl SqliteInventory {
     pub async fn users_pending_deploy_for_server(
@@ -149,21 +168,15 @@ impl SqliteInventory {
     }
 
     pub async fn user_last_seen(&self, user: &UserId) -> Result<Option<DateTime<Utc>>> {
-        let row = sqlx::query(
-            "SELECT MAX(latest_ts) AS last_seen FROM (
-                 SELECT MAX(ts) AS latest_ts FROM sub_access_log WHERE user_id = ?1
-                 UNION ALL
-                 SELECT MAX(ts) AS latest_ts FROM vpn_connection_stats
-                  WHERE user_id = ?1 AND (upload_bytes > 0 OR download_bytes > 0 OR active_connections > 0)
-                 UNION ALL
-                 SELECT MAX(last_seen) AS latest_ts FROM vpn_user_sessions WHERE user_id = ?1
-                 UNION ALL
-                 SELECT last_activity_at AS latest_ts FROM users WHERE id = ?1
-             )",
-        )
-        .bind(&user.0)
-        .fetch_one(&self.pool)
-        .await?;
+        let sql =
+            format!("SELECT {USER_LAST_ACTIVITY_SCALAR} AS last_seen FROM users u WHERE u.id = ?1");
+        let row = sqlx::query(&sql)
+            .bind(&user.0)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
 
         let last_seen_str: Option<String> = row.try_get("last_seen")?;
         Ok(last_seen_str.and_then(|s| {
@@ -171,5 +184,46 @@ impl SqliteInventory {
                 .ok()
                 .map(|d| d.with_timezone(&Utc))
         }))
+    }
+
+    /// User list in one snapshot: user fields plus creation and last-activity
+    /// times. Rendering the list never performs per-user reads, and the row
+    /// set and its timestamps cannot come from different queries.
+    pub async fn users_list_with_activity(&self) -> Result<Vec<UserListEntry>> {
+        let sql = format!(
+            "SELECT u.id, u.uuid, u.tuic_password, u.wireguard_pubkey, u.wireguard_private,
+                    u.sub_token, u.vpn_router_device_id, u.disabled,
+                    u.created_at AS created_at,
+                    {USER_LAST_ACTIVITY_SCALAR} AS last_activity
+             FROM users u
+             ORDER BY u.id"
+        );
+        let rows = sqlx::query(&sql).fetch_all(&self.pool).await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let created_s: Option<String> = row.try_get("created_at")?;
+            let created_at = created_s.as_deref().and_then(|value| {
+                DateTime::parse_from_rfc3339(value)
+                    .ok()
+                    .map(|date| date.with_timezone(&Utc))
+                    .or_else(|| {
+                        chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f")
+                            .ok()
+                            .map(|date| date.and_utc())
+                    })
+            });
+            let last_s: Option<String> = row.try_get("last_activity")?;
+            let last_activity = last_s.and_then(|s| {
+                DateTime::parse_from_rfc3339(&s)
+                    .ok()
+                    .map(|d| d.with_timezone(&Utc))
+            });
+            out.push(UserListEntry {
+                user: row_to_user(row)?,
+                created_at,
+                last_activity,
+            });
+        }
+        Ok(out)
     }
 }
