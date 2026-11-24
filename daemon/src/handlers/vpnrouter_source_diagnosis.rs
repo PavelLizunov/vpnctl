@@ -251,13 +251,11 @@ impl ModelReply {
             if lines > u64::from(MAX_EXCERPT_LINES) {
                 return None;
             }
-            let Some(excerpt) = selected.iter().find(|excerpt| {
+            let excerpt = selected.iter().find(|excerpt| {
                 excerpt.path == citation.path
                     && excerpt.first == citation.first
                     && excerpt.last == citation.last
-            }) else {
-                return None;
-            };
+            })?;
             if !distinct.insert((citation.path.clone(), citation.first, citation.last)) {
                 return None;
             }

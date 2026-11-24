@@ -1324,7 +1324,7 @@ async fn registered_build_binds_the_provider_prompt_and_reply_to_selected_source
         let (upstream, gateway) = Upstream::start(StatusCode::OK, completion(&answer)).await;
         let app = Fixture::with_routes(router_with_catalog(
             Some(gateway),
-            CatalogStatus::Ready(catalog.clone()),
+            CatalogStatus::Ready(Arc::clone(&catalog)),
         ))
         .await;
         let user = app.user(0xddd, false).await;
@@ -1538,7 +1538,7 @@ async fn source_diagnosis_hides_known_build_provider_failures() {
         let (upstream, gateway) = Upstream::start(status, upstream_body).await;
         let fixture = Fixture::with_routes(router_with_catalog(
             Some(gateway),
-            CatalogStatus::Ready(catalog.clone()),
+            CatalogStatus::Ready(Arc::clone(&catalog)),
         ))
         .await;
         let user = fixture.user(0xdc3 + index as u32, false).await;
@@ -1615,7 +1615,7 @@ async fn busy_diagnoses_preserve_the_other_account_slot_and_recover() {
             "basis":"The crash report indicates an IO error.", "confidence":"low", "check":"review_settings",
             "citations":[{"path":"VPNRouter.Core/Services/SettingsLoader.cs","first":51,"last":51}]
         })),
-        Some((entered.clone(), release.clone())),
+        Some((Arc::clone(&entered), Arc::clone(&release))),
     ).await;
     let fixture = Fixture::with_routes(router_with_catalog(
         Some(gateway),
