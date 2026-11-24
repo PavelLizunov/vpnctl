@@ -86,6 +86,14 @@ jobs:
           echo "cargo test --workspace --all-targets exit_code=$status"
           exit "$status"
 
+      - name: load a trusted source catalog through the public daemon router
+        env:
+          VPNCTL_TEST_TRUSTED_SOURCE_CATALOG: /run/vpnctl-ci/source-catalog.json
+        run: |
+          sudo install -d -o root -g root -m 0755 /run/vpnctl-ci
+          sudo install -o root -g root -m 0644 daemon/tests/fixtures/vpnrouter-source-catalog.json "$VPNCTL_TEST_TRUSTED_SOURCE_CATALOG"
+          cargo test -p vpnctld --test spec_vpnrouter_source_diagnosis -- --ignored
+
   corp-portal-ui:
     name: Corp portal browser verification
     # Playwright 1.56.1 supports Ubuntu 24.04; ubuntu-latest can move ahead.

@@ -8,15 +8,19 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::Response;
 use axum::{Json, Router, routing::post};
 use serde_json::{Value, json};
+use tokio::sync::Semaphore;
 use tower::ServiceExt;
 use vpnctl_core::{User, UserId};
 use vpnctl_inventory::SqliteInventory;
 
 use super::nina_assistant::Gateway;
-use super::vpnrouter_assistant::router;
+use super::vpnrouter_assistant::{router, router_with_catalog};
+use super::vpnrouter_source_catalog::{CatalogStatus, SourceCatalog};
 
 const IDENTITY: &str = "x-vpnctl-identity";
 const PATH: &str = "/api/v1/assistant/vpnrouter/plan";
+const STEP_PATH: &str = "/api/v1/assistant/vpnrouter/step";
+const SOURCE_PATH: &str = "/api/v1/assistant/vpnrouter/source-diagnosis";
 const MODEL: &str = "synthetic-vpnrouter-model";
 const GATEWAY_KEY: &str = "synthetic-vpnrouter-server-key";
 
@@ -29,6 +33,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new(gateway: Option<Gateway>) -> Self {
+        Self::with_routes(router(gateway)).await
+    }
+
+    async fn with_routes(routes: Router<crate::app::AppState>) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let inventory = SqliteInventory::open(&directory.path().join("inventory.db"))
             .await
@@ -36,7 +44,7 @@ impl Fixture {
         let registry = Arc::new(crate::app::build_registry().unwrap());
         let (state, writer) = crate::app::make_app_state_for_tests(inventory.clone(), registry);
         Self {
-            app: router(gateway).with_state(state),
+            app: routes.with_state(state),
             inventory,
             writer,
             _directory: directory,
@@ -76,14 +84,27 @@ struct Upstream {
 
 impl Upstream {
     async fn start(status: StatusCode, body: Value) -> (Self, Gateway) {
+        Self::with_gate(status, body, None).await
+    }
+
+    async fn with_gate(
+        status: StatusCode,
+        body: Value,
+        gate: Option<(Arc<Semaphore>, Arc<Semaphore>)>,
+    ) -> (Self, Gateway) {
         let (record, requests) = mpsc::channel();
         let app = Router::new().route(
             "/synthetic/chat/completions",
             post(move |headers: HeaderMap, Json(payload): Json<Value>| {
                 let record = record.clone();
                 let body = body.clone();
+                let gate = gate.clone();
                 async move {
                     record.send((headers, payload)).unwrap();
+                    if let Some((entered, release)) = gate {
+                        entered.add_permits(1);
+                        release.acquire().await.unwrap().forget();
+                    }
                     (status, Json(body))
                 }
             }),
@@ -126,7 +147,11 @@ fn credentials(user: &User) -> [(&str, &str); 2] {
 }
 
 fn request(identity: &str, credential: &str, body: String) -> Request<Body> {
-    Request::post(PATH)
+    request_at(PATH, identity, credential, body)
+}
+
+fn request_at(path: &str, identity: &str, credential: &str, body: String) -> Request<Body> {
+    Request::post(path)
         .header(CONTENT_TYPE, "application/json")
         .header(AUTHORIZATION, format!("Bearer {credential}"))
         .header(IDENTITY, identity)
@@ -539,4 +564,1100 @@ async fn a_valid_request_without_a_gateway_is_unavailable() {
     let text = response_text(response).await;
     assert!(!text.contains(credential));
     assert!(!text.contains(GATEWAY_KEY));
+}
+
+fn step_body() -> Value {
+    json!({
+        "schema": 2,
+        "locale": "en",
+        "goal": "Enable VPN",
+        "connected": false,
+        "busy": false,
+        "simple": true,
+        "controls": [
+            {"id": 1, "name": "SmpToggleConnectCommand", "kind": "press"},
+            {"id": 2, "name": "ChangeMode", "kind": "toggle", "active": false},
+            {"id": 3, "name": "ServerRow", "kind": "select", "active": false},
+            {"id": 4, "name": "SearchField", "kind": "text"},
+            {"id": 32, "name": "SettingsMenu", "kind": "expand"}
+        ]
+    })
+}
+
+#[tokio::test]
+async fn step_requires_an_enabled_subscription_or_device_identity() {
+    let (upstream, gateway) =
+        Upstream::start(StatusCode::OK, completion(&json!({"operation": "finish"}))).await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let disabled = fixture.user(0xd1, true).await;
+    let body = step_body().to_string();
+    for (identity, credential) in credentials(&disabled) {
+        let response = fixture
+            .send(request_at(STEP_PATH, identity, credential, body.clone()))
+            .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_no_store(&response);
+
+        let mut missing = request_at(STEP_PATH, identity, credential, body.clone());
+        missing.headers_mut().remove(AUTHORIZATION);
+        let response = fixture.send(missing).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_no_store(&response);
+    }
+    assert!(upstream.requests.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn step_forwards_only_the_public_request_and_returns_a_typed_action_for_both_identities() {
+    let action = json!({"operation": "act", "id": 2, "value": true});
+    let (upstream, gateway) = Upstream::start(StatusCode::OK, completion(&action)).await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let user = fixture.user(0xd2, false).await;
+    let mut body = step_body();
+    body["goal"] = json!("Change the mode");
+    body["controls"] = json!([{"id": 2, "name": "ChangeMode", "kind": "toggle", "active": false}]);
+    body["previous"] = json!("SettingsMenu");
+    for (identity, credential) in credentials(&user) {
+        let response = fixture
+            .send(request_at(
+                STEP_PATH,
+                identity,
+                credential,
+                body.to_string(),
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_no_store(&response);
+        let text = response_text(response).await;
+        assert!(!text.contains(credential));
+        assert!(!text.contains(GATEWAY_KEY));
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap(),
+            json!({"schema": 2, "result": action})
+        );
+
+        let (headers, payload) = upstream.requests.try_recv().unwrap();
+        assert_upstream_request(&headers, &payload, &body, &user);
+    }
+    assert!(upstream.requests.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn step_selects_action_instructions_only_when_the_desired_state_toggle_is_available() {
+    let action = json!({"operation": "act", "id": 2, "value": true});
+    let (upstream, gateway) = Upstream::start(StatusCode::OK, completion(&action)).await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let user = fixture.user(0xd2, false).await;
+    let [(identity, credential), _] = credentials(&user);
+
+    for (name, has_semantic_actions, has_route) in [
+        ("ChangeMode", false, false),
+        ("SetVpnConnected", true, false),
+        ("SetVpnConnected", true, true),
+    ] {
+        let mut body = step_body();
+        let mut controls = vec![json!({"id": 2, "name": name, "kind": "toggle", "active": false})];
+        if has_route {
+            controls.push(json!({"id": 3, "name": "RouteApplicationDirectByWindowsExecutableName", "kind": "text"}));
+        }
+        body["controls"] = json!(controls);
+        let response = fixture
+            .send(request_at(
+                STEP_PATH,
+                identity,
+                credential,
+                body.to_string(),
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let (headers, payload) = upstream.requests.try_recv().unwrap();
+        assert_upstream_request(&headers, &payload, &body, &user);
+        let instructions = payload["messages"][0]["content"].as_str().unwrap();
+        assert_eq!(
+            instructions.contains("RouteApplicationDirect"),
+            has_semantic_actions
+        );
+        assert_eq!(
+            instructions.contains("Per-app routing is unavailable in this inventory."),
+            has_semantic_actions && !has_route,
+        );
+    }
+}
+
+async fn assert_step_result(action: Value, status: StatusCode) {
+    let (upstream, gateway) = Upstream::start(StatusCode::OK, completion(&action)).await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let user = fixture.user(0xd3, false).await;
+    let [_, (identity, credential)] = credentials(&user);
+    let response = fixture
+        .send(request_at(
+            STEP_PATH,
+            identity,
+            credential,
+            step_body().to_string(),
+        ))
+        .await;
+    assert_eq!(response.status(), status, "model reply: {action}");
+    assert_no_store(&response);
+    let text = response_text(response).await;
+    assert!(!text.contains(credential));
+    assert!(!text.contains(GATEWAY_KEY));
+    if status == StatusCode::OK {
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap(),
+            json!({"schema": 2, "result": action})
+        );
+    }
+    assert_eq!(upstream.requests.try_iter().count(), 1);
+}
+
+#[tokio::test]
+async fn step_accepts_the_advertised_action_types_and_exact_terminal_replies() {
+    for reply in [
+        json!({"operation": "act", "id": 1}),
+        json!({"operation": "act", "id": 2, "value": false}),
+        json!({"operation": "act", "id": 3}),
+        json!({"operation": "act", "id": 4, "value": "\u{e9}".repeat(192)}),
+        json!({"operation": "act", "id": 32}),
+        json!({"operation": "finish"}),
+        json!({"operation": "clarify"}),
+    ] {
+        assert_step_result(reply, StatusCode::OK).await;
+    }
+}
+
+#[tokio::test]
+async fn step_rejects_unadvertised_controls_and_invalid_action_values() {
+    for reply in [
+        json!({"operation": "act", "id": 31}),
+        json!({"operation": "act", "id": 1, "value": true}),
+        json!({"operation": "act", "id": 1, "value": null}),
+        json!({"operation": "act", "id": 2}),
+        json!({"operation": "act", "id": 2, "value": "true"}),
+        json!({"operation": "act", "id": 3, "value": false}),
+        json!({"operation": "act", "id": 4, "value": false}),
+        json!({"operation": "act", "id": 4, "value": "\u{e9}".repeat(193)}),
+        json!({"operation": "act", "id": 4, "value": "\ttext"}),
+        json!({"operation": "act", "id": 4, "value": "\u{202e}text"}),
+        json!({"operation": "act", "id": 32, "value": 1}),
+        json!({"operation": "act", "id": "1"}),
+        json!({"operation": "act", "id": 1, "target": "another-control"}),
+        json!({"operation": "finish", "id": 1}),
+        json!({"operation": "clarify", "reason": "unknown-control"}),
+        json!({"operation": "route_only_app"}),
+    ] {
+        assert_step_result(reply, StatusCode::BAD_GATEWAY).await;
+    }
+}
+
+#[tokio::test]
+async fn step_checks_the_inventory_before_forwarding_and_keeps_v1_on_plan() {
+    let (upstream, gateway) =
+        Upstream::start(StatusCode::OK, completion(&json!({"operation": "finish"}))).await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let user = fixture.user(0xd4, false).await;
+    let [(identity, credential), _] = credentials(&user);
+
+    for (path, body) in [
+        (STEP_PATH, plan_body("en", "Enable VPN", true)),
+        (PATH, step_body()),
+    ] {
+        let response = fixture
+            .send(request_at(path, identity, credential, body.to_string()))
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        assert_no_store(&response);
+    }
+
+    for (field, value) in [
+        ("busy", json!("false")),
+        ("previous", json!("Settings Menu")),
+        (
+            "raw_fields",
+            json!({"SearchField": "synthetic-private-text"}),
+        ),
+    ] {
+        let mut body = step_body();
+        body[field] = value;
+        let response = fixture
+            .send(request_at(
+                STEP_PATH,
+                identity,
+                credential,
+                body.to_string(),
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{field}");
+        assert_no_store(&response);
+    }
+
+    for (field, value) in [
+        ("id", json!(0)),
+        ("id", json!(2)),
+        ("id", json!(33)),
+        ("kind", json!("unadvertised-kind")),
+        ("name", json!("")),
+        ("name", json!("a".repeat(73))),
+        ("name", json!("settings/menu")),
+        ("value", json!("synthetic-private-field-text")),
+    ] {
+        let mut body = step_body();
+        body["controls"][0][field] = value;
+        let response = fixture
+            .send(request_at(
+                STEP_PATH,
+                identity,
+                credential,
+                body.to_string(),
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{field}");
+        assert_no_store(&response);
+    }
+
+    assert!(upstream.requests.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn step_body_limit_is_exactly_2048_bytes() {
+    let (upstream, gateway) =
+        Upstream::start(StatusCode::OK, completion(&json!({"operation": "finish"}))).await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let user = fixture.user(0xd5, false).await;
+    let [(identity, credential), _] = credentials(&user);
+    let compact = step_body().to_string();
+    assert!(compact.len() < 2048);
+
+    for (length, status) in [
+        (2048, StatusCode::OK),
+        (2049, StatusCode::PAYLOAD_TOO_LARGE),
+    ] {
+        let body = format!("{compact:<length$}");
+        assert_eq!(body.len(), length);
+        let response = fixture
+            .send(request_at(STEP_PATH, identity, credential, body))
+            .await;
+        assert_eq!(response.status(), status);
+        assert_no_store(&response);
+    }
+    assert_eq!(upstream.requests.try_iter().count(), 1);
+}
+
+#[tokio::test]
+async fn step_and_plan_share_the_account_quota_across_identity_forms() {
+    let (upstream, gateway) =
+        Upstream::start(StatusCode::OK, completion(&json!({"operation": "finish"}))).await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let user = fixture.user(0xd6, false).await;
+    let [(subscription, token), (device, device_id)] = credentials(&user);
+    let body = step_body();
+    for _ in 0..6 {
+        let response = fixture
+            .send(request_at(STEP_PATH, device, device_id, body.to_string()))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let response = fixture
+        .send(request(
+            subscription,
+            token,
+            plan_body("en", "Enable VPN", true).to_string(),
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_no_store(&response);
+    assert!(response.headers().contains_key(RETRY_AFTER));
+    assert_eq!(upstream.requests.try_iter().count(), 6);
+}
+
+#[tokio::test]
+async fn step_does_not_echo_an_escaped_gateway_credential() {
+    let secret = format!(
+        r"\u{:04x}{}",
+        u32::from(GATEWAY_KEY.as_bytes()[0]),
+        &GATEWAY_KEY[1..]
+    );
+    let content = format!(r#"{{"operation":"act","id":4,"value":"{secret}"}}"#);
+    let (upstream, gateway) = Upstream::start(
+        StatusCode::OK,
+        json!({"choices": [{"message": {"content": content}}]}),
+    )
+    .await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let user = fixture.user(0xdf, false).await;
+    let [(identity, credential), _] = credentials(&user);
+    let response = fixture
+        .send(request_at(
+            STEP_PATH,
+            identity,
+            credential,
+            step_body().to_string(),
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_no_store(&response);
+    assert!(!response_text(response).await.contains(GATEWAY_KEY));
+    assert!(upstream.requests.try_recv().is_ok());
+}
+
+fn crash_observation() -> Value {
+    json!({
+        "fatal": true,
+        "fault": "null_reference",
+        "area": "startup",
+        "signal": "none"
+    })
+}
+
+fn crash_step_body() -> Value {
+    let mut body = step_body();
+    body["controls"] = json!([]);
+    body["crash"] = crash_observation();
+    body
+}
+
+fn diagnosis_reply(summary: &str) -> Value {
+    json!({"operation": "diagnosis", "summary": summary})
+}
+
+async fn step_model_reply(body: Value, reply: Value, status: StatusCode) -> String {
+    let (upstream, gateway) = Upstream::start(StatusCode::OK, completion(&reply)).await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let user = fixture.user(0xe8, false).await;
+    let [_, (identity, credential)] = credentials(&user);
+    let response = fixture
+        .send(request_at(
+            STEP_PATH,
+            identity,
+            credential,
+            body.to_string(),
+        ))
+        .await;
+    assert_eq!(response.status(), status, "model reply: {reply}");
+    assert_no_store(&response);
+    let text = response_text(response).await;
+    assert!(!text.contains(credential));
+    assert!(!text.contains(GATEWAY_KEY));
+    assert_eq!(upstream.requests.try_iter().count(), 1);
+    text
+}
+
+async fn assert_crash_step_bad_request(case: &str, body: Value) {
+    let (upstream, gateway) = Upstream::start(
+        StatusCode::OK,
+        completion(&diagnosis_reply("Synthetic unused diagnosis.")),
+    )
+    .await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let user = fixture.user(0xe9, false).await;
+    let [_, (identity, credential)] = credentials(&user);
+    let response = fixture
+        .send(request_at(
+            STEP_PATH,
+            identity,
+            credential,
+            body.to_string(),
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{case}");
+    assert_no_store(&response);
+    let text = response_text(response).await;
+    assert!(!text.contains(credential));
+    assert!(!text.contains(GATEWAY_KEY));
+    assert!(upstream.requests.try_recv().is_err(), "{case}");
+}
+
+#[tokio::test]
+async fn step_accepts_crash_diagnosis_for_both_identities_and_forwards_the_evidence() {
+    let summary = "The VPN service stopped after a routing failure.";
+    let reply = diagnosis_reply(summary);
+    let (upstream, gateway) = Upstream::start(StatusCode::OK, completion(&reply)).await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let user = fixture.user(0xe0, false).await;
+    let body = crash_step_body();
+    let expected = json!({"schema": 2, "result": reply});
+
+    for (identity, credential) in credentials(&user) {
+        let response = fixture
+            .send(request_at(
+                STEP_PATH,
+                identity,
+                credential,
+                body.to_string(),
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_no_store(&response);
+        let text = response_text(response).await;
+        assert!(!text.contains(credential));
+        assert!(!text.contains(GATEWAY_KEY));
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), expected);
+
+        let (headers, payload) = upstream.requests.try_recv().unwrap();
+        assert_upstream_request(&headers, &payload, &body, &user);
+    }
+    assert!(upstream.requests.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn step_accepts_every_advertised_crash_value() {
+    let summary = "Synthetic crash diagnosis.";
+    let reply = diagnosis_reply(summary);
+    let (upstream, gateway) = Upstream::start(StatusCode::OK, completion(&reply)).await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let expected = json!({"schema": 2, "result": reply});
+    let faults = [
+        "unknown",
+        "null_reference",
+        "invalid_operation",
+        "io",
+        "access_denied",
+        "out_of_memory",
+        "network",
+        "configuration",
+        "native",
+    ];
+    let areas = ["unknown", "ui", "startup", "routing", "settings"];
+    let signals = ["none", "proxy_unreachable", "tun_busy", "stop_unconfirmed"];
+    let mut cases = vec![(false, "unknown", "unknown", "none")];
+    cases.extend(faults.iter().map(|fault| (true, *fault, "unknown", "none")));
+    cases.extend(areas.iter().map(|area| (true, "unknown", *area, "none")));
+    cases.extend(
+        signals
+            .iter()
+            .map(|signal| (true, "unknown", "unknown", *signal)),
+    );
+
+    for (index, (fatal, fault, area, signal)) in cases.into_iter().enumerate() {
+        let mut body = step_body();
+        body["controls"] = json!([]);
+        body["crash"] = json!({"fatal": fatal, "fault": fault, "area": area, "signal": signal});
+        let user = fixture.user(0x200 + index as u32, false).await;
+        let [_, (identity, credential)] = credentials(&user);
+        let response = fixture
+            .send(request_at(
+                STEP_PATH,
+                identity,
+                credential,
+                body.to_string(),
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK, "{fault}/{area}/{signal}");
+        assert_no_store(&response);
+        let text = response_text(response).await;
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), expected);
+
+        let (headers, payload) = upstream.requests.try_recv().unwrap();
+        assert_upstream_request(&headers, &payload, &body, &user);
+    }
+    assert!(upstream.requests.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn step_rejects_invalid_crash_observations_before_the_model() {
+    let mut unknown_nested = crash_step_body();
+    unknown_nested["crash"]["backtrace"] = json!("synthetic-private-backtrace");
+
+    let mut unknown_fault = crash_step_body();
+    unknown_fault["crash"]["fault"] = json!("segfault");
+
+    let mut unknown_area = crash_step_body();
+    unknown_area["crash"]["area"] = json!("daemon");
+
+    let mut unknown_signal = crash_step_body();
+    unknown_signal["crash"]["signal"] = json!("stopped");
+
+    let mut uppercase_fault = crash_step_body();
+    uppercase_fault["crash"]["fault"] = json!("IO");
+
+    let mut wrong_fatal = crash_step_body();
+    wrong_fatal["crash"]["fatal"] = json!("true");
+
+    let mut missing_fatal = crash_step_body();
+    missing_fatal["crash"]
+        .as_object_mut()
+        .unwrap()
+        .remove("fatal");
+
+    let mut missing_fault = crash_step_body();
+    missing_fault["crash"]
+        .as_object_mut()
+        .unwrap()
+        .remove("fault");
+
+    let mut missing_area = crash_step_body();
+    missing_area["crash"]
+        .as_object_mut()
+        .unwrap()
+        .remove("area");
+
+    let mut missing_signal = crash_step_body();
+    missing_signal["crash"]
+        .as_object_mut()
+        .unwrap()
+        .remove("signal");
+
+    let mut scalar_crash = step_body();
+    scalar_crash["controls"] = json!([]);
+    scalar_crash["crash"] = json!(true);
+
+    let mut non_empty_controls = step_body();
+    non_empty_controls["crash"] = crash_observation();
+
+    let mut crash_with_previous = crash_step_body();
+    crash_with_previous["previous"] = json!("SettingsMenu");
+
+    let mut missing_controls = crash_step_body();
+    missing_controls.as_object_mut().unwrap().remove("controls");
+
+    for (case, body) in [
+        ("unknown nested field", unknown_nested),
+        ("unknown fault", unknown_fault),
+        ("unknown area", unknown_area),
+        ("unknown signal", unknown_signal),
+        ("case-sensitive fault", uppercase_fault),
+        ("wrong fatal type", wrong_fatal),
+        ("missing fatal", missing_fatal),
+        ("missing fault", missing_fault),
+        ("missing area", missing_area),
+        ("missing signal", missing_signal),
+        ("scalar crash", scalar_crash),
+        ("non-empty controls", non_empty_controls),
+        ("previous with crash", crash_with_previous),
+        ("missing controls", missing_controls),
+    ] {
+        assert_crash_step_bad_request(case, body).await;
+    }
+}
+
+#[tokio::test]
+async fn step_rejects_diagnosis_without_crash_evidence() {
+    step_model_reply(
+        step_body(),
+        diagnosis_reply("Synthetic uncorroborated diagnosis."),
+        StatusCode::BAD_GATEWAY,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn step_rejects_non_diagnosis_replies_with_crash_evidence() {
+    for reply in [
+        json!({"operation": "act", "id": 1}),
+        json!({"operation": "act", "id": 2, "value": true}),
+        json!({"operation": "finish"}),
+        json!({"operation": "clarify"}),
+    ] {
+        step_model_reply(crash_step_body(), reply, StatusCode::BAD_GATEWAY).await;
+    }
+}
+
+#[tokio::test]
+async fn step_accepts_diagnosis_summary_within_the_byte_bound() {
+    for summary in ["a".to_string(), "a".repeat(384), "\u{e9}".repeat(192)] {
+        let text =
+            step_model_reply(crash_step_body(), diagnosis_reply(&summary), StatusCode::OK).await;
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap(),
+            json!({"schema": 2, "result": {"operation": "diagnosis", "summary": summary}})
+        );
+    }
+}
+
+#[tokio::test]
+async fn step_rejects_invalid_diagnosis_summaries() {
+    let long_utf8 = format!("{}a", "\u{e9}".repeat(192));
+    assert_eq!(long_utf8.len(), 385);
+
+    for summary in [
+        String::new(),
+        " \t\n ".to_string(),
+        "a".repeat(385),
+        long_utf8,
+        "diagnosis\u{0007}synthetic".to_string(),
+        "diagnosis\nsynthetic".to_string(),
+        "\u{202e}diagnosis".to_string(),
+    ] {
+        step_model_reply(
+            crash_step_body(),
+            diagnosis_reply(&summary),
+            StatusCode::BAD_GATEWAY,
+        )
+        .await;
+    }
+
+    for reply in [
+        json!({"operation": "diagnosis"}),
+        json!({"operation": "diagnosis", "summary": 7}),
+        json!({"operation": "diagnosis", "summary": "Synthetic.", "fatal": true}),
+        json!({"operation": "diagnosis", "summary": "Synthetic.", "extra": "synthetic"}),
+    ] {
+        step_model_reply(crash_step_body(), reply, StatusCode::BAD_GATEWAY).await;
+    }
+}
+
+#[tokio::test]
+async fn step_diagnosis_summary_cannot_echo_account_credentials() {
+    for (index, number) in [0xe9_u32, 0xea].into_iter().enumerate() {
+        let subscription = format!("synthetic-vpnrouter-subscription_{number}");
+        let device = format!("{number:032x}");
+        let summary = if index == 0 {
+            format!("Synthetic diagnosis for {subscription}.")
+        } else {
+            format!("Synthetic diagnosis for {device}.")
+        };
+        let (upstream, gateway) =
+            Upstream::start(StatusCode::OK, completion(&diagnosis_reply(&summary))).await;
+        let fixture = Fixture::new(Some(gateway)).await;
+        let user = fixture.user(number, false).await;
+        let [subscription_pair, device_pair] = credentials(&user);
+        let (identity, credential) = if index == 0 {
+            subscription_pair
+        } else {
+            device_pair
+        };
+
+        let response = fixture
+            .send(request_at(
+                STEP_PATH,
+                identity,
+                credential,
+                crash_step_body().to_string(),
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{summary}");
+        assert_no_store(&response);
+        let text = response_text(response).await;
+        assert!(!text.contains(summary.as_str()));
+        assert!(!text.contains(subscription.as_str()));
+        assert!(!text.contains(device.as_str()));
+        assert!(!text.contains(credential));
+        assert!(!text.contains(GATEWAY_KEY));
+        assert_eq!(upstream.requests.try_iter().count(), 1);
+    }
+}
+
+#[tokio::test]
+async fn step_diagnosis_summary_cannot_echo_the_gateway_credential() {
+    let summary = format!("Synthetic diagnosis for {GATEWAY_KEY}.");
+    let text = step_model_reply(
+        crash_step_body(),
+        diagnosis_reply(&summary),
+        StatusCode::BAD_GATEWAY,
+    )
+    .await;
+    assert!(!text.contains(GATEWAY_KEY));
+}
+
+#[tokio::test]
+async fn step_diagnosis_summary_cannot_hide_the_gateway_credential() {
+    let secret = format!(
+        r"\u{:04x}{}",
+        u32::from(GATEWAY_KEY.as_bytes()[0]),
+        &GATEWAY_KEY[1..]
+    );
+    let content = format!(r#"{{"operation":"diagnosis","summary":"{secret}"}}"#);
+    let (upstream, gateway) = Upstream::start(
+        StatusCode::OK,
+        json!({"choices": [{"message": {"content": content}}]}),
+    )
+    .await;
+    let fixture = Fixture::new(Some(gateway)).await;
+    let user = fixture.user(0xeb, false).await;
+    let [_, (identity, credential)] = credentials(&user);
+    let response = fixture
+        .send(request_at(
+            STEP_PATH,
+            identity,
+            credential,
+            crash_step_body().to_string(),
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_no_store(&response);
+    assert!(!response_text(response).await.contains(GATEWAY_KEY));
+    assert_eq!(upstream.requests.try_iter().count(), 1);
+}
+
+#[tokio::test]
+async fn step_keeps_existing_actions_without_crash_evidence() {
+    for reply in [
+        json!({"operation": "act", "id": 1}),
+        json!({"operation": "finish"}),
+        json!({"operation": "clarify"}),
+    ] {
+        let body = step_body();
+        let text = step_model_reply(body, reply.clone(), StatusCode::OK).await;
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap(),
+            json!({"schema": 2, "result": reply})
+        );
+    }
+}
+
+#[tokio::test]
+async fn registered_build_binds_the_provider_prompt_and_reply_to_selected_source() {
+    const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+    const SOURCE_PATH: &str = "/api/v1/assistant/vpnrouter/source-diagnosis";
+    let matched = json!({"path":"VPNRouter.Core/Services/SettingsLoader.cs","first":51,"last":51,"text":"return ReadSettings();"});
+    let mut tagged = matched.clone();
+    tagged["areas"] = json!(["settings"]);
+    let catalog = json!({"schema":1,"releases":[{
+        "version":"2.51.1-r1","commit":COMMIT,"targets":[{"platform":"windows","arch":"x64"}],
+        "excerpts":[tagged,{"path":"VPNRouter.App/Program.cs","first":10,"last":10,
+            "text":"return Start();","areas":["startup"]}]
+    }]});
+    let catalog = Arc::new(SourceCatalog::parse(&serde_json::to_vec(&catalog).unwrap()).unwrap());
+    let model = json!({"operation":"source_diagnosis","hypothesis":"Reading settings failed.",
+        "basis":"The report records an I/O error.","confidence":"low","check":"review_settings",
+        "citations":[{"path":matched["path"],"first":51,"last":51}]});
+    let crash = json!({"fatal":false,"fault":"io","area":"settings","signal":"none"});
+    let input = json!({"schema":1,"locale":"en","version":"2.51.1-r1","commit":COMMIT,
+        "platform":"windows","arch":"x64","crash":crash});
+    let mut forged = model.clone();
+    forged["citations"][0]["last"] = json!(52);
+    for (answer, expected_status) in [
+        (model.clone(), StatusCode::OK),
+        (forged, StatusCode::BAD_GATEWAY),
+    ] {
+        let (upstream, gateway) = Upstream::start(StatusCode::OK, completion(&answer)).await;
+        let app = Fixture::with_routes(router_with_catalog(
+            Some(gateway),
+            CatalogStatus::Ready(Arc::clone(&catalog)),
+        ))
+        .await;
+        let user = app.user(0xddd, false).await;
+        let [(kind, credential), _] = credentials(&user);
+        for (field, other) in [("version", "2.51.1-r2"), ("arch", "arm64")] {
+            let mut mismatch = input.clone();
+            mismatch[field] = json!(other);
+            let response = app
+                .send(request_at(
+                    SOURCE_PATH,
+                    kind,
+                    credential,
+                    mismatch.to_string(),
+                ))
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let value: Value = serde_json::from_str(&response_text(response).await).unwrap();
+            assert_eq!(
+                value,
+                json!({"schema":1,"result":{"operation":"unknown_build"}})
+            );
+        }
+        let mut no_match = input.clone();
+        no_match["crash"] =
+            json!({"fatal":false,"fault":"network","area":"routing","signal":"none"});
+        let no_match_response = app
+            .send(request_at(
+                SOURCE_PATH,
+                kind,
+                credential,
+                no_match.to_string(),
+            ))
+            .await;
+        assert_eq!(no_match_response.status(), StatusCode::OK);
+        let no_match_value: Value =
+            serde_json::from_str(&response_text(no_match_response).await).unwrap();
+        assert_eq!(
+            no_match_value,
+            json!({"schema":1,"result":{"operation":"insufficient_evidence"}})
+        );
+        assert!(upstream.requests.try_recv().is_err());
+
+        let response = app
+            .send(request_at(SOURCE_PATH, kind, credential, input.to_string()))
+            .await;
+        assert_eq!(response.status(), expected_status);
+        assert_no_store(&response);
+        let value: Value = serde_json::from_str(&response_text(response).await).unwrap();
+        if expected_status == StatusCode::OK {
+            let mut expected = model.clone();
+            expected["citations"][0]["commit"] = json!(COMMIT);
+            assert_eq!(value, json!({"schema":1,"result":expected}));
+        } else {
+            assert_eq!(value, json!({"error":"gateway_error"}));
+        }
+        let (headers, payload) = upstream.requests.try_recv().unwrap();
+        assert_upstream_request(
+            &headers,
+            &payload,
+            &json!({"locale":"en","version":"2.51.1-r1",
+            "platform":"windows","arch":"x64","crash":crash,"sources":[matched]}),
+            &user,
+        );
+        assert!(upstream.requests.try_recv().is_err());
+    }
+
+    let mut connection = input;
+    connection.as_object_mut().unwrap().remove("crash");
+    connection["connection"] = json!("startup_timeout");
+    let mut answer = model;
+    let source =
+        json!({"path":"VPNRouter.App/Program.cs","first":10,"last":10,"text":"return Start();"});
+    answer["citations"] = json!([{"path":source["path"],"first":10,"last":10}]);
+    let (upstream, gateway) = Upstream::start(StatusCode::OK, completion(&answer)).await;
+    let app = Fixture::with_routes(router_with_catalog(
+        Some(gateway),
+        CatalogStatus::Ready(catalog),
+    ))
+    .await;
+    let user = app.user(0xdde, false).await;
+    let [_, (kind, credential)] = credentials(&user);
+    let response = app
+        .send(request_at(
+            SOURCE_PATH,
+            kind,
+            credential,
+            connection.to_string(),
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    answer["citations"][0]["commit"] = json!(COMMIT);
+    let reply: Value = serde_json::from_str(&response_text(response).await).unwrap();
+    assert_eq!(reply, json!({"schema":1,"result":answer}));
+    let (headers, payload) = upstream.requests.try_recv().unwrap();
+    assert_upstream_request(
+        &headers,
+        &payload,
+        &json!({"locale":"en","version":"2.51.1-r1","platform":"windows","arch":"x64",
+            "connection":"startup_timeout","sources":[source]}),
+        &user,
+    );
+}
+
+const SOURCE_VERSION: &str = "2.51.1-r1";
+const SOURCE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+fn source_catalog(text: &str) -> Arc<SourceCatalog> {
+    let catalog = json!({"schema":1,"releases":[{
+        "version":SOURCE_VERSION,
+        "commit":SOURCE_COMMIT,
+        "targets":[{"platform":"windows","arch":"x64"}],
+        "excerpts":[{
+            "path":"VPNRouter.Core/Services/SettingsLoader.cs",
+            "first":51,
+            "last":51,
+            "text":text,
+            "areas":["settings"]
+        }]
+    }]});
+    Arc::new(SourceCatalog::parse(&serde_json::to_vec(&catalog).unwrap()).unwrap())
+}
+
+fn source_body() -> Value {
+    json!({
+        "schema": 1,
+        "locale": "en",
+        "version": SOURCE_VERSION,
+        "commit": SOURCE_COMMIT,
+        "platform": "windows",
+        "arch": "x64",
+        "crash": {"fatal": false, "fault": "io", "area": "settings", "signal": "none"}
+    })
+}
+
+async fn assert_source_unavailable(fixture: &Fixture, number: u32, case: &str) -> String {
+    let user = fixture.user(number, false).await;
+    let [(identity, credential), _] = credentials(&user);
+    let response = fixture
+        .send(request_at(
+            SOURCE_PATH,
+            identity,
+            credential,
+            source_body().to_string(),
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{case}");
+    assert_no_store(&response);
+    let text = response_text(response).await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&text).unwrap(),
+        json!({"error": "unavailable"}),
+        "{case}"
+    );
+    assert!(!text.contains(credential), "{case}");
+    assert!(!text.contains(GATEWAY_KEY), "{case}");
+    text
+}
+
+#[tokio::test]
+async fn source_diagnosis_catalog_gateway_and_secret_source_failures_skip_the_provider() {
+    let (upstream, gateway) = Upstream::start(
+        StatusCode::OK,
+        completion(&json!({"operation": "source_diagnosis"})),
+    )
+    .await;
+    let fixture = Fixture::with_routes(router_with_catalog(
+        Some(gateway),
+        CatalogStatus::Unavailable,
+    ))
+    .await;
+    assert_source_unavailable(&fixture, 0xdc0, "catalog unavailable").await;
+    assert!(upstream.requests.try_recv().is_err());
+
+    let catalog = source_catalog("return ReadSettings();");
+    let fixture =
+        Fixture::with_routes(router_with_catalog(None, CatalogStatus::Ready(catalog))).await;
+    assert_source_unavailable(&fixture, 0xdc1, "gateway unavailable").await;
+
+    let catalog = source_catalog(&format!("return \"{GATEWAY_KEY}\";"));
+    let (upstream, gateway) = Upstream::start(
+        StatusCode::OK,
+        completion(&json!({"operation": "source_diagnosis"})),
+    )
+    .await;
+    let fixture = Fixture::with_routes(router_with_catalog(
+        Some(gateway),
+        CatalogStatus::Ready(catalog),
+    ))
+    .await;
+    assert_source_unavailable(&fixture, 0xdc2, "source carries the gateway key").await;
+    assert!(upstream.requests.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn source_diagnosis_hides_known_build_provider_failures() {
+    const PRIVATE_ERROR: &str = "synthetic-private-source-provider-error";
+    let catalog = source_catalog("return ReadSettings();");
+    for (index, (status, upstream_body)) in [
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"error": PRIVATE_ERROR}),
+        ),
+        (
+            StatusCode::OK,
+            json!({"choices": [{"message": {"content": "not json"}}]}),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (upstream, gateway) = Upstream::start(status, upstream_body).await;
+        let fixture = Fixture::with_routes(router_with_catalog(
+            Some(gateway),
+            CatalogStatus::Ready(Arc::clone(&catalog)),
+        ))
+        .await;
+        let user = fixture.user(0xdc3 + index as u32, false).await;
+        let [(identity, credential), _] = credentials(&user);
+        let response = fixture
+            .send(request_at(
+                SOURCE_PATH,
+                identity,
+                credential,
+                source_body().to_string(),
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_no_store(&response);
+        let text = response_text(response).await;
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap(),
+            json!({"error": "gateway_error"})
+        );
+        assert!(!text.contains(PRIVATE_ERROR));
+        assert!(!text.contains(credential));
+        assert!(!text.contains(GATEWAY_KEY));
+        assert_eq!(upstream.requests.try_iter().count(), 1);
+    }
+}
+
+#[tokio::test]
+async fn source_diagnosis_blocks_alternate_account_credentials_before_forwarding() {
+    let number = 0x7abu32;
+    for (index, alternate) in [
+        format!("{number:032x}"),
+        format!("synthetic-vpnrouter-subscription_{number}"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let catalog = source_catalog(&format!("return \"{alternate}\";"));
+        let (upstream, gateway) = Upstream::start(StatusCode::OK, json!({})).await;
+        let fixture = Fixture::with_routes(router_with_catalog(
+            Some(gateway),
+            CatalogStatus::Ready(catalog),
+        ))
+        .await;
+        let user = fixture.user(number, false).await;
+        let identities = credentials(&user);
+        let (kind, credential) = identities[index];
+        assert_eq!(identities[1 - index].1, alternate);
+        let response = fixture
+            .send(request_at(
+                SOURCE_PATH,
+                kind,
+                credential,
+                source_body().to_string(),
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_no_store(&response);
+        let text = response_text(response).await;
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap(),
+            json!({"error":"unavailable"})
+        );
+        assert_eq!(upstream.requests.try_iter().count(), 0);
+    }
+}
+
+#[tokio::test]
+async fn busy_diagnoses_preserve_the_other_account_slot_and_recover() {
+    let entered = Arc::new(Semaphore::new(0));
+    let release = Arc::new(Semaphore::new(0));
+    let (upstream, gateway) = Upstream::with_gate(
+        StatusCode::OK, completion(&json!({
+            "operation":"source_diagnosis", "hypothesis":"Settings read failed.",
+            "basis":"The crash report indicates an IO error.", "confidence":"low", "check":"review_settings",
+            "citations":[{"path":"VPNRouter.Core/Services/SettingsLoader.cs","first":51,"last":51}]
+        })),
+        Some((Arc::clone(&entered), Arc::clone(&release))),
+    ).await;
+    let fixture = Fixture::with_routes(router_with_catalog(
+        Some(gateway),
+        CatalogStatus::Ready(source_catalog("return ReadSettings();")),
+    ))
+    .await;
+    let alice = fixture.user(0x7ac, false).await;
+    let bob = fixture.user(0x7ad, false).await;
+    let carol = fixture.user(0x7ae, false).await;
+    let request = |(kind, credential): (&str, &str)| {
+        request_at(SOURCE_PATH, kind, credential, source_body().to_string())
+    };
+    let start =
+        |user: &User| tokio::spawn(fixture.app.clone().oneshot(request(credentials(user)[0])));
+    let wait_for_provider = || async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.acquire())
+            .await
+            .expect("request reached the provider")
+            .unwrap()
+            .forget();
+    };
+    let assert_busy = |request| async {
+        let response = fixture.send(request).await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()[RETRY_AFTER], "1");
+        assert_no_store(&response);
+        assert_eq!(
+            serde_json::from_str::<Value>(&response_text(response).await).unwrap(),
+            json!({"error":"diagnosis_busy"})
+        );
+    };
+    let first = start(&alice);
+    wait_for_provider().await;
+    assert_busy(request(credentials(&alice)[1])).await;
+    let second = start(&bob);
+    wait_for_provider().await;
+    assert_busy(request(credentials(&carol)[0])).await;
+    release.add_permits(2);
+    assert_eq!(second.await.unwrap().unwrap().status(), StatusCode::OK);
+    assert_eq!(first.await.unwrap().unwrap().status(), StatusCode::OK);
+    release.add_permits(1);
+    let response = fixture.send(request(credentials(&carol)[0])).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(upstream.requests.try_iter().count(), 3);
 }

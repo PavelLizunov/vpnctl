@@ -35,7 +35,7 @@ impl PollLimits {
         let now = Instant::now();
         let anonymous = matches!(
             namespace,
-            b"nodes:ip" | b"nina:ip" | b"vpnrouter:assistant:ip"
+            b"nodes:ip" | b"nina:ip" | b"vpnrouter:assistant:ip" | b"vpnrouter:source-diagnosis:ip"
         );
         let (buckets, max_buckets) = if anonymous {
             (&mut self.anonymous_ips, MAX_IP_BUCKETS)
@@ -93,10 +93,13 @@ fn pool(namespace: &[u8]) -> &'static OnceLock<Mutex<PollLimits>> {
     static NODE_LIMITS: OnceLock<Mutex<PollLimits>> = OnceLock::new();
     static NINA_LIMITS: OnceLock<Mutex<PollLimits>> = OnceLock::new();
     static VPNROUTER_LIMITS: OnceLock<Mutex<PollLimits>> = OnceLock::new();
+    static VPNROUTER_SOURCE_LIMITS: OnceLock<Mutex<PollLimits>> = OnceLock::new();
     if namespace.starts_with(b"nina:") {
         &NINA_LIMITS
     } else if namespace.starts_with(b"vpnrouter:assistant:") {
         &VPNROUTER_LIMITS
+    } else if namespace.starts_with(b"vpnrouter:source-diagnosis:") {
+        &VPNROUTER_SOURCE_LIMITS
     } else {
         &NODE_LIMITS
     }
@@ -131,6 +134,23 @@ mod tests {
         assert!(std::ptr::eq(pool(ip), pool(user)));
         assert!(!std::ptr::eq(pool(ip), pool(b"nina:ip")));
         assert!(!std::ptr::eq(pool(user), pool(b"nodes:device")));
+
+        let owner = Arc::new(RateLimiter::default());
+        let mut limits = PollLimits::default();
+        assert!(limits.acquire(&owner, ip, [1; 32], 120).is_ok());
+        assert_eq!(limits.anonymous_ips.len(), 1);
+        assert!(limits.credentials.is_empty());
+        assert!(limits.acquire(&owner, user, [2; 32], 6).is_ok());
+        assert_eq!(limits.credentials.len(), 1);
+    }
+
+    #[test]
+    fn source_diagnosis_has_its_own_pool_and_anonymous_ip_bucket() {
+        let ip = b"vpnrouter:source-diagnosis:ip";
+        let user = b"vpnrouter:source-diagnosis:user";
+        assert!(std::ptr::eq(pool(ip), pool(user)));
+        assert!(!std::ptr::eq(pool(ip), pool(b"vpnrouter:assistant:ip")));
+        assert!(!std::ptr::eq(pool(user), pool(b"nina:ip")));
 
         let owner = Arc::new(RateLimiter::default());
         let mut limits = PollLimits::default();

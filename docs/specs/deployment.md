@@ -37,6 +37,96 @@ For the [manual DNSTT check](dnstt-on-demand-assurance.md), install
 `VPNCTLD_DNSTT_CHECK_RUNNER` to it. The adapter uses the separately provisioned
 one-shot probe and its private template.
 
+### VPNRouter source-diagnosis catalog
+
+`POST /api/v1/assistant/vpnrouter/source-diagnosis` uses the same
+subscription/device credentials, gateway settings and `Cache-Control: no-store`
+transport as `/plan` and `/step`. It additionally reads a trusted release
+catalog from `VPNCTLD_VPNROUTER_SOURCE_CATALOG`. Set it in
+`/etc/vpnctl/vpnctld.env`:
+
+```sh
+VPNCTLD_VPNROUTER_SOURCE_CATALOG=/etc/vpnctl/vpnrouter-source-catalog.json
+```
+
+The path must be absolute. The catalog must be a regular, non-symlink file
+owned by root with no group or world write permission; every parent directory
+is checked the same way. Install public source excerpts as `root:root 0644`
+because vpnctld reads the file as an unprivileged service user. If the setting
+is unset, the route treats every build as unmapped and returns
+`unknown_build` without calling the provider. If the setting is present but the
+file is missing, unsafe or malformed, the route returns 503 and never calls the
+provider. Do not put credentials, private logs or account data in this file.
+
+Match the tag commit and supported targets to the build provenance of the published
+artifacts. Review each selected range for data suitable for external disclosure.
+The assistant sends those public source lines to its provider on a matching request.
+Build the catalog offline with Git and Gitleaks 8 installed. The manifest
+names the version, the full 40-hex commit, the supported platform/architecture
+pairs and the selected `path`/`first`/`last` ranges. Optional `areas`, `signals`
+and `faults` selectors use the same values as the `/step` crash enums:
+
+```json
+{
+  "schema": 1,
+  "releases": [{
+    "version": "2.51.0-r2",
+    "commit": "<40 lowercase hex>",
+    "targets": [{"platform": "windows", "arch": "x64"}],
+    "excerpts": [{
+      "path": "VPNRouter.Core/Services/Example.cs",
+      "first": 15,
+      "last": 23,
+      "areas": ["routing", "startup"],
+      "signals": ["tun_busy"],
+      "faults": ["network"]
+    }]
+  }]
+}
+```
+
+```sh
+python3 scripts/vpnrouter-source-catalog.py \
+  --repo /path/to/VPNRouter \
+  --manifest /secure/vpnrouter-2.51.0-r2.manifest.json \
+  --output /secure/vpnrouter-source-catalog.json
+sudo install -o root -g root -m 0644 \
+  /secure/vpnrouter-source-catalog.json \
+  /etc/vpnctl/vpnrouter-source-catalog.json
+sudo systemctl restart vpnctld
+```
+
+The generator reads committed blobs with Git repository-environment overrides,
+network transports, lazy fetching and replacement objects disabled. It scans the
+decoded excerpt text with Gitleaks before writing the catalog. A scanner error or
+secret finding preserves the prior catalog. It accepts only regular committed files; a symlink entry is
+rejected. If a mapping is missing, the generator fails instead of guessing. For
+each build, the service ranks excerpts by the observed crash signal, area and
+fault. It keeps up to 12 excerpts within 24 KiB of text and trims the lowest-ranked entries to fit 32 KiB of serialized JSON. Signal
+matches rank above area matches and area above fault; an excerpt without
+selectors is a fallback, and an excerpt whose selectors do not match is not
+sent. Tag representative routing, startup, UI and settings sources so different
+crash classes receive different evidence even when the catalog is larger than
+the prompt budget. Connection evidence maps to selectors as follows:
+`startup_timeout` uses `areas: ["startup"]`; `readiness_timeout` uses
+`areas: ["startup"]` and `signals: ["proxy_unreachable"]`; `unexpected_stop`
+uses `areas: ["routing"]` and `signals: ["stop_unconfirmed"]`; `tun_busy` uses
+`areas: ["routing"]` and `signals: ["tun_busy"]`. The request carries exactly
+one of `crash` or `connection`, never both or neither. If the crash reports only
+`fault: unknown`, `area: unknown` and `signal: none`, or no excerpt matches, the
+route returns
+`{"schema":1,"result":{"operation":"insufficient_evidence"}}` without a
+provider call and Desktop abstains locally. The service caps the catalog at
+512 KiB, 1 to 64 releases, 8 target pairs
+and 24 excerpts per release; each excerpt is at most 48 lines and 4096 UTF-8
+bytes. Route the exact POST path through the existing reverse proxy, preserve
+`Authorization` and `X-Vpnctl-Identity`, keep the 2048-byte body limit and set
+`X-Real-IP` from the trusted proxy block. An authorized request for an
+unregistered version/commit/platform/arch tuple returns HTTP 200 with
+`{"schema":1,"result":{"operation":"unknown_build"}}` without a provider call.
+
+An account can occupy one provider slot. Each daemon has two slots. When either limit is reached, the route returns HTTP 429 with `diagnosis_busy` and `Retry-After: 1`.
+
 Build static musl binaries with `just build-release` on a
 [HomeLab worker](agent-workflow.md#remote-builds-and-tests) or in GitHub Actions.
 The CI job installs `musl-tools`, `cmake`, and the Rust
@@ -199,6 +289,20 @@ configs containing private or preshared keys.
       commit.
 - [ ] `systemctl is-active vpnctld`; health endpoint 200 with expected version.
 - [ ] Changed behavior exercised by a live request after restart.
+- [ ] VPNRouter source catalog is present at the configured path, `root:root`
+      with no group/world write access, and a registered build returns a
+      diagnosis while an unregistered build returns `unknown_build`.
+- [ ] Routing and startup crash requests select different tagged excerpts when
+      the catalog exceeds the prompt budget; a crash with only unknown
+      fault/area/signal, or one with no matching excerpt, returns
+      `insufficient_evidence` without a provider call.
+- [ ] A connection request with exactly one of `startup_timeout`,
+      `readiness_timeout`, `unexpected_stop` or `tun_busy` forwards that code
+      without a crash object; null, both or neither evidence form is rejected.
+      The same known/unknown/missing-source results apply.
+- [ ] With the catalog setting unset, the source-diagnosis route returns
+      `unknown_build` without a provider call. With the setting present but the
+      file missing or malformed, it returns 503.
 - [ ] Binary backup created before replacement.
 - [ ] Pre-0050 (and pre-0049) inventory snapshot created and `verify_snapshot`
       passed; restore path and snapshot location recorded before daemon

@@ -71,15 +71,39 @@ struct PlanReply {
 }
 
 pub(crate) fn from_env() -> Router<AppState> {
-    router(Gateway::from_env([
-        "VPNCTLD_VPNROUTER_GATEWAY_URL",
-        "VPNCTLD_VPNROUTER_GATEWAY_MODEL",
-        "VPNCTLD_VPNROUTER_GATEWAY_KEY_FILE",
-    ]))
+    router_with_catalog(
+        Gateway::from_env([
+            "VPNCTLD_VPNROUTER_GATEWAY_URL",
+            "VPNCTLD_VPNROUTER_GATEWAY_MODEL",
+            "VPNCTLD_VPNROUTER_GATEWAY_KEY_FILE",
+        ]),
+        super::vpnrouter_source_catalog::SourceCatalog::from_env(),
+    )
 }
 
+#[cfg(test)]
 pub(super) fn router(gateway: Option<Gateway>) -> Router<AppState> {
-    configure_route(Router::new().route(PATH, post(plan)), gateway)
+    router_with_catalog(
+        gateway,
+        super::vpnrouter_source_catalog::CatalogStatus::Disabled,
+    )
+}
+
+pub(super) fn router_with_catalog(
+    gateway: Option<Gateway>,
+    catalog: super::vpnrouter_source_catalog::CatalogStatus,
+) -> Router<AppState> {
+    let source = Arc::new(super::vpnrouter_source_diagnosis::SourceState::new(catalog));
+    configure_route(
+        Router::new()
+            .route(PATH, post(plan))
+            .route(
+                super::vpnrouter_assistant_step::PATH,
+                post(super::vpnrouter_assistant_step::step),
+            )
+            .merge(super::vpnrouter_source_diagnosis::router(source)),
+        gateway,
+    )
 }
 
 async fn plan(
