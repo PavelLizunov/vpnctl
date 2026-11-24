@@ -272,9 +272,9 @@ fn assert_no_store(headers: &HeaderMap) {
     );
 }
 
-fn assert_json(text: &str, expected: Value) {
+fn assert_json(text: &str, expected: &Value) {
     assert_eq!(
-        serde_json::from_str::<Value>(text).unwrap(),
+        &serde_json::from_str::<Value>(text).unwrap(),
         expected,
         "body: {text}"
     );
@@ -289,7 +289,7 @@ fn assert_error(
 ) {
     assert_eq!(status, expected_status, "body: {text}");
     assert_no_store(headers);
-    assert_json(text, json!({"error": code}));
+    assert_json(text, &json!({"error": code}));
 }
 
 fn valid_body() -> Value {
@@ -349,7 +349,7 @@ async fn expect_unknown_build(fixture: &Fixture, number: u32, case: &str, body: 
         send(fixture, request(identity, credential, body.to_string())).await;
     assert_eq!(status, StatusCode::OK, "{case}: {text}");
     assert_no_store(&headers);
-    assert_json(&text, unknown_build());
+    assert_json(&text, &unknown_build());
     assert!(!text.contains(credential), "{case}: credential leaked");
 }
 
@@ -420,7 +420,7 @@ async fn valid_subscription_and_device_credentials_reach_the_unknown_build_resul
             send(&fixture, request(identity, credential, body.clone())).await;
         assert_eq!(status, StatusCode::OK, "{identity}: {text}");
         assert_no_store(&headers);
-        assert_json(&text, unknown_build());
+        assert_json(&text, &unknown_build());
         assert!(!text.contains(credential));
     }
 }
@@ -1041,7 +1041,7 @@ async fn body_limit_is_exactly_2048_bytes() {
     let (status, headers, text) = send(&fixture, request(identity, credential, at_limit)).await;
     assert_eq!(status, StatusCode::OK, "{text}");
     assert_no_store(&headers);
-    assert_json(&text, unknown_build());
+    assert_json(&text, &unknown_build());
 
     let over_limit = format!("{compact:<2049}");
     assert_eq!(over_limit.len(), 2049);
@@ -1179,7 +1179,7 @@ async fn unregistered_versions_commits_platforms_and_architectures_are_unknown_b
         .await;
         assert_eq!(status, StatusCode::OK, "{identity}: {text}");
         assert_no_store(&headers);
-        assert_json(&text, unknown_build());
+        assert_json(&text, &unknown_build());
     }
 }
 
@@ -1234,7 +1234,7 @@ async fn unknown_build_does_not_require_a_configured_gateway() {
     .await;
     assert_eq!(status, StatusCode::OK, "{text}");
     assert_no_store(&headers);
-    assert_json(&text, unknown_build());
+    assert_json(&text, &unknown_build());
 }
 
 #[tokio::test]
@@ -1278,7 +1278,7 @@ async fn both_identity_forms_share_one_source_diagnosis_account_quota() {
         }
         assert_eq!(status, StatusCode::OK, "{identity}: {text}");
         assert_no_store(&headers);
-        assert_json(&text, unknown_build());
+        assert_json(&text, &unknown_build());
         successes += 1;
     }
 
@@ -1342,7 +1342,7 @@ async fn source_diagnosis_has_a_separate_account_quota_from_step() {
         send(&fixture, request(identity, credential, source.clone())).await;
     assert_eq!(status, StatusCode::OK, "{text}");
     assert_no_store(&headers);
-    assert_json(&text, unknown_build());
+    assert_json(&text, &unknown_build());
 
     // An unknown build is still an authorized request, so it must consume the
     // endpoint account quota before any provider path is reachable.
@@ -1411,7 +1411,7 @@ async fn step_and_plan_keep_their_existing_public_contracts() {
     assert_no_store(&headers);
     assert_json(
         &text,
-        json!({"schema": 2, "result": {"operation": "finish"}}),
+        &json!({"schema": 2, "result": {"operation": "finish"}}),
     );
 
     let (status, headers, text) = send(
@@ -1423,7 +1423,7 @@ async fn step_and_plan_keep_their_existing_public_contracts() {
     assert_no_store(&headers);
     assert_json(
         &text,
-        json!({"schema": 1, "result": {"operation": "clarify", "reason": "unsupported_goal"}}),
+        &json!({"schema": 1, "result": {"operation": "clarify", "reason": "unsupported_goal"}}),
     );
 }
 
@@ -1550,5 +1550,5 @@ async fn registered_build_uses_trusted_catalog_from_env() {
     assert_no_store(&headers);
     let mut expected = model;
     expected["citations"][0]["commit"] = json!(COMMIT_A);
-    assert_json(&text, json!({"schema": 1, "result": expected}));
+    assert_json(&text, &json!({"schema": 1, "result": expected}));
 }
