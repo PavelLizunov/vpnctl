@@ -1,6 +1,7 @@
 import gettext
 import ipaddress
 import os
+import shutil
 import subprocess
 import sys
 
@@ -171,6 +172,11 @@ def main():
     else:
         raise ValueError("invalid firewall action")
 
+    # UFW checks the permissions of argv[0], which is "-" for stdin.
+    ufw_path = shutil.which("ufw")
+    if ufw_path is None:
+        raise RuntimeError("UFW executable not found on PATH")
+    sys.argv[0] = os.path.abspath(ufw_path)
     gettext.install("ufw")
     lock = create_lock()
     try:
