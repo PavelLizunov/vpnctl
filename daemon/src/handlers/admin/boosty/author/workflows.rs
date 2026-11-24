@@ -4,6 +4,8 @@ use serde::Deserialize;
 use super::client::{AuthorClient, AuthorIssue};
 use super::date;
 use super::views::{Page, Query, empty, pager};
+use crate::handlers::admin::helpers::valid_user_id;
+use crate::http_util::path_segment_encode;
 use crate::i18n::{Locale, tr};
 
 #[derive(Deserialize)]
@@ -20,6 +22,7 @@ struct Automation {
 #[serde(rename_all = "camelCase")]
 struct Job {
     name: String,
+    vpn_user_id: Option<String>,
     detected_at: Option<String>,
     delivery_state: String,
     telegram_state: String,
@@ -66,7 +69,16 @@ pub(super) async fn automation(
                     } }
                     tbody { @for job in &data.jobs.items {
                         tr {
-                            td { (job.name) }
+                            td {
+                                (job.name)
+                                @if let Some(id) = job.vpn_user_id.as_deref().filter(|id| valid_user_id(id)) {
+                                    div {
+                                        a href=(format!("/admin/users/{}", path_segment_encode(id))) {
+                                            (tr(lang, "Open in vpnctl", "Открыть в vpnctl"))
+                                        }
+                                    }
+                                }
+                            }
                             td { (date(job.detected_at.as_deref())) }
                             td {
                                 @if job.acknowledged_at.is_some() {

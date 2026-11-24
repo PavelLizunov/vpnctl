@@ -107,7 +107,42 @@ pub(crate) async fn user_set_traffic_limit(
     Redirect::to(&destination).into_response()
 }
 
-pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> Response {
+fn invalid_note(lang: crate::i18n::Locale) -> Response {
+    bad_request(crate::i18n::tr(
+        lang,
+        "Enter a note of up to 2,000 characters.",
+        "Введите заметку длиной до 2000 символов.",
+    ))
+}
+
+pub(crate) async fn user_set_note(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(user_id_str): Path<String>,
+    body: String,
+) -> Response {
+    let (_, _, lang) = theme_accent_lang(&headers);
+    let Some(note) = form_field(&body, "admin_note") else {
+        return invalid_note(lang);
+    };
+    let uid = vpnctl_core::UserId(user_id_str.clone());
+    match state.inv.set_user_admin_note(&uid, &note, "admin").await {
+        Ok(true) => Redirect::to(&format!(
+            "/admin/users/{}/overview#user-note",
+            path_segment_encode(&user_id_str)
+        ))
+        .into_response(),
+        Ok(false) => user_not_found(&user_id_str),
+        Err(vpnctl_inventory::SqliteInventoryError::Invalid(_)) => invalid_note(lang),
+        Err(error) => internal_error(anyhow::Error::new(error)),
+    }
+}
+
+pub(crate) async fn user_create(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
     let id_decoded: String = form_field(&body, "id")
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
@@ -139,10 +174,14 @@ pub(crate) async fn user_create(State(state): State<AppState>, body: String) -> 
         disabled: false,
     };
 
-    if let Err(e) = state.inv.add_user(&user).await {
+    let note = form_field(&body, "admin_note").unwrap_or_default();
+    if let Err(e) = state.inv.add_user_with_admin_note(&user, &note).await {
         return match e {
             vpnctl_inventory::SqliteInventoryError::AlreadyExists(what) => {
                 bad_request(&format!("{what} already exists — pick a different id"))
+            }
+            vpnctl_inventory::SqliteInventoryError::Invalid(_) => {
+                invalid_note(theme_accent_lang(&headers).2)
             }
             other => internal_error(anyhow::Error::new(other)),
         };

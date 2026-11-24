@@ -192,6 +192,7 @@ async fn retained_contents(pool: &SqlitePool) -> Vec<(String, Vec<Vec<String>>)>
             || table == "ssh_access_checks"
             || table == "server_security_reports"
             || table == "new_server_bandwidth_default"
+            || table == "user_admin_notes"
         {
             continue;
         }
@@ -238,7 +239,11 @@ async fn assert_current_migrations(pool: &SqlitePool) {
         "migration must leave existing delivery unrestricted"
     );
     assert!(table_contents(pool, "ssh_access_checks").await.is_empty());
-    for table in ["server_security_reports", "new_server_bandwidth_default"] {
+    for table in [
+        "server_security_reports",
+        "new_server_bandwidth_default",
+        "user_admin_notes",
+    ] {
         let contents = table_contents(pool, table).await;
         assert!(contents.is_empty(), "unexpected rows in {table}");
     }

@@ -317,6 +317,101 @@ async fn user_last_seen_isolates_between_users_and_ignores_server_wide_rows() {
 }
 
 #[tokio::test]
+async fn users_list_with_activity_matches_per_user_last_seen() {
+    let dir = TempDir::new().unwrap();
+    let inv = open(&dir).await;
+    let pool = raw_pool(&dir).await;
+    inv.add_server(&server("srv-1")).await.unwrap();
+    for id in ["alice", "bob", "carol", "dave"] {
+        inv.add_user(&user(id)).await.unwrap();
+    }
+    sqlx::query("UPDATE users SET created_at = '2026-01-02T03:04:05.000Z' WHERE id = 'alice'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET created_at = '2026-01-03 04:05:06' WHERE id = 'bob'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET created_at = 'unknown' WHERE id = 'carol'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO sub_access_log (ts, user_id, ip, status, bytes)
+         VALUES ('2026-08-27T11:18:13.452Z', 'alice', '1.1.1.1', 200, 1024)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO vpn_connection_stats (ts, server_id, user_id, upload_bytes, download_bytes, active_connections)
+         VALUES ('2026-09-04T13:08:02.427Z', 'srv-1', 'bob', 1000, 5000, 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO vpn_connection_stats (ts, server_id, user_id, upload_bytes, download_bytes, active_connections)
+         VALUES ('2026-09-04T12:00:00.000Z', 'srv-1', 'carol', 0, 0, 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE users SET last_activity_at = '2026-09-05T06:07:08.900Z' WHERE id = 'dave'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let rows = inv.users_list_with_activity().await.unwrap();
+    let ids: Vec<&str> = rows.iter().map(|row| row.user.id.0.as_str()).collect();
+    assert_eq!(ids, ["alice", "bob", "carol", "dave"]);
+
+    let alice = rows.iter().find(|row| row.user.id.0 == "alice").unwrap();
+    assert_eq!(
+        alice
+            .created_at
+            .unwrap()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string(),
+        "2026-01-02T03:04:05.000Z"
+    );
+    assert_eq!(
+        rows[1].created_at.unwrap().to_rfc3339(),
+        "2026-01-03T04:05:06+00:00"
+    );
+    assert!(rows[2].created_at.is_none());
+
+    for id in ["alice", "bob", "carol", "dave"] {
+        let row = rows.iter().find(|row| row.user.id.0 == id).unwrap();
+        let per_user = inv.user_last_seen(&UserId(id.into())).await.unwrap();
+        assert_eq!(
+            row.last_activity, per_user,
+            "bulk {id} activity must equal the overview's user_last_seen"
+        );
+    }
+    assert!(
+        rows.iter()
+            .find(|row| row.user.id.0 == "carol")
+            .unwrap()
+            .last_activity
+            .is_none(),
+        "zero-byte quiet ticks are not activity"
+    );
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.user.id.0 == "dave")
+            .unwrap()
+            .last_activity
+            .unwrap()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string(),
+        "2026-09-05T06:07:08.900Z",
+        "persisted last_activity_at must survive as the bulk activity instant"
+    );
+}
+
+#[tokio::test]
 async fn user_last_seen_survives_purge_of_each_activity_source() {
     let dir = TempDir::new().unwrap();
     let inv = open(&dir).await;

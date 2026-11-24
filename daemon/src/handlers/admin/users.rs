@@ -6,7 +6,8 @@ use maud::{Markup, html};
 
 use super::grant_targets;
 use super::helpers::{
-    humanize_bytes, internal_error, named_server, render_page, server_names, theme_accent_lang,
+    format_msk_iso, humanize_bytes, internal_error, named_server, render_page, server_names,
+    theme_accent_lang,
 };
 use crate::AppState;
 use crate::http_util::path_segment_encode;
@@ -21,15 +22,49 @@ pub(crate) fn mask_secret(s: &str) -> String {
     format!("{head}…{tail} ({n} chars)")
 }
 
+struct UserListRow<'a> {
+    user: &'a vpnctl_core::User,
+    grants_count: usize,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    last_activity: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Unknown dates sort last in both directions.
+fn compare_dates(
+    a: &Option<chrono::DateTime<chrono::Utc>>,
+    b: &Option<chrono::DateTime<chrono::Utc>>,
+    descending: bool,
+) -> std::cmp::Ordering {
+    match (a, b) {
+        (Some(a), Some(b)) if descending => b.cmp(a),
+        (Some(a), Some(b)) => a.cmp(b),
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(_), None) => std::cmp::Ordering::Less,
+    }
+}
+
+fn date_cell(date: Option<chrono::DateTime<chrono::Utc>>) -> Markup {
+    html! {
+        td.ed-grid__sm {
+            @match date {
+                Some(ts) => time datetime=(ts.to_rfc3339()) { (format_msk_iso(ts)) },
+                None => span.ed-grid__mut { "—" },
+            }
+        }
+    }
+}
+
 fn user_row(
     idx: usize,
-    u: &vpnctl_core::User,
-    grants_count: usize,
+    row: &UserListRow<'_>,
     live_conns: u32,
     traffic_24h: u64,
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
+    let u = row.user;
+    let grants_count = row.grants_count;
     let sub_token_preview = u.sub_token.as_deref().map(mask_secret);
     let uuid_preview: String = u.uuid.chars().take(8).collect();
     let detail_href = format!("/admin/users/{}", path_segment_encode(&u.id.0));
@@ -50,6 +85,8 @@ fn user_row(
                     span.ed-grid__mut { "— " (tr(lang, "offline", "офлайн")) }
                 }
             }
+            (date_cell(row.created_at))
+            (date_cell(row.last_activity))
             td.num {
                 @if traffic_24h > 0 {
                     a href=(traffic_href) style="color: var(--ink);" { b { (humanize_bytes(traffic_24h)) } }
@@ -90,8 +127,8 @@ pub(crate) async fn users(
 ) -> Result<Markup, Response> {
     let (theme, accent, lang) = theme_accent_lang(&headers);
 
-    let (users_list, servers_list, grants_map, fleet_servers) = tokio::try_join!(
-        state.inv.list_users(),
+    let (user_rows, servers_list, grants_map, fleet_servers) = tokio::try_join!(
+        state.inv.users_list_with_activity(),
         state.inv.list_servers(),
         state.inv.servers_count_per_user(),
         state.inv.list_fleet_servers(),
@@ -144,36 +181,65 @@ pub(crate) async fn users(
         }
     }
 
-    let grants_per_user: Vec<usize> = users_list
-        .iter()
-        .map(|u| usize::try_from(grants_map.get(&u.id).copied().unwrap_or(0)).unwrap_or(0))
-        .collect();
-
     let q_lower = query
         .q
         .as_deref()
         .map(|s| s.trim().to_ascii_lowercase())
         .unwrap_or_default();
-    let mut pairs: Vec<(usize, &vpnctl_core::User, usize)> = users_list
+    let mut pairs: Vec<UserListRow<'_>> = user_rows
         .iter()
-        .zip(grants_per_user.iter().copied())
-        .enumerate()
-        .map(|(i, (u, g))| (i, u, g))
-        .filter(|(_, u, _)| {
-            q_lower.is_empty() || u.id.0.to_ascii_lowercase().contains(q_lower.as_str())
+        .filter(|entry| {
+            q_lower.is_empty()
+                || entry
+                    .user
+                    .id
+                    .0
+                    .to_ascii_lowercase()
+                    .contains(q_lower.as_str())
+        })
+        .map(|entry| UserListRow {
+            user: &entry.user,
+            grants_count: usize::try_from(grants_map.get(&entry.user.id).copied().unwrap_or(0))
+                .unwrap_or(0),
+            created_at: entry.created_at,
+            last_activity: entry.last_activity,
         })
         .collect();
     let sort_kind = query.sort.as_deref().unwrap_or("id");
     match sort_kind {
-        "id-desc" => pairs.sort_by(|a, b| b.1.id.0.cmp(&a.1.id.0)),
-        "servers" => pairs.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.1.id.0.cmp(&b.1.id.0))),
-        "servers-desc" => pairs.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.id.0.cmp(&b.1.id.0))),
-        "traffic" => pairs.sort_by(|a, b| {
-            traffic_of(&b.1.id.0)
-                .cmp(&traffic_of(&a.1.id.0))
-                .then_with(|| a.1.id.0.cmp(&b.1.id.0))
+        "id-desc" => pairs.sort_by(|a, b| b.user.id.0.cmp(&a.user.id.0)),
+        "created" => pairs.sort_by(|a, b| {
+            compare_dates(&a.created_at, &b.created_at, false)
+                .then_with(|| a.user.id.0.cmp(&b.user.id.0))
         }),
-        _ => pairs.sort_by(|a, b| a.1.id.0.cmp(&b.1.id.0)),
+        "created-desc" => pairs.sort_by(|a, b| {
+            compare_dates(&a.created_at, &b.created_at, true)
+                .then_with(|| a.user.id.0.cmp(&b.user.id.0))
+        }),
+        "activity" => pairs.sort_by(|a, b| {
+            compare_dates(&a.last_activity, &b.last_activity, false)
+                .then_with(|| a.user.id.0.cmp(&b.user.id.0))
+        }),
+        "activity-desc" => pairs.sort_by(|a, b| {
+            compare_dates(&a.last_activity, &b.last_activity, true)
+                .then_with(|| a.user.id.0.cmp(&b.user.id.0))
+        }),
+        "servers" => pairs.sort_by(|a, b| {
+            a.grants_count
+                .cmp(&b.grants_count)
+                .then_with(|| a.user.id.0.cmp(&b.user.id.0))
+        }),
+        "servers-desc" => pairs.sort_by(|a, b| {
+            b.grants_count
+                .cmp(&a.grants_count)
+                .then_with(|| a.user.id.0.cmp(&b.user.id.0))
+        }),
+        "traffic" => pairs.sort_by(|a, b| {
+            traffic_of(&b.user.id.0)
+                .cmp(&traffic_of(&a.user.id.0))
+                .then_with(|| a.user.id.0.cmp(&b.user.id.0))
+        }),
+        _ => pairs.sort_by(|a, b| a.user.id.0.cmp(&b.user.id.0)),
     }
     let make_sort_href = |kind: &str| -> String {
         if q_lower.is_empty() {
@@ -185,7 +251,7 @@ pub(crate) async fn users(
             )
         }
     };
-    let total_users = users_list.len();
+    let total_users = user_rows.len();
     let visible_users = pairs.len();
     let sort_link = |kind: &str, label: &str| -> Markup {
         let active = sort_kind == kind;
@@ -196,13 +262,47 @@ pub(crate) async fn users(
             }
         }
     };
+    let date_sort_header = |label: &str, asc_kind: &str, desc_kind: &str| -> Markup {
+        let active_asc = sort_kind == asc_kind;
+        let active_desc = sort_kind == desc_kind;
+        let active = active_asc || active_desc;
+        // First click sorts newest-first; while active the link toggles.
+        let (target, aria_sort, arrow) = if active_asc {
+            (desc_kind, "ascending", "arrow-up")
+        } else if active_desc {
+            (asc_kind, "descending", "arrow-down")
+        } else {
+            (desc_kind, "none", "arrow-down")
+        };
+        let (state_en, state_ru) = if active_asc {
+            ("Sorted ascending", "Сортировка по возрастанию")
+        } else if active_desc {
+            ("Sorted descending", "Сортировка по убыванию")
+        } else {
+            ("Newest first", "Сначала новые")
+        };
+        let (action_en, action_ru) = if target == asc_kind {
+            ("Sort oldest first", "Сортировать: сначала старые")
+        } else {
+            ("Sort newest first", "Сортировать: сначала новые")
+        };
+        html! {
+            th aria-sort=(aria_sort) {
+                a href=(make_sort_href(target))
+                  style=(if active { "color: var(--ink); text-decoration: underline;" } else { "color: inherit;" })
+                  title=(crate::i18n::tr(lang, action_en, action_ru)) {
+                    (label) " " (status(arrow, lang, state_en, state_ru))
+                }
+            }
+        }
+    };
 
     let body = html! {
         div.ed-art-eyebrow { (crate::i18n::t(lang, crate::i18n::K::PageUsers)) }
         div.ed-headrow {
             h1.ed-sumbar__h {
-                (users_list.len()) " "
-                em { (crate::i18n::noun_for(lang, users_list.len() as u64, "user", "users", "пользователь", "пользователя", "пользователей")) }
+                (user_rows.len()) " "
+                em { (crate::i18n::noun_for(lang, user_rows.len() as u64, "user", "users", "пользователь", "пользователя", "пользователей")) }
                 (crate::i18n::tr(lang, " on file", " в базе"))
             }
             span.ed-tip title=(crate::i18n::tr(
@@ -210,7 +310,7 @@ pub(crate) async fn users(
                 "Each user has a public subscription URL at <public address>/api/v1/app/config/<device_id> (address in Settings → System); /sub/<token> remains the LAN-only fallback. Open a row for the QR you'll point a phone at.",
                 "У каждого пользователя есть публичный URL подписки <публичный адрес>/api/v1/app/config/<device_id> (адрес в Настройки → Система); /sub/<token> остаётся LAN-only fallback. Открой строку — там QR для телефона.",
             )) { (icon("info")) }
-            @if !users_list.is_empty() {
+            @if !user_rows.is_empty() {
                 div.ed-headrow__actions style="font-family: var(--mono); font-size: 11px;" {
                     (crate::i18n::tr(lang, "sort:", "сортировка:"))
                     (sort_link("id", "id"))
@@ -225,7 +325,7 @@ pub(crate) async fn users(
         }
 
         div.ed-inbar {
-            @if !users_list.is_empty() {
+            @if !user_rows.is_empty() {
                 form method="get" action="/admin/users"
                      style="display: flex; gap: 6px; align-items: center;" {
                     span.ed-inbar__label { (crate::i18n::tr(lang, "search", "поиск")) }
@@ -350,7 +450,7 @@ pub(crate) async fn users(
             }
         }
 
-        @if users_list.is_empty() {
+        @if user_rows.is_empty() {
             p style="font-family: var(--serif); font-style: italic; color: var(--mute); padding: 24px 0;" {
                 (crate::i18n::tr(lang, "No users yet. Type an id above and hit ", "Пользователей пока нет. Введи id выше и нажми "))
                 span.ed-mono { (crate::i18n::tr(lang, "create", "создать")) }
@@ -373,6 +473,8 @@ pub(crate) async fn users(
                         th { "№" }
                         th { (crate::i18n::tr(lang, "user", "пользователь")) }
                         th { (crate::i18n::tr(lang, "presence", "присутствие")) }
+                        (date_sort_header(crate::i18n::tr(lang, "date added", "дата добавления"), "created", "created-desc"))
+                        (date_sort_header(crate::i18n::tr(lang, "last activity", "последняя активность"), "activity", "activity-desc"))
                         th.num { (crate::i18n::tr(lang, "weighted traffic 24h", "взвеш. трафик 24ч")) }
                         th { "uuid" }
                         th { "sub-token" }
@@ -382,13 +484,12 @@ pub(crate) async fn users(
                     }
                 }
                 tbody {
-                    @for (display_idx, (_orig_idx, u, g)) in pairs.iter().enumerate() {
+                    @for (display_idx, row) in pairs.iter().enumerate() {
                         (user_row(
                             display_idx,
-                            u,
-                            *g,
-                            live_conns_per_user.get(&u.id.0).copied().unwrap_or(0),
-                            traffic_of(&u.id.0),
+                            row,
+                            live_conns_per_user.get(&row.user.id.0).copied().unwrap_or(0),
+                            traffic_of(&row.user.id.0),
                             lang,
                         ))
                     }

@@ -49,10 +49,10 @@ pub use sqlite::{
     ServerPaymentInput, ServerRole, ServerTrafficLimit, SharingSignals, SqliteInventory,
     SqliteInventoryError, SubAccessAggregates, SubAccessEntry, SubAccessEntryInput, SubDeviceFp,
     SubOriginAsn, SubOriginCountry, SubOriginIp, TelegramConfig, TodayDigest, TrafficBreakdown,
-    UaCluster, UptimeStat, UserLifecycle, VPN_STATS_RETENTION_DAYS, VpnCumulativeCounter,
-    VpnCumulativeTick, VpnStatsDelta, VpnStatsRow, VpnUserDailyRow, VpnUserDestinationRow,
-    VpnUserSessionRow, VpnUserSourceIpRow, advance_date_by_cycle, convert_minor,
-    monthly_equivalent, server_traffic_period, sum_nic_deltas, validate_due_date,
+    UaCluster, UptimeStat, UserLifecycle, UserListEntry, VPN_STATS_RETENTION_DAYS,
+    VpnCumulativeCounter, VpnCumulativeTick, VpnStatsDelta, VpnStatsRow, VpnUserDailyRow,
+    VpnUserDestinationRow, VpnUserSessionRow, VpnUserSourceIpRow, advance_date_by_cycle,
+    convert_minor, monthly_equivalent, server_traffic_period, sum_nic_deltas, validate_due_date,
 };
 
 pub use sqlite::{

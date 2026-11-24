@@ -27,6 +27,8 @@ const ADMIN_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
     object-src 'none'; \
     base-uri 'self'; \
     form-action 'self'";
+// A percent-encoded four-byte Unicode character can take twelve form bytes.
+const ADMIN_NOTE_FORM_BYTES: usize = 32 * 1024;
 
 pub fn router(state: AppState) -> Router {
     let config = crate::corp_operator::OperatorConfig::from_parts(
@@ -565,6 +567,10 @@ pub(crate) fn admin_router(state: AppState) -> Router {
         )
         .route("/admin/logout", post(admin::logout))
         .route_layer(RequestBodyLimitLayer::new(8 * 1024))
+        .route(
+            "/admin/users/{id}/note",
+            post(admin::user_set_note).layer(RequestBodyLimitLayer::new(ADMIN_NOTE_FORM_BYTES)),
+        )
         .route(
             "/admin/boosty/inbox/action",
             post(admin::boosty_inbox_action).layer(RequestBodyLimitLayer::new(64 * 1024)),

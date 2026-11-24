@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use vpnctl_core::{ServerId, UserId};
+use vpnctl_core::{ServerId, User, UserId};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SqliteInventoryError {
@@ -214,6 +214,15 @@ pub struct UserLifecycle {
     pub created_at: DateTime<Utc>,
     pub last_sub_fetch: Option<DateTime<Utc>>,
     pub age_days: u64,
+}
+
+/// One user row with the list-only timestamps, read in the same query so the
+/// page never mixes two inventory snapshots.
+#[derive(Debug, Clone)]
+pub struct UserListEntry {
+    pub user: User,
+    pub created_at: Option<DateTime<Utc>>,
+    pub last_activity: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
