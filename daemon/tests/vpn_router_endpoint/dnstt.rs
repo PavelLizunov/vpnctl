@@ -129,11 +129,15 @@ async fn get(
     if let Some(value) = capability {
         request = request.header("X-VPNRouter-Capabilities", value);
     }
+    get_request(state, request).await
+}
+
+async fn get_request(state: &AppState, request: axum::http::request::Builder) -> (String, Vec<u8>) {
     let response = router(state.clone())
         .oneshot(request.body(Body::empty()).unwrap())
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK, "GET {path}");
+    assert_eq!(response.status(), StatusCode::OK);
     let content_type = response.headers()["content-type"]
         .to_str()
         .unwrap()
@@ -200,6 +204,84 @@ fn ssh_public_identity(profile: &Value) -> Vec<u8> {
     assert_eq!(identity.len(), 32);
     assert!(public_key.is_empty());
     identity.to_vec()
+}
+
+#[tokio::test]
+async fn windows_business_app_config_respects_the_exact_core_grant_and_dnstt_capability() {
+    const BUSINESS: &str = "VPNRouterBusiness/2.52.0";
+    const CORE: &str = "1.14.4-vpnctl.3";
+    let dir = TempDir::new().unwrap();
+    let state = seed_dnstt_registry(&dir).await;
+    let dns = add_dnstt_server(&state, "dns-fixture").await;
+    let reality = ServerId("de".into());
+    let full = get_opted_in_config(&state).await;
+    assert_eq!(dnstt_profile(&full)["id"], "dns-fixture");
+    for server in [&reality, &dns] {
+        state
+            .inv
+            .set_desktop_subscription_core(server, Some(CORE))
+            .await
+            .unwrap();
+    }
+    let unrestricted = LEGACY_LINKS.split_once('\n').unwrap().1;
+    let path = format!("/api/v1/app/config/{TEST_DEVICE_ID}");
+    let request = |ua: &str, platform: &str, core: &str, capabilities: &str| {
+        Request::builder()
+            .uri(path.as_str())
+            .header("User-Agent", ua)
+            .header("X-VPNRouter-Platform", platform)
+            .header("X-VPNRouter-Core-Version", core)
+            .header("X-VPNRouter-Capabilities", capabilities)
+    };
+    async fn check(state: &AppState, request: axum::http::request::Builder, expected: &str) {
+        let (content_type, body) = get_request(state, request).await;
+        assert!(content_type.starts_with("application/json"));
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["config"], STANDARD.encode(expected));
+    }
+    for (ua, platform, core, capabilities, expected) in [
+        (
+            BUSINESS,
+            "windows",
+            CORE,
+            "detour-v1, dnstt-v1",
+            full.as_str(),
+        ),
+        (BUSINESS, "windows", CORE, "detour-v1", LEGACY_LINKS),
+        (BUSINESS, "windows", CORE, "dnstt-v10", LEGACY_LINKS),
+        (
+            BUSINESS,
+            "windows",
+            "1.14.4-vpnctl.2",
+            DNS_CAPABILITY,
+            unrestricted,
+        ),
+        (BUSINESS, "linux", CORE, DNS_CAPABILITY, unrestricted),
+        (BUSINESS, "macos", CORE, DNS_CAPABILITY, unrestricted),
+        (BUSINESS, "android", CORE, DNS_CAPABILITY, unrestricted),
+        (
+            "OtherVPNRouterBusiness",
+            "windows",
+            CORE,
+            DNS_CAPABILITY,
+            unrestricted,
+        ),
+    ] {
+        check(&state, request(ua, platform, core, capabilities), expected).await;
+    }
+    let business_request = || request(BUSINESS, "windows", CORE, DNS_CAPABILITY);
+    check(
+        &state,
+        business_request().header("User-Agent", BUSINESS),
+        unrestricted,
+    )
+    .await;
+    let user = UserId("tester-1".into());
+    for server in [&reality, &dns] {
+        state.inv.revoke(&user, server).await.unwrap();
+    }
+    check(&state, business_request(), unrestricted).await;
 }
 
 #[tokio::test]
