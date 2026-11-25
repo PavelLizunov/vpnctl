@@ -37,10 +37,16 @@ pub(crate) async fn register_new_server(
     server: &Server,
     roster_url: &str,
 ) -> Result<bool, SqliteInventoryError> {
-    let mut settings = vec![(
-        "vless.sni",
-        vpnctl_protocols::NEW_SERVER_REALITY_SNI.to_string(),
-    )];
+    let mut settings = vec![
+        (
+            "vless.sni",
+            vpnctl_protocols::NEW_SERVER_REALITY_SNI.to_string(),
+        ),
+        (
+            "vless.fp",
+            vpnctl_protocols::NEW_SERVER_REALITY_FP.to_string(),
+        ),
+    ];
     let mut pending = false;
     if server.kernels.iter().any(|kernel| kernel.0 == "sing-box")
         && let Some((mbps, json)) = inv.get_new_server_bandwidth_default().await?

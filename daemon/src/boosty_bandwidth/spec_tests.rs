@@ -982,7 +982,11 @@ async fn saved_boosty_rates_become_defaults_for_new_admin_nodes() {
     let sid = ServerId("new-node".into());
     let server = inv.get_server(&sid).await.unwrap().unwrap();
     let mut secrets = inv.list_server_secrets(&sid).await.unwrap();
-    assert_eq!(secrets.get("vless.sni").map(String::as_str), Some("ya.ru"));
+    assert_eq!(
+        secrets.get("vless.sni").map(String::as_str),
+        Some("www.apple.com")
+    );
+    assert_eq!(secrets.get("vless.fp").map(String::as_str), Some("chrome"));
     assert_eq!(secrets.get(DEFAULT_KEY).map(String::as_str), Some("40"));
     assert_eq!(
         serde_json::from_str::<Value>(&secrets[OVERRIDES_KEY]).unwrap(),
@@ -1004,9 +1008,12 @@ async fn saved_boosty_rates_become_defaults_for_new_admin_nodes() {
         .protocol(&ProtocolId("vless+reality".into()))
         .unwrap();
     let inbound = reality.server_inbound(&context, &users).unwrap();
-    assert_eq!(inbound["tls"]["reality"]["handshake"]["server"], "ya.ru");
+    assert_eq!(
+        inbound["tls"]["reality"]["handshake"]["server"],
+        "www.apple.com"
+    );
     let link = reality.share_link(&context, &users[0]).unwrap();
-    assert!(link.contains("&sni=ya.ru&"));
+    assert!(link.contains("&sni=www.apple.com&fp=chrome&"));
     let xhttp = f
         .state
         .registry
@@ -1015,19 +1022,20 @@ async fn saved_boosty_rates_become_defaults_for_new_admin_nodes() {
     let inbound = xhttp.server_inbound(&context, &users).unwrap();
     assert_eq!(
         inbound["streamSettings"]["realitySettings"]["dest"],
-        "ya.ru:443"
+        "www.apple.com:443"
     );
     assert_eq!(
         inbound["streamSettings"]["realitySettings"]["serverNames"],
-        json!(["ya.ru"]),
+        json!(["www.apple.com"]),
     );
     let link = xhttp.share_link(&context, &users[0]).unwrap();
-    assert!(link.contains("&sni=ya.ru&"));
+    assert!(link.contains("&sni=www.apple.com&fp=chrome&"));
 
     let legacy_id = ServerId("s1".into());
     let legacy_server = inv.get_server(&legacy_id).await.unwrap().unwrap();
     let mut legacy_secrets = inv.list_server_secrets(&legacy_id).await.unwrap();
     assert!(!legacy_secrets.contains_key("vless.sni"));
+    assert!(!legacy_secrets.contains_key("vless.fp"));
     assert!(!legacy_secrets.contains_key(DEFAULT_KEY));
     legacy_secrets.extend(render_settings);
     let legacy_context = vpnctl_core::RenderCtx::new(&legacy_server, &legacy_secrets);
@@ -1040,7 +1048,7 @@ async fn saved_boosty_rates_become_defaults_for_new_admin_nodes() {
         reality
             .share_link(&legacy_context, &users[0])
             .unwrap()
-            .contains("&sni=yahoo.com&")
+            .contains("&sni=yahoo.com&fp=randomized&")
     );
 }
 

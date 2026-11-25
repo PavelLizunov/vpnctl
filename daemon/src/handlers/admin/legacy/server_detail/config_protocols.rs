@@ -160,6 +160,19 @@ pub(crate) fn server_detail_reality_config_section(
         .get("vless.sni")
         .map(String::as_str)
         .unwrap_or(vpnctl_protocols::DEFAULT_REALITY_SNI);
+    let current_fp = server_secrets
+        .get("vless.fp")
+        .map(String::as_str)
+        .filter(|fp| vpnctl_protocols::is_valid_reality_fp(fp))
+        .unwrap_or("");
+    let handshake_server = server_secrets
+        .get("vless.handshake_server")
+        .map(String::as_str)
+        .unwrap_or("");
+    let handshake_port = server_secrets
+        .get("vless.handshake_port")
+        .map(String::as_str)
+        .unwrap_or("");
     html! {
         div.ed-rule {}
         div.ed-art-eyebrow
@@ -175,7 +188,7 @@ pub(crate) fn server_detail_reality_config_section(
         }
         form method="post"
              action=(format!("/admin/servers/{sid_enc}/reality-config"))
-             style="display: grid; grid-template-columns: 96px 1fr; gap: 6px 8px; align-items: center; max-width: 520px;" {
+             style="display: grid; grid-template-columns: 140px 1fr; gap: 6px 8px; align-items: center; max-width: 560px;" {
             label for="reality-sni" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                 (tr(lang, "handshake domain", "домен рукопожатия"))
             }
@@ -183,6 +196,35 @@ pub(crate) fn server_detail_reality_config_section(
                   value=(sni)
                   title=(tr(lang, "Hostname of the HTTPS site used for the REALITY handshake.", "Имя HTTPS-сайта для рукопожатия REALITY."))
                   style="min-width: 0; padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
+            label for="reality-fp" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                (tr(lang, "uTLS fingerprint", "uTLS-отпечаток"))
+            }
+            select id="reality-fp" name="fp"
+                   title=(tr(lang, "Client TLS fingerprint emitted in subscriptions. Blank keeps the legacy default (randomized); chrome is recommended for new deployments.", "TLS-отпечаток клиента в подписках. Пусто оставляет прежнее значение (randomized); для новых узлов рекомендуется chrome."))
+                   style="min-width: 0; padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {
+                option value="" selected[current_fp.is_empty()] {
+                    (tr(lang, "default (randomized)", "по умолчанию (randomized)"))
+                }
+                @for candidate in vpnctl_protocols::VALID_REALITY_FPS {
+                    option value=(candidate) selected[current_fp == *candidate] { (candidate) }
+                }
+            }
+            label for="reality-handshake-server" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                (tr(lang, "handshake target", "цель рукопожатия"))
+            }
+            input id="reality-handshake-server" type="text" name="handshake_server" maxlength="253"
+                  value=(handshake_server)
+                  placeholder=(sni)
+                  title=(tr(lang, "Optional host or IP for the server-side REALITY handshake (for self-SNI e.g. 127.0.0.1). Blank uses the handshake domain.", "Опциональный хост или IP для серверного рукопожатия REALITY (для self-SNI, напр. 127.0.0.1). Пусто = домен рукопожатия."))
+                  style="min-width: 0; padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
+            label for="reality-handshake-port" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                (tr(lang, "handshake port", "порт рукопожатия"))
+            }
+            input id="reality-handshake-port" type="text" name="handshake_port" maxlength="5" inputmode="numeric"
+                  value=(handshake_port)
+                  placeholder="443"
+                  title=(tr(lang, "Optional TCP port for the server-side REALITY handshake. Blank = 443.", "Опциональный TCP-порт серверного рукопожатия REALITY. Пусто = 443."))
+                  style="padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
             label style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
                 (tr(lang, "listen port", "порт"))
             }
@@ -196,6 +238,58 @@ pub(crate) fn server_detail_reality_config_section(
                    title=(tr(lang, "Save REALITY settings", "Сохранить настройки REALITY"))
                    style="justify-self: start; padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
                 (icon("save")) (tr(lang, "save reality config", "сохранить конфиг"))
+            }
+        }
+    }
+}
+
+pub(crate) fn server_detail_quic_tls_section(
+    server: &vpnctl_core::Server,
+    server_secrets: &HashMap<String, String>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    if !server
+        .enabled_protocols
+        .iter()
+        .any(|p| matches!(p.0.as_str(), "tuic-v5" | "hysteria2"))
+    {
+        return html! {};
+    }
+    let sid_enc = path_segment_encode(&server.id.0);
+    let server_name = server_secrets
+        .get("tls.server_name")
+        .map(String::as_str)
+        .unwrap_or("");
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow
+            title=(tr(lang,
+                "Optional TLS SNI sent by TUIC v5 and Hysteria2 clients with SPKI-pinned self-signed certs. Leave blank to omit server_name (legacy behavior).",
+                "Опциональный TLS SNI для клиентов TUIC v5 и Hysteria2 с привязанным отпечатком самоподписанного сертификата. Пусто — не отправлять server_name (прежнее поведение).")) {
+            (tr(lang, "QUIC TLS SNI (TUIC / HYSTERIA2)", "QUIC TLS SNI (TUIC / HYSTERIA2)"))
+        }
+        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 10px;" {
+            (tr(lang,
+                "Clients receive the updated SNI when they refresh their subscription. Leave blank to clear.",
+                "Клиенты получат обновлённый SNI при обновлении подписки. Оставь пустым, чтобы очистить."))
+        }
+        form method="post"
+             action=(format!("/admin/servers/{sid_enc}/quic-tls-config"))
+             style="display: grid; grid-template-columns: 140px 1fr; gap: 6px 8px; align-items: center; max-width: 560px;" {
+            label for="quic-tls-server-name" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
+                (tr(lang, "TLS server_name", "TLS server_name"))
+            }
+            input id="quic-tls-server-name" type="text" name="server_name" maxlength="253"
+                  value=(server_name)
+                  placeholder="www.apple.com"
+                  title=(tr(lang, "Optional hostname emitted as tls.server_name for pinned TUIC/Hysteria2 clients.", "Опциональное имя хоста, передаваемое как tls.server_name для клиентов TUIC/Hysteria2."))
+                  style="min-width: 0; padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
+            span {}
+            button type="submit"
+                   title=(tr(lang, "Save QUIC TLS SNI", "Сохранить QUIC TLS SNI"))
+                   style="justify-self: start; padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                (icon("save")) (tr(lang, "save QUIC TLS SNI", "сохранить QUIC TLS SNI"))
             }
         }
     }

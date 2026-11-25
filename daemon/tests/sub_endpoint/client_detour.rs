@@ -306,6 +306,19 @@ async fn pinned_udp_detour_response_byte_equal() {
         };
         let expected = serde_json::json!({
             "log": {"level": "info", "timestamp": true},
+            "dns": {
+                "servers": [
+                    {
+                        "tag": "vpn-dns",
+                        "type": "https",
+                        "server": "1.1.1.1",
+                        "path": "/dns-query",
+                        "detour": "proxy"
+                    },
+                    {"tag": "local-dns", "type": "local"}
+                ],
+                "final": "vpn-dns"
+            },
             "outbounds": [
                 {"type": "selector", "tag": "proxy", "outbounds": ["Iceland VLESS ~alice", tag],
                  "default": "Iceland VLESS ~alice"},
@@ -322,8 +335,15 @@ async fn pinned_udp_detour_response_byte_equal() {
                 }, target,
                 {"type": "direct", "tag": "direct"}, {"type": "block", "tag": "block"}
             ],
-            "route": {"rules": [{"protocol": "dns", "outbound": "direct"}],
-                      "final": "proxy", "auto_detect_interface": true}
+            "route": {
+                "rules": [
+                    {"action": "sniff"},
+                    {"protocol": "dns", "action": "hijack-dns"}
+                ],
+                "final": "proxy",
+                "auto_detect_interface": true,
+                "default_domain_resolver": "local-dns"
+            }
         });
         assert_eq!(body, expected.to_string().as_bytes());
     }
@@ -798,6 +818,19 @@ async fn unique_singbox_tags_keep_legacy_response_byte_equal() {
     assert_eq!(status, StatusCode::OK);
     let expected = serde_json::json!({
         "log": {"level": "info", "timestamp": true},
+        "dns": {
+            "servers": [
+                {
+                    "tag": "vpn-dns",
+                    "type": "https",
+                    "server": "1.1.1.1",
+                    "path": "/dns-query",
+                    "detour": "proxy"
+                },
+                {"tag": "local-dns", "type": "local"}
+            ],
+            "final": "vpn-dns"
+        },
         "outbounds": [
             {
                 "type": "selector", "tag": "proxy",
@@ -831,8 +864,13 @@ async fn unique_singbox_tags_keep_legacy_response_byte_equal() {
             {"type": "block", "tag": "block"}
         ],
         "route": {
-            "rules": [{"protocol": "dns", "outbound": "direct"}],
-            "final": "proxy", "auto_detect_interface": true
+            "rules": [
+                {"action": "sniff"},
+                {"protocol": "dns", "action": "hijack-dns"}
+            ],
+            "final": "proxy",
+            "auto_detect_interface": true,
+            "default_domain_resolver": "local-dns"
         }
     });
     assert_eq!(actual, expected.to_string().as_bytes());

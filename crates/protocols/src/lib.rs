@@ -23,11 +23,14 @@ pub use dnstt::Dnstt;
 pub use hysteria2::Hysteria2;
 pub use naive::{NAIVE_PORT, Naive};
 pub use shadowsocks2022::{SS_2022_PORT, Shadowsocks2022};
+pub use tls::tls_server_name;
 pub use trojan::{TROJAN_PORT, Trojan};
 pub use tuic_v5::TuicV5;
 pub use vless_reality::{
-    DEFAULT_REALITY_SNI, NEW_SERVER_REALITY_SNI, VLESS_PACKET_ENCODING, VlessReality,
-    listen_port as reality_listen_port,
+    DEFAULT_REALITY_FP, DEFAULT_REALITY_SNI, NEW_SERVER_REALITY_FP, NEW_SERVER_REALITY_SNI,
+    VALID_REALITY_FPS, VLESS_PACKET_ENCODING, VlessReality, is_valid_reality_fp,
+    is_valid_reality_handshake_server, is_valid_reality_sni, listen_port as reality_listen_port,
+    reality_fp, reality_handshake_target,
 };
 pub use vless_ws::{DEFAULT_FRONT_PORT as VLESS_WS_DEFAULT_FRONT_PORT, VlessWs};
 pub use vless_xhttp::{VLESS_XHTTP_PORT, VlessXhttp};

@@ -79,6 +79,17 @@ Behavior rules:
   override, no active auto-suppression, and no client detour. These visibility
   and routing exclusions return `400` with an admin settings message; allowed files retain
   their existing bytes. AmneziaWG 2/3 downloads retain their existing checks.
+- Non-empty sing-box client subscriptions (`/sub/<token>` and
+  `/sub/<token>?format=sing-box`) deliberately replace the former leaking
+  `{ "protocol": "dns", "outbound": "direct" }` route rule with a tunneled
+  `dns` block (`vpn-dns` DoH `1.1.1.1` via `proxy`, `local-dns` `type: "local"`
+  for `route.default_domain_resolver` only) and `sniff` + `hijack-dns` route
+  rules. Empty fail-closed sing-box responses keep their exact bytes.
+- Optional per-server hardening secrets (`vless.fp`, `vless.handshake_server`,
+  `vless.handshake_port`, `tls.server_name`) leave legacy servers and existing
+  rendered profiles byte-identical when absent. Newly registered servers persist
+  `vless.sni = "www.apple.com"` and `vless.fp = "chrome"`. See
+  [RF DPI / DNS / SNI hardening](rf-dpi-dns-sni-hardening.md).
 
 ## 3. Verification Checklist
 

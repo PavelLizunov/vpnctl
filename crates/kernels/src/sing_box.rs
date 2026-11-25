@@ -153,6 +153,13 @@ impl Kernel for SingBox {
             .collect::<Result<_>>()?;
         let mut cfg = json!({
             "log": { "level": "info", "output": "/var/log/sing-box.log", "timestamp": true },
+            "dns": {
+                "servers": [
+                    { "tag": "dns-cf", "type": "udp", "server": "1.1.1.1" }
+                ],
+                "final": "dns-cf",
+                "strategy": "prefer_ipv4"
+            },
             "inbounds": inbounds,
             "outbounds": [
                 { "type": "direct", "tag": "direct" },
@@ -216,12 +223,15 @@ impl Kernel for SingBox {
                 "ip_cidr": denied,
                 "action": "reject"
             }));
-            cfg["route"] = json!({ "rules": rules, "final": "direct" });
+            cfg["route"] = json!({
+                "rules": rules,
+                "final": "direct",
+                "default_domain_resolver": "dns-cf"
+            });
+        } else {
+            cfg["route"] = json!({ "default_domain_resolver": "dns-cf" });
         }
         if let Some(bandwidth) = bandwidth::render_user_bandwidth(ctx.secrets, &endpoints, users)? {
-            if !cfg["route"].is_object() {
-                cfg["route"] = json!({});
-            }
             cfg["route"]["vpnctl_user_bandwidth"] = bandwidth;
         }
         if !endpoints.is_empty() {

@@ -82,7 +82,7 @@ fn wireguard_fragments_are_endpoints_and_private_destinations_are_denied()
             {"inbound":["vless-in"],"action":"resolve"},
             {"inbound":["vless-in","awg2-in"],"ip_is_private":true,"action":"reject"},
             {"inbound":["vless-in","awg2-in"],"ip_cidr":denied(&["203.0.113.1/32"]),"action":"reject"}
-        ],"final":"direct"})
+        ],"final":"direct","default_domain_resolver":"dns-cf"})
     );
     assert!(
         SingBox::new()
@@ -126,13 +126,20 @@ fn proxy_only_config_resolves_before_isolation() -> Result<(), Box<dyn std::erro
         SingBox::new().render_config(&ctx, &[], &[&Fragment("vless", Some("vless-in"))])?;
     let expected = json!({
         "log":{"level":"info","output":"/var/log/sing-box.log","timestamp":true},
+        "dns":{
+            "servers":[
+                {"tag":"dns-cf","type":"udp","server":"1.1.1.1"}
+            ],
+            "final":"dns-cf",
+            "strategy":"prefer_ipv4"
+        },
         "inbounds":[{"type":"vless","listen_port":51821,"tag":"vless-in"}],
         "outbounds":[{"type":"direct","tag":"direct"},{"type":"block","tag":"block"}],
         "route":{"rules":[
             {"inbound":["vless-in"],"action":"resolve"},
             {"inbound":["vless-in"],"ip_is_private":true,"action":"reject"},
             {"inbound":["vless-in"],"ip_cidr":denied(&["203.0.113.1/32"]),"action":"reject"}
-        ],"final":"direct"},
+        ],"final":"direct","default_domain_resolver":"dns-cf"},
         "experimental":{"clash_api":{"external_controller":"127.0.0.1:9090"},"v2ray_api":{"listen":"127.0.0.1:10085","stats":{"enabled":true,"inbounds":["vless-in"],"users":[]}}}
     });
     assert_eq!(config, serde_json::to_vec_pretty(&expected)?);
@@ -183,7 +190,7 @@ fn every_proxy_inbound_resolves_before_ipv6_server_isolation()
             {"inbound":proxy_tags,"action":"resolve"},
             {"inbound":all_tags,"ip_is_private":true,"action":"reject"},
             {"inbound":all_tags,"ip_cidr":denied(&["2001:db8::1/128"]),"action":"reject"}
-        ],"final":"direct"})
+        ],"final":"direct","default_domain_resolver":"dns-cf"})
     );
     Ok(())
 }
@@ -201,7 +208,7 @@ fn awg_only_isolation_rules_remain_unchanged() -> Result<(), Box<dyn std::error:
         json!({"rules":[
             {"inbound":["awg2-in"],"ip_is_private":true,"action":"reject"},
             {"inbound":["awg2-in"],"ip_cidr":denied(&["203.0.113.1/32"]),"action":"reject"}
-        ],"final":"direct"})
+        ],"final":"direct","default_domain_resolver":"dns-cf"})
     );
     Ok(())
 }

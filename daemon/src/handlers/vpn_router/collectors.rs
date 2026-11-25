@@ -22,6 +22,7 @@ pub(crate) fn render_vless_uri(
     server_ip: &str,
     port: u16,
     sni: &str,
+    fp: &str,
     pbk: &str,
     sid: &str,
     client_uuid: &str,
@@ -29,10 +30,11 @@ pub(crate) fn render_vless_uri(
     client_name: &str,
 ) -> String {
     let pbk_e = utf8_percent_encode(pbk, NINITUX_QUOTE);
+    let fp_e = utf8_percent_encode(fp, NINITUX_QUOTE);
     let sni_e = utf8_percent_encode(sni, NINITUX_QUOTE);
     let sid_e = utf8_percent_encode(sid, NINITUX_QUOTE);
     let params = format!(
-        "encryption=none&type=tcp&security=reality&pbk={pbk_e}&fp=randomized&sni={sni_e}&sid={sid_e}&spx=%2F&flow=xtls-rprx-vision&packetEncoding={VLESS_PACKET_ENCODING}"
+        "encryption=none&type=tcp&security=reality&pbk={pbk_e}&fp={fp_e}&sni={sni_e}&sid={sid_e}&spx=%2F&flow=xtls-rprx-vision&packetEncoding={VLESS_PACKET_ENCODING}"
     );
 
     let label = format!("{server_tag} VLESS ~{client_name}");
@@ -87,6 +89,7 @@ pub(super) fn collect_vless_uris_with_entries(
             .get("vless.sni")
             .map(String::as_str)
             .unwrap_or(vpnctl_protocols::DEFAULT_REALITY_SNI);
+        let fp = vpnctl_protocols::reality_fp(secrets);
 
         let client_uuid = &input.client_uuid;
         let port: u16 = vpnctl_protocols::reality_listen_port(secrets);
@@ -95,6 +98,7 @@ pub(super) fn collect_vless_uris_with_entries(
             &server.address,
             port,
             sni,
+            fp,
             pbk,
             sid,
             client_uuid,

@@ -4,7 +4,7 @@ use serde_json::json;
 use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{CoreError, Protocol, ProtocolId, RenderCtx, Result, User};
 
-use crate::vless_reality::{DEFAULT_REALITY_SNI, REALITY_UTLS_FP};
+use crate::vless_reality::{DEFAULT_REALITY_SNI, reality_fp, reality_handshake_target};
 
 pub const VLESS_XHTTP_PORT: u16 = 9443;
 
@@ -83,6 +83,7 @@ impl Protocol for VlessXhttp {
         let private_key = ctx.require("vless.private_key")?;
         let short_id = ctx.require("vless.short_id")?;
         let sni = ctx.or_default("vless.sni", DEFAULT_REALITY_SNI);
+        let (handshake_server, handshake_port) = reality_handshake_target(ctx.secrets, sni);
         let path = checked_path(ctx)?;
         let mode = checked_mode(ctx)?;
 
@@ -107,7 +108,7 @@ impl Protocol for VlessXhttp {
                     "mode": mode
                 },
                 "realitySettings": {
-                    "dest": format!("{sni}:443"),
+                    "dest": format!("{}:{handshake_port}", host_for_url(handshake_server)),
                     "serverNames": [sni],
                     "privateKey": private_key,
                     "shortIds": [short_id]
@@ -120,6 +121,7 @@ impl Protocol for VlessXhttp {
         let public_key = ctx.require("vless.public_key")?;
         let short_id = ctx.require("vless.short_id")?;
         let sni = ctx.or_default("vless.sni", DEFAULT_REALITY_SNI);
+        let fp = reality_fp(ctx.secrets);
         let path = checked_path(ctx)?;
         let mode = checked_mode(ctx)?;
 
@@ -132,7 +134,7 @@ impl Protocol for VlessXhttp {
             "tls": {
                 "enabled": true,
                 "server_name": sni,
-                "utls": { "enabled": true, "fingerprint": REALITY_UTLS_FP },
+                "utls": { "enabled": true, "fingerprint": fp },
                 "reality": {
                     "enabled": true,
                     "public_key": public_key,
@@ -151,6 +153,7 @@ impl Protocol for VlessXhttp {
         let public_key = ctx.require("vless.public_key")?;
         let short_id = ctx.require("vless.short_id")?;
         let sni = ctx.or_default("vless.sni", DEFAULT_REALITY_SNI);
+        let fp = reality_fp(ctx.secrets);
         let path = checked_path(ctx)?;
         let mode = checked_mode(ctx)?;
         let name = utf8_percent_encode(&user.id.0, FRAGMENT);
@@ -160,7 +163,7 @@ impl Protocol for VlessXhttp {
             uuid = user.uuid,
             addr = host_for_url(&ctx.server.address),
             port = VLESS_XHTTP_PORT,
-            fp = REALITY_UTLS_FP,
+            fp = fp,
             pbk = public_key,
             sid = short_id,
             sni = sni,

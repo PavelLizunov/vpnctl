@@ -117,6 +117,7 @@ fn render_vless_uri_post_rename_fragment_format() {
         "198.51.100.93",
         443,
         "www.microsoft.com",
+        "randomized",
         "FixturePublicKeyAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         "0123456789abcdef",
         "60063863-d2be-4d57-bc0b-aef4da88528b",
@@ -129,11 +130,30 @@ fn render_vless_uri_post_rename_fragment_format() {
 }
 
 #[test]
+fn render_vless_uri_honors_custom_fp_in_same_param_slot() {
+    let got = render_vless_uri(
+        "198.51.100.93",
+        443,
+        "www.apple.com",
+        "chrome",
+        "FixturePublicKeyAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "0123456789abcdef",
+        "60063863-d2be-4d57-bc0b-aef4da88528b",
+        "Germany",
+        "tester-1",
+    );
+
+    let expected = "vless://60063863-d2be-4d57-bc0b-aef4da88528b@198.51.100.93:443?encryption=none&type=tcp&security=reality&pbk=FixturePublicKeyAAAAAAAAAAAAAAAAAAAAAAAAAAA&fp=chrome&sni=www.apple.com&sid=0123456789abcdef&spx=%2F&flow=xtls-rprx-vision&packetEncoding=xudp#Germany%20VLESS%20~tester-1";
+    assert_eq!(got, expected);
+}
+
+#[test]
 fn render_vless_uri_brackets_ipv6_authority() {
     let got = render_vless_uri(
         "2a00:1450::1",
         443,
         "www.microsoft.com",
+        "randomized",
         "FixturePublicKeyAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         "0123456789abcdef",
         "60063863-d2be-4d57-bc0b-aef4da88528b",

@@ -2,9 +2,11 @@
 
 ## Intent and invariants
 
-New nodes use `ya.ru` as their REALITY handshake domain. Save it on registration
-so existing server configurations and issued profiles keep the handshake name
-they already use. An operator can change the name for an individual node.
+New nodes use `www.apple.com` as their REALITY handshake domain and `chrome` as
+their REALITY uTLS fingerprint (`vless.fp`). Save both on registration so
+existing server configurations and issued profiles keep the handshake name and
+fingerprint they already use (`yahoo.com` / `randomized`). An operator can
+change either setting for an individual node.
 
 ## Interface and data contract
 
@@ -26,8 +28,8 @@ they already use. An operator can change the name for an individual node.
 
 ## Verification
 
-- Old links keep their byte-exact SNI. A new node uses `ya.ru` in its client
-  and server configuration.
+- Old links keep their byte-exact SNI and `fp=randomized`. A new node uses
+  `www.apple.com` and `chrome` in its client and server configuration.
 - Fresh roster registration prepares matching per-user rates. Unavailable or
   mismatched rosters leave a usable base limit and an operator-visible status.
 - Changing the fleet template affects later registrations only. No-op saves

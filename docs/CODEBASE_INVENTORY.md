@@ -5,26 +5,26 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 568 (362 prod / 206 test)
-- **Total Rust LOC:** 216,758 (112,817 prod / 103,941 test)
+- **Tracked Rust Files:** 569 (362 prod / 207 test)
+- **Total Rust LOC:** 218,348 (113,200 prod / 105,148 test)
 - **Database Migrations:** 79
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 159
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 160
 
 ## Workspace Crates & Targets
 
 | Crate | Path | Version | Targets | Prod LOC (Files) | Test LOC (Files) | Total LOC |
 |---|---|---|---|---|---|---|
-| `vpnctl` | `cli` | 0.9.0 | bin, 2 tests | 6,465 (20) | 1,617 (3) | **8,082** |
+| `vpnctl` | `cli` | 0.9.0 | bin, 2 tests | 6,471 (20) | 1,617 (3) | **8,088** |
 | `vpnctl-boosty-bridge` | `crates/boosty-bridge` | 0.9.0 | lib, 2 tests | 1,494 (6) | 1,345 (2) | **2,839** |
 | `vpnctl-core` | `crates/core` | 0.9.0 | lib | 1,434 (13) | 0 (0) | **1,434** |
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 318 (1) | 125 (1) | **443** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 193 (1) | 454 (2) | **647** |
 | `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 61 tests | 19,411 (65) | 28,424 (67) | **47,835** |
-| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 7 tests, 1 examples | 7,368 (17) | 2,346 (9) | **9,714** |
-| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 13 tests | 4,575 (23) | 4,928 (13) | **9,503** |
+| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 7 tests, 1 examples | 7,412 (17) | 2,460 (9) | **9,872** |
+| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 14 tests | 4,663 (23) | 5,804 (14) | **10,467** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,825 (5) | 1,191 (5) | **4,016** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 32 tests | 68,734 (211) | 63,511 (104) | **132,245** |
-| **Total** | | | | **112,817 (362)** | **103,941 (206)** | **216,758** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 32 tests | 68,979 (211) | 63,728 (104) | **132,707** |
+| **Total** | | | | **113,200 (362)** | **105,148 (207)** | **218,348** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -35,13 +35,13 @@
 | `daemon/tests/spec_corp_policy_http.rs` | 2,338 | `daemon` | Test |
 | `daemon/tests/spec_corp_operator.rs` | 2,071 | `daemon` | Test |
 | `crates/inventory/src/sqlite/tests.rs` | 2,065 | `crates/inventory` | Prod |
-| `crates/kernels/src/sing_box/tests.rs` | 1,851 | `crates/kernels` | Prod |
+| `crates/kernels/src/sing_box/tests.rs` | 1,863 | `crates/kernels` | Prod |
 | `daemon/src/health_monitor/tests.rs` | 1,845 | `daemon` | Prod |
 | `vendor/sqlx-sqlite/src/connection/explain.rs` | 1,779 | `other` | Prod |
 | `crates/kernels/src/caddy/tests.rs` | 1,772 | `crates/kernels` | Prod |
 | `daemon/tests/admin_smoke/users.rs` | 1,739 | `daemon` | Test |
 | `daemon/src/handlers/vpnrouter_assistant_spec_tests.rs` | 1,663 | `daemon` | Test |
-| `daemon/tests/admin_smoke/servers.rs` | 1,613 | `daemon` | Test |
+| `daemon/tests/admin_smoke/servers.rs` | 1,620 | `daemon` | Test |
 | `daemon/tests/spec_vpnrouter_source_diagnosis.rs` | 1,554 | `daemon` | Test |
 | `daemon/tests/spec_corp_egress.rs` | 1,531 | `daemon` | Test |
 | `daemon/tests/admin_smoke/alerts_health.rs` | 1,514 | `daemon` | Test |
@@ -140,7 +140,7 @@
 | `0078` | desktop subscription core | `crates/inventory/migrations/0078_desktop_subscription_core.sql` | 1 |
 | `0079` | user admin note | `crates/inventory/migrations/0079_user_admin_note.sql` | 4 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (159)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (160)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -222,6 +222,7 @@
 | `POST` | `/admin/servers/{id}/protocols/{proto}/disable` | `admin::server_disable_protocol` |
 | `POST` | `/admin/servers/{id}/protocols/{proto}/enable` | `admin::server_enable_protocol` |
 | `POST` | `/admin/servers/{id}/push-deploy-key` | `admin::server_push_deploy_key` |
+| `POST` | `/admin/servers/{id}/quic-tls-config` | `admin::server_set_quic_tls_config` |
 | `POST` | `/admin/servers/{id}/reality-config` | `admin::server_set_reality_config` |
 | `POST` | `/admin/servers/{id}/reserved-ports` | `admin::server_set_reserved_ports` |
 | `POST` | `/admin/servers/{id}/routing-policy` | `admin::server_set_routing_policy` |

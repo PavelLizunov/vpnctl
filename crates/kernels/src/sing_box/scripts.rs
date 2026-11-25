@@ -217,14 +217,15 @@ pub(super) const SING_BOX_SETUP_SCRIPT_TAIL: &str = r#"    # Pre-create log file
     # web/SSE deploy paths get it idempotently. Previously only the CLI
     # generated it, and only when tuic-v5 was enabled — so a
     # hy2/trojan/anytls-only node (or ANY web/SSE-deployed node)
-    # crash-looped sing-box on the missing cert files. Self-signed +
-    # clients use insecure:true, so the CN is irrelevant; the `test -f`
+    # crash-looped sing-box on the missing cert files. Newly generated
+    # self-signed certs use a neutral `/CN=localhost` subject instead of
+    # naming the proxy software; clients pin the leaf SPKI, and the `test -f`
     # guard never rotates an existing cert out from under live clients.
     if [ ! -f /etc/sing-box/cert.pem ] || [ ! -f /etc/sing-box/key.pem ]; then
         apt-get install -y --no-install-recommends openssl
         openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
             -keyout /etc/sing-box/key.pem -out /etc/sing-box/cert.pem \
-            -subj '/CN=sing-box'
+            -subj '/CN=localhost'
     fi
     chown sing-box:sing-box /etc/sing-box/cert.pem /etc/sing-box/key.pem
     chmod 600 /etc/sing-box/key.pem

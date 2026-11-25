@@ -247,6 +247,165 @@ async fn reality_sni_rejects_invalid_hostnames_without_mutations() {
 }
 
 #[tokio::test]
+async fn reality_fp_and_handshake_target_save_validate_clear_and_audit() {
+    let dir = TempDir::new().unwrap();
+    let s = fixture(&dir).await;
+    let sid = ServerId("s0".into());
+
+    let en = fetch_html(router(s.clone()), "/admin/servers/s0/protocols").await;
+    assert!(en.contains(r#"name="fp""#));
+    assert!(en.contains(r#"name="handshake_server""#));
+    assert!(en.contains(r#"name="handshake_port""#));
+
+    let resp = post(
+        &s,
+        "reality-config",
+        "sni=www.apple.com&fp=chrome&handshake_server=127.0.0.1&handshake_port=8443&listen_port=",
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        s.inv
+            .get_server_secret(&sid, "vless.fp")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("chrome")
+    );
+    assert_eq!(
+        s.inv
+            .get_server_secret(&sid, "vless.handshake_server")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("127.0.0.1")
+    );
+    assert_eq!(
+        s.inv
+            .get_server_secret(&sid, "vless.handshake_port")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("8443")
+    );
+    let after = client_artifacts(&s).await;
+    assert!(after.0.contains("&sni=www.apple.com&fp=chrome&"));
+
+    let before_invalid = s.inv.list_server_secrets(&sid).await.unwrap();
+    for bad in [
+        "sni=www.apple.com&fp=not-a-fp",
+        "sni=www.apple.com&handshake_server=https%3A%2F%2Fbad.example",
+        "sni=www.apple.com&handshake_port=0",
+        "sni=www.apple.com&handshake_port=99999",
+    ] {
+        assert_eq!(
+            post(&s, "reality-config", bad).await.status(),
+            StatusCode::BAD_REQUEST,
+            "body: {bad}"
+        );
+    }
+    assert_eq!(
+        s.inv.list_server_secrets(&sid).await.unwrap(),
+        before_invalid
+    );
+
+    // Clearing optional fields returns to legacy fp=randomized without breaking sni.
+    assert_eq!(
+        post(
+            &s,
+            "reality-config",
+            "sni=www.apple.com&fp=&handshake_server=&handshake_port=&listen_port=",
+        )
+        .await
+        .status(),
+        StatusCode::SEE_OTHER
+    );
+    let cleared = client_artifacts(&s).await;
+    assert!(cleared.0.contains("&sni=www.apple.com&fp=randomized&"));
+}
+
+#[tokio::test]
+async fn quic_tls_sni_form_saves_audits_clears_and_rejects_invalid_or_disabled() {
+    let dir = TempDir::new().unwrap();
+    let s = fixture(&dir).await;
+    let sid = ServerId("s0".into());
+
+    let en = fetch_html(router(s.clone()), "/admin/servers/s0/protocols").await;
+    assert!(en.contains(r#"action="/admin/servers/s0/quic-tls-config""#));
+    assert!(en.contains(r#"name="server_name""#));
+    let ru = fetch_html_with_cookie(
+        router(s.clone()),
+        "/admin/servers/s0/protocols",
+        "vpnctl_lang=ru",
+    )
+    .await;
+    assert!(ru.contains("сохранить QUIC TLS SNI"));
+
+    // Blank save when unset is a no-op (no audit, no pending deploy).
+    let latest = s.inv.recent_audit(1).await.unwrap()[0].id;
+    assert_eq!(
+        post(&s, "quic-tls-config", "server_name=").await.status(),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(s.inv.recent_audit(1).await.unwrap()[0].id, latest);
+    assert!(!s.inv.server_pending_deploy(&sid).await.unwrap());
+
+    // Valid hostname saves, audits, and appears in Hysteria2 client_config tls.server_name.
+    let resp = post(&s, "quic-tls-config", "server_name=%20www.apple.com%20").await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(resp.headers()["location"], "/admin/servers/s0/protocols");
+    assert_eq!(
+        s.inv
+            .get_server_secret(&sid, "tls.server_name")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("www.apple.com")
+    );
+    let audit = s.inv.recent_audit(1).await.unwrap();
+    assert_eq!(audit[0].action, "server.quic_tls.set");
+    assert_eq!(
+        audit[0].payload,
+        Some(serde_json::json!({"keys": ["tls.server_name"]}))
+    );
+    let after = client_artifacts(&s).await;
+    assert!(after.1.contains(r#""server_name":"www.apple.com""#));
+
+    // Invalid hostnames / IP literals return 400 without mutation.
+    for bad in ["127.0.0.1", "::1", "-bad.org", "https://example.org"] {
+        assert_eq!(
+            post(&s, "quic-tls-config", &format!("server_name={bad}"))
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST,
+            "server_name={bad}"
+        );
+    }
+
+    // Blank clears tls.server_name.
+    assert_eq!(
+        post(&s, "quic-tls-config", "server_name=").await.status(),
+        StatusCode::SEE_OTHER
+    );
+    let cleared = client_artifacts(&s).await;
+    assert!(!cleared.1.contains("server_name"));
+
+    // Disabled QUIC protocols reject with 400 and hide the form.
+    s.inv
+        .remove_server_protocol(&sid, &ProtocolId("hysteria2".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        post(&s, "quic-tls-config", "server_name=www.apple.com")
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let disabled_html = fetch_html(router(s), "/admin/servers/s0/protocols").await;
+    assert!(!disabled_html.contains("/quic-tls-config"));
+}
+
+#[tokio::test]
 async fn hysteria2_rotation_generates_secret_audits_and_preserves_other_link_bytes() {
     let dir = TempDir::new().unwrap();
     let s = fixture(&dir).await;
@@ -313,7 +472,12 @@ async fn protocol_settings_posts_require_csrf_and_existing_enabled_server() {
         .await
         .unwrap();
     let latest = s.inv.recent_audit(1).await.unwrap()[0].id;
-    for suffix in ["reality-config", "hysteria2-obfs-rotate", "ss2022-mode"] {
+    for suffix in [
+        "reality-config",
+        "quic-tls-config",
+        "hysteria2-obfs-rotate",
+        "ss2022-mode",
+    ] {
         for origin in [None, Some("https://evil.example")] {
             let mut req = Request::builder()
                 .method("POST")
