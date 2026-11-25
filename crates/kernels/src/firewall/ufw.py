@@ -6,31 +6,20 @@ import shutil
 import subprocess
 import sys
 
-UFWRule = None
-UFWFrontend = None
-create_lock = None
-hex_encode = None
-release_lock = None
+try:
+    from ufw.common import UFWRule
+    from ufw.frontend import UFWFrontend
+    from ufw.util import create_lock, hex_encode, release_lock
+except ModuleNotFoundError:
+    UFWRule = None
+    UFWFrontend = None
+    create_lock = None
+    hex_encode = None
+    release_lock = None
 
 MARKER = "vpnctl managed ingress"
 DNSTT_MARKER = "vpnctl DNSTT"
 RULE_TRANSPORTS = ("tcp4", "tcp6", "udp4", "udp6")
-
-
-def _load_ufw():
-    global UFWRule, UFWFrontend, create_lock, hex_encode, release_lock
-    from ufw.common import UFWRule as _UFWRule
-    from ufw.frontend import UFWFrontend as _UFWFrontend
-    from ufw.util import (
-        create_lock as _create_lock,
-        hex_encode as _hex_encode,
-        release_lock as _release_lock,
-    )
-    UFWRule = _UFWRule
-    UFWFrontend = _UFWFrontend
-    create_lock = _create_lock
-    hex_encode = _hex_encode
-    release_lock = _release_lock
 
 
 def _extract_port_ranges(node, named_sets, table_key):
@@ -412,7 +401,8 @@ def main():
             check_nftables_drop_policy(ports)
             return
         raise RuntimeError("UFW executable not found on PATH")
-    _load_ufw()
+    if UFWFrontend is None:
+        raise RuntimeError("UFW python module not found")
     sys.argv[0] = os.path.abspath(ufw_path)
     gettext.install("ufw")
     lock = create_lock()
