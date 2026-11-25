@@ -717,6 +717,9 @@ pub(super) async fn server_detail_render(
             div data-protocol-setting="hysteria2" {
                 (server_detail_hysteria2_obfs_section(&server, lang))
             }
+            div data-protocol-setting="quic-tls" {
+                (server_detail_quic_tls_section(&server, &server_secrets, lang))
+            }
             (server_detail_user_bandwidth_section(&server, &server_secrets, boosty_roster.as_ref(), onboarding_default.as_ref(), lang))
             div data-protocol-setting="shadowsocks-2022" {
                 (server_detail_ss2022_mode_section(&server, &server_secrets, lang))

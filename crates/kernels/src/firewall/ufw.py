@@ -1,17 +1,250 @@
 import gettext
 import ipaddress
+import json
 import os
 import shutil
 import subprocess
 import sys
 
-from ufw.common import UFWRule
-from ufw.frontend import UFWFrontend
-from ufw.util import create_lock, hex_encode, release_lock
+UFWRule = None
+UFWFrontend = None
+create_lock = None
+hex_encode = None
+release_lock = None
 
 MARKER = "vpnctl managed ingress"
 DNSTT_MARKER = "vpnctl DNSTT"
 RULE_TRANSPORTS = ("tcp4", "tcp6", "udp4", "udp6")
+
+
+def _load_ufw():
+    global UFWRule, UFWFrontend, create_lock, hex_encode, release_lock
+    from ufw.common import UFWRule as _UFWRule
+    from ufw.frontend import UFWFrontend as _UFWFrontend
+    from ufw.util import (
+        create_lock as _create_lock,
+        hex_encode as _hex_encode,
+        release_lock as _release_lock,
+    )
+    UFWRule = _UFWRule
+    UFWFrontend = _UFWFrontend
+    create_lock = _create_lock
+    hex_encode = _hex_encode
+    release_lock = _release_lock
+
+
+def _extract_port_ranges(node, named_sets, table_key):
+    if isinstance(node, int) and not isinstance(node, bool):
+        return [(node, node)]
+    if isinstance(node, str) and node.startswith("@"):
+        return list(named_sets.get((table_key[0], table_key[1], node[1:]), ()))
+    if isinstance(node, list):
+        out = []
+        for item in node:
+            out.extend(_extract_port_ranges(item, named_sets, table_key))
+        return out
+    if isinstance(node, dict):
+        if "range" in node and isinstance(node["range"], list) and len(node["range"]) == 2:
+            lo, hi = node["range"]
+            if isinstance(lo, int) and isinstance(hi, int):
+                return [(lo, hi)]
+        if "set" in node:
+            return _extract_port_ranges(node["set"], named_sets, table_key)
+        if "elem" in node:
+            elem = node["elem"]
+            if isinstance(elem, dict) and "val" in elem:
+                return _extract_port_ranges(elem["val"], named_sets, table_key)
+            return _extract_port_ranges(elem, named_sets, table_key)
+    return []
+
+
+def _extract_l4_protos(node):
+    if isinstance(node, str):
+        return {node} if node in ("tcp", "udp") else set()
+    if isinstance(node, list):
+        out = set()
+        for item in node:
+            out.update(_extract_l4_protos(item))
+        return out
+    if isinstance(node, dict):
+        if "set" in node:
+            return _extract_l4_protos(node["set"])
+        if "elem" in node:
+            elem = node["elem"]
+            if isinstance(elem, dict) and "val" in elem:
+                return _extract_l4_protos(elem["val"])
+            return _extract_l4_protos(elem)
+    return set()
+
+
+def _extract_ct_states(node):
+    if isinstance(node, str):
+        return {node}
+    if isinstance(node, list):
+        out = set()
+        for item in node:
+            out.update(_extract_ct_states(item))
+        return out
+    if isinstance(node, dict):
+        if "set" in node:
+            return _extract_ct_states(node["set"])
+        if "elem" in node:
+            elem = node["elem"]
+            if isinstance(elem, dict) and "val" in elem:
+                return _extract_ct_states(elem["val"])
+            return _extract_ct_states(elem)
+    return set()
+
+
+def find_nft_blocked_ports(ruleset, ports):
+    items = ruleset.get("nftables") if isinstance(ruleset, dict) else None
+    if not isinstance(items, list):
+        return []
+
+    dormant = set()
+    named_sets = {}
+    drop_chains = set()
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        table = item.get("table")
+        if isinstance(table, dict):
+            flags = table.get("flags") or []
+            if "dormant" in flags:
+                dormant.add((table.get("family"), table.get("name")))
+        nft_set = item.get("set")
+        if isinstance(nft_set, dict):
+            key = (nft_set.get("family"), nft_set.get("table"), nft_set.get("name"))
+            named_sets[key] = _extract_port_ranges(
+                nft_set.get("elem"), {}, (nft_set.get("family"), nft_set.get("table"))
+            )
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        chain = item.get("chain")
+        if not isinstance(chain, dict):
+            continue
+        family = chain.get("family")
+        table_name = chain.get("table")
+        if (
+            family in ("inet", "ip", "ip6")
+            and (family, table_name) not in dormant
+            and chain.get("hook") == "input"
+            and chain.get("policy") == "drop"
+        ):
+            drop_chains.add((family, table_name, chain.get("name")))
+
+    if not drop_chains:
+        return []
+
+    allowed_by_chain = {chain_key: set() for chain_key in drop_chains}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        rule = item.get("rule")
+        if not isinstance(rule, dict):
+            continue
+        chain_key = (rule.get("family"), rule.get("table"), rule.get("chain"))
+        if chain_key not in allowed_by_chain:
+            continue
+        expr = rule.get("expr")
+        if not isinstance(expr, list):
+            continue
+        if not any(isinstance(step, dict) and "accept" in step for step in expr):
+            continue
+
+        skip_rule = False
+        l4_protos = set()
+        dport_entries = []
+        for step in expr:
+            if not isinstance(step, dict) or "match" not in step:
+                continue
+            match = step["match"]
+            if not isinstance(match, dict):
+                continue
+            op = match.get("op")
+            if op not in ("==", "in", None):
+                skip_rule = True
+                break
+            left = match.get("left")
+            right = match.get("right")
+            if not isinstance(left, dict):
+                continue
+            if "meta" in left and isinstance(left["meta"], dict):
+                meta_key = left["meta"].get("key")
+                if meta_key in ("iifname", "iif") and right == "lo":
+                    skip_rule = True
+                    break
+                if meta_key == "l4proto":
+                    l4_protos.update(_extract_l4_protos(right))
+            elif "ct" in left and isinstance(left["ct"], dict):
+                if left["ct"].get("key") == "state":
+                    states = _extract_ct_states(right)
+                    if "new" not in states:
+                        skip_rule = True
+                        break
+            elif "payload" in left and isinstance(left["payload"], dict):
+                proto = left["payload"].get("protocol")
+                field = left["payload"].get("field")
+                if field == "saddr":
+                    skip_rule = True
+                    break
+                if field == "dport" and proto in ("tcp", "udp", "th"):
+                    ranges = _extract_port_ranges(
+                        right, named_sets, (chain_key[0], chain_key[1])
+                    )
+                    dport_entries.append((proto, ranges))
+
+        if skip_rule:
+            continue
+
+        if dport_entries:
+            for proto, ranges in dport_entries:
+                target_protos = l4_protos if proto == "th" else {proto}
+                for target_proto in target_protos:
+                    for port_proto, port_num in ports:
+                        if port_proto == target_proto and any(
+                            lo <= port_num <= hi for lo, hi in ranges
+                        ):
+                            allowed_by_chain[chain_key].add((port_proto, port_num))
+        elif l4_protos:
+            for port_proto, port_num in ports:
+                if port_proto in l4_protos:
+                    allowed_by_chain[chain_key].add((port_proto, port_num))
+
+    blocked = set()
+    for port in ports:
+        if any(port not in allowed for allowed in allowed_by_chain.values()):
+            blocked.add(port)
+    return sorted(blocked)
+
+
+def check_nftables_drop_policy(ports):
+    search_path = os.environ.get("PATH", "")
+    search_path = f"{search_path}:/usr/sbin:/sbin" if search_path else "/usr/sbin:/sbin"
+    nft = shutil.which("nft", path=search_path)
+    if nft is None or not ports:
+        return
+    try:
+        proc = subprocess.run(
+            [nft, "-j", "list", "ruleset"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return
+    try:
+        ruleset = json.loads(proc.stdout)
+    except ValueError:
+        return
+    blocked = find_nft_blocked_ports(ruleset, ports)
+    if blocked:
+        print(" ".join(f"nft-blocked:{proto}:{port}" for proto, port in blocked))
 
 
 def parse_port(value, transports=("tcp", "udp")):
@@ -175,7 +408,11 @@ def main():
     # UFW checks the permissions of argv[0], which is "-" for stdin.
     ufw_path = shutil.which("ufw")
     if ufw_path is None:
+        if action == "cleanup":
+            check_nftables_drop_policy(ports)
+            return
         raise RuntimeError("UFW executable not found on PATH")
+    _load_ufw()
     sys.argv[0] = os.path.abspath(ufw_path)
     gettext.install("ufw")
     lock = create_lock()
@@ -183,6 +420,8 @@ def main():
         firewall = UFWFrontend(False)
         status = firewall.get_status().partition("\n")[0]
         if status == "Status: inactive":
+            if action == "cleanup":
+                check_nftables_drop_policy(ports)
             return
         if status != "Status: active":
             raise RuntimeError("could not determine UFW status")

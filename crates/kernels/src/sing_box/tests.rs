@@ -304,6 +304,14 @@ fn setup_script_provisions_shared_tls_cert() {
         "self-signed cert generation missing"
     );
     assert!(
+        s.contains("-subj '/CN=localhost'"),
+        "new self-signed certs must use neutral /CN=localhost subject"
+    );
+    assert!(
+        !s.contains("-subj '/CN=sing-box'"),
+        "must not fingerprint newly generated self-signed certs as /CN=sing-box"
+    );
+    assert!(
         s.contains("[ ! -f /etc/sing-box/cert.pem ]"),
         "cert generation must be guarded on absence (idempotent)"
     );
@@ -1065,6 +1073,10 @@ fn render_config_keeps_existing_top_level_keys() {
     let bytes = SingBox::new().render_config(&ctx, &[], &[]).unwrap();
     let v: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(v["log"].is_object(), "log block missing");
+    assert!(v["dns"].is_object(), "explicit upstream dns block missing");
+    assert_eq!(v["dns"]["final"], "dns-cf");
+    assert_eq!(v["dns"]["strategy"], "prefer_ipv4");
+    assert_eq!(v["route"]["default_domain_resolver"], "dns-cf");
     assert!(v["inbounds"].is_array(), "inbounds array missing");
     let out = v["outbounds"].as_array().unwrap();
     assert_eq!(out.len(), 2, "outbounds should be [direct, block]");

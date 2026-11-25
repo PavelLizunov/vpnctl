@@ -176,7 +176,10 @@ pub(crate) async fn run(args: BootstrapArgs, db_flag: Option<PathBuf>) -> anyhow
     inv.register_server_with_secrets(
         &server,
         "cli",
-        &[("vless.sni", vpnctl_protocols::NEW_SERVER_REALITY_SNI)],
+        &[
+            ("vless.sni", vpnctl_protocols::NEW_SERVER_REALITY_SNI),
+            ("vless.fp", vpnctl_protocols::NEW_SERVER_REALITY_FP),
+        ],
     )
     .await?;
 

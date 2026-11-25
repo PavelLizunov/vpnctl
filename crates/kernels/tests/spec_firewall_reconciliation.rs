@@ -257,3 +257,110 @@ async fn cleanup_reports_unmarked_ports_without_echoing_unexpected_output() {
         Some("UFW retained unmarked allowances with no public listener: 8443/tcp, 53/udp"),
     );
 }
+
+#[tokio::test]
+async fn cleanup_reports_nftables_drop_policy_blocked_ports_without_echoing_garbage() {
+    let registry = build_registry().unwrap();
+    let server = server(&[], &["sing-box"], 22);
+    let secrets = secrets(&[]);
+    let ctx = RenderCtx::new(&server, &secrets);
+    let ssh = RecordingTransport {
+        stdout: "nft-blocked:tcp:8443 nft-blocked:udp:53 nft-blocked:bad:44 garbage".into(),
+        ..RecordingTransport::default()
+    };
+
+    let warning = reconcile_firewall(&ssh, &registry, &ctx, &[])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        warning.as_deref(),
+        Some(
+            "nftables input chain has policy drop without an explicit accept rule for: 8443/tcp, 53/udp (UFW is inactive or not installed)"
+        ),
+    );
+}
+
+#[test]
+fn embedded_nftables_drop_policy_checker_detects_missing_and_allowed_ports() {
+    let script = include_str!("../src/firewall/ufw.py");
+    let driver = r#"
+import importlib.util, json, sys
+namespace = {}
+exec(sys.stdin.read(), namespace)
+find_blocked = namespace["find_nft_blocked_ports"]
+
+blocked_ruleset = {
+    "nftables": [
+        {"table": {"family": "inet", "name": "hostfw"}},
+        {"chain": {"family": "inet", "table": "hostfw", "name": "input", "type": "filter", "hook": "input", "prio": 0, "policy": "drop"}},
+        {"rule": {"family": "inet", "table": "hostfw", "chain": "input", "expr": [
+            {"match": {"op": "==", "left": {"meta": {"key": "iifname"}}, "right": "lo"}},
+            {"accept": None},
+        ]}},
+        {"rule": {"family": "inet", "table": "hostfw", "chain": "input", "expr": [
+            {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": {"set": [22, 443]}}},
+            {"accept": None},
+        ]}},
+    ]
+}
+ports = {("tcp", 22), ("tcp", 8443), ("udp", 53)}
+assert find_blocked(blocked_ruleset, ports) == [("tcp", 8443), ("udp", 53)], find_blocked(blocked_ruleset, ports)
+
+fixed_ruleset = {
+    "nftables": blocked_ruleset["nftables"] + [
+        {"rule": {"family": "inet", "table": "hostfw", "chain": "input", "expr": [
+            {"match": {"op": "==", "left": {"ct": {"key": "state"}}, "right": "new"}},
+            {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 8443}},
+            {"accept": None},
+        ]}},
+        {"rule": {"family": "inet", "table": "hostfw", "chain": "input", "expr": [
+            {"match": {"op": "==", "left": {"payload": {"protocol": "udp", "field": "dport"}}, "right": {"set": [{"range": [50, 60]}]}}},
+            {"accept": None},
+        ]}},
+    ]
+}
+assert find_blocked(fixed_ruleset, ports) == [], find_blocked(fixed_ruleset, ports)
+
+# Negated / inequality rules must not falsely mark excluded ports as allowed.
+negated_ruleset = {
+    "nftables": [
+        {"table": {"family": "inet", "name": "hostfw"}},
+        {"chain": {"family": "inet", "table": "hostfw", "name": "input", "hook": "input", "policy": "drop"}},
+        {"rule": {"family": "inet", "table": "hostfw", "chain": "input", "expr": [
+            {"match": {"op": "==", "left": {"meta": {"key": "l4proto"}}, "right": "tcp"}},
+            {"match": {"op": "!=", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 443}},
+            {"accept": None},
+        ]}},
+    ]
+}
+assert find_blocked(negated_ruleset, [("tcp", 443)]) == [("tcp", 443)], find_blocked(negated_ruleset, [("tcp", 443)])
+print("NFT_CHECK_OK")
+"#;
+    let mut child = std::process::Command::new("python3")
+        .args(["-c", driver])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "python check failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "NFT_CHECK_OK"
+    );
+}

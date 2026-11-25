@@ -193,7 +193,10 @@ pub(crate) async fn run(
             inv.register_server_with_secrets(
                 &server,
                 "cli",
-                &[("vless.sni", vpnctl_protocols::NEW_SERVER_REALITY_SNI)],
+                &[
+                    ("vless.sni", vpnctl_protocols::NEW_SERVER_REALITY_SNI),
+                    ("vless.fp", vpnctl_protocols::NEW_SERVER_REALITY_FP),
+                ],
             )
             .await?;
             let audit_payload = json!({

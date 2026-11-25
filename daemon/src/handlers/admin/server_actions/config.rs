@@ -242,20 +242,36 @@ pub(crate) async fn server_set_reality_config(
     let sni_raw = form_field(&body, "sni");
     let sni = sni_raw.as_deref().map(str::trim);
     if let Some(sni) = sni
-        && (sni.is_empty()
-            || sni.len() > 253
-            || sni.parse::<std::net::IpAddr>().is_ok()
-            || !sni.split('.').all(|label| {
-                !label.is_empty()
-                    && label.len() <= 63
-                    && label.starts_with(|c: char| c.is_ascii_alphanumeric())
-                    && label.ends_with(|c: char| c.is_ascii_alphanumeric())
-                    && label
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-            }))
+        && !vpnctl_protocols::is_valid_reality_sni(sni)
     {
         return bad_request("invalid REALITY handshake domain (expected a hostname)");
+    }
+
+    let fp_raw = form_field(&body, "fp");
+    let fp = fp_raw.as_deref().map(str::trim);
+    if let Some(fp) = fp
+        && !fp.is_empty()
+        && !vpnctl_protocols::is_valid_reality_fp(fp)
+    {
+        return bad_request("invalid REALITY uTLS fingerprint");
+    }
+
+    let handshake_server_raw = form_field(&body, "handshake_server");
+    let handshake_server = handshake_server_raw.as_deref().map(str::trim);
+    if let Some(hs) = handshake_server
+        && !hs.is_empty()
+        && !vpnctl_protocols::is_valid_reality_handshake_server(hs)
+    {
+        return bad_request("invalid REALITY handshake server (expected a hostname or IP)");
+    }
+
+    let handshake_port_raw = form_field(&body, "handshake_port");
+    let handshake_port = handshake_port_raw.as_deref().map(str::trim);
+    if let Some(hp) = handshake_port
+        && !hp.is_empty()
+        && !matches!(hp.parse::<u16>(), Ok(p) if p != 0)
+    {
+        return bad_request("invalid REALITY handshake port (1..=65535)");
     }
 
     let mut candidate = match state.inv.list_server_secrets(&sid).await {
@@ -275,14 +291,94 @@ pub(crate) async fn server_set_reality_config(
         candidate.insert("vless.sni".to_string(), sni.to_string());
         values.push(("vless.sni", sni));
     }
+    if let Some(fp) = fp {
+        if !fp.is_empty() || candidate.contains_key("vless.fp") {
+            values.push(("vless.fp", fp));
+        }
+        if fp.is_empty() {
+            candidate.remove("vless.fp");
+        } else {
+            candidate.insert("vless.fp".to_string(), fp.to_string());
+        }
+    }
+    if let Some(hs) = handshake_server {
+        if !hs.is_empty() || candidate.contains_key("vless.handshake_server") {
+            values.push(("vless.handshake_server", hs));
+        }
+        if hs.is_empty() {
+            candidate.remove("vless.handshake_server");
+        } else {
+            candidate.insert("vless.handshake_server".to_string(), hs.to_string());
+        }
+    }
+    if let Some(hp) = handshake_port {
+        if !hp.is_empty() || candidate.contains_key("vless.handshake_port") {
+            values.push(("vless.handshake_port", hp));
+        }
+        if hp.is_empty() {
+            candidate.remove("vless.handshake_port");
+        } else {
+            candidate.insert("vless.handshake_port".to_string(), hp.to_string());
+        }
+    }
     if let Err(e) = state.registry.validate_server(&server, &candidate) {
         return bad_request(&format!("{e}"));
     }
 
-    if let Err(e) = state
-        .inv
-        .set_server_secrets_audited(&sid, "admin", "server.reality.set", &values)
-        .await
+    if !values.is_empty()
+        && let Err(e) = state
+            .inv
+            .set_server_secrets_audited(&sid, "admin", "server.reality.set", &values)
+            .await
+    {
+        return internal_error(anyhow::Error::new(e));
+    }
+
+    Redirect::to(&format!(
+        "/admin/servers/{}/protocols",
+        path_segment_encode(&server_id)
+    ))
+    .into_response()
+}
+
+pub(crate) async fn server_set_quic_tls_config(
+    Path(server_id): Path<String>,
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id.clone());
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return not_found(&format!("no such server '{server_id}'")),
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    if !server
+        .enabled_protocols
+        .iter()
+        .any(|p| matches!(p.0.as_str(), "tuic-v5" | "hysteria2"))
+    {
+        return bad_request("TUIC or Hysteria2 is not enabled on this server");
+    }
+
+    let sni_raw = form_field(&body, "server_name").unwrap_or_default();
+    let sni = sni_raw.trim();
+    if !sni.is_empty() && !vpnctl_protocols::is_valid_reality_sni(sni) {
+        return bad_request("invalid QUIC TLS server_name (expected a hostname)");
+    }
+
+    let candidate = match state.inv.list_server_secrets(&sid).await {
+        Ok(s) => s,
+        Err(e) => return internal_error(anyhow::Error::new(e)),
+    };
+    let mut values = Vec::new();
+    if !sni.is_empty() || candidate.contains_key("tls.server_name") {
+        values.push(("tls.server_name", sni));
+    }
+    if !values.is_empty()
+        && let Err(e) = state
+            .inv
+            .set_server_secrets_audited(&sid, "admin", "server.quic_tls.set", &values)
+            .await
     {
         return internal_error(anyhow::Error::new(e));
     }

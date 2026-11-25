@@ -8,7 +8,11 @@ use crate::Caddy;
 pub(crate) fn ufw_function() -> String {
     format!(
         "vpnctl_ufw() {{\n\
+         if [ \"${{1:-}}\" != \"cleanup\" ]; then\n\
          command -v ufw >/dev/null 2>&1 || return 0\n\
+         elif ! command -v ufw >/dev/null 2>&1 && [ ! -x /usr/bin/python3 ]; then\n\
+         return 0\n\
+         fi\n\
          LC_ALL=C /usr/bin/python3 -I - \"$@\" <<'VPNCTL_UFW_PY'\n{}\nVPNCTL_UFW_PY\n}}\n",
         include_str!("firewall/ufw.py"),
     )
@@ -91,18 +95,35 @@ pub async fn reconcile_firewall(
     append_ports(&mut script, &protected);
     script.push('\n');
     let output = ssh.exec(&script).await?;
-    let ports: Vec<_> = output
-        .split_whitespace()
-        .filter_map(parse_port)
-        .filter(|(protocol, _)| matches!(*protocol, "tcp" | "udp"))
-        .map(|(protocol, port)| format!("{port}/{protocol}"))
-        .collect();
-    Ok((!ports.is_empty()).then(|| {
-        format!(
+    let mut unmarked = Vec::new();
+    let mut nft_blocked = Vec::new();
+    for token in output.split_whitespace() {
+        if let Some(rest) = token.strip_prefix("nft-blocked:") {
+            if let Some((protocol, port)) = parse_port(rest)
+                && matches!(protocol, "tcp" | "udp")
+            {
+                nft_blocked.push(format!("{port}/{protocol}"));
+            }
+        } else if let Some((protocol, port)) = parse_port(token)
+            && matches!(protocol, "tcp" | "udp")
+        {
+            unmarked.push(format!("{port}/{protocol}"));
+        }
+    }
+    let mut warnings = Vec::new();
+    if !unmarked.is_empty() {
+        warnings.push(format!(
             "UFW retained unmarked allowances with no public listener: {}",
-            ports.join(", ")
-        )
-    }))
+            unmarked.join(", ")
+        ));
+    }
+    if !nft_blocked.is_empty() {
+        warnings.push(format!(
+            "nftables input chain has policy drop without an explicit accept rule for: {} (UFW is inactive or not installed)",
+            nft_blocked.join(", ")
+        ));
+    }
+    Ok((!warnings.is_empty()).then(|| warnings.join("; ")))
 }
 
 /// Sweep results identify the address family as `tcp4`, `tcp6`, `udp4`, or `udp6`.

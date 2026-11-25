@@ -339,13 +339,31 @@ fn build_client_envelope(_user: &User, mut outbounds: Vec<Value>, tags: &[String
 
     json!({
         "log": { "level": "info", "timestamp": true },
+        "dns": {
+            "servers": [
+                {
+                    "tag": "vpn-dns",
+                    "type": "https",
+                    "server": "1.1.1.1",
+                    "path": "/dns-query",
+                    "detour": "proxy"
+                },
+                {
+                    "tag": "local-dns",
+                    "type": "local"
+                }
+            ],
+            "final": "vpn-dns"
+        },
         "outbounds": outbounds,
         "route": {
             "rules": [
-                { "protocol": "dns", "outbound": "direct" }
+                { "action": "sniff" },
+                { "protocol": "dns", "action": "hijack-dns" }
             ],
             "final": "proxy",
-            "auto_detect_interface": true
+            "auto_detect_interface": true,
+            "default_domain_resolver": "local-dns"
         }
     })
 }

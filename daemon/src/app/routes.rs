@@ -301,6 +301,10 @@ pub(crate) fn admin_router(state: AppState) -> Router {
             post(admin::server_set_reality_config),
         )
         .route(
+            "/admin/servers/{id}/quic-tls-config",
+            post(admin::server_set_quic_tls_config),
+        )
+        .route(
             "/admin/servers/{id}/hysteria2-obfs-rotate",
             post(admin::server_rotate_hysteria2_obfs),
         )
