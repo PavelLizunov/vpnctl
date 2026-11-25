@@ -880,6 +880,146 @@ pub(crate) fn server_detail_dnstt_section(
     }
 }
 
+pub(crate) fn server_detail_turnrelay_section(
+    server: &vpnctl_core::Server,
+    secrets: &HashMap<String, String>,
+    health: Option<&vpnctl_inventory::NodeHealthRow>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    if server.address.parse::<std::net::IpAddr>().is_err() {
+        return html! {};
+    }
+    let sid = path_segment_encode(&server.id.0);
+    let port = secrets
+        .get("turnrelay.listen_port")
+        .map(String::as_str)
+        .unwrap_or("");
+    let mode = secrets
+        .get("turnrelay.mode")
+        .map(String::as_str)
+        .unwrap_or(vpnctl_protocols::TURNRELAY_DEFAULT_MODE);
+    let turn_server = secrets
+        .get("turnrelay.turn_server")
+        .map(String::as_str)
+        .unwrap_or("");
+    let turn_username = secrets
+        .get("turnrelay.turn_username")
+        .map(String::as_str)
+        .unwrap_or("");
+    let turn_password_set = secrets
+        .get("turnrelay.turn_password")
+        .is_some_and(|value| !value.is_empty());
+    let connections = secrets
+        .get("turnrelay.connections")
+        .map(String::as_str)
+        .unwrap_or("2");
+    let udp = secrets
+        .get("turnrelay.udp")
+        .is_none_or(|value| !matches!(value.as_str(), "false" | "0"));
+    let publish = secrets
+        .get("turnrelay.publish")
+        .map(String::as_str)
+        .unwrap_or("");
+    let publish_targets = secrets
+        .get("turnrelay.publish_targets")
+        .map(String::as_str)
+        .unwrap_or("");
+    let fingerprint = secrets
+        .get("observed.turnrelay.cert_sha256")
+        .filter(|value| vpnctl_protocols::is_valid_turnrelay_fingerprint(value));
+    let applied =
+        vpnctl_protocols::turnrelay_applied_digest(&vpnctl_core::RenderCtx::new(server, secrets))
+            .ok()
+            .is_some_and(|digest| {
+                secrets
+                    .get("observed.turnrelay.applied")
+                    .is_some_and(|value| value == &digest)
+            });
+    let enabled = server
+        .enabled_protocols
+        .iter()
+        .any(|protocol| protocol.0 == "turnrelay");
+    let active = health
+        .filter(|row| chrono::Utc::now() - row.ts < chrono::Duration::minutes(30))
+        .and_then(|row| row.kernel_versions_json.as_deref())
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .and_then(|value| value["turnrelay"]["active"].as_bool());
+    let state = match (enabled, applied, active) {
+        (false, _, _) => tr(lang, "Disabled", "Выключен"),
+        (true, false, _) => tr(lang, "Pending deploy", "Ожидает развёртывания"),
+        (true, true, Some(true)) => tr(lang, "Service active", "Служба активна"),
+        (true, true, Some(false)) => tr(lang, "Service down", "Служба остановлена"),
+        (true, true, None) => tr(
+            lang,
+            "Applied, awaiting a fresh probe",
+            "Применено, ожидает свежей пробы",
+        ),
+    };
+    html! {
+        div.ed-rule {}
+        div.ed-art-eyebrow id="turnrelay"
+            title=(tr(lang,
+                "Exit-only TURN relay: clients reach this node through a TURN provider and pin its certificate. The exit password is minted once; client-visible settings are issued only after a successful deploy.",
+                "Выходной TURN-релей: клиенты приходят на этот узел через TURN-провайдера и пиннят его сертификат. Пароль выхода создаётся один раз; клиентские настройки выдаются только после успешного деплоя.")) {
+            "TURNRELAY (EXIT)"
+        }
+        p { (state) }
+        @if let Some(fingerprint) = fingerprint {
+            p style="font-family: var(--mono); font-size: 11px; color: var(--mute); overflow-wrap: anywhere;" {
+                (tr(lang, "certificate SHA-256: ", "SHA-256 сертификата: ")) (fingerprint)
+            }
+        }
+        form method="post" action=(format!("/admin/servers/{sid}/turnrelay-config")) {
+            label { (tr(lang, "UDP port (blank = 53492)", "UDP-порт (пусто = 53492)")) " "
+                input.ed-field type="text" name="listen_port" value=(port) maxlength="5" inputmode="numeric";
+            }
+            label { (tr(lang, "Obfuscation mode", "Режим обфускации")) " "
+                select.ed-field name="mode" {
+                    option value="dtls" selected[mode == "dtls"] { "dtls" }
+                    option value="srtp" selected[mode == "srtp"] { "srtp" }
+                }
+            }
+            label { (tr(lang, "TURN server host:port", "TURN-сервер host:port")) " "
+                input.ed-field type="text" name="turn_server" value=(turn_server) maxlength="512" required;
+            }
+            label { (tr(lang, "TURN username", "Имя пользователя TURN")) " "
+                input.ed-field type="text" name="turn_username" value=(turn_username) maxlength="256" required;
+            }
+            label { (tr(lang, "TURN password", "Пароль TURN")) " "
+                input.ed-field type="password" name="turn_password" value="" maxlength="512"
+                    autocomplete="new-password"
+                    placeholder=(if turn_password_set {
+                        tr(lang, "unchanged", "без изменений")
+                    } else {
+                        tr(lang, "required", "обязательно")
+                    });
+            }
+            label { (tr(lang, "Connections (1..60)", "Соединений (1..60)")) " "
+                input.ed-field type="number" name="connections" value=(connections) min="1" max="60" required;
+            }
+            label style="display: flex; gap: 6px; align-items: center;" {
+                input type="checkbox" name="udp" value="true" checked[udp];
+                (tr(lang, "carry UDP through the relay", "передавать UDP через релей"))
+            }
+            label { (tr(lang, "Publish (comma-separated, e.g. vless+reality)", "Публиковать (через запятую, напр. vless+reality)")) " "
+                input.ed-field type="text" name="publish" value=(publish) maxlength="128"
+                    placeholder="vless+reality";
+            }
+            label { (tr(lang, "Cross-server targets (server IDs or *)", "Кросс-серверные цели (ID серверов или *)")) " "
+                input.ed-field type="text" name="publish_targets" value=(publish_targets) maxlength="512"
+                    placeholder="*";
+            }
+            p.ed-muted style="font-family: var(--serif); font-style: italic; font-size: 12px;" {
+                (tr(lang,
+                    "Saving changes takes effect on the next deploy. Relayed VLESS profiles are issued only to VPNRouter clients advertising turnrelay-v1.",
+                    "Сохранение вступает в силу при следующем деплое. Релейные VLESS-профили выдаются только клиентам VPNRouter с возможностью turnrelay-v1."))
+            }
+            button.ed-abtn type="submit" { (tr(lang, "Save TurnRelay settings", "Сохранить настройки TurnRelay")) }
+        }
+    }
+}
+
 pub(crate) fn server_detail_vmess_section(
     server: &vpnctl_core::Server,
     secrets: &HashMap<String, String>,

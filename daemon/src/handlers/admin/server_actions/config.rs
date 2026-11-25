@@ -926,6 +926,155 @@ pub(crate) async fn server_set_vmess_config(
     .into_response()
 }
 
+pub(crate) async fn server_set_turnrelay_config(
+    Path(server_id): Path<String>,
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id.clone());
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(server)) => server,
+        Ok(None) => return not_found("TurnRelay server not found"),
+        Err(error) => return internal_error(anyhow::Error::new(error)),
+    };
+    let pid = vpnctl_core::ProtocolId("turnrelay".into());
+    let Some(protocol) = state.registry.protocol(&pid) else {
+        return bad_request("TurnRelay is not registered");
+    };
+    let mut secrets = match state.inv.list_server_secrets(&sid).await {
+        Ok(secrets) => secrets,
+        Err(error) => return internal_error(anyhow::Error::new(error)),
+    };
+
+    let port = form_field(&body, "listen_port")
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if !port.is_empty() && !matches!(port.parse::<u16>(), Ok(port) if port != 0) {
+        return bad_request("invalid TurnRelay UDP port (1..=65535)");
+    }
+    let mode = form_field(&body, "mode").unwrap_or_default();
+    let mode = match mode.trim() {
+        "" => vpnctl_protocols::TURNRELAY_DEFAULT_MODE,
+        value @ ("dtls" | "srtp") => value,
+        _ => return bad_request("invalid TurnRelay mode (expected dtls or srtp)"),
+    };
+    let turn_server = form_field(&body, "turn_server")
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let turn_username = form_field(&body, "turn_username")
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let turn_password_input = form_field(&body, "turn_password").unwrap_or_default();
+    let turn_password = if turn_password_input.trim().is_empty() {
+        secrets
+            .get("turnrelay.turn_password")
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        turn_password_input.trim().to_owned()
+    };
+    let connections = form_field(&body, "connections").unwrap_or_default();
+    let connections = match connections.trim() {
+        "" => vpnctl_protocols::TURNRELAY_DEFAULT_CONNECTIONS.to_string(),
+        value => match value.parse::<u8>() {
+            Ok(connections) if (1..=60).contains(&connections) => connections.to_string(),
+            _ => return bad_request("invalid TurnRelay connections (expected 1..=60)"),
+        },
+    };
+    let udp = if form_field(&body, "udp")
+        .is_some_and(|value| matches!(value.trim(), "true" | "on" | "1" | "yes"))
+    {
+        "true"
+    } else {
+        "false"
+    };
+    let publish = form_field(&body, "publish")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if !valid_turnrelay_publish(&publish) {
+        return bad_request("invalid TurnRelay publish list (use vless+reality or all)");
+    }
+    let publish_targets = form_field(&body, "publish_targets")
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if !valid_turnrelay_publish_targets(&publish_targets) {
+        return bad_request("invalid TurnRelay publish targets");
+    }
+
+    let values = [
+        ("turnrelay.listen_port", port.as_str()),
+        ("turnrelay.mode", mode),
+        ("turnrelay.turn_server", turn_server.as_str()),
+        ("turnrelay.turn_username", turn_username.as_str()),
+        ("turnrelay.turn_password", turn_password.as_str()),
+        ("turnrelay.connections", connections.as_str()),
+        ("turnrelay.udp", udp),
+        ("turnrelay.publish", publish.as_str()),
+        ("turnrelay.publish_targets", publish_targets.as_str()),
+    ];
+    secrets.extend(
+        values
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned())),
+    );
+    if let Err(error) = protocol.validate_server(&vpnctl_core::RenderCtx::new(&server, &secrets)) {
+        return bad_request(&error.to_string());
+    }
+    if server.enabled_protocols.contains(&pid) {
+        let reserved = match state.inv.get_reserved_ports(&sid).await {
+            Ok(ports) => ports,
+            Err(error) => return internal_error(anyhow::Error::new(error)),
+        };
+        if let Some((_, port)) = protocol
+            .effective_listen_ports(&secrets)
+            .into_iter()
+            .find(|(_, port)| reserved.contains(port))
+        {
+            return bad_request(&format!("TurnRelay UDP/{port} is reserved on this server"));
+        }
+    }
+    if let Err(error) = state
+        .inv
+        .set_server_secrets_audited(&sid, "admin", "server.turnrelay.set", &values)
+        .await
+    {
+        return internal_error(anyhow::Error::new(error));
+    }
+    Redirect::to(&format!(
+        "/admin/servers/{}/protocols#turnrelay",
+        path_segment_encode(&server_id)
+    ))
+    .into_response()
+}
+
+fn valid_turnrelay_publish(value: &str) -> bool {
+    value.is_empty()
+        || value.split(',').all(|token| {
+            matches!(
+                token.trim(),
+                "" | "vless+reality" | "all" | "true" | "1" | "yes"
+            )
+        })
+}
+
+fn valid_turnrelay_publish_targets(value: &str) -> bool {
+    value.is_empty()
+        || value.split(',').all(|token| {
+            let token = token.trim();
+            token == "*"
+                || (!token.is_empty()
+                    && token.len() <= 64
+                    && !token
+                        .chars()
+                        .any(|character| character.is_control() || character.is_whitespace()))
+        })
+}
+
 fn vmess_tls_pair_matches(certificate: &str, key: &str) -> bool {
     use rustls::pki_types::pem::PemObject;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};

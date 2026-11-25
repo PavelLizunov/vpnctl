@@ -37,7 +37,7 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 
 | Aspect | Value |
 |---|---|
-| Protocols × Kernels | **10 protocols** × **5 kernels**, fully orthogonal (see [Architecture](#architecture)) |
+| Protocols × Kernels | **11 protocols** × **6 kernels**, fully orthogonal (see [Architecture](#architecture)) |
 | Inventory | SQLite via `sqlx`, audit-on-mutation |
 | Toolchain | Rust **1.89+**, edition **2024** · static musl Linux x86_64 binaries (`x86_64-unknown-linux-musl`) |
 
@@ -50,8 +50,8 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 | `vpnctl` CLI — server / user / grant / deploy / sub / status / migrate / bootstrap | ✅ |
 | `vpnctld` daemon — REST API + `/sub/<token>` + Admin UI + per-IP rate-limit + persistent bans | ✅ |
 | Inventory — sqlx + SQLite, migrations, audit_log, retention scheduler | ✅ |
-| Kernels — `sing-box`, `amneziawg`, `caddy` (naive / vless-ws cover site), `xray` | ✅ |
-| Protocols — `vless+reality`, `tuic-v5`, `hysteria2`, `wireguard`, `amneziawg3`, `naive`, `vless-ws`, `vless+xhttp`, `dnstt`, `vmess` | ✅ (10 across 5 kernels) |
+| Kernels — `sing-box`, `amneziawg`, `caddy` (naive / vless-ws cover site), `xray`, `dnstt`, `turnrelay` | ✅ |
+| Protocols — `vless+reality`, `tuic-v5`, `hysteria2`, `wireguard`, `amneziawg3`, `naive`, `vless-ws`, `vless+xhttp`, `dnstt`, `vmess`, `turnrelay` | ✅ (11 across 6 kernels) |
 | Hosters — DigitalOcean / Cloudzy / Generic (SSH port quirks) | ✅ |
 | Add-server **wizard** (Phase E) — paste IP+root password, SSE-streamed bootstrap | ✅ |
 | Backups — [hourly SQLite snapshots and daily encrypted DR bundles](specs/backup-restore.md), restore CLI/web self-test + CI-protected byte-equality (`restore_e2e`) + in-product Disaster Recovery section | ✅ |
@@ -59,7 +59,7 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 | Chain-capable subscriptions — stock sing-box JSON plus capability-gated VPNRouter app-config metadata, both with fail-closed entry filtering | ✅ |
 | Boosty subscription bridge — optionally auto-creates complete users for new eligible paid subscribers, grants current VPN-exit servers at creation, preserves existing users’ grants, and supports a configurable disable grace period | ✅ |
 | Protocol visibility — per-(server, protocol) hide + per-(user, server, protocol) deny with OR-semantics | ✅ |
-| DPI-risk tiers — Strong: `naive`, `vless+reality`, `vless+xhttp`, `vless-ws`; Moderate: `amneziawg3`, `tuic-v5`, `vmess`; Weak: `dnstt`, `hysteria2`, `wireguard` | ✅ |
+| DPI-risk tiers — Strong: `naive`, `vless+reality`, `vless+xhttp`, `vless-ws`; Moderate: `amneziawg3`, `tuic-v5`, `vmess`; Weak: `dnstt`, `hysteria2`, `turnrelay`, `wireguard` | ✅ |
 | Monitoring — 24h sub-fetch sparkline + heavy-users heatmap + filtered `/admin/sharing` risk page + per-user UA fingerprint heuristic | ✅ |
 | Traffic accounting — cumulative per-user sing-box V2Ray Stats (Clash for live metadata; AmneziaWG independent) | ✅ |
 | Audit timeline — paginated + filtered + CSV export | ✅ |
@@ -163,8 +163,8 @@ the other:
 
 | Trait | Meaning | Examples |
 |---|---|---|
-| `Kernel` | Node-side daemon that holds the connections | `sing-box`, `amneziawg`, `caddy`, `xray` |
-| `Protocol` | Wire format presented to the client | `vless+reality`, `tuic-v5`, `hysteria2`, `wireguard`, `amneziawg3`, `naive`, `vless-ws`, `vless+xhttp` |
+| `Kernel` | Node-side daemon that holds the connections | `sing-box`, `amneziawg`, `caddy`, `xray`, `dnstt`, `turnrelay` |
+| `Protocol` | Wire format presented to the client | `vless+reality`, `tuic-v5`, `hysteria2`, `wireguard`, `amneziawg3`, `naive`, `vless-ws`, `vless+xhttp`, `dnstt`, `vmess`, `turnrelay` |
 
 A `Kernel` declares which `Protocol`s it can host (`Kernel::supported_protocols()`).
 `Registry::validate_server` catches incompatible combinations **before** an
@@ -205,8 +205,8 @@ vpnctl/
 │   ├── ssh/              SshTransport trait + russh implementations
 │   ├── protocols/        vless+reality, tuic-v5, hysteria2, ss-2022, wg,
 │   │                     amneziawg2, amneziawg3, anytls, trojan, naive, vless-ws,
-│   │                     vless+xhttp
-│   ├── kernels/          sing-box (full), amneziawg, caddy, xray
+│   │                     vless+xhttp, dnstt, vmess, turnrelay
+│   ├── kernels/          sing-box (full), amneziawg, caddy, xray, dnstt, turnrelay
 │   ├── inventory/        SqliteInventory, migrations, audit_log
 │   └── boosty-bridge/    Boosty subscription → user reconcile/sync
 ├── cli/                  clap binary `vpnctl`

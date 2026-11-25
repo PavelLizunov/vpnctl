@@ -95,6 +95,27 @@ pub(crate) async fn server_enable_protocol(
                 return bad_request(&format!("VMess TCP/{port} is reserved on this server"));
             }
         }
+        if pid.0 == "turnrelay" {
+            let secrets = match state.inv.list_server_secrets(&sid).await {
+                Ok(secrets) => secrets,
+                Err(error) => return internal_error(anyhow::Error::new(error)),
+            };
+            if let Err(error) = state.registry.validate_server(&after, &secrets) {
+                return bad_request(&error.to_string());
+            }
+            let reserved = match state.inv.get_reserved_ports(&sid).await {
+                Ok(ports) => ports,
+                Err(error) => return internal_error(anyhow::Error::new(error)),
+            };
+            if let Some((_, port)) = state.registry.protocol(&pid).and_then(|protocol| {
+                protocol
+                    .effective_listen_ports(&secrets)
+                    .into_iter()
+                    .find(|(_, port)| reserved.contains(port) || *port == after.ssh_port)
+            }) {
+                return bad_request(&format!("TurnRelay UDP/{port} is reserved on this server"));
+            }
+        }
     }
 
     let inserted = match state.inv.add_server_protocol(&sid, &pid).await {

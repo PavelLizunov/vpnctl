@@ -218,6 +218,7 @@ DPI tiers mirror each implementation's `dpi_risk()`.
 | Protocol / candidate | Wire | DPI tier | Use case | Status in vpnctl | Kernel / recommendation |
 |---|---|---|---|---|---|
 | `dnstt` | TCP over UDP DNS | Weak | Reserve access | ✅ shipped | `dnstt`; managed SSH |
+| `turnrelay` | TURN/DTLS | Weak | TURN-relayed exit proxy with pinned certificate | ✅ shipped | `turnrelay`; exit-only, VPNRouter `turnrelay-v1` |
 | `vless+reality` | TCP | Strong | Censorship-circumvention primary | ✅ shipped | `sing-box`; default |
 | `tuic-v5` | UDP | Moderate | Low-latency UDP-friendly net | ✅ shipped | `sing-box`; secondary |
 | `hysteria2` | UDP/QUIC | Weak | LTE/satellite; optional Salamander and Realm | ✅ shipped | `sing-box`; validate Realm across distinct networks |
