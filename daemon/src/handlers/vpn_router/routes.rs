@@ -127,15 +127,15 @@ pub(crate) async fn get_config(
         .unwrap_or("");
     let want_raw = is_vpn_client_ua(ua);
     let vpnrouter = is_vpnrouter_client_ua(ua);
-    let desktop_vpnrouter = single_header(&headers, "user-agent")
+    let product = single_header(&headers, "user-agent")
         .and_then(|ua| ua.split_ascii_whitespace().next())
         .and_then(|product| product.split('/').next())
-        .is_some_and(|product| product.eq_ignore_ascii_case("VPNRouter"));
-    let desktop_core = if desktop_vpnrouter
-        && matches!(
-            single_header(&headers, "x-vpnrouter-platform"),
-            Some("windows" | "macos" | "linux")
-        ) {
+        .unwrap_or_default();
+    let platform = single_header(&headers, "x-vpnrouter-platform");
+    let supported_desktop = (product.eq_ignore_ascii_case("VPNRouter")
+        && matches!(platform, Some("windows" | "macos" | "linux")))
+        || (product.eq_ignore_ascii_case("VPNRouterBusiness") && platform == Some("windows"));
+    let desktop_core = if supported_desktop {
         single_header(&headers, "x-vpnrouter-core-version")
     } else {
         None
