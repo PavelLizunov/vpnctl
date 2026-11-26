@@ -439,7 +439,11 @@ async fn hidden_suppressed_revoked_detoured_and_unapplied_states_are_omitted() {
             .set_client_detour_via_as("test", &ServerId("de".into()), Some(&ServerId("is".into())))
             .await
             .unwrap();
-        assert_no_turnrelay(&fixture.state, "detoured").await;
+        let detoured_lines = decode_lines(&body(&fixture.state, RAW_UA, Some(CAPABILITY)).await);
+        assert!(
+            detoured_lines.iter().any(|l| l.starts_with("turnrelay://")),
+            "detoured exit with TurnRelay enabled should still issue its TurnRelay chain"
+        );
     }
     {
         let fixture = Fixture::new().await;

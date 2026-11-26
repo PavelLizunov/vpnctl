@@ -364,7 +364,6 @@ pub(crate) fn collect_turnrelay_uris(
     let mut profiled = HashSet::new();
     for exit in inputs {
         if exit.suppressed
-            || exit.detour_via.is_some()
             || !exit.visible.contains(&turnrelay)
             || exit.server.address.parse::<std::net::IpAddr>().is_err()
             || !turnrelay_publishes_vless(&exit.secrets)
