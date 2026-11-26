@@ -16,24 +16,24 @@ pub(super) fn server_detail_desktop_subscription_section(
     html! {
         section id="desktop-subscription" class="ed-card" style="margin: 16px 0;" {
             h2 { (tr(lang, "Desktop subscription", "Подписка для ПК")) }
-            p id="desktop-subscription-help" {
+            p id="desktop-subscription-help" class="ed-form-hint" {
                 (tr(
                     lang,
                     "Enter the exact core version to offer this server only in desktop VPNRouter subscriptions, including Omarchy. Leave blank to allow ordinary subscriptions. Previously saved profiles retain access.",
                     "Укажите точную версию ядра, чтобы выдавать этот сервер только в настольном VPNRouter, включая Omarchy. Пустое поле разрешает обычные подписки. Ранее сохранённые профили сохраняют доступ.",
                 ))
             }
-            form method="post" action=(format!("/admin/servers/{server_id}/desktop-subscription")) {
-                label for="desktop-subscription-core" {
-                    (tr(lang, "Required sing-box-vpnctl version", "Требуемая версия sing-box-vpnctl"))
-                }
-                " "
-                input id="desktop-subscription-core" name="core_version" type="text"
-                      value=(core.unwrap_or_default()) maxlength="64" placeholder="1.14.4-vpnctl.3"
-                      aria-describedby="desktop-subscription-help" spellcheck="false";
-                " "
-                button type="submit" class="ed-abtn ed-abtn--primary ed-abtn--sm" {
-                    (tr(lang, "Save", "Сохранить"))
+            form.ed-form method="post" action=(format!("/admin/servers/{server_id}/desktop-subscription")) {
+                div.ed-form-row.ed-form-row--inline.ed-form-row--grow {
+                    label.ed-form-label for="desktop-subscription-core" {
+                        (tr(lang, "Required sing-box-vpnctl version", "Требуемая версия sing-box-vpnctl"))
+                    }
+                    input.ed-field id="desktop-subscription-core" name="core_version" type="text"
+                          value=(core.unwrap_or_default()) maxlength="64" placeholder="1.14.4-vpnctl.4"
+                          aria-describedby="desktop-subscription-help" spellcheck="false";
+                    button.ed-btn-primary type="submit" {
+                        (tr(lang, "Save", "Сохранить"))
+                    }
                 }
             }
         }
@@ -167,20 +167,22 @@ pub(super) fn server_detail_push_deploy_key_section(
             ))
         }
 
-        form method="post" action=(format!("/admin/servers/{sid_enc}/push-deploy-key")) {
+        form.ed-form method="post" action=(format!("/admin/servers/{sid_enc}/push-deploy-key")) {
             h4 { (tr(lang, "Deploy key already installed", "Deploy-ключ уже установлен")) }
-            p class="ed-muted" {
+            p class="ed-form-hint" {
                 (tr(lang,
                     "Check the existing deploy key and save the SSH user. No password or reference key needed. Non-root users need passwordless sudo. Does not install keys or deploy the server.",
                     "Проверить установленный deploy-ключ и сохранить SSH-пользователя. Пароль и reference-key не нужны. Для non-root необходим sudo без пароля. Ключи не устанавливаются, деплой не запускается."))
             }
             input type="hidden" name="auth_method" value="deploy-key";
-            label for="verify_ssh_user" { (tr(lang, "SSH user", "SSH-пользователь")) }
-            input id="verify_ssh_user" type="text" name="ssh_user" value=(server.ssh_user)
-                required autocomplete="username" autocapitalize="none" spellcheck="false"
-                pattern="[A-Za-z0-9_\\-]+" maxlength="32";
-            button type="submit" class="ed-abtn ed-abtn--recovery" {
-                (tr(lang, "Check key and save", "Проверить ключ и сохранить"))
+            div.ed-form-row.ed-form-row--inline.ed-form-row--grow {
+                label.ed-form-label for="verify_ssh_user" { (tr(lang, "SSH user", "SSH-пользователь")) }
+                input.ed-field id="verify_ssh_user" type="text" name="ssh_user" value=(server.ssh_user)
+                    required autocomplete="username" autocapitalize="none" spellcheck="false"
+                    pattern="[A-Za-z0-9_\\-]+" maxlength="32";
+                button.ed-btn-primary type="submit" {
+                    (tr(lang, "Check key and save", "Проверить ключ и сохранить"))
+                }
             }
         }
 
@@ -209,55 +211,55 @@ pub(super) fn server_detail_push_deploy_key_section(
             }
         }
 
-        form method="post"
-             action=(format!("/admin/servers/{sid_enc}/push-deploy-key"))
-             style="margin: 0 0 14px;" {
-            div style="display: grid; grid-template-columns: 140px 1fr; gap: 10px 14px; align-items: center; max-width: 560px;" {
-                label for="setup_ssh_user" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                    (tr(lang, "ssh user", "ssh пользователь"))
+        form.ed-form method="post"
+             action=(format!("/admin/servers/{sid_enc}/push-deploy-key")) {
+            div.ed-form-grid {
+                div.ed-form-row {
+                    label.ed-form-label for="setup_ssh_user" {
+                        (tr(lang, "ssh user", "ssh пользователь"))
+                    }
+                    input.ed-field id="setup_ssh_user" type="text" name="ssh_user"
+                          value=(server.ssh_user)
+                          autocomplete="username" autocapitalize="none" spellcheck="false"
+                          pattern="[A-Za-z0-9_\\-]+" maxlength="32";
                 }
-                input id="setup_ssh_user" type="text" name="ssh_user"
-                      value=(server.ssh_user)
-                      autocomplete="username" autocapitalize="none" spellcheck="false"
-                      pattern="[A-Za-z0-9_\\-]+" maxlength="32"
-                      style="font-family: var(--mono); font-size: 12px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper);";
-                label style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                    (tr(lang, "ssh password", "ssh-пароль"))
+                div.ed-form-row {
+                    label.ed-form-label for="setup_ssh_password" {
+                        (tr(lang, "ssh password", "ssh-пароль"))
+                    }
+                    input.ed-field id="setup_ssh_password" type="password"
+                          name="root_password"
+                          autocomplete="off"
+                          placeholder=(if reference_ok {
+                              tr(lang, "blank = reference key", "пусто = reference-key")
+                          } else {
+                              tr(lang, "never stored", "не сохраняется")
+                          })
+                          title=(if reference_ok {
+                              tr(
+                                  lang,
+                                  "Leave blank to authenticate with the reference key; fill in to force the sshpass fallback. Used once for the SSH connect, then discarded — never stored, never logged.",
+                                  "Пусто — аутентификация reference-ключом; заполни, чтобы форсировать sshpass-fallback. Используется один раз для SSH-коннекта и отбрасывается — не хранится и не логируется.",
+                              )
+                          } else {
+                              tr(
+                                  lang,
+                                  "Used once for the SSH connect, then discarded — never stored, never logged.",
+                                  "Используется один раз для SSH-коннекта и отбрасывается — не хранится и не логируется.",
+                              )
+                          });
                 }
-                input type="password"
-                      name="root_password"
-                      autocomplete="off"
-                      placeholder=(if reference_ok {
-                          tr(lang, "blank = reference key", "пусто = reference-key")
-                      } else {
-                          tr(lang, "never stored", "не сохраняется")
-                      })
-                      title=(if reference_ok {
-                          tr(
-                              lang,
-                              "Leave blank to authenticate with the reference key; fill in to force the sshpass fallback. Used once for the SSH connect, then discarded — never stored, never logged.",
-                              "Пусто — аутентификация reference-ключом; заполни, чтобы форсировать sshpass-fallback. Используется один раз для SSH-коннекта и отбрасывается — не хранится и не логируется.",
-                          )
-                      } else {
-                          tr(
-                              lang,
-                              "Used once for the SSH connect, then discarded — never stored, never logged.",
-                              "Используется один раз для SSH-коннекта и отбрасывается — не хранится и не логируется.",
-                          )
-                      })
-                      style="font-family: var(--mono); font-size: 12px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper);";
             }
-            div style="margin-top: 12px;" {
-                button type="submit"
+            div.ed-form-actions {
+                button.ed-btn-primary type="submit"
                        title=(crate::i18n::tr(
                            lang,
                            "Append the daemon's deploy pubkey to ~/.ssh/authorized_keys on this server. With the password filled it connects via sshpass; leave the password empty to use the configured reference key instead.",
                            "Добавить deploy-pubkey демона в ~/.ssh/authorized_keys на этом сервере. С заполненным паролем подключается через sshpass; оставь пароль пустым, чтобы использовать настроенный reference-key.",
-                       ))
-                       class="ed-abtn ed-abtn--recovery ed-abtn--lg" {
+                       )) {
                     (icon("key-round")) (crate::i18n::tr(lang, "push deploy key", "запушить deploy-ключ"))
                 }
-                span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-left: 14px;" {
+                span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
                     (crate::i18n::tr(lang, "Connects to ", "Подключение к "))
                     span.ed-mono { (server.ssh_user) "@" (server.address) ":" (server.ssh_port) }
                 }
@@ -287,23 +289,25 @@ pub(super) fn server_detail_routing_policy_section(
             @if let Some(error) = routing_error {
                 div class="ed-alert ed-alert--warn" { "management route invalid: " (error) }
             }
-            form method="post" action=(format!("/admin/servers/{sid}/routing-policy")) {
-                label for="server-role" { "role" }
-                select id="server-role" name="role" {
-                    option value="vpn-exit" selected[role == vpnctl_inventory::ServerRole::VpnExit] { "vpn-exit" }
-                    option value="workload-only" selected[role == vpnctl_inventory::ServerRole::WorkloadOnly] { "workload-only" }
-                }
-                label for="jump-via" style="margin-left: 12px;" { "jump_via" }
-                select id="jump-via" name="jump_via" {
-                    option value="" selected[server.jump_via.is_none()] { "direct" }
-                    @for candidate in candidates {
-                        @if candidate.id != server.id {
-                            option value=(candidate.id.0) selected[server.jump_via.as_ref() == Some(&candidate.id)] { (candidate.id.0) }
+            form.ed-form method="post" action=(format!("/admin/servers/{sid}/routing-policy")) {
+                div.ed-form-row.ed-form-row--inline {
+                    label.ed-form-label for="server-role" { "role" }
+                    select.ed-field id="server-role" name="role" {
+                        option value="vpn-exit" selected[role == vpnctl_inventory::ServerRole::VpnExit] { "vpn-exit" }
+                        option value="workload-only" selected[role == vpnctl_inventory::ServerRole::WorkloadOnly] { "workload-only" }
+                    }
+                    label.ed-form-label for="jump-via" { "jump_via" }
+                    select.ed-field id="jump-via" name="jump_via" {
+                        option value="" selected[server.jump_via.is_none()] { "direct" }
+                        @for candidate in candidates {
+                            @if candidate.id != server.id {
+                                option value=(candidate.id.0) selected[server.jump_via.as_ref() == Some(&candidate.id)] { (candidate.id.0) }
+                            }
                         }
                     }
-                }
-                button type="submit" class="ed-abtn ed-abtn--recovery" style="margin-left: 12px;" {
-                    (icon("save")) (crate::i18n::tr(lang, "save routing policy", "сохранить политику"))
+                    button.ed-btn-primary type="submit" {
+                        (icon("save")) (crate::i18n::tr(lang, "save routing policy", "сохранить политику"))
+                    }
                 }
             }
         }
@@ -328,24 +332,26 @@ pub(super) fn server_detail_client_detour_section(
                     "Маршрутизирует клиентский трафик через входной сервер перед этим целевым выходом (2-hop VPN цепочка).",
                 ))
             }
-            form method="post" action=(format!("/admin/servers/{sid_enc}/client-detour")) {
-                label for="client-detour-via" {
-                    (tr(lang, "Client entry", "Входной сервер"))
-                }
-                select id="client-detour-via" name="client_detour_via" style="margin-left: 8px;" {
-                    option value="" selected[current_detour.is_none()] {
-                        (tr(lang, "direct (none)", "прямой (нет)"))
+            form.ed-form method="post" action=(format!("/admin/servers/{sid_enc}/client-detour")) {
+                div.ed-form-row.ed-form-row--inline {
+                    label.ed-form-label for="client-detour-via" {
+                        (tr(lang, "Client entry", "Входной сервер"))
                     }
-                    @for candidate in candidates {
-                        @if candidate.id != server.id {
-                            option value=(candidate.id.0) selected[current_detour == Some(&candidate.id)] {
-                                (candidate.id.0)
+                    select.ed-field id="client-detour-via" name="client_detour_via" {
+                        option value="" selected[current_detour.is_none()] {
+                            (tr(lang, "direct (none)", "прямой (нет)"))
+                        }
+                        @for candidate in candidates {
+                            @if candidate.id != server.id {
+                                option value=(candidate.id.0) selected[current_detour == Some(&candidate.id)] {
+                                    (candidate.id.0)
+                                }
                             }
                         }
                     }
-                }
-                button type="submit" class="ed-abtn ed-abtn--recovery" style="margin-left: 12px;" {
-                    (icon("save")) (tr(lang, "save client entry", "сохранить входной сервер"))
+                    button.ed-btn-primary type="submit" {
+                        (icon("save")) (tr(lang, "save client entry", "сохранить входной сервер"))
+                    }
                 }
             }
         }
@@ -403,41 +409,43 @@ pub(super) fn server_detail_fingerprint_section(
             }
         }
         div style="display: flex; flex-direction: column; gap: 10px;" {
-            form method="post"
-                 action=(format!("/admin/servers/{sid_enc}/set-fingerprint"))
-                 style="display: flex; gap: 8px; align-items: center;" {
+            form.ed-form method="post"
+                 action=(format!("/admin/servers/{sid_enc}/set-fingerprint")) {
                 input type="hidden" name="mode" value="keyscan";
-                button type="submit"
-                       title=(tr(
-                           lang,
-                           "Run ssh-keyscan + ssh-keygen -lf - on the daemon host, pin the resulting fingerprint.",
-                           "Запустить ssh-keyscan + ssh-keygen -lf - на хосте демона и закрепить полученный отпечаток.",
-                       ))
-                       class="ed-abtn ed-abtn--recovery ed-abtn--lg" {
-                    (icon("scan")) (tr(lang, "auto-detect via ssh-keyscan", "автоопределить через ssh-keyscan"))
-                }
-                span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
-                    (tr(lang, "(daemon will SSH-keyscan ", "(демон сделает ssh-keyscan "))
-                    span.ed-mono { (server.address) ":" (server.ssh_port) }
-                    (tr(lang, " and pin the SHA-256)", " и закрепит SHA-256)"))
+                div.ed-form-row.ed-form-row--inline {
+                    button.ed-abtn.ed-abtn--recovery.ed-abtn--lg type="submit"
+                           title=(tr(
+                               lang,
+                               "Run ssh-keyscan + ssh-keygen -lf - on the daemon host, pin the resulting fingerprint.",
+                               "Запустить ssh-keyscan + ssh-keygen -lf - на хосте демона и закрепить полученный отпечаток.",
+                           )) {
+                        (icon("scan")) (tr(lang, "auto-detect via ssh-keyscan", "автоопределить через ssh-keyscan"))
+                    }
+                    span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
+                        (tr(lang, "(daemon will SSH-keyscan ", "(демон сделает ssh-keyscan "))
+                        span.ed-mono { (server.address) ":" (server.ssh_port) }
+                        (tr(lang, " and pin the SHA-256)", " и закрепит SHA-256)"))
+                    }
                 }
             }
-            form method="post"
-                 action=(format!("/admin/servers/{sid_enc}/set-fingerprint"))
-                 style="display: flex; gap: 8px; align-items: center;" {
+            form.ed-form method="post"
+                 action=(format!("/admin/servers/{sid_enc}/set-fingerprint")) {
                 input type="hidden" name="mode" value="manual";
-                input type="text" name="fingerprint" placeholder="SHA256:..."
-                      style="flex: 1; padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);"
-                      pattern="SHA256:[A-Za-z0-9+\\/=_\\-]{1,44}"
-                      title="SHA256:<43-char-base64>";
-                button type="submit"
-                       title=(tr(
-                           lang,
-                           "Save the SHA256 fingerprint you pasted above as the trusted host key for this server (TOFU pin). Future SSH connections refuse if the node presents a different key — protects against MITM after the initial trust.",
-                           "Сохранить вставленный выше SHA256-отпечаток как доверенный host-ключ для этого сервера (TOFU pin). Будущие SSH-коннекты откажутся если нода предъявит другой ключ — защита от MITM после первичного доверия.",
-                       ))
-                       style="padding: 4px 12px; border: 1px solid var(--ink); background: transparent; color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                    (icon("shield-check")) (tr(lang, "pin manually", "закрепить вручную"))
+                div.ed-form-row.ed-form-row--inline.ed-form-row--grow {
+                    label.ed-form-label.ed-sr-only for="trusted-host-fingerprint" {
+                        (tr(lang, "SSH host fingerprint", "Отпечаток SSH-хоста"))
+                    }
+                    input.ed-field id="trusted-host-fingerprint" type="text" name="fingerprint" placeholder="SHA256:..."
+                          pattern="SHA256:[A-Za-z0-9+\\/=_\\-]{1,44}"
+                          title="SHA256:<43-char-base64>";
+                    button.ed-abtn.ed-abtn--secondary type="submit"
+                           title=(tr(
+                               lang,
+                               "Save the SHA256 fingerprint you pasted above as the trusted host key for this server (TOFU pin). Future SSH connections refuse if the node presents a different key — protects against MITM after the initial trust.",
+                               "Сохранить вставленный выше SHA256-отпечаток как доверенный host-ключ для этого сервера (TOFU pin). Будущие SSH-коннекты откажутся если нода предъявит другой ключ — защита от MITM после первичного доверия.",
+                           )) {
+                        (icon("shield-check")) (tr(lang, "pin manually", "закрепить вручную"))
+                    }
                 }
             }
         }

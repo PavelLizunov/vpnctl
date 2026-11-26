@@ -11,3 +11,5 @@ mod core_http;
 mod dnstt;
 #[path = "vpn_router_endpoint/protocols.rs"]
 mod protocols;
+#[path = "vpn_router_endpoint/turnrelay.rs"]
+mod turnrelay;

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${SINGBOX_VERSION:-1.14.4-vpnctl.3}"
+VERSION="${SINGBOX_VERSION:-1.14.4-vpnctl.4}"
 TARGET_ARCH="${TARGET_ARCH:-$(uname -m)}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="${OUT:-${HERE}/sing-box-${VERSION}-${TARGET_ARCH}}"
@@ -10,17 +10,17 @@ FORCE_BUILD="${FORCE_BUILD:-0}"
 case "$TARGET_ARCH" in
     x86_64|amd64)
         ASSET="sing-box-${VERSION}-linux-amd64.tar.gz"
-        EXPECTED_SHA="62c7d4ab2ec93fc6a51790facbcc50436d1183d8bf6f9c84b07d1d75e1618eae"
+        EXPECTED_SHA="a6014cfad5494fe8fa3f178facad6a7c6dab59f5143f7b5af645e8e4e5d84094"
         GOARCH="amd64"
         ;;
     aarch64|arm64)
         ASSET="sing-box-${VERSION}-linux-arm64.tar.gz"
-        EXPECTED_SHA="917e2a7b392ab2113168ee9193552f0b515755323ac65aed96eef669492fffb5"
+        EXPECTED_SHA="281cd5214208147b869d654fd8d86ea7b77a61b312fc6112fb7e0d4ddd8beabf"
         GOARCH="arm64"
         ;;
     armv7*|armhf)
         ASSET="sing-box-${VERSION}-linux-armv7.tar.gz"
-        EXPECTED_SHA="3d589fc44dcab9f62675c41c343b4e5d8ae92201193643dd5c001731c6bef17a"
+        EXPECTED_SHA="36fec164b839c707a086f9ff404af1ba7ab40cf4d532270b186444bc5d203fc0"
         GOARCH="arm"
         ;;
     *)
@@ -67,7 +67,7 @@ fi
 
 TAG="v${VERSION}"
 WORK="${WORK:-/tmp/sb-vpnctl-build}"
-TAGS="with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,with_v2ray_api,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0,with_xhttp,with_awg"
+TAGS="with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,with_v2ray_api,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0,with_xhttp,with_awg,with_turnrelay"
 
 rm -rf "$WORK"
 git clone --depth 1 -b "$TAG" https://github.com/PavelLizunov/sing-box-vpnctl "$WORK"

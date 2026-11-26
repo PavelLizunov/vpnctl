@@ -14,5 +14,7 @@ mod protocol_settings;
 mod protocols;
 #[path = "server_detail/setup_config.rs"]
 mod setup_config;
+#[path = "server_detail/turnrelay_settings.rs"]
+mod turnrelay_settings;
 #[path = "server_detail/user_bandwidth.rs"]
 mod user_bandwidth;

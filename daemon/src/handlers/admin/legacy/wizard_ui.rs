@@ -114,13 +114,12 @@ pub(crate) async fn wizard_new(headers: HeaderMap, State(state): State<AppState>
                 }
             }
             div style="display: flex; gap: 12px; align-items: center; margin-top: 6px;" {
-                button type="submit"
+                button.ed-btn-primary type="submit"
                        title=(tr(
                            lang,
                            "Validate inputs and continue to the bootstrap log",
                            "Проверить ввод и продолжить к bootstrap-логу",
-                       ))
-                       style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                       )) {
                     (icon("arrow-right")) (tr(lang, "continue", "продолжить"))
                 }
                 a href="/admin/servers"

@@ -137,7 +137,7 @@ pub(crate) fn server_detail_protocols_section(
             }
             p.ed-protocols__hint {
                 (tr(lang, "Changes are saved and applied automatically to the node.", "Изменения сохраняются и автоматически применяются на ноде.")) " "
-                a href=(format!("{server_path}/status#external-readiness")) {
+                a.ed-link href=(format!("{server_path}/status#external-readiness")) {
                     (tr(lang, "View connectivity checks", "Результаты проверок подключения"))
                 }
             }

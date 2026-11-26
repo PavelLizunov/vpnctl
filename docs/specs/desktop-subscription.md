@@ -10,7 +10,7 @@ node configuration, and credentials already delivered remain valid.
 ## Contract
 
 - Server Setup accepts an exact managed core version such as
-  `1.14.4-vpnctl.3`. An empty value clears the filter. A changed value
+  `1.14.4-vpnctl.4`. An empty value clears the filter. A changed value
   is audited and takes effect on subsequent requests.
 - The device-ID endpoint requires an active grant and single values for
   `User-Agent`, `X-VPNRouter-Platform`, and `X-VPNRouter-Core-Version`.

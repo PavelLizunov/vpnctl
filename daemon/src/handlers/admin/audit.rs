@@ -166,8 +166,7 @@ pub(crate) async fn audit(
                 }
             }
             @if hiding {
-                a href=(audit_url("/admin/audit", actor, action, target, false, None))
-                  style="color: var(--acc);"
+                a.ed-link href=(audit_url("/admin/audit", actor, action, target, false, None))
                   title=(crate::i18n::tr(
                       lang,
                       "Snapshots are hidden. Click to show every row again.",
@@ -176,8 +175,7 @@ pub(crate) async fn audit(
                     (icon("eye")) (crate::i18n::tr(lang, "show snapshots", "показать снапшоты"))
                 }
             } @else {
-                a href=(audit_url("/admin/audit", actor, action, target, true, None))
-                  style="color: var(--mute);"
+                a.ed-link href=(audit_url("/admin/audit", actor, action, target, true, None))
                   title=(crate::i18n::tr(
                       lang,
                       "Hide the hourly backup.snapshot housekeeping rows so real changes surface.",
@@ -187,16 +185,14 @@ pub(crate) async fn audit(
                 }
             }
         }
-        form method="get" action="/admin/audit"
-             style="display: flex; gap: 12px; align-items: baseline; padding: 12px 14px; border: 1px solid var(--rule); margin: 10px 0 24px; font-family: var(--mono); font-size: 11px;" {
-            label { (crate::i18n::tr(lang, "actor", "автор")) }
-            select name="actor"
+        form.ed-form-inline.ed-form-inline--boxed method="get" action="/admin/audit" {
+            label.ed-form-label for="audit-actor" { (crate::i18n::tr(lang, "actor", "автор")) }
+            select.ed-field #audit-actor name="actor"
                    title=(crate::i18n::tr(
                        lang,
                        "admin = web UI, cli = vpnctl binary on the daemon host, daemon = scheduler / background job",
                        "admin = веб-UI, cli = бинарь vpnctl на хосте демона, daemon = шедулер / фоновая задача",
-                   ))
-                   style="padding: 3px 6px; border: 1px solid var(--rule-s); font-family: var(--mono); font-size: 11px;" {
+                   )) {
                 option value="" { (crate::i18n::tr(lang, "(any)", "(любой)")) }
                 @for opt in ["admin", "cli", "daemon"] {
                     @if Some(opt) == actor {
@@ -206,51 +202,47 @@ pub(crate) async fn audit(
                     }
                 }
             }
-            label { (crate::i18n::tr(lang, "action prefix", "префикс действия")) }
-            input type="text" name="action"
+            label.ed-form-label for="audit-action" { (crate::i18n::tr(lang, "action prefix", "префикс действия")) }
+            input.ed-field #audit-action type="text" name="action"
                   value=(action.unwrap_or(""))
                   placeholder="server. / user.grant / user. / settings."
                   title=(crate::i18n::tr(
                       lang,
                       "PREFIX match on the action column (not substring — `sub_token` won't match `user.sub_token.regen`; `user.` will). Convention: dot-separated domain.subdomain.verb (e.g. `server.protocol.set_hidden`, `user.grant`, `user.sub_token.regen`). Underscores allowed INSIDE a verb.",
                       "Поиск по ПРЕФИКСУ в колонке action (не подстрока — `sub_token` не найдёт `user.sub_token.regen`; `user.` найдёт). Конвенция: точка-разделитель domain.subdomain.verb (напр. `server.protocol.set_hidden`, `user.grant`, `user.sub_token.regen`). Подчёркивания допустимы ВНУТРИ verb.",
-                  ))
-                  style="padding: 3px 6px; max-width: 320px; border: 1px solid var(--rule-s); font-family: var(--mono); font-size: 11px;";
-            label { (crate::i18n::tr(lang, "target contains", "цель содержит")) }
-            input type="text" name="target"
+                  ));
+            label.ed-form-label for="audit-target" { (crate::i18n::tr(lang, "target contains", "цель содержит")) }
+            input.ed-field #audit-target type="text" name="target"
                   value=(target.unwrap_or(""))
                   placeholder=(crate::i18n::tr(lang, "user or server id…", "id юзера или сервера…"))
                   title=(crate::i18n::tr(
                       lang,
                       "SUBSTRING match on the target column — `brat` matches `main-brat`.",
                       "Поиск ПОДСТРОКИ в колонке target — `brat` найдёт `main-brat`.",
-                  ))
-                  style="padding: 3px 6px; max-width: 180px; border: 1px solid var(--rule-s); font-family: var(--mono); font-size: 11px;";
-            button type="submit"
+                  ));
+            button.ed-btn-primary type="submit"
                    title=(crate::i18n::tr(
                        lang,
                        "Apply actor + action-prefix filters. URL stores them so the page is bookmarkable.",
                        "Применить фильтры по автору + префиксу действия. URL сохраняет их — страницу можно бookmark-нуть.",
-                   ))
-                   style="padding: 3px 10px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                   )) {
                 (icon("list-filter")) (crate::i18n::t(lang, crate::i18n::K::BtnFilter))
             }
-            a href="/admin/audit"
+            a.ed-btn-quiet href="/admin/audit"
               title=(crate::i18n::tr(
                   lang,
                   "Clear all filters and return to the unfiltered timeline.",
                   "Очистить все фильтры и вернуться к нефильтрованной ленте.",
-              ))
-              style="padding: 3px 10px; border: 1px solid var(--rule-s); background: transparent; color: var(--mute); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
+              )) {
                 (icon("x")) (crate::i18n::t(lang, crate::i18n::K::BtnReset))
             }
-            a href=(audit_url("/admin/audit.csv", actor, action, target, hiding, None))
+            a.ed-btn-quiet href=(audit_url("/admin/audit.csv", actor, action, target, hiding, None))
+              style="margin-left: auto;"
               title=(crate::i18n::tr(
                   lang,
                   "Download the currently-filtered slice as CSV (up to 10000 rows). Honours both actor + action filters.",
                   "Скачать текущую выборку как CSV (до 10000 строк). Учитывает оба фильтра.",
-              ))
-              style="margin-left: auto; padding: 3px 10px; border: 1px solid var(--rule-s); background: transparent; color: var(--ink); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
+              )) {
                 (icon("download")) (crate::i18n::t(lang, crate::i18n::K::BtnExportCsv))
             }
         }

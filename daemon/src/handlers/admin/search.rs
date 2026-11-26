@@ -69,15 +69,13 @@ pub(crate) async fn search(
                 }
             }
         }
-        form method="get" action="/admin/search"
-             style="margin: 16px 0; display: flex; gap: 8px; align-items: baseline;" {
-            input type="text" name="q"
+        form.ed-form-inline method="get" action="/admin/search" style="margin: 16px 0;" {
+            label.ed-sr-only for="admin-search-query" { (crate::i18n::tr(lang, "Search query", "Поисковый запрос")) }
+            input.ed-field #admin-search-query type="text" name="q"
                   value=(query)
                   autofocus="autofocus"
-                  placeholder=(crate::i18n::tr(lang, "user id, ip, uuid, alert kind...", "id юзера, ip, uuid, kind алерта..."))
-                  style="flex: 1; padding: 6px 10px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 13px; color: var(--ink);";
-            button type="submit"
-                   style="padding: 6px 16px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 12px; cursor: pointer;" {
+                  placeholder=(crate::i18n::tr(lang, "user id, ip, uuid, alert kind...", "id юзера, ip, uuid, kind алерта..."));
+            button.ed-btn-primary type="submit" {
                 (icon("search")) (crate::i18n::tr(lang, "search", "искать"))
             }
         }

@@ -6,8 +6,8 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
 use super::collectors::{
-    collect_awg_subscription_uris, collect_extra_protocol_uris, collect_vless_uris_with_entries,
-    collect_vmess_uris, make_config_blob,
+    collect_awg_subscription_uris, collect_extra_protocol_uris, collect_turnrelay_uris,
+    collect_vless_uris_with_entries, collect_vmess_uris, make_config_blob,
 };
 use super::compat::{is_vpn_client_ua, is_vpnrouter_client_ua};
 use crate::app::AppState;
@@ -152,6 +152,7 @@ pub(crate) async fn get_config(
     let has_detour_cap = supports("detour-v1");
     let has_dnstt_cap = supports("dnstt-v1");
     let has_vmess_cap = supports("vmess-v1");
+    let has_turnrelay_cap = supports("turnrelay-v1");
     let now = now_unix_secs();
 
     let peer_ip: Option<std::net::IpAddr> = request
@@ -260,6 +261,10 @@ pub(crate) async fn get_config(
             "DNSTT",
             Some("observed.dnstt.applied"),
         ));
+    }
+
+    if has_turnrelay_cap {
+        uris.extend(collect_turnrelay_uris(&state, &inputs, &user));
     }
 
     uris.extend(vmess);

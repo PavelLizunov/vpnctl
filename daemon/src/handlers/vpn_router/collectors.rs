@@ -6,7 +6,10 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{ProtocolId, RenderCtx, ServerId, User};
 use vpnctl_inventory::sqlite::SubscriptionServer;
-use vpnctl_protocols::VLESS_PACKET_ENCODING;
+use vpnctl_protocols::{
+    VLESS_PACKET_ENCODING, turnrelay_outbound_id, turnrelay_relayed_vless_outbound_id,
+    turnrelay_vless_outbound_id,
+};
 
 use super::compat::server_display_label;
 use crate::app::AppState;
@@ -57,6 +60,30 @@ fn vless_reality_keys(input: &SubscriptionServer) -> Option<(&str, &str)> {
     ))
 }
 
+fn vless_base_uri(input: &SubscriptionServer, client_name: &str) -> Option<String> {
+    let (pbk, sid) = vless_reality_keys(input)?;
+    let server = &input.server;
+    let secrets = &input.secrets;
+    let sni = secrets
+        .get("vless.sni")
+        .map(String::as_str)
+        .unwrap_or(vpnctl_protocols::DEFAULT_REALITY_SNI);
+    let fp = vpnctl_protocols::reality_fp(secrets);
+    let port: u16 = vpnctl_protocols::reality_listen_port(secrets);
+    let server_display = server_display_label(&server.id.0, input.display_name.as_deref());
+    Some(render_vless_uri(
+        &server.address,
+        port,
+        sni,
+        fp,
+        pbk,
+        sid,
+        &input.client_uuid,
+        &server_display,
+        client_name,
+    ))
+}
+
 pub(crate) fn collect_vless_uris_for_user(
     inputs: &[SubscriptionServer],
     client_name: &str,
@@ -79,36 +106,12 @@ pub(super) fn collect_vless_uris_with_entries(
 
     let mut rendered: Vec<RenderedServer> = Vec::with_capacity(inputs.len());
     for input in inputs {
-        let Some((pbk, sid)) = vless_reality_keys(input) else {
+        let Some(base_uri) = vless_base_uri(input, client_name) else {
             continue;
         };
-        let server = &input.server;
-        let detour_via = input.detour_via.clone();
-        let secrets = &input.secrets;
-        let sni = secrets
-            .get("vless.sni")
-            .map(String::as_str)
-            .unwrap_or(vpnctl_protocols::DEFAULT_REALITY_SNI);
-        let fp = vpnctl_protocols::reality_fp(secrets);
-
-        let client_uuid = &input.client_uuid;
-        let port: u16 = vpnctl_protocols::reality_listen_port(secrets);
-        let server_display = server_display_label(&server.id.0, input.display_name.as_deref());
-        let base_uri = render_vless_uri(
-            &server.address,
-            port,
-            sni,
-            fp,
-            pbk,
-            sid,
-            client_uuid,
-            &server_display,
-            client_name,
-        );
-
         rendered.push(RenderedServer {
-            server_id: server.id.clone(),
-            detour_via,
+            server_id: input.server.id.clone(),
+            detour_via: input.detour_via.clone(),
             base_uri,
         });
     }
@@ -299,6 +302,146 @@ pub(crate) fn collect_extra_protocol_uris(
                     "extra-protocol share_link failed; skipping this server"
                 );
             }
+        }
+    }
+    uris
+}
+
+fn turnrelay_publishes_vless(secrets: &std::collections::HashMap<String, String>) -> bool {
+    secrets.get("turnrelay.publish").is_some_and(|value| {
+        value.split(',').map(str::trim).any(|token| {
+            matches!(
+                token.to_ascii_lowercase().as_str(),
+                "vless+reality" | "all" | "true" | "1" | "yes"
+            )
+        })
+    })
+}
+
+fn turnrelay_targets<'a>(
+    exit: &SubscriptionServer,
+    inputs: &'a [SubscriptionServer],
+    vless: &ProtocolId,
+) -> Vec<&'a SubscriptionServer> {
+    let Some(raw) = exit.secrets.get("turnrelay.publish_targets") else {
+        return Vec::new();
+    };
+    let targets: Vec<&str> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|target| !target.is_empty())
+        .collect();
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let all = targets.contains(&"*");
+    inputs
+        .iter()
+        .filter(|target| {
+            target.server.id != exit.server.id
+                && !target.suppressed
+                && target.detour_via.is_none()
+                && target.visible.contains(vless)
+                && (all || targets.iter().any(|id| *id == target.server.id.0))
+        })
+        .collect()
+}
+
+/// Append capability-gated TurnRelay profiles: one relayed VLESS duplicate per
+/// eligible VLESS endpoint, then one deduplicated `turnrelay://` hop per exit.
+/// Direct URIs are owned by the existing collectors and never modified here.
+pub(crate) fn collect_turnrelay_uris(
+    state: &AppState,
+    inputs: &[SubscriptionServer],
+    user: &User,
+) -> Vec<String> {
+    let turnrelay = ProtocolId("turnrelay".into());
+    let vless = ProtocolId("vless+reality".into());
+    let Some(protocol) = state.registry.protocol(&turnrelay) else {
+        return Vec::new();
+    };
+    let mut uris = Vec::new();
+    let mut profiled = HashSet::new();
+    for exit in inputs {
+        if exit.suppressed
+            || exit.detour_via.is_some()
+            || !exit.visible.contains(&turnrelay)
+            || exit.server.address.parse::<std::net::IpAddr>().is_err()
+            || !turnrelay_publishes_vless(&exit.secrets)
+        {
+            continue;
+        }
+        let ctx = RenderCtx::new(&exit.server, &exit.secrets);
+        if protocol.client_config(&ctx, user).is_err() {
+            continue;
+        }
+        let exit_label = server_display_label(&exit.server.id.0, exit.display_name.as_deref());
+        let mut emitted = false;
+
+        if let Some(base) = vless_base_uri(exit, &user.id.0) {
+            let outbound = utf8_percent_encode(
+                &turnrelay_vless_outbound_id(&exit.server.id.0),
+                NINITUX_QUOTE,
+            )
+            .to_string();
+            let detour =
+                utf8_percent_encode(&turnrelay_outbound_id(&exit.server.id.0), NINITUX_QUOTE)
+                    .to_string();
+            let uri = add_query_param(
+                &add_query_param(&base, "outbound", &outbound),
+                "detour",
+                &detour,
+            );
+            let fragment = utf8_percent_encode(
+                &format!("{exit_label} VLESS · TurnRelay ~{}", user.id.0),
+                NINITUX_QUOTE,
+            )
+            .to_string();
+            uris.push(relabel_uri_fragment(&uri, &fragment));
+            emitted = true;
+        }
+
+        for target in turnrelay_targets(exit, inputs, &vless) {
+            let Some(base) = vless_base_uri(target, &user.id.0) else {
+                continue;
+            };
+            let outbound = utf8_percent_encode(
+                &turnrelay_relayed_vless_outbound_id(&target.server.id.0, &exit.server.id.0),
+                NINITUX_QUOTE,
+            )
+            .to_string();
+            let detour =
+                utf8_percent_encode(&turnrelay_outbound_id(&exit.server.id.0), NINITUX_QUOTE)
+                    .to_string();
+            let uri = add_query_param(
+                &add_query_param(&base, "outbound", &outbound),
+                "detour",
+                &detour,
+            );
+            let target_label =
+                server_display_label(&target.server.id.0, target.display_name.as_deref());
+            let fragment = utf8_percent_encode(
+                &format!(
+                    "{target_label} VLESS · TurnRelay ({exit_label}) ~{}",
+                    user.id.0
+                ),
+                NINITUX_QUOTE,
+            )
+            .to_string();
+            uris.push(relabel_uri_fragment(&uri, &fragment));
+            emitted = true;
+        }
+
+        if emitted
+            && profiled.insert(exit.server.id.clone())
+            && let Ok(link) = protocol.share_link(&ctx, user)
+        {
+            let fragment = utf8_percent_encode(
+                &format!("{exit_label} TurnRelay ~{}", user.id.0),
+                NINITUX_QUOTE,
+            )
+            .to_string();
+            uris.push(relabel_uri_fragment(&link, &fragment));
         }
     }
     uris

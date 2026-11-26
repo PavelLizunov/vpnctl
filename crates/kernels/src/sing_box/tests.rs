@@ -211,7 +211,7 @@ fn sing_box_vpnctl_release_artifacts_and_sha256_constants_are_pinned() {
         SING_BOX_AMD64_SHA256, SING_BOX_ARM64_SHA256, SING_BOX_ARMV7_SHA256,
         SING_BOX_VPNCTL_VERSION,
     };
-    assert_eq!(SING_BOX_VPNCTL_VERSION, "1.14.4-vpnctl.3");
+    assert_eq!(SING_BOX_VPNCTL_VERSION, "1.14.4-vpnctl.4");
     let acquisition_script = include_str!("../../../../tools/singbox-attr-patch/build.sh");
     assert!(acquisition_script.contains(&format!("SINGBOX_VERSION:-{SING_BOX_VPNCTL_VERSION}")));
     let acquisition_readme = include_str!("../../../../tools/singbox-attr-patch/README.md");
@@ -231,15 +231,15 @@ fn sing_box_vpnctl_release_artifacts_and_sha256_constants_are_pinned() {
     }
     assert_eq!(
         SING_BOX_AMD64_SHA256,
-        "62c7d4ab2ec93fc6a51790facbcc50436d1183d8bf6f9c84b07d1d75e1618eae"
+        "a6014cfad5494fe8fa3f178facad6a7c6dab59f5143f7b5af645e8e4e5d84094"
     );
     assert_eq!(
         SING_BOX_ARM64_SHA256,
-        "917e2a7b392ab2113168ee9193552f0b515755323ac65aed96eef669492fffb5"
+        "281cd5214208147b869d654fd8d86ea7b77a61b312fc6112fb7e0d4ddd8beabf"
     );
     assert_eq!(
         SING_BOX_ARMV7_SHA256,
-        "3d589fc44dcab9f62675c41c343b4e5d8ae92201193643dd5c001731c6bef17a"
+        "36fec164b839c707a086f9ff404af1ba7ab40cf4d532270b186444bc5d203fc0"
     );
 }
 
@@ -1380,7 +1380,7 @@ async fn open_firewall_uses_effective_listen_ports() {
 fn is_artifact_up_to_date_detects_matching_and_mismatching_node_state() {
     use super::is_artifact_up_to_date;
 
-    let sb = "62c7d4ab2ec93fc6a51790facbcc50436d1183d8bf6f9c84b07d1d75e1618eae";
+    let sb = "a6014cfad5494fe8fa3f178facad6a7c6dab59f5143f7b5af645e8e4e5d84094";
     let sh = "adfcc59728309f6e5bda548d402b3284fe97bdd9216b04933d1b97b4a2531ddc";
 
     let valid_output = format!(

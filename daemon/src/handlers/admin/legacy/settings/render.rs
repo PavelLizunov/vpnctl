@@ -174,10 +174,9 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                         "). Выбери IANA-имя часового пояса; полная база (включая DST) встроена.",
                     ))
                 }
-                form method="post"
-                     action="/admin/settings/timezone"
-                     style="display: flex; gap: 8px; align-items: baseline;" {
-                    label style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-transform: uppercase; letter-spacing: 0.10em;" {
+                form.ed-form-inline method="post"
+                     action="/admin/settings/timezone" {
+                    label.ed-form-label for="admin-timezone" {
                         (crate::i18n::tr(lang, "timezone", "часовой пояс"))
                     }
                     @let common_tzs: &[&str] = &[
@@ -195,8 +194,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                         "America/New_York",
                         "America/Los_Angeles",
                     ];
-                    select name="tz"
-                           style="padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink); min-width: 220px;" {
+                    select.ed-field #admin-timezone name="tz" style="min-width: 220px;" {
                         @for tz in common_tzs {
                             @if *tz == display_tz_current.as_str() {
                                 option value=(tz) selected="selected" { (tz) }
@@ -210,8 +208,7 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                             }
                         }
                     }
-                    button type="submit"
-                           style="padding: 4px 12px; border: 1px solid var(--acc); background: var(--acc); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                    button.ed-btn-primary type="submit" {
                         (icon("save")) (crate::i18n::tr(lang, "save", "сохранить"))
                     }
                     span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute);" {
@@ -565,13 +562,12 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                 }
 
                 div style="margin-top: 12px;" {
-                    button type="submit"
+                    button.ed-btn-primary type="submit"
                            title=(crate::i18n::tr(
                                lang,
                                "Save all three fields. Empty token = keep existing (unless chat-id is ALSO empty, then clear). Empty chat-id = clear. Egress dropdown is always overwritten with the selected value.",
                                "Сохранить все три поля. Пустой токен = оставить как есть (если chat-id ТОЖЕ пуст, тогда очистить). Пустой chat-id = очистить. Egress dropdown всегда переписывается выбранным значением.",
-                           ))
-                           style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                           )) {
                         (icon("save")) (crate::i18n::t(lang, crate::i18n::K::BtnSave))
                     }
                 }
@@ -580,13 +576,12 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
             @match &telegram_cfg {
                 Ok(Some(cfg)) if cfg.is_enabled() => {
                     form method="post" action="/admin/settings/telegram/test" style="margin-top: 10px;" {
-                        button type="submit"
+                        button.ed-btn-quiet type="submit"
                                title=(crate::i18n::tr(
                                    lang,
                                    "Send a test message to the configured chat. Surfaces curl / Telegram-API errors inline.",
                                    "Отправить тестовое сообщение в настроенный чат. Ошибки curl / Telegram-API показываются прямо здесь.",
-                               ))
-                               style="padding: 5px 12px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                               )) {
                             (icon("send")) (crate::i18n::tr(lang, "send test message", "отправить тестовое сообщение"))
                         }
                         span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-left: 14px;" {
@@ -598,13 +593,12 @@ async fn settings_render(headers: HeaderMap, state: AppState, tab: SettingsTab) 
                         }
                     }
                     form method="post" action="/admin/settings/digest-now" style="margin-top: 8px;" {
-                        button type="submit"
+                        button.ed-btn-quiet type="submit"
                                title=(crate::i18n::tr(
                                    lang,
                                    "Send the fleet digest now: all-clear, or the list of open problems. Also sent daily.",
                                    "Отправить дайджест по флоту сейчас: всё спокойно или список открытых проблем. Также шлётся раз в сутки.",
-                               ))
-                               style="padding: 5px 12px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                               )) {
                             (icon("send")) (crate::i18n::tr(lang, "send digest now", "отправить дайджест"))
                         }
                         span style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin-left: 14px;" {

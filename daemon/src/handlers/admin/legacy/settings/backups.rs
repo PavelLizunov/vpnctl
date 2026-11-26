@@ -185,8 +185,7 @@ pub(crate) fn settings_disaster_recovery_section(
                     (icon("shield-check")) (tr(lang, "run self-test now", "запустить self-test сейчас"))
                 }
             }
-            a href="/admin/audit?action=backup."
-              style="padding: 6px 14px; border: 1px solid var(--rule); color: var(--ink); font-family: var(--mono); font-size: 11px; text-decoration: none;" {
+            a.ed-btn-quiet href="/admin/audit?action=backup." {
                 (icon("history")) (tr(lang, "self-test history", "история self-test"))
             }
         }

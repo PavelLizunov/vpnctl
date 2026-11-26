@@ -727,6 +727,9 @@ pub(super) async fn server_detail_render(
             div data-protocol-setting="dnstt" {
                 (server_detail_dnstt_section(&server, &server_secrets, latest.as_ref(), lang))
             }
+            div data-protocol-setting="turnrelay" {
+                (server_detail_turnrelay_section(&server, &server_secrets, latest.as_ref(), lang))
+            }
             @if udp_pair_enabled { (server_detail_udp_pair_section(lang)) }
             (server_detail_reserved_ports_section(&server, &reserved_ports, lang))
             (server_detail_drift_detail_section(&server, drift_live.as_ref(), query.drift_live(), lang))

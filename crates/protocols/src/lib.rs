@@ -8,6 +8,7 @@ mod shadowsocks2022;
 mod tls;
 mod trojan;
 mod tuic_v5;
+mod turnrelay;
 mod vless_reality;
 mod vless_ws;
 mod vless_xhttp;
@@ -26,6 +27,11 @@ pub use shadowsocks2022::{SS_2022_PORT, Shadowsocks2022};
 pub use tls::tls_server_name;
 pub use trojan::{TROJAN_PORT, Trojan};
 pub use tuic_v5::TuicV5;
+pub use turnrelay::{
+    TURNRELAY_DEFAULT_CONNECTIONS, TURNRELAY_DEFAULT_MODE, TURNRELAY_OUTBOUND_ID_MAX,
+    TURNRELAY_PORT, TurnRelay, is_valid_turnrelay_fingerprint, turnrelay_applied_digest,
+    turnrelay_outbound_id, turnrelay_relayed_vless_outbound_id, turnrelay_vless_outbound_id,
+};
 pub use vless_reality::{
     DEFAULT_REALITY_FP, DEFAULT_REALITY_SNI, NEW_SERVER_REALITY_FP, NEW_SERVER_REALITY_SNI,
     VALID_REALITY_FPS, VLESS_PACKET_ENCODING, VlessReality, is_valid_reality_fp,

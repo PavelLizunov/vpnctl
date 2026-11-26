@@ -201,25 +201,23 @@ pub(crate) fn settings_public_address_section(
         div #public-address.ed-art-eyebrow {
             (tr(lang, "Public address", "Публичный адрес"))
         }
-        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
+        p.ed-form-hint {
             (tr(
                 lang,
                 "The address users' apps reach this daemon at. Subscription QR codes and app config URLs are built on it. Empty: the address this page was opened at.",
                 "Адрес, по которому приложения пользователей обращаются к этому демону. На нём строятся QR-коды подписок и URL конфигурации приложений. Пусто — адрес, по которому открыта эта страница.",
             ))
         }
-        form method="post"
-             action="/admin/settings/public-url"
-             style="display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;" {
-            label for="public-base-url" style="font-family: var(--mono); font-size: 11px; color: var(--mute); text-transform: uppercase; letter-spacing: 0.10em;" {
+        form.ed-form-inline method="post"
+             action="/admin/settings/public-url" {
+            label.ed-form-label for="public-base-url" {
                 (tr(lang, "public URL", "публичный URL"))
             }
-            input #public-base-url type="url" name="public_base_url"
+            input.ed-field #public-base-url type="url" name="public_base_url"
                   value=(current.unwrap_or(""))
                   placeholder="https://vpn.example.com"
-                  style="padding: 4px 8px; border: 1px solid var(--rule-s); background: var(--paper); font-family: var(--mono); font-size: 12px; color: var(--ink); min-width: 280px; max-width: 100%;";
-            button type="submit"
-                   style="padding: 4px 12px; border: 1px solid var(--acc); background: var(--acc); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
+                  style="min-width: 280px; max-width: 100%;";
+            button.ed-btn-primary type="submit" {
                 (icon("save")) (tr(lang, "save", "сохранить"))
             }
         }
