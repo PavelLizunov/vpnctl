@@ -339,7 +339,7 @@ async fn admin_server_quick_add_registers_with_default_protocols() {
             .await
             .unwrap()
             .as_deref(),
-        Some("www.apple.com"),
+        Some("ozon.ru"),
     );
     assert_eq!(
         inv.get_server_secret(&srv.id, "vless.fp")

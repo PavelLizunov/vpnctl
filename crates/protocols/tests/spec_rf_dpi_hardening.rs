@@ -80,7 +80,7 @@ fn quic_base_secrets() -> HashMap<String, String> {
 #[test]
 fn constants_match_spec_legacy_and_new_server_values() {
     assert_eq!(DEFAULT_REALITY_SNI, "yahoo.com");
-    assert_eq!(NEW_SERVER_REALITY_SNI, "www.apple.com");
+    assert_eq!(NEW_SERVER_REALITY_SNI, "ozon.ru");
     assert_eq!(DEFAULT_REALITY_FP, "randomized");
     assert_eq!(NEW_SERVER_REALITY_FP, "chrome");
 
@@ -154,7 +154,7 @@ fn reality_fp_returns_valid_secret_or_falls_back_to_default() {
 fn is_valid_reality_sni_accepts_valid_ascii_hostnames() {
     let valid_hosts = [
         "yahoo.com",
-        "www.apple.com",
+        "ozon.ru",
         "a.b",
         "sub-1.edge-02.example.co.uk",
         "A1.Example-Host.ORG",
@@ -233,7 +233,7 @@ fn is_valid_reality_sni_rejects_hyphens_dots_bad_chars_and_ip_literals() {
 fn is_valid_reality_handshake_server_accepts_hostnames_and_ip_literals() {
     let valid_servers = [
         "yahoo.com",
-        "www.apple.com",
+        "ozon.ru",
         "decoy-1.internal.example",
         "127.0.0.1",
         "203.0.113.7",
@@ -261,7 +261,7 @@ fn is_valid_reality_handshake_server_rejects_invalid_hosts_ports_brackets_and_wh
         "example.com:443",
         " 127.0.0.1",
         "127.0.0.1 ",
-        " www.apple.com ",
+        " ozon.ru ",
         "-bad.example.com",
         "bad-.example.com",
         "bad..example.com",
@@ -285,8 +285,8 @@ fn reality_handshake_target_defaults_to_sni_and_443_when_unset() {
         ("yahoo.com", 443)
     );
     assert_eq!(
-        reality_handshake_target(&empty, "www.apple.com"),
-        ("www.apple.com", 443)
+        reality_handshake_target(&empty, "ozon.ru"),
+        ("ozon.ru", 443)
     );
 }
 
@@ -297,7 +297,7 @@ fn reality_handshake_target_accepts_ipv4_ipv6_hostname_and_trims_whitespace() {
         ("vless.handshake_port", "8443"),
     ]);
     assert_eq!(
-        reality_handshake_target(&sec_ipv4, "www.apple.com"),
+        reality_handshake_target(&sec_ipv4, "ozon.ru"),
         ("127.0.0.1", 8443)
     );
 
@@ -306,7 +306,7 @@ fn reality_handshake_target_accepts_ipv4_ipv6_hostname_and_trims_whitespace() {
         ("vless.handshake_port", "8443"),
     ]);
     assert_eq!(
-        reality_handshake_target(&sec_ipv6, "www.apple.com"),
+        reality_handshake_target(&sec_ipv6, "ozon.ru"),
         ("::1", 8443)
     );
 
@@ -315,7 +315,7 @@ fn reality_handshake_target_accepts_ipv4_ipv6_hostname_and_trims_whitespace() {
         ("vless.handshake_port", "9443"),
     ]);
     assert_eq!(
-        reality_handshake_target(&sec_host, "www.apple.com"),
+        reality_handshake_target(&sec_host, "ozon.ru"),
         ("decoy.example.com", 9443)
     );
 
@@ -324,7 +324,7 @@ fn reality_handshake_target_accepts_ipv4_ipv6_hostname_and_trims_whitespace() {
         ("vless.handshake_port", " \t8443\r\n "),
     ]);
     assert_eq!(
-        reality_handshake_target(&sec_trimmed, "www.apple.com"),
+        reality_handshake_target(&sec_trimmed, "ozon.ru"),
         ("127.0.0.1", 8443)
     );
 
@@ -333,7 +333,7 @@ fn reality_handshake_target_accepts_ipv4_ipv6_hostname_and_trims_whitespace() {
         ("vless.handshake_port", " 443 "),
     ]);
     assert_eq!(
-        reality_handshake_target(&sec_trimmed_host, "www.apple.com"),
+        reality_handshake_target(&sec_trimmed_host, "ozon.ru"),
         ("decoy.example.com", 443)
     );
 }
@@ -345,7 +345,7 @@ fn reality_handshake_target_enforces_port_bounds_and_independent_fallbacks() {
         ("vless.handshake_port", "1"),
     ]);
     assert_eq!(
-        reality_handshake_target(&sec_min_port, "www.apple.com"),
+        reality_handshake_target(&sec_min_port, "ozon.ru"),
         ("127.0.0.1", 1)
     );
 
@@ -354,7 +354,7 @@ fn reality_handshake_target_enforces_port_bounds_and_independent_fallbacks() {
         ("vless.handshake_port", "65535"),
     ]);
     assert_eq!(
-        reality_handshake_target(&sec_max_port, "www.apple.com"),
+        reality_handshake_target(&sec_max_port, "ozon.ru"),
         ("127.0.0.1", 65535)
     );
 
@@ -364,7 +364,7 @@ fn reality_handshake_target_enforces_port_bounds_and_independent_fallbacks() {
             ("vless.handshake_port", bad_port),
         ]);
         assert_eq!(
-            reality_handshake_target(&sec, "www.apple.com"),
+            reality_handshake_target(&sec, "ozon.ru"),
             ("127.0.0.1", 443),
             "invalid port {bad_port:?} must fall back to 443 while keeping valid server"
         );
@@ -376,8 +376,8 @@ fn reality_handshake_target_enforces_port_bounds_and_independent_fallbacks() {
             ("vless.handshake_port", "8443"),
         ]);
         assert_eq!(
-            reality_handshake_target(&sec, "www.apple.com"),
-            ("www.apple.com", 8443),
+            reality_handshake_target(&sec, "ozon.ru"),
+            ("ozon.ru", 8443),
             "invalid server {bad_server:?} must fall back to sni while keeping valid port"
         );
     }
@@ -502,7 +502,7 @@ fn vless_reality_uses_chrome_fp_in_client_config_and_share_link() {
     let expected_link = concat!(
         "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:443",
         "?encryption=none&flow=xtls-rprx-vision&security=reality",
-        "&sni=www.apple.com&fp=chrome",
+        "&sni=ozon.ru&fp=chrome",
         "&pbk=EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE",
         "&sid=0102030405060708&type=tcp&packetEncoding=xudp#alice",
     );
@@ -517,7 +517,7 @@ fn vless_reality_separate_handshake_target_loopback_and_hostname_preserves_sni()
     let users = std::slice::from_ref(&user);
 
     let mut base_sec = vless_base_secrets();
-    base_sec.insert(String::from("vless.sni"), String::from("www.apple.com"));
+    base_sec.insert(String::from("vless.sni"), String::from("ozon.ru"));
     base_sec.insert(String::from("vless.fp"), String::from("chrome"));
     let base_ctx = RenderCtx::new(&server, &base_sec);
     let base_client_json =
@@ -532,7 +532,7 @@ fn vless_reality_separate_handshake_target_loopback_and_hostname_preserves_sni()
     ipv4_sec.insert(String::from("vless.handshake_port"), String::from("8443"));
     let ipv4_ctx = RenderCtx::new(&server, &ipv4_sec);
     let ipv4_inbound = proto.server_inbound(&ipv4_ctx, users).unwrap();
-    assert_eq!(ipv4_inbound["tls"]["server_name"], json!("www.apple.com"));
+    assert_eq!(ipv4_inbound["tls"]["server_name"], json!("ozon.ru"));
     assert_eq!(
         ipv4_inbound["tls"]["reality"]["handshake"]["server"],
         json!("127.0.0.1")
@@ -555,7 +555,7 @@ fn vless_reality_separate_handshake_target_loopback_and_hostname_preserves_sni()
     host_sec.insert(String::from("vless.handshake_port"), String::from("8443"));
     let host_ctx = RenderCtx::new(&server, &host_sec);
     let host_inbound = proto.server_inbound(&host_ctx, users).unwrap();
-    assert_eq!(host_inbound["tls"]["server_name"], json!("www.apple.com"));
+    assert_eq!(host_inbound["tls"]["server_name"], json!("ozon.ru"));
     assert_eq!(
         host_inbound["tls"]["reality"]["handshake"]["server"],
         json!("decoy.example.com")
@@ -572,10 +572,7 @@ fn vless_reality_separate_handshake_target_loopback_and_hostname_preserves_sni()
     );
     let trimmed_ctx = RenderCtx::new(&server, &trimmed_sec);
     let trimmed_inbound = proto.server_inbound(&trimmed_ctx, users).unwrap();
-    assert_eq!(
-        trimmed_inbound["tls"]["server_name"],
-        json!("www.apple.com")
-    );
+    assert_eq!(trimmed_inbound["tls"]["server_name"], json!("ozon.ru"));
     assert_eq!(
         trimmed_inbound["tls"]["reality"]["handshake"]["server"],
         json!("127.0.0.1")
@@ -632,7 +629,7 @@ fn vless_xhttp_legacy_defaults_and_chrome_fp_in_client_and_share_link() {
     let expected_chrome_link = concat!(
         "vless://00000000-0000-0000-0000-000000000001@203.0.113.7:9443",
         "?encryption=none&security=reality",
-        "&sni=www.apple.com&fp=chrome",
+        "&sni=ozon.ru&fp=chrome",
         "&pbk=EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE",
         "&sid=0102030405060708&type=xhttp&path=%2FZq9_path-OK%2F&mode=auto#alice",
     );
@@ -663,7 +660,7 @@ fn vless_xhttp_separate_handshake_target_brackets_ipv6_and_preserves_server_name
     let users = std::slice::from_ref(&user);
 
     let mut base_sec = vless_xhttp_base_secrets();
-    base_sec.insert(String::from("vless.sni"), String::from("www.apple.com"));
+    base_sec.insert(String::from("vless.sni"), String::from("ozon.ru"));
 
     let mut ipv6_sec = base_sec.clone();
     ipv6_sec.insert(String::from("vless.handshake_server"), String::from("::1"));
@@ -671,7 +668,7 @@ fn vless_xhttp_separate_handshake_target_brackets_ipv6_and_preserves_server_name
     let ipv6_ctx = RenderCtx::new(&server, &ipv6_sec);
     let ipv6_inbound = proto.server_inbound(&ipv6_ctx, users).unwrap();
     let ipv6_rs = &ipv6_inbound["streamSettings"]["realitySettings"];
-    assert_eq!(ipv6_rs["serverNames"], json!(["www.apple.com"]));
+    assert_eq!(ipv6_rs["serverNames"], json!(["ozon.ru"]));
     assert_eq!(ipv6_rs["dest"], json!("[::1]:8443"));
 
     let mut ipv6_def_sec = base_sec.clone();
@@ -682,7 +679,7 @@ fn vless_xhttp_separate_handshake_target_brackets_ipv6_and_preserves_server_name
     let ipv6_def_ctx = RenderCtx::new(&server, &ipv6_def_sec);
     let ipv6_def_inbound = proto.server_inbound(&ipv6_def_ctx, users).unwrap();
     let ipv6_def_rs = &ipv6_def_inbound["streamSettings"]["realitySettings"];
-    assert_eq!(ipv6_def_rs["serverNames"], json!(["www.apple.com"]));
+    assert_eq!(ipv6_def_rs["serverNames"], json!(["ozon.ru"]));
     assert_eq!(ipv6_def_rs["dest"], json!("[2001:db8::1]:443"));
 
     let mut ipv4_sec = base_sec.clone();
@@ -694,7 +691,7 @@ fn vless_xhttp_separate_handshake_target_brackets_ipv6_and_preserves_server_name
     let ipv4_ctx = RenderCtx::new(&server, &ipv4_sec);
     let ipv4_inbound = proto.server_inbound(&ipv4_ctx, users).unwrap();
     let ipv4_rs = &ipv4_inbound["streamSettings"]["realitySettings"];
-    assert_eq!(ipv4_rs["serverNames"], json!(["www.apple.com"]));
+    assert_eq!(ipv4_rs["serverNames"], json!(["ozon.ru"]));
     assert_eq!(ipv4_rs["dest"], json!("127.0.0.1:8443"));
 
     let mut host_sec = base_sec.clone();
@@ -706,7 +703,7 @@ fn vless_xhttp_separate_handshake_target_brackets_ipv6_and_preserves_server_name
     let host_ctx = RenderCtx::new(&server, &host_sec);
     let host_inbound = proto.server_inbound(&host_ctx, users).unwrap();
     let host_rs = &host_inbound["streamSettings"]["realitySettings"];
-    assert_eq!(host_rs["serverNames"], json!(["www.apple.com"]));
+    assert_eq!(host_rs["serverNames"], json!(["ozon.ru"]));
     assert_eq!(host_rs["dest"], json!("decoy.example.com:8443"));
 
     let mut invalid_sec = base_sec;
@@ -718,8 +715,8 @@ fn vless_xhttp_separate_handshake_target_brackets_ipv6_and_preserves_server_name
     let invalid_ctx = RenderCtx::new(&server, &invalid_sec);
     let invalid_inbound = proto.server_inbound(&invalid_ctx, users).unwrap();
     let invalid_rs = &invalid_inbound["streamSettings"]["realitySettings"];
-    assert_eq!(invalid_rs["serverNames"], json!(["www.apple.com"]));
-    assert_eq!(invalid_rs["dest"], json!("www.apple.com:443"));
+    assert_eq!(invalid_rs["serverNames"], json!(["ozon.ru"]));
+    assert_eq!(invalid_rs["dest"], json!("ozon.ru:443"));
 }
 
 #[test]

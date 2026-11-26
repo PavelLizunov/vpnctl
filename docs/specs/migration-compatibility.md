@@ -88,7 +88,7 @@ Behavior rules:
 - Optional per-server hardening secrets (`vless.fp`, `vless.handshake_server`,
   `vless.handshake_port`, `tls.server_name`) leave legacy servers and existing
   rendered profiles byte-identical when absent. Newly registered servers persist
-  `vless.sni = "www.apple.com"` and `vless.fp = "chrome"`. See
+  `vless.sni = "ozon.ru"` and `vless.fp = "chrome"`. See
   [RF DPI / DNS / SNI hardening](rf-dpi-dns-sni-hardening.md).
 
 ## 3. Verification Checklist

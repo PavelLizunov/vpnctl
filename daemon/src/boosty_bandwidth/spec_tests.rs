@@ -984,7 +984,7 @@ async fn saved_boosty_rates_become_defaults_for_new_admin_nodes() {
     let mut secrets = inv.list_server_secrets(&sid).await.unwrap();
     assert_eq!(
         secrets.get("vless.sni").map(String::as_str),
-        Some("www.apple.com")
+        Some("ozon.ru")
     );
     assert_eq!(secrets.get("vless.fp").map(String::as_str), Some("chrome"));
     assert_eq!(secrets.get(DEFAULT_KEY).map(String::as_str), Some("40"));
@@ -1008,12 +1008,9 @@ async fn saved_boosty_rates_become_defaults_for_new_admin_nodes() {
         .protocol(&ProtocolId("vless+reality".into()))
         .unwrap();
     let inbound = reality.server_inbound(&context, &users).unwrap();
-    assert_eq!(
-        inbound["tls"]["reality"]["handshake"]["server"],
-        "www.apple.com"
-    );
+    assert_eq!(inbound["tls"]["reality"]["handshake"]["server"], "ozon.ru");
     let link = reality.share_link(&context, &users[0]).unwrap();
-    assert!(link.contains("&sni=www.apple.com&fp=chrome&"));
+    assert!(link.contains("&sni=ozon.ru&fp=chrome&"));
     let xhttp = f
         .state
         .registry
@@ -1022,14 +1019,14 @@ async fn saved_boosty_rates_become_defaults_for_new_admin_nodes() {
     let inbound = xhttp.server_inbound(&context, &users).unwrap();
     assert_eq!(
         inbound["streamSettings"]["realitySettings"]["dest"],
-        "www.apple.com:443"
+        "ozon.ru:443"
     );
     assert_eq!(
         inbound["streamSettings"]["realitySettings"]["serverNames"],
-        json!(["www.apple.com"]),
+        json!(["ozon.ru"]),
     );
     let link = xhttp.share_link(&context, &users[0]).unwrap();
-    assert!(link.contains("&sni=www.apple.com&fp=chrome&"));
+    assert!(link.contains("&sni=ozon.ru&fp=chrome&"));
 
     let legacy_id = ServerId("s1".into());
     let legacy_server = inv.get_server(&legacy_id).await.unwrap().unwrap();

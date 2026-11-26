@@ -20,7 +20,7 @@ pub const VALID_REALITY_FPS: &[&str] = &[
 ];
 
 pub const DEFAULT_REALITY_SNI: &str = "yahoo.com";
-pub const NEW_SERVER_REALITY_SNI: &str = "www.apple.com";
+pub const NEW_SERVER_REALITY_SNI: &str = "ozon.ru";
 
 pub const VLESS_PACKET_ENCODING: &str = "xudp";
 
