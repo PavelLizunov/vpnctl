@@ -22,7 +22,7 @@ const LEGACY_UA: &str = "v2rayN/6.62";
 const BUSINESS: &str = "VPNRouterBusiness/2.52.0";
 const CAPABILITY: &str = "turnrelay-v1";
 const FINGERPRINT: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-const CORE: &str = "1.14.4-vpnctl.3";
+const CORE: &str = "1.14.4-vpnctl.4";
 
 struct Fixture {
     _dir: TempDir,

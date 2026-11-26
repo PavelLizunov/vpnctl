@@ -209,7 +209,7 @@ fn ssh_public_identity(profile: &Value) -> Vec<u8> {
 #[tokio::test]
 async fn windows_business_app_config_respects_the_exact_core_grant_and_dnstt_capability() {
     const BUSINESS: &str = "VPNRouterBusiness/2.52.0";
-    const CORE: &str = "1.14.4-vpnctl.3";
+    const CORE: &str = "1.14.4-vpnctl.4";
     let dir = TempDir::new().unwrap();
     let state = seed_dnstt_registry(&dir).await;
     let dns = add_dnstt_server(&state, "dns-fixture").await;

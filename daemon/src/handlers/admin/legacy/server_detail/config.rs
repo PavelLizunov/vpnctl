@@ -29,7 +29,7 @@ pub(super) fn server_detail_desktop_subscription_section(
                         (tr(lang, "Required sing-box-vpnctl version", "Требуемая версия sing-box-vpnctl"))
                     }
                     input.ed-field id="desktop-subscription-core" name="core_version" type="text"
-                          value=(core.unwrap_or_default()) maxlength="64" placeholder="1.14.4-vpnctl.3"
+                          value=(core.unwrap_or_default()) maxlength="64" placeholder="1.14.4-vpnctl.4"
                           aria-describedby="desktop-subscription-help" spellcheck="false";
                     button.ed-btn-primary type="submit" {
                         (tr(lang, "Save", "Сохранить"))

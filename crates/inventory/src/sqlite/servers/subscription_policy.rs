@@ -18,7 +18,7 @@ impl SqliteInventory {
     ) -> Result<bool> {
         if core_version.is_some_and(|version| !valid_core_version(version)) {
             return Err(SqliteInventoryError::Invalid(
-                "enter a managed sing-box version such as 1.14.4-vpnctl.3".to_owned(),
+                "enter a managed sing-box version such as 1.14.4-vpnctl.4".to_owned(),
             ));
         }
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;

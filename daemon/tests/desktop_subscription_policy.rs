@@ -29,7 +29,7 @@ use vpnctld::{AppState, router};
 
 const DEVICE_ID: &str = "a92b915032b48a2ed45ef72f4171e5f4";
 const OPEN_ONLY_DEVICE_ID: &str = "deadbeefdeadbeefdeadbeefdeadbeef";
-const REQUIRED_CORE: &str = "1.14.4-vpnctl.3";
+const REQUIRED_CORE: &str = "1.14.4-vpnctl.4";
 const LOCKED_SERVER: &str = "desk-locked";
 const OPEN_SERVER: &str = "desk-open";
 const LOCKED_HOST: &str = "desk-locked.example.com";
