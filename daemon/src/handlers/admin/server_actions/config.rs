@@ -1025,6 +1025,9 @@ pub(crate) async fn server_set_turnrelay_config(
     if let Err(error) = protocol.validate_server(&vpnctl_core::RenderCtx::new(&server, &secrets)) {
         return bad_request(&error.to_string());
     }
+    if let Err(error) = state.registry.validate_server(&server, &secrets) {
+        return bad_request(&error.to_string());
+    }
     if server.enabled_protocols.contains(&pid) {
         let reserved = match state.inv.get_reserved_ports(&sid).await {
             Ok(ports) => ports,

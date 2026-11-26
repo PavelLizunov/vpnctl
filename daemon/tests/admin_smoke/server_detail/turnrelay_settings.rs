@@ -6,7 +6,7 @@ use axum::response::Response;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use tempfile::TempDir;
 use tower::ServiceExt;
-use vpnctl_core::{KernelId, ProtocolId, ServerId};
+use vpnctl_core::{KernelId, ProtocolId, RenderCtx, ServerId};
 use vpnctld::{AppState, router};
 
 use crate::common::{SAME_ORIGIN_HOST, add_same_origin, fetch_html, naive_server, state};
@@ -205,6 +205,134 @@ async fn turnrelay_config_rejects_ports_reserved_on_the_server() {
             .map(String::as_str),
         Some("6000")
     );
+}
+
+#[tokio::test]
+async fn turnrelay_section_renders_only_for_turnrelay_servers() {
+    let dir = TempDir::new().unwrap();
+    let mut plain = state(&dir).await;
+    plain.registry = Arc::new(vpnctl_kernels::build_registry().unwrap());
+    plain.inv.add_server(&naive_server("s0")).await.unwrap();
+    let html = fetch_html(router(plain), "/admin/servers/s0/protocols").await;
+    assert!(
+        !html.contains(r#"action="/admin/servers/s0/turnrelay-config""#),
+        "non-TurnRelay server must not render the TurnRelay settings form"
+    );
+
+    let dir = TempDir::new().unwrap();
+    let mut kernel_only = state(&dir).await;
+    kernel_only.registry = Arc::new(vpnctl_kernels::build_registry().unwrap());
+    let mut server = naive_server("s0");
+    server.kernels = vec![KernelId("turnrelay".into())];
+    server.enabled_protocols.clear();
+    kernel_only.inv.add_server(&server).await.unwrap();
+    let html = fetch_html(router(kernel_only), "/admin/servers/s0/protocols").await;
+    assert!(
+        html.contains(r#"action="/admin/servers/s0/turnrelay-config""#),
+        "a server carrying the TurnRelay kernel must expose the settings form"
+    );
+}
+
+#[tokio::test]
+async fn turnrelay_config_rejects_cross_protocol_udp_port_collisions() {
+    use vpnctl_core::Server;
+
+    let dir = TempDir::new().unwrap();
+    let mut app_state = state(&dir).await;
+    app_state.registry = Arc::new(vpnctl_kernels::build_registry().unwrap());
+    let server = Server {
+        id: ServerId("s0".into()),
+        address: "192.0.2.10".into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels: vec![KernelId("sing-box".into()), KernelId("turnrelay".into())],
+        enabled_protocols: vec![
+            ProtocolId("hysteria2".into()),
+            ProtocolId("turnrelay".into()),
+        ],
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    app_state.inv.add_server(&server).await.unwrap();
+    let before = app_state
+        .inv
+        .list_server_secrets(&ServerId("s0".into()))
+        .await
+        .unwrap();
+
+    let collision = VALID.replace("listen_port=53492", "listen_port=8444");
+    let response = post(&app_state, &collision).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        app_state
+            .inv
+            .list_server_secrets(&ServerId("s0".into()))
+            .await
+            .unwrap(),
+        before,
+        "a colliding UDP port must not be saved"
+    );
+}
+
+#[tokio::test]
+async fn service_active_requires_a_valid_certificate_fingerprint() {
+    let dir = TempDir::new().unwrap();
+    let state = fixture(&dir).await;
+    let server_id = ServerId("s0".into());
+    assert_eq!(post(&state, VALID).await.status(), StatusCode::SEE_OTHER);
+    state
+        .inv
+        .set_server_secret(&server_id, "turnrelay.password", "exit-secret")
+        .await
+        .unwrap();
+    let server = state.inv.get_server(&server_id).await.unwrap().unwrap();
+    let secrets = state.inv.list_server_secrets(&server_id).await.unwrap();
+    let digest =
+        vpnctl_protocols::turnrelay_applied_digest(&RenderCtx::new(&server, &secrets)).unwrap();
+    state
+        .inv
+        .set_server_secret(&server_id, "observed.turnrelay.applied", &digest)
+        .await
+        .unwrap();
+    state
+        .inv
+        .record_node_health(
+            &server_id,
+            Some(true),
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(r#"{"turnrelay":{"active":true}}"#),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let html = fetch_html(router(state.clone()), "/admin/servers/s0/protocols").await;
+    assert!(!html.contains("Service active"));
+    assert!(html.contains("Pending deploy"));
+
+    state
+        .inv
+        .set_server_secret(
+            &server_id,
+            "observed.turnrelay.cert_sha256",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .await
+        .unwrap();
+    let html = fetch_html(router(state), "/admin/servers/s0/protocols").await;
+    assert!(html.contains("Service active"));
 }
 
 #[tokio::test]

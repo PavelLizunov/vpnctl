@@ -25,6 +25,9 @@ use vpnctl_core::{
 pub const TURNRELAY_PORT: u16 = 53492;
 pub const TURNRELAY_DEFAULT_MODE: &str = "dtls";
 pub const TURNRELAY_DEFAULT_CONNECTIONS: u8 = 2;
+/// Maximum length of a sing-box outbound tag. TurnRelay hop ids and every
+/// relayed VLESS `outbound`/`detour` value must stay inside this bound.
+pub const TURNRELAY_OUTBOUND_ID_MAX: usize = 64;
 
 const LISTEN_PORT: &str = "turnrelay.listen_port";
 const MODE: &str = "turnrelay.mode";
@@ -46,7 +49,6 @@ const FRAGMENT: &AsciiSet = &NON_ALPHANUMERIC
 #[derive(Debug, Default)]
 pub struct TurnRelay;
 
-#[derive(Debug)]
 struct Settings<'a> {
     address: &'a str,
     port: u16,
@@ -56,6 +58,64 @@ struct Settings<'a> {
     mode: &'a str,
     connections: u8,
     udp: bool,
+}
+
+impl std::fmt::Debug for Settings<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The exit password is never stored in Settings, but keep both
+        // credential fields redacted so a future field cannot leak it.
+        f.debug_struct("Settings")
+            .field("address", &self.address)
+            .field("port", &self.port)
+            .field("turn_server", &self.turn_server)
+            .field("turn_username", &self.turn_username)
+            .field("turn_password", &"[redacted]")
+            .field("password", &"[redacted]")
+            .field("mode", &self.mode)
+            .field("connections", &self.connections)
+            .field("udp", &self.udp)
+            .finish()
+    }
+}
+
+/// Deterministic, always-valid sing-box outbound tag.
+///
+/// Server ids are normally short slugs, but a 64-character id would push a
+/// prefixed tag past sing-box's 64-byte cap and break the whole config. When
+/// the composed value is too long, truncate it and append `-` plus the first
+/// eight hex characters of its SHA-256. The same helper feeds the `turnrelay`
+/// hop `id` and the VLESS `detour`, so they can never drift apart.
+fn capped_outbound_id(raw: &str) -> String {
+    let mut cleaned = String::with_capacity(raw.len());
+    for character in raw.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | ':' | '-') {
+            cleaned.push(character);
+        } else {
+            cleaned.push('_');
+        }
+    }
+    if cleaned.len() <= TURNRELAY_OUTBOUND_ID_MAX {
+        return cleaned;
+    }
+    let digest = hex::encode(Sha256::digest(raw.as_bytes()));
+    let suffix = &digest[..8];
+    let keep = TURNRELAY_OUTBOUND_ID_MAX - 1 - suffix.len();
+    format!("{}-{suffix}", &cleaned[..keep])
+}
+
+/// Outbound tag of the `turnrelay://` hop for an exit server.
+pub fn turnrelay_outbound_id(server_id: &str) -> String {
+    capped_outbound_id(&format!("turnrelay-{server_id}"))
+}
+
+/// Outbound tag of a relayed VLESS duplicate whose target is the exit itself.
+pub fn turnrelay_vless_outbound_id(server_id: &str) -> String {
+    capped_outbound_id(&format!("vless-turnrelay-{server_id}"))
+}
+
+/// Outbound tag of a relayed VLESS duplicate routed through another exit.
+pub fn turnrelay_relayed_vless_outbound_id(target_id: &str, exit_id: &str) -> String {
+    capped_outbound_id(&format!("vless-turnrelay-{target_id}-via-{exit_id}"))
 }
 
 fn optional<'a>(secrets: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
@@ -80,7 +140,7 @@ fn valid_text(value: &str, max_len: usize) -> bool {
 }
 
 fn valid_turn_server(value: &str) -> bool {
-    if !valid_text(value, 512) {
+    if !valid_text(value, 255) {
         return false;
     }
     let Some((host, port)) = value.rsplit_once(':') else {
@@ -311,7 +371,7 @@ impl Protocol for TurnRelay {
         }
         let (settings, password, fingerprint) = ready(ctx)?;
         Ok(json!({
-            "id": format!("turnrelay-{}", ctx.server.id.0),
+            "id": turnrelay_outbound_id(&ctx.server.id.0),
             "provider": "static",
             "server_type": "exit",
             "server": settings.address,
@@ -430,6 +490,60 @@ mod tests {
         assert!(!is_valid_turnrelay_fingerprint(&"AB".repeat(32)));
         assert!(!is_valid_turnrelay_fingerprint(&"ab".repeat(31)));
         assert!(!is_valid_turnrelay_fingerprint(&"zz".repeat(32)));
+    }
+
+    #[test]
+    fn turn_server_accepts_255_and_rejects_256_characters() {
+        let host = |len: usize| "a".repeat(len - ":3478".len());
+        let ok = format!("{}:3478", host(255));
+        assert_eq!(ok.len(), 255);
+        let mut accepted_secrets = secrets();
+        accepted_secrets.insert(TURN_SERVER.into(), ok);
+        assert!(settings(&RenderCtx::new(&server(), &accepted_secrets)).is_ok());
+
+        let too_long = format!("{}:3478", host(256));
+        assert_eq!(too_long.len(), 256);
+        let mut rejected_secrets = secrets();
+        rejected_secrets.insert(TURN_SERVER.into(), too_long);
+        assert!(settings(&RenderCtx::new(&server(), &rejected_secrets)).is_err());
+    }
+
+    #[test]
+    fn outbound_ids_are_capped_and_share_one_helper() {
+        let short = "de";
+        assert_eq!(turnrelay_outbound_id(short), "turnrelay-de");
+        assert_eq!(turnrelay_vless_outbound_id(short), "vless-turnrelay-de");
+        assert_eq!(
+            turnrelay_relayed_vless_outbound_id("is", short),
+            "vless-turnrelay-is-via-de"
+        );
+
+        let long = "a".repeat(64);
+        let hop = turnrelay_outbound_id(&long);
+        let vless = turnrelay_vless_outbound_id(&long);
+        let relayed = turnrelay_relayed_vless_outbound_id(&long, &long);
+        for id in [&hop, &vless, &relayed] {
+            assert!(id.len() <= TURNRELAY_OUTBOUND_ID_MAX, "{id}");
+            assert!(
+                id.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-')),
+                "{id}"
+            );
+        }
+        assert_ne!(hop, turnrelay_outbound_id(&"b".repeat(64)));
+        let raw = format!("turnrelay-{long}");
+        assert!(hop.ends_with(&hex::encode(&Sha256::digest(raw.as_bytes())[..4])));
+    }
+
+    #[test]
+    fn settings_debug_redacts_credentials() {
+        let server = server();
+        let secrets = secrets();
+        let settings = settings(&RenderCtx::new(&server, &secrets)).unwrap();
+        let debug = format!("{settings:?}");
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains("turn-pass"));
+        assert!(!debug.contains("exit-pass"));
     }
 
     #[test]

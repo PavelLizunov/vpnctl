@@ -47,40 +47,7 @@ impl Fixture {
             ("is", "192.0.2.11", "Iceland", false),
             ("nl", "192.0.2.12", "Netherlands", false),
         ] {
-            let mut protocols = vec![ProtocolId("vless+reality".into())];
-            let mut kernels = vec![KernelId("sing-box".into())];
-            if relay {
-                protocols.push(ProtocolId("turnrelay".into()));
-                kernels.push(KernelId("turnrelay".into()));
-            }
-            let server = Server {
-                id: ServerId(sid.into()),
-                address: address.into(),
-                ssh_port: 22,
-                ssh_user: "root".into(),
-                kernels,
-                enabled_protocols: protocols,
-                trusted_host_fingerprint: None,
-                hoster: "generic".into(),
-                jump_via: None,
-                usage_coefficient: 1.0,
-            };
-            state.inv.add_server(&server).await.unwrap();
-            state
-                .inv
-                .set_server_display_name(&server.id, Some(label))
-                .await
-                .unwrap();
-            state
-                .inv
-                .set_server_secret(&server.id, "vless.public_key", &format!("PUB_{sid}"))
-                .await
-                .unwrap();
-            state
-                .inv
-                .set_server_secret(&server.id, "vless.short_id", "12345678")
-                .await
-                .unwrap();
+            seed_server(&state, sid, address, label, relay).await;
         }
         let user = User {
             id: UserId("tester-1".into()),
@@ -108,8 +75,16 @@ impl Fixture {
         Self { _dir: dir, state }
     }
 
+    async fn add_server(&self, sid: &str, address: &str, label: &str, relay: bool) {
+        seed_server(&self.state, sid, address, label, relay).await;
+    }
+
     async fn configure_relay(&self, publish_targets: &str) {
-        let sid = ServerId("de".into());
+        self.configure_relay_for("de", publish_targets).await;
+    }
+
+    async fn configure_relay_for(&self, exit: &str, publish_targets: &str) {
+        let sid = ServerId(exit.into());
         let server = self.state.inv.get_server(&sid).await.unwrap().unwrap();
         let mut secrets = self.state.inv.list_server_secrets(&sid).await.unwrap();
         for (key, value) in [
@@ -139,6 +114,43 @@ impl Fixture {
             .await
             .unwrap();
     }
+}
+
+async fn seed_server(state: &AppState, sid: &str, address: &str, label: &str, relay: bool) {
+    let mut protocols = vec![ProtocolId("vless+reality".into())];
+    let mut kernels = vec![KernelId("sing-box".into())];
+    if relay {
+        protocols.push(ProtocolId("turnrelay".into()));
+        kernels.push(KernelId("turnrelay".into()));
+    }
+    let server = Server {
+        id: ServerId(sid.into()),
+        address: address.into(),
+        ssh_port: 22,
+        ssh_user: "root".into(),
+        kernels,
+        enabled_protocols: protocols,
+        trusted_host_fingerprint: None,
+        hoster: "generic".into(),
+        jump_via: None,
+        usage_coefficient: 1.0,
+    };
+    state.inv.add_server(&server).await.unwrap();
+    state
+        .inv
+        .set_server_display_name(&server.id, Some(label))
+        .await
+        .unwrap();
+    state
+        .inv
+        .set_server_secret(&server.id, "vless.public_key", &format!("PUB_{sid}"))
+        .await
+        .unwrap();
+    state
+        .inv
+        .set_server_secret(&server.id, "vless.short_id", "12345678")
+        .await
+        .unwrap();
 }
 
 fn expected_vless(address: &str, pbk: &str, label: &str) -> String {
@@ -615,5 +627,247 @@ async fn generic_subscription_and_sub_route_never_gain_turnrelay() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    assert!(!String::from_utf8_lossy(&bytes).contains("turnrelay"));
+    let decoded = String::from_utf8(STANDARD.decode(bytes.as_ref()).unwrap()).unwrap();
+    let lines: Vec<&str> = decoded.lines().collect();
+    assert_eq!(lines.len(), 3);
+    for address in ["192.0.2.10", "192.0.2.11", "192.0.2.12"] {
+        assert!(
+            lines.iter().any(|line| line.contains(address)),
+            "{address} missing from /sub: {lines:?}"
+        );
+    }
+    assert!(!decoded.contains("turnrelay"));
+}
+
+async fn subscription_bytes(state: &AppState, path: &str, user_agent: &str) -> Vec<u8> {
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(path)
+                .header("user-agent", user_agent)
+                .header("X-VPNRouter-Capabilities", CAPABILITY)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "{path}");
+    response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec()
+}
+
+#[tokio::test]
+async fn sub_mihomo_and_stock_singbox_surfaces_stay_byte_equal() {
+    let fixture = Fixture::new().await;
+    let user = fixture
+        .state
+        .inv
+        .get_user(&UserId("tester-1".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    let token = user.sub_token.unwrap();
+    let cases = [
+        (format!("/sub/{token}"), LEGACY_UA, "v2ray /sub"),
+        (
+            format!("/sub/{token}?format=mihomo"),
+            LEGACY_UA,
+            "mihomo /sub",
+        ),
+        (
+            format!("/sub/{token}?format=sing-box"),
+            LEGACY_UA,
+            "stock sing-box /sub",
+        ),
+    ];
+    let mut before = Vec::new();
+    for (path, user_agent, label) in &cases {
+        before.push((
+            label,
+            subscription_bytes(&fixture.state, path, user_agent).await,
+        ));
+    }
+
+    fixture.configure_relay("*").await;
+
+    for ((path, user_agent, label), (_, expected)) in cases.iter().zip(&before) {
+        let after = subscription_bytes(&fixture.state, path, user_agent).await;
+        assert_eq!(
+            &after, expected,
+            "{label} bytes changed after TurnRelay was deployed"
+        );
+        assert!(
+            !String::from_utf8_lossy(&after).contains("turnrelay"),
+            "{label} must never carry TurnRelay"
+        );
+    }
+    let (_, v2ray) = &before[0];
+    let decoded = String::from_utf8(STANDARD.decode(v2ray.as_slice()).unwrap()).unwrap();
+    let lines: Vec<&str> = decoded.lines().collect();
+    assert_eq!(lines.len(), 3);
+    assert!(!decoded.contains("turnrelay"));
+}
+
+#[tokio::test]
+async fn sixty_four_character_exit_ids_keep_id_and_detour_identical_and_capped() {
+    let fixture = Fixture::new().await;
+    let exit = "e".repeat(64);
+    fixture
+        .add_server(&exit, "192.0.2.20", "Long Exit", true)
+        .await;
+    fixture
+        .state
+        .inv
+        .grant(&UserId("tester-1".into()), &ServerId(exit.clone()))
+        .await
+        .unwrap();
+    fixture.configure_relay_for(&exit, "is").await;
+
+    let lines = decode_lines(&body(&fixture.state, RAW_UA, Some(CAPABILITY)).await);
+    let query_value = |line: &str, key: &str| -> Option<String> {
+        let query = line.split_once('?')?.1.split('#').next()?;
+        query.split('&').find_map(|pair| {
+            pair.strip_prefix(key)
+                .and_then(|rest| rest.strip_prefix('='))
+                .map(str::to_owned)
+        })
+    };
+    let valid = |id: &str| {
+        !id.is_empty()
+            && id.len() <= 64
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
+    };
+    let relayed: Vec<&String> = lines
+        .iter()
+        .filter(|line| line.contains("detour="))
+        .collect();
+    assert!(!relayed.is_empty(), "{lines:?}");
+    for line in relayed {
+        let outbound = query_value(line, "outbound").expect("outbound");
+        let detour = query_value(line, "detour").expect("detour");
+        assert!(valid(&outbound), "{outbound}");
+        assert!(valid(&detour), "{detour}");
+    }
+
+    let hop = lines
+        .iter()
+        .find(|line| line.starts_with("turnrelay://"))
+        .expect("hop");
+    let profile = decode_profile(hop);
+    let id = profile["id"].as_str().unwrap();
+    assert!(valid(id), "{id}");
+    assert_eq!(id.len(), 64);
+
+    let same_server = lines
+        .iter()
+        .find(|line| line.contains("192.0.2.20") && line.contains("detour="))
+        .expect("same-server duplicate");
+    assert_eq!(query_value(same_server, "detour").as_deref(), Some(id));
+
+    let cross_server = lines
+        .iter()
+        .find(|line| line.contains("192.0.2.11") && line.contains("detour="))
+        .expect("cross-server duplicate");
+    assert_eq!(query_value(cross_server, "detour").as_deref(), Some(id));
+    assert!(query_value(cross_server, "outbound").is_some_and(|outbound| outbound.len() <= 64));
+}
+
+#[tokio::test]
+async fn ineligible_targets_never_receive_relayed_vless_duplicates() {
+    let vless = ProtocolId("vless+reality".into());
+
+    {
+        let fixture = Fixture::new().await;
+        fixture.configure_relay("*").await;
+        fixture
+            .state
+            .inv
+            .set_server_protocol_hidden(&ServerId("is".into()), &vless, true)
+            .await
+            .unwrap();
+        let lines = decode_lines(&body(&fixture.state, RAW_UA, Some(CAPABILITY)).await);
+        assert_no_relayed_target(&lines, "192.0.2.11", "hidden target");
+    }
+    {
+        let fixture = Fixture::new().await;
+        fixture.configure_relay("*").await;
+        fixture
+            .state
+            .inv
+            .set_server_auto_suppress(&ServerId("is".into()), true)
+            .await
+            .unwrap();
+        fixture
+            .state
+            .inv
+            .set_server_suppressed(&ServerId("is".into()), true)
+            .await
+            .unwrap();
+        let lines = decode_lines(&body(&fixture.state, RAW_UA, Some(CAPABILITY)).await);
+        assert_no_relayed_target(&lines, "192.0.2.11", "suppressed target");
+    }
+    {
+        let fixture = Fixture::new().await;
+        fixture.configure_relay("*").await;
+        fixture
+            .state
+            .inv
+            .set_client_detour_via_as("test", &ServerId("is".into()), Some(&ServerId("nl".into())))
+            .await
+            .unwrap();
+        let lines = decode_lines(&body(&fixture.state, RAW_UA, Some(CAPABILITY)).await);
+        assert_no_relayed_target(&lines, "192.0.2.11", "detoured target");
+    }
+    {
+        let fixture = Fixture::new().await;
+        fixture.configure_relay("*").await;
+        fixture
+            .state
+            .inv
+            .revoke(&UserId("tester-1".into()), &ServerId("is".into()))
+            .await
+            .unwrap();
+        let lines = decode_lines(&body(&fixture.state, RAW_UA, Some(CAPABILITY)).await);
+        assert_no_relayed_target(&lines, "192.0.2.11", "ungranted target");
+    }
+    {
+        let fixture = Fixture::new().await;
+        fixture.configure_relay("*").await;
+        fixture
+            .state
+            .inv
+            .remove_server_protocol(&ServerId("is".into()), &vless)
+            .await
+            .unwrap();
+        let lines = decode_lines(&body(&fixture.state, RAW_UA, Some(CAPABILITY)).await);
+        assert_no_relayed_target(&lines, "192.0.2.11", "non-VLESS target");
+    }
+}
+
+fn assert_no_relayed_target(lines: &[String], address: &str, case: &str) {
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("outbound=vless-turnrelay-de&detour=turnrelay-de")),
+        "same-server duplicate missing for {case}: {lines:?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains(address) && line.contains("detour=turnrelay-de")),
+        "relayed duplicate leaked for {case}: {lines:?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("outbound=vless-turnrelay-is-via-de")),
+        "relayed outbound leaked for {case}: {lines:?}"
+    );
 }

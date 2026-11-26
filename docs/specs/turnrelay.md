@@ -17,7 +17,12 @@ not advertise `turnrelay-v1` stay byte-for-byte unchanged.
   and whose `observed.turnrelay.cert_sha256` is 64 lowercase hex.
 - Relayed VLESS copies reuse the existing `outbound=` and `detour=` query
   params; there is no new `relay=` parameter. `detour` matches the
-  `turnrelay://` profile id `turnrelay-<exit_sid>` exactly.
+  `turnrelay://` profile id `turnrelay-<exit_sid>` exactly. Every composed
+  outbound tag is capped at 64 characters; an over-long id is truncated and
+  suffixed with `-` plus eight hex characters of its SHA-256, and the hop `id`
+  and VLESS `detour` are always produced by the same helper.
+- `turnrelay.turn_server` is at most 255 characters, matching VPNRouter's
+  parser.
 
 ## Interface and data contract
 
@@ -67,9 +72,14 @@ Issuance, only when the capability is present:
    one duplicate, labelled `"{ExitLabel} TurnRelay ~{user}"`.
 
 Build node artifacts with `tools/turnrelay-server/build.sh <output-directory>`
-(upstream commit `4c3dc7ad`, plus optional patches from the sibling
-`sing-box-vpnctl` checkout) and install the three binaries with their
-`.sha256` sidecars under `/opt/vpnctl/node-artifacts/`.
+(upstream commit `4c3dc7ad`, plus the patched files listed in
+`SING_BOX_VPNCTL_DIR/protocol/turnrelay/UPSTREAM`, defaulting to the sibling
+`sing-box-vpnctl` checkout or `/var/lib/dsh/Project/sing-box-vpnctl`; the
+script fails closed when the manifest or a listed file is missing). Install the
+three binaries with their `.sha256` sidecars under
+`/opt/vpnctl/node-artifacts/`. `scripts/deploy.sh` builds and stages them in a
+checkout deploy when the patched checkout is available, or accepts a prebuilt
+directory via `VPNCTL_TURNRELAY_SRC`; without either it skips them explicitly.
 
 ## Verification
 

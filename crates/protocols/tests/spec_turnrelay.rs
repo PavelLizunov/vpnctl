@@ -177,6 +177,59 @@ fn invalid_overrides_are_render_errors() {
 }
 
 #[test]
+fn turn_server_boundary_is_255_characters() {
+    let server = server();
+    let host = |len: usize| "a".repeat(len - ":3478".len());
+    let accepted = format!("{}:3478", host(255));
+    assert_eq!(accepted.len(), 255);
+    let mut secrets = base_secrets();
+    secrets.insert("turnrelay.turn_server".into(), accepted);
+    assert!(
+        TurnRelay
+            .server_inbound(&RenderCtx::new(&server, &secrets), &[])
+            .is_ok()
+    );
+
+    let rejected = format!("{}:3478", host(256));
+    assert_eq!(rejected.len(), 256);
+    let mut secrets = base_secrets();
+    secrets.insert("turnrelay.turn_server".into(), rejected);
+    assert!(
+        TurnRelay
+            .server_inbound(&RenderCtx::new(&server, &secrets), &[])
+            .is_err()
+    );
+}
+
+#[test]
+fn outbound_ids_never_exceed_sixty_four_characters() {
+    use vpnctl_protocols::{
+        TURNRELAY_OUTBOUND_ID_MAX, turnrelay_outbound_id, turnrelay_relayed_vless_outbound_id,
+        turnrelay_vless_outbound_id,
+    };
+
+    let long = "a".repeat(64);
+    let hop = turnrelay_outbound_id(&long);
+    assert_eq!(hop.len(), TURNRELAY_OUTBOUND_ID_MAX);
+    let (head, suffix) = hop.rsplit_once('-').expect("hash suffix separator");
+    assert_eq!(head.len(), 55);
+    assert_eq!(suffix.len(), 8);
+    assert!(suffix.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert_eq!(turnrelay_outbound_id("de"), "turnrelay-de");
+    assert_eq!(turnrelay_vless_outbound_id("de"), "vless-turnrelay-de");
+    assert_eq!(
+        turnrelay_relayed_vless_outbound_id("is", "de"),
+        "vless-turnrelay-is-via-de"
+    );
+    for id in [
+        turnrelay_vless_outbound_id(&long),
+        turnrelay_relayed_vless_outbound_id(&long, &long),
+    ] {
+        assert!(id.len() <= TURNRELAY_OUTBOUND_ID_MAX, "{id}");
+    }
+}
+
+#[test]
 fn node_address_must_be_a_literal_ip_and_must_not_collide_with_ssh() {
     for address in ["de.example.com", "0.0.0.0", "::"] {
         let mut server = server();

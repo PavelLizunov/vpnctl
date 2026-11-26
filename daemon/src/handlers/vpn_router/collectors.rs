@@ -6,7 +6,10 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use vpnctl_core::url_host::host_for_url;
 use vpnctl_core::{ProtocolId, RenderCtx, ServerId, User};
 use vpnctl_inventory::sqlite::SubscriptionServer;
-use vpnctl_protocols::VLESS_PACKET_ENCODING;
+use vpnctl_protocols::{
+    VLESS_PACKET_ENCODING, turnrelay_outbound_id, turnrelay_relayed_vless_outbound_id,
+    turnrelay_vless_outbound_id,
+};
 
 use super::compat::server_display_label;
 use crate::app::AppState;
@@ -377,12 +380,12 @@ pub(crate) fn collect_turnrelay_uris(
 
         if let Some(base) = vless_base_uri(exit, &user.id.0) {
             let outbound = utf8_percent_encode(
-                &format!("vless-turnrelay-{}", exit.server.id.0),
+                &turnrelay_vless_outbound_id(&exit.server.id.0),
                 NINITUX_QUOTE,
             )
             .to_string();
             let detour =
-                utf8_percent_encode(&format!("turnrelay-{}", exit.server.id.0), NINITUX_QUOTE)
+                utf8_percent_encode(&turnrelay_outbound_id(&exit.server.id.0), NINITUX_QUOTE)
                     .to_string();
             let uri = add_query_param(
                 &add_query_param(&base, "outbound", &outbound),
@@ -403,15 +406,12 @@ pub(crate) fn collect_turnrelay_uris(
                 continue;
             };
             let outbound = utf8_percent_encode(
-                &format!(
-                    "vless-turnrelay-{}-via-{}",
-                    target.server.id.0, exit.server.id.0
-                ),
+                &turnrelay_relayed_vless_outbound_id(&target.server.id.0, &exit.server.id.0),
                 NINITUX_QUOTE,
             )
             .to_string();
             let detour =
-                utf8_percent_encode(&format!("turnrelay-{}", exit.server.id.0), NINITUX_QUOTE)
+                utf8_percent_encode(&turnrelay_outbound_id(&exit.server.id.0), NINITUX_QUOTE)
                     .to_string();
             let uri = add_query_param(
                 &add_query_param(&base, "outbound", &outbound),

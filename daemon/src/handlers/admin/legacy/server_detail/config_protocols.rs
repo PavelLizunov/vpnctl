@@ -890,6 +890,14 @@ pub(crate) fn server_detail_turnrelay_section(
     if server.address.parse::<std::net::IpAddr>().is_err() {
         return html! {};
     }
+    let enabled = server
+        .enabled_protocols
+        .iter()
+        .any(|protocol| protocol.0 == "turnrelay");
+    let kernel = server.kernels.iter().any(|kernel| kernel.0 == "turnrelay");
+    if !enabled && !kernel {
+        return html! {};
+    }
     let sid = path_segment_encode(&server.id.0);
     let port = secrets
         .get("turnrelay.listen_port")
@@ -928,18 +936,16 @@ pub(crate) fn server_detail_turnrelay_section(
     let fingerprint = secrets
         .get("observed.turnrelay.cert_sha256")
         .filter(|value| vpnctl_protocols::is_valid_turnrelay_fingerprint(value));
-    let applied =
-        vpnctl_protocols::turnrelay_applied_digest(&vpnctl_core::RenderCtx::new(server, secrets))
-            .ok()
-            .is_some_and(|digest| {
-                secrets
-                    .get("observed.turnrelay.applied")
-                    .is_some_and(|value| value == &digest)
-            });
-    let enabled = server
-        .enabled_protocols
-        .iter()
-        .any(|protocol| protocol.0 == "turnrelay");
+    let applied = fingerprint.is_some()
+        && vpnctl_protocols::turnrelay_applied_digest(&vpnctl_core::RenderCtx::new(
+            server, secrets,
+        ))
+        .ok()
+        .is_some_and(|digest| {
+            secrets
+                .get("observed.turnrelay.applied")
+                .is_some_and(|value| value == &digest)
+        });
     let active = health
         .filter(|row| chrono::Utc::now() - row.ts < chrono::Duration::minutes(30))
         .and_then(|row| row.kernel_versions_json.as_deref())
@@ -981,7 +987,7 @@ pub(crate) fn server_detail_turnrelay_section(
                 }
             }
             label { (tr(lang, "TURN server host:port", "TURN-сервер host:port")) " "
-                input.ed-field type="text" name="turn_server" value=(turn_server) maxlength="512" required;
+                input.ed-field type="text" name="turn_server" value=(turn_server) maxlength="255" required;
             }
             label { (tr(lang, "TURN username", "Имя пользователя TURN")) " "
                 input.ed-field type="text" name="turn_username" value=(turn_username) maxlength="256" required;
