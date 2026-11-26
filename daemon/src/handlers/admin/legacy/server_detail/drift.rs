@@ -122,8 +122,7 @@ pub(super) fn server_detail_drift_detail_section(
             }
             @if !armed {
                 p style="font-family: var(--mono); font-size: 12px; margin: 8px 0;" {
-                    a href=(format!("/admin/servers/{sid_enc}/protocols?drift=live#drift-detail"))
-                      style="color: var(--ink); border-bottom: 1px dotted var(--ink); text-decoration: none;" {
+                    a.ed-link href=(format!("/admin/servers/{sid_enc}/protocols?drift=live#drift-detail")) {
                         (icon("scan")) (tr(lang, "check live drift", "проверить живой дрейф"))
                     }
                 }
@@ -151,8 +150,7 @@ pub(super) fn server_detail_drift_detail_section(
                                                 span style="color: var(--ink); font-style: italic; font-family: var(--serif);" {
                                                     (tr(lang, "maps to user ", "соответствует юзеру "))
                                                 }
-                                                a href=(format!("/admin/users/{}", path_segment_encode(name)))
-                                                  style="color: var(--ink); border-bottom: 1px dotted var(--ink); text-decoration: none;" {
+                                                a.ed-link href=(format!("/admin/users/{}", path_segment_encode(name))) {
                                                     (name)
                                                 }
                                             }
@@ -234,8 +232,7 @@ pub(super) fn server_detail_drift_summary(
                     (extra.len()) " " (tr(lang, "listening-but-undeclared", "слушает-но-не-заявлено"))
                 }
                 " "
-                a href=(format!("{base}/protocols#drift-detail"))
-                  style="color: var(--ink); border-bottom: 1px dotted var(--ink); text-decoration: none;" {
+                a.ed-link href=(format!("{base}/protocols#drift-detail")) {
                     (icon("arrow-right")) (tr(lang, "full grid on protocols tab", "полная таблица на вкладке протоколы"))
                 }
             }

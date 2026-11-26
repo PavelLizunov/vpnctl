@@ -30,33 +30,32 @@ pub(crate) fn server_detail_naive_config_section(
                 "Caddy + forwardproxy отдаёт настоящий сайт-прикрытие (HTTP 200) зондам и туннелирует аутентифицированных клиентов. Домен + почта идут во встроенный ACME Caddy (Let's Encrypt).")) {
             (tr(lang, "NAIVE (CADDY) CONFIG", "КОНФИГ NAIVE (CADDY)"))
         }
-        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 10px;" {
+        p.ed-form-hint {
             (tr(lang,
                 "Before deploy: point a DNS A-record at this server and open TCP 80+443 — Caddy's ACME needs both. vpnctl can't do DNS for you.",
                 "До деплоя: направь DNS A-запись на этот сервер и открой TCP 80+443 — встроенному ACME Caddy нужны оба. DNS vpnctl за тебя не сделает."))
         }
-        form method="post"
-             action=(format!("/admin/servers/{sid_enc}/naive-config"))
-             style="display: grid; grid-template-columns: 96px 1fr; gap: 6px 8px; align-items: center; max-width: 520px;" {
-            label style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                (tr(lang, "domain", "домен"))
+        form.ed-form method="post"
+             action=(format!("/admin/servers/{sid_enc}/naive-config")) {
+            div.ed-form-grid {
+                div.ed-form-row {
+                    label.ed-form-label for="naive-domain" { (tr(lang, "domain", "домен")) }
+                    input.ed-field id="naive-domain" type="text" name="domain" maxlength="253" required
+                          value=(domain)
+                          placeholder="cdn.example.com";
+                }
+                div.ed-form-row {
+                    label.ed-form-label for="naive-acme-email" { (tr(lang, "ACME email", "ACME почта")) }
+                    input.ed-field id="naive-acme-email" type="text" name="acme_email" maxlength="254"
+                          value=(email)
+                          placeholder="admin@example.com";
+                }
             }
-            input type="text" name="domain" maxlength="253" required
-                  value=(domain)
-                  placeholder="cdn.example.com"
-                  style="padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
-            label style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                (tr(lang, "ACME email", "ACME почта"))
-            }
-            input type="text" name="acme_email" maxlength="254"
-                  value=(email)
-                  placeholder="admin@example.com"
-                  style="padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
-            span {}
-            button type="submit"
-                   title=(tr(lang, "Save naive domain + ACME email", "Сохранить домен naive + ACME почту"))
-                   style="justify-self: start; padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                (icon("save")) (tr(lang, "save naive config", "сохранить конфиг"))
+            div.ed-form-actions {
+                button.ed-btn-primary type="submit"
+                       title=(tr(lang, "Save naive domain + ACME email", "Сохранить домен naive + ACME почту")) {
+                    (icon("save")) (tr(lang, "Save naive config", "Сохранить конфиг"))
+                }
             }
         }
     }
@@ -93,7 +92,7 @@ pub(crate) fn server_detail_vlessws_config_section(
                 "Caddy терминирует настоящий сертификат Let's-Encrypt на фронт-порту, отдаёт сайт-приманку на /, и reverse_proxy одного секретного пути на loopback sing-box VLESS+ws. ПРЯМОЙ (без CDN) — устойчивый к RU-DPI, совместимый со всеми клиентами фолбэк рядом с REALITY на :443.")) {
             (tr(lang, "VLESS-WS (CADDY) CONFIG", "КОНФИГ VLESS-WS (CADDY)"))
         }
-        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 10px;" {
+        p.ed-form-hint {
             (tr(lang,
                 "Before deploy: point a DNS A-record at this server and open TCP 80 (ACME) + the front port. The secret ws path is generated automatically on deploy.",
                 "До деплоя: направь DNS A-запись на этот сервер и открой TCP 80 (ACME) + фронт-порт. Секретный ws-путь генерируется автоматически при деплое."))
@@ -103,36 +102,34 @@ pub(crate) fn server_detail_vlessws_config_section(
                 (tr(lang, " The path is not minted yet (deploy to generate it).", " Путь ещё не сгенерирован (задеплой, чтобы создать его)."))
             }
         }
-        form method="post"
-             action=(format!("/admin/servers/{sid_enc}/vlessws-config"))
-             style="display: grid; grid-template-columns: 96px 1fr; gap: 6px 8px; align-items: center; max-width: 520px;" {
-            label style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                (tr(lang, "domain", "домен"))
+        form.ed-form method="post"
+             action=(format!("/admin/servers/{sid_enc}/vlessws-config")) {
+            div.ed-form-grid {
+                div.ed-form-row.ed-form-row--wide {
+                    label.ed-form-label for="vlessws-domain" { (tr(lang, "domain", "домен")) }
+                    input.ed-field id="vlessws-domain" type="text" name="domain" maxlength="253" required
+                          value=(domain)
+                          placeholder="vpn.example.com";
+                }
+                div.ed-form-row {
+                    label.ed-form-label for="vlessws-front-port" { (tr(lang, "front port", "фронт-порт")) }
+                    input.ed-field id="vlessws-front-port" type="text" name="listen_port" maxlength="5" inputmode="numeric"
+                          value=(port)
+                          placeholder="8443"
+                          title=(tr(lang, "Public TLS port Caddy serves on — NOT 443 (REALITY owns that). Blank = 8443.", "Публичный TLS-порт Caddy — НЕ 443 (его занимает REALITY). Пусто = 8443."));
+                }
+                div.ed-form-row {
+                    label.ed-form-label for="vlessws-acme-email" { (tr(lang, "ACME email", "ACME почта")) }
+                    input.ed-field id="vlessws-acme-email" type="text" name="acme_email" maxlength="254"
+                          value=(email)
+                          placeholder="admin@example.com";
+                }
             }
-            input type="text" name="domain" maxlength="253" required
-                  value=(domain)
-                  placeholder="vpn.example.com"
-                  style="padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
-            label style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                (tr(lang, "front port", "фронт-порт"))
-            }
-            input type="text" name="listen_port" maxlength="5" inputmode="numeric"
-                  value=(port)
-                  placeholder="8443"
-                  title=(tr(lang, "Public TLS port Caddy serves on — NOT 443 (REALITY owns that). Blank = 8443.", "Публичный TLS-порт Caddy — НЕ 443 (его занимает REALITY). Пусто = 8443."))
-                  style="padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
-            label style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                (tr(lang, "ACME email", "ACME почта"))
-            }
-            input type="text" name="acme_email" maxlength="254"
-                  value=(email)
-                  placeholder="admin@example.com"
-                  style="padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
-            span {}
-            button type="submit"
-                   title=(tr(lang, "Save vless-ws domain + front port + ACME email", "Сохранить домен vless-ws + фронт-порт + ACME почту"))
-                   style="justify-self: start; padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                (icon("save")) (tr(lang, "save vless-ws config", "сохранить конфиг"))
+            div.ed-form-actions {
+                button.ed-btn-primary type="submit"
+                       title=(tr(lang, "Save vless-ws domain + front port + ACME email", "Сохранить домен vless-ws + фронт-порт + ACME почту")) {
+                    (icon("save")) (tr(lang, "Save vless-ws config", "Сохранить конфиг"))
+                }
             }
         }
     }
@@ -181,63 +178,69 @@ pub(crate) fn server_detail_reality_config_section(
                 "REALITY слушает этот порт напрямую. По умолчанию 443 (золотой стандарт HTTPS-маскировки); задай другой порт, если 443 на этом хосте занят со-жителем (naive/caddy, легаси 3x-ui). При сохранении проверяется против портов всех остальных протоколов и вступает в силу при деплое.")) {
             (tr(lang, "VLESS+REALITY CONFIG", "КОНФИГ VLESS+REALITY"))
         }
-        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 10px;" {
+        p.ed-form-hint {
             (tr(lang,
                 "Deploy after saving. Clients receive the new handshake domain when they refresh their subscription after the deploy.",
                 "После сохранения выполни деплой. Клиенты получат новый домен рукопожатия при обновлении подписки после деплоя."))
         }
-        form method="post"
-             action=(format!("/admin/servers/{sid_enc}/reality-config"))
-             style="display: grid; grid-template-columns: 140px 1fr; gap: 6px 8px; align-items: center; max-width: 560px;" {
-            label for="reality-sni" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                (tr(lang, "handshake domain", "домен рукопожатия"))
-            }
-            input id="reality-sni" type="text" name="sni" maxlength="253" required
-                  value=(sni)
-                  title=(tr(lang, "Hostname of the HTTPS site used for the REALITY handshake.", "Имя HTTPS-сайта для рукопожатия REALITY."))
-                  style="min-width: 0; padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
-            label for="reality-fp" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                (tr(lang, "uTLS fingerprint", "uTLS-отпечаток"))
-            }
-            select id="reality-fp" name="fp"
-                   title=(tr(lang, "Client TLS fingerprint emitted in subscriptions. Blank keeps the legacy default (randomized); chrome is recommended for new deployments.", "TLS-отпечаток клиента в подписках. Пусто оставляет прежнее значение (randomized); для новых узлов рекомендуется chrome."))
-                   style="min-width: 0; padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {
-                option value="" selected[current_fp.is_empty()] {
-                    (tr(lang, "default (randomized)", "по умолчанию (randomized)"))
+        form.ed-form method="post"
+             action=(format!("/admin/servers/{sid_enc}/reality-config")) {
+            div.ed-form-grid {
+                div.ed-form-row.ed-form-row--wide {
+                    label.ed-form-label for="reality-sni" {
+                        (tr(lang, "handshake domain", "домен рукопожатия"))
+                    }
+                    input.ed-field id="reality-sni" type="text" name="sni" maxlength="253" required
+                          value=(sni)
+                          title=(tr(lang, "Hostname of the HTTPS site used for the REALITY handshake.", "Имя HTTPS-сайта для рукопожатия REALITY."));
                 }
-                @for candidate in vpnctl_protocols::VALID_REALITY_FPS {
-                    option value=(candidate) selected[current_fp == *candidate] { (candidate) }
+                div.ed-form-row {
+                    label.ed-form-label for="reality-fp" {
+                        (tr(lang, "uTLS fingerprint", "uTLS-отпечаток"))
+                    }
+                    select.ed-field id="reality-fp" name="fp"
+                           title=(tr(lang, "Client TLS fingerprint emitted in subscriptions. Blank keeps the legacy default (randomized); chrome is recommended for new deployments.", "TLS-отпечаток клиента в подписках. Пусто оставляет прежнее значение (randomized); для новых узлов рекомендуется chrome.")) {
+                        option value="" selected[current_fp.is_empty()] {
+                            (tr(lang, "default (randomized)", "по умолчанию (randomized)"))
+                        }
+                        @for candidate in vpnctl_protocols::VALID_REALITY_FPS {
+                            option value=(candidate) selected[current_fp == *candidate] { (candidate) }
+                        }
+                    }
+                }
+                div.ed-form-row {
+                    label.ed-form-label for="reality-handshake-port" {
+                        (tr(lang, "handshake port", "порт рукопожатия"))
+                    }
+                    input.ed-field id="reality-handshake-port" type="text" name="handshake_port" maxlength="5" inputmode="numeric"
+                          value=(handshake_port)
+                          placeholder="443"
+                          title=(tr(lang, "Optional TCP port for the server-side REALITY handshake. Blank = 443.", "Опциональный TCP-порт серверного рукопожатия REALITY. Пусто = 443."));
+                }
+                div.ed-form-row.ed-form-row--wide {
+                    label.ed-form-label for="reality-handshake-server" {
+                        (tr(lang, "handshake target", "цель рукопожатия"))
+                    }
+                    input.ed-field id="reality-handshake-server" type="text" name="handshake_server" maxlength="253"
+                          value=(handshake_server)
+                          placeholder=(sni)
+                          title=(tr(lang, "Optional host or IP for the server-side REALITY handshake (for self-SNI e.g. 127.0.0.1). Blank uses the handshake domain.", "Опциональный хост или IP для серверного рукопожатия REALITY (для self-SNI, напр. 127.0.0.1). Пусто = домен рукопожатия."));
+                }
+                div.ed-form-row {
+                    label.ed-form-label for="reality-listen-port" {
+                        (tr(lang, "listen port", "порт"))
+                    }
+                    input.ed-field id="reality-listen-port" type="text" name="listen_port" maxlength="5" inputmode="numeric"
+                          value=(port)
+                          placeholder="443"
+                          title=(tr(lang, "TCP port REALITY binds. Blank = 443. Must not collide with any other protocol on this node.", "TCP-порт, который слушает REALITY. Пусто = 443. Не должен совпадать с портом другого протокола на этом узле."));
                 }
             }
-            label for="reality-handshake-server" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                (tr(lang, "handshake target", "цель рукопожатия"))
-            }
-            input id="reality-handshake-server" type="text" name="handshake_server" maxlength="253"
-                  value=(handshake_server)
-                  placeholder=(sni)
-                  title=(tr(lang, "Optional host or IP for the server-side REALITY handshake (for self-SNI e.g. 127.0.0.1). Blank uses the handshake domain.", "Опциональный хост или IP для серверного рукопожатия REALITY (для self-SNI, напр. 127.0.0.1). Пусто = домен рукопожатия."))
-                  style="min-width: 0; padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
-            label for="reality-handshake-port" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                (tr(lang, "handshake port", "порт рукопожатия"))
-            }
-            input id="reality-handshake-port" type="text" name="handshake_port" maxlength="5" inputmode="numeric"
-                  value=(handshake_port)
-                  placeholder="443"
-                  title=(tr(lang, "Optional TCP port for the server-side REALITY handshake. Blank = 443.", "Опциональный TCP-порт серверного рукопожатия REALITY. Пусто = 443."))
-                  style="padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
-            label style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                (tr(lang, "listen port", "порт"))
-            }
-            input type="text" name="listen_port" maxlength="5" inputmode="numeric"
-                  value=(port)
-                  placeholder="443"
-                  title=(tr(lang, "TCP port REALITY binds. Blank = 443. Must not collide with any other protocol on this node.", "TCP-порт, который слушает REALITY. Пусто = 443. Не должен совпадать с портом другого протокола на этом узле."))
-                  style="padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
-            span {}
-            button type="submit"
-                   title=(tr(lang, "Save REALITY settings", "Сохранить настройки REALITY"))
-                   style="justify-self: start; padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                (icon("save")) (tr(lang, "save reality config", "сохранить конфиг"))
+            div.ed-form-actions {
+                button.ed-btn-primary type="submit"
+                       title=(tr(lang, "Save REALITY settings", "Сохранить настройки REALITY")) {
+                    (icon("save")) (tr(lang, "Save REALITY config", "Сохранить конфиг"))
+                }
             }
         }
     }
@@ -269,27 +272,29 @@ pub(crate) fn server_detail_quic_tls_section(
                 "Опциональный TLS SNI для клиентов TUIC v5 и Hysteria2 с привязанным отпечатком самоподписанного сертификата. Пусто — не отправлять server_name (прежнее поведение).")) {
             (tr(lang, "QUIC TLS SNI (TUIC / HYSTERIA2)", "QUIC TLS SNI (TUIC / HYSTERIA2)"))
         }
-        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 10px;" {
+        p.ed-form-hint {
             (tr(lang,
                 "Clients receive the updated SNI when they refresh their subscription. Leave blank to clear.",
                 "Клиенты получат обновлённый SNI при обновлении подписки. Оставь пустым, чтобы очистить."))
         }
-        form method="post"
-             action=(format!("/admin/servers/{sid_enc}/quic-tls-config"))
-             style="display: grid; grid-template-columns: 140px 1fr; gap: 6px 8px; align-items: center; max-width: 560px;" {
-            label for="quic-tls-server-name" style="font-family: var(--mono); font-size: 11px; color: var(--mute);" {
-                (tr(lang, "TLS server_name", "TLS server_name"))
+        form.ed-form method="post"
+             action=(format!("/admin/servers/{sid_enc}/quic-tls-config")) {
+            div.ed-form-grid {
+                div.ed-form-row.ed-form-row--wide {
+                    label.ed-form-label for="quic-tls-server-name" {
+                        (tr(lang, "TLS server_name", "TLS server_name"))
+                    }
+                    input.ed-field id="quic-tls-server-name" type="text" name="server_name" maxlength="253"
+                          value=(server_name)
+                          placeholder="www.apple.com"
+                          title=(tr(lang, "Optional hostname emitted as tls.server_name for pinned TUIC/Hysteria2 clients.", "Опциональное имя хоста, передаваемое как tls.server_name для клиентов TUIC/Hysteria2."));
+                }
             }
-            input id="quic-tls-server-name" type="text" name="server_name" maxlength="253"
-                  value=(server_name)
-                  placeholder="www.apple.com"
-                  title=(tr(lang, "Optional hostname emitted as tls.server_name for pinned TUIC/Hysteria2 clients.", "Опциональное имя хоста, передаваемое как tls.server_name для клиентов TUIC/Hysteria2."))
-                  style="min-width: 0; padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
-            span {}
-            button type="submit"
-                   title=(tr(lang, "Save QUIC TLS SNI", "Сохранить QUIC TLS SNI"))
-                   style="justify-self: start; padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                (icon("save")) (tr(lang, "save QUIC TLS SNI", "сохранить QUIC TLS SNI"))
+            div.ed-form-actions {
+                button.ed-btn-primary type="submit"
+                       title=(tr(lang, "Save QUIC TLS SNI", "Сохранить QUIC TLS SNI")) {
+                    (icon("save")) (tr(lang, "save QUIC TLS SNI", "сохранить QUIC TLS SNI"))
+                }
             }
         }
     }
@@ -337,20 +342,20 @@ pub(crate) fn server_detail_user_bandwidth_section(
         div.ed-art-eyebrow id="user-bandwidth" {
             (tr(lang, "Speed per user", "Скорость на пользователя"))
         }
-        p.ed-grid__mut {
+        p.ed-form-hint {
             (tr(lang, "Each user's sing-box connections share this upload and download budget on this node. Zero means unlimited. Check deploy status to confirm that the kernel applied the setting.",
                 "Все соединения sing-box одного пользователя на этом узле делят этот лимит на приём и отдачу. Ноль означает без ограничения. Результат применения видно в статусе деплоя."))
         }
-        form method="post" action=(format!("/admin/servers/{sid}/user-bandwidth")) {
-            label for="user-bandwidth-mbps" { (tr(lang, "Mbit/s", "Мбит/с")) }
-            " "
-            input.ed-inp id="user-bandwidth-mbps" name="mbps" type="number" min="0"
-                max=(USER_BANDWIDTH_MAX_MBPS) value=(rate) required;
-            " "
-            button.ed-abtn type="submit" { (tr(lang, "Apply uniform speed", "Применить единый лимит")) }
+        form.ed-form method="post" action=(format!("/admin/servers/{sid}/user-bandwidth")) {
+            div.ed-form-row.ed-form-row--inline {
+                label.ed-form-label for="user-bandwidth-mbps" { (tr(lang, "Mbit/s", "Мбит/с")) }
+                input.ed-field id="user-bandwidth-mbps" name="mbps" type="number" min="0"
+                    max=(USER_BANDWIDTH_MAX_MBPS) value=(rate) required;
+                button.ed-btn-primary type="submit" { (tr(lang, "Apply uniform speed", "Применить единый лимит")) }
+            }
         }
         @if secrets.get(PENDING_KEY).is_some_and(|value| value == "1") {
-            p.ed-grid__mut {
+            p.ed-form-hint {
                 (tr(lang, "The base limit is saved. Apply Boosty rates when a fresh roster is available.",
                     "Базовый лимит сохранён. Примените лимиты Boosty, когда будет доступен свежий список подписчиков."))
             }
@@ -358,48 +363,50 @@ pub(crate) fn server_detail_user_bandwidth_section(
         details.ed-spoiler {
             summary { (tr(lang, "Speed by Boosty tier", "Скорость по уровням Boosty")) }
             @if let Some(roster) = roster {
-                p.ed-grid__mut {
+                p.ed-form-hint {
                     (tr(lang, "Boosty account", "Аккаунт Boosty")) " " (&roster.blog)
                     " · " time datetime=(&roster.captured_at) { (&roster.captured_at) }
                 }
-                p.ed-grid__mut {
+                p.ed-form-hint {
                     (tr(lang, "Blank tiers use the default. Apply again to refresh after subscription changes.",
                         "Пустое поле означает базовый лимит. Примените повторно после изменения подписок."))
                 }
                 @if saved_policy.is_some() && saved.is_none() {
-                    p.ed-grid__mut { (tr(lang, "The active Boosty account has changed.", "Активный аккаунт Boosty сменился.")) }
+                    p.ed-form-hint { (tr(lang, "The active Boosty account has changed.", "Активный аккаунт Boosty сменился.")) }
                 }
-                form method="post" action=(format!("/admin/servers/{sid}/user-bandwidth")) {
+                form.ed-form method="post" action=(format!("/admin/servers/{sid}/user-bandwidth")) {
                     input type="hidden" name="boosty_blog" value=(roster.blog);
-                    p {
-                        label for="boosty-base-speed" { (tr(lang, "Default (Mbit/s)", "Базовый лимит (Мбит/с)")) }
-                        " "
-                        input.ed-inp id="boosty-base-speed" name="mbps" type="number" min="1"
-                            max=(USER_BANDWIDTH_MAX_MBPS) value=(if rate == "0" { "" } else { rate }) placeholder="40" required;
-                    }
-                    @for (id, label) in &levels {
-                        @let input_id = format!("boosty-speed-{id}");
-                        @let mbps = saved.and_then(|policy| policy.levels.get(id)).map(u32::to_string).unwrap_or_default();
-                        p {
-                            label for=(&input_id) { (label) " #" (id) }
-                            " "
-                            input.ed-inp id=(&input_id) name=(format!("tier_{id}")) type="number"
-                                min="1" max=(USER_BANDWIDTH_MAX_MBPS) value=(mbps);
+                    div.ed-form-grid {
+                        div.ed-form-row {
+                            label.ed-form-label for="boosty-base-speed" { (tr(lang, "Default (Mbit/s)", "Базовый лимит (Мбит/с)")) }
+                            input.ed-field id="boosty-base-speed" name="mbps" type="number" min="1"
+                                max=(USER_BANDWIDTH_MAX_MBPS) value=(if rate == "0" { "" } else { rate }) placeholder="40" required;
+                        }
+                        @for (id, label) in &levels {
+                            @let input_id = format!("boosty-speed-{id}");
+                            @let mbps = saved.and_then(|policy| policy.levels.get(id)).map(u32::to_string).unwrap_or_default();
+                            div.ed-form-row {
+                                label.ed-form-label for=(&input_id) { (label) " #" (id) }
+                                input.ed-field id=(&input_id) name=(format!("tier_{id}")) type="number"
+                                    min="1" max=(USER_BANDWIDTH_MAX_MBPS) value=(mbps);
+                            }
                         }
                     }
-                    button.ed-abtn type="submit" { (tr(lang, "Apply Boosty rates", "Применить лимиты Boosty")) }
+                    div.ed-form-actions {
+                        button.ed-btn-primary type="submit" { (tr(lang, "Apply Boosty rates", "Применить лимиты Boosty")) }
+                    }
                 }
             } @else {
-                p.ed-grid__mut { (tr(lang, "Waiting for a fresh roster from the Boosty dashboard.", "Ожидается свежий список подписчиков из панели Boosty.")) }
+                p.ed-form-hint { (tr(lang, "Waiting for a fresh roster from the Boosty dashboard.", "Ожидается свежий список подписчиков из панели Boosty.")) }
             }
             @if is_default {
-                p.ed-grid__mut {
+                p.ed-form-hint {
                     (tr(lang, "These rates are the default for newly added nodes.",
                         "Эти лимиты используются для новых узлов."))
                 }
             } @else if can_set_default {
                 form method="post" action=(format!("/admin/servers/{sid}/user-bandwidth-default")) {
-                    button.ed-abtn type="submit" {
+                    button.ed-abtn.ed-abtn--secondary type="submit" {
                         (tr(lang, "Use saved Boosty rates for new nodes", "Использовать сохранённые лимиты Boosty для новых узлов"))
                     }
                 }
@@ -422,7 +429,7 @@ pub(crate) fn server_detail_hysteria2_obfs_section(
         div.ed-art-eyebrow {
             (tr(lang, "HYSTERIA2 OBFUSCATION", "ОБФУСКАЦИЯ HYSTERIA2"))
         }
-        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 10px;" {
+        p.ed-form-hint {
             (tr(lang,
                 "Generate a new obfuscation password, then deploy. Clients receive the new password when they refresh their subscription after the deploy; cached configurations must be refreshed.",
                 "Создай новый пароль обфускации, затем выполни деплой. Клиенты получат новый пароль при обновлении подписки после деплоя; сохранённые конфигурации нужно обновить."))
@@ -464,7 +471,7 @@ pub(crate) fn server_detail_ss2022_mode_section(
                 tr(lang, "shared key (legacy)", "общий ключ (прежний режим)")
             })
         }
-        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 10px;" {
+        p.ed-form-hint {
             (tr(lang,
                 "After changing the mode and the next deploy, every SS2022 user must re-import their profile. Per-user keys allow revocation on deploy and require an AES method; chacha20 does not support them.",
                 "После смены режима и следующего деплоя каждый пользователь SS2022 должен заново импортировать профиль. Персональные ключи позволяют отзывать доступ при деплое и требуют метод AES; chacha20 их не поддерживает."))
@@ -498,28 +505,30 @@ pub(crate) fn server_detail_display_name_section(
             )) {
             (tr(lang, "DISPLAY NAME", "ОТОБРАЖАЕМОЕ ИМЯ"))
         }
-        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
+        p.ed-form-hint {
             (tr(lang, "Subscription label clients see: ", "Метка в подписке, которую видят клиенты: "))
             span.ed-mono { (effective) " VLESS ~<user>" }
             @if current.is_none() {
                 (tr(lang, " — auto (no custom name set)", " — авто (своё имя не задано)"))
             }
         }
-        form method="post"
-             action=(format!("/admin/servers/{sid_enc}/display-name"))
-             style="display: flex; gap: 8px; align-items: center;" {
-            input type="text" name="display_name" maxlength="64"
-                  value=(current.unwrap_or(""))
-                  placeholder=(tr(lang, "e.g. Kyrgyzstan  (blank = auto)", "напр. Kyrgyzstan  (пусто = авто)"))
-                  style="flex: 1; padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
-            button type="submit"
-                   title=(tr(
-                       lang,
-                       "Save this server's display label. Takes effect on the next subscription pull by each client; cached URIs are unaffected.",
-                       "Сохранить отображаемую метку этого сервера. Применится при следующем обновлении подписки у каждого клиента; на кэшированные URI не влияет.",
-                   ))
-                   style="padding: 4px 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                (icon("save")) (tr(lang, "save name", "сохранить"))
+        form.ed-form method="post"
+             action=(format!("/admin/servers/{sid_enc}/display-name")) {
+            div.ed-form-row.ed-form-row--inline.ed-form-row--grow {
+                label.ed-form-label.ed-sr-only for="server-display-name" {
+                    (tr(lang, "Display name", "Отображаемое имя"))
+                }
+                input.ed-field id="server-display-name" type="text" name="display_name" maxlength="64"
+                      value=(current.unwrap_or(""))
+                      placeholder=(tr(lang, "e.g. Kyrgyzstan  (blank = auto)", "напр. Kyrgyzstan  (пусто = авто)"));
+                button.ed-btn-primary type="submit"
+                       title=(tr(
+                           lang,
+                           "Save this server's display label. Takes effect on the next subscription pull by each client; cached URIs are unaffected.",
+                           "Сохранить отображаемую метку этого сервера. Применится при следующем обновлении подписки у каждого клиента; на кэшированные URI не влияет.",
+                       )) {
+                    (icon("save")) (tr(lang, "Save display name", "Сохранить"))
+                }
             }
         }
     }
@@ -592,31 +601,29 @@ pub(crate) fn server_detail_billing_section(
                 }
             }
         } @else {
-            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
+            p.ed-form-hint {
                 (tr(lang, "No billing terms configured for this server yet. Set due date and pricing below.", "Параметры оплаты для этого сервера ещё не заданы. Укажи дату и стоимость ниже."))
             }
         }
 
-        form method="post"
-             action=(format!("/admin/servers/{sid_enc}/billing"))
-             style="margin: 14px 0 4px; max-width: 1080px; display: flex; flex-direction: column; gap: 12px; font-family: var(--mono); font-size: 11px;" {
+        form.ed-form method="post"
+             action=(format!("/admin/servers/{sid_enc}/billing")) {
             input type="hidden" name="return_to" value=(return_to) {}
 
-            div style="display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end;" {
-                div style="flex: 0 0 140px;" {
-                    label style="display: block; color: var(--mute); margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;" {
+            div.ed-form-grid {
+                div.ed-form-row {
+                    label.ed-form-label for="billing-due-date" {
                         (tr(lang, "Due date", "Дата оплаты"))
                     }
-                    input type="date" name="due_date" required
-                           value=(current.map(|b| b.due_date.as_str()).unwrap_or(""))
-                           style="width: 100%; box-sizing: border-box; height: 32px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
+                    input.ed-field id="billing-due-date" type="date" name="due_date" required
+                           value=(current.map(|b| b.due_date.as_str()).unwrap_or("")) {}
                 }
 
-                div style="flex: 0 0 130px;" {
-                    label style="display: block; color: var(--mute); margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;" {
+                div.ed-form-row {
+                    label.ed-form-label for="billing-cycle" {
                         (tr(lang, "Billing cycle", "Период"))
                     }
-                    select name="billing_cycle" style="width: 100%; box-sizing: border-box; height: 32px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {
+                    select.ed-field id="billing-cycle" name="billing_cycle" {
                         @let cur_c = current.map(|b| b.billing_cycle).unwrap_or(BillingCycle::Monthly);
                         option value="monthly" selected[cur_c == BillingCycle::Monthly] { (tr(lang, "Monthly", "1 месяц")) }
                         option value="quarterly" selected[cur_c == BillingCycle::Quarterly] { (tr(lang, "Quarterly (3 mo)", "3 месяца")) }
@@ -625,66 +632,59 @@ pub(crate) fn server_detail_billing_section(
                     }
                 }
 
-                div style="flex: 0 0 95px;" {
-                    label style="display: block; color: var(--mute); margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;" {
+                div.ed-form-row {
+                    label.ed-form-label for="billing-amount" {
                         (tr(lang, "Amount", "Стоимость"))
                     }
-                    input type="text" name="amount" placeholder="0.00"
-                           value=(current.map(|b| format!("{:.2}", b.amount_cents as f64 / 100.0)).unwrap_or_default())
-                           style="width: 100%; box-sizing: border-box; height: 32px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); text-align: right;" {}
+                    input.ed-field id="billing-amount" type="text" name="amount" placeholder="0.00"
+                           value=(current.map(|b| format!("{:.2}", b.amount_cents as f64 / 100.0)).unwrap_or_default()) {}
                 }
 
-                div style="flex: 0 0 80px;" {
-                    label style="display: block; color: var(--mute); margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;" {
+                div.ed-form-row {
+                    label.ed-form-label for="billing-currency" {
                         (tr(lang, "Currency", "Валюта"))
                     }
-                    input list="currency_list" name="currency" maxlength="8"
+                    input.ed-field id="billing-currency" list="currency_list" name="currency" maxlength="8"
                            value=(current.map(|b| b.currency.as_str()).unwrap_or("EUR"))
-                           style="width: 100%; box-sizing: border-box; height: 32px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); text-transform: uppercase; text-align: center;" {}
+                           style="text-transform: uppercase;" {}
                 }
 
-                div style="flex: 0 0 110px;" {
-                    label style="display: block; color: var(--mute); margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;"
+                div.ed-form-row {
+                    label.ed-form-label for="billing-past-paid"
                           title=(tr(lang, "Past cycles already paid (history record)", "Сколько циклов было оплачено ранее (запись в историю)")) {
                         (tr(lang, "Past paid", "Оплачено ранее"))
                     }
-                    input type="number" min="0" max="120" name="initial_payments_count" placeholder="0"
-                           style="width: 100%; box-sizing: border-box; height: 32px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); text-align: right;" {}
+                    input.ed-field id="billing-past-paid" type="number" min="0" max="120" name="initial_payments_count" placeholder="0" {}
                 }
 
-                div style="margin-left: auto; padding-bottom: 6px;" {
-                    label style="display: inline-flex; align-items: center; gap: 6px; cursor: pointer; color: var(--ink); font-size: 11px;" {
+                div.ed-form-row {
+                    label.ed-form-check {
                         @let auto = current.map(|b| b.auto_renew).unwrap_or(false);
                         input type="checkbox" name="auto_renew" value="1" checked[auto] {}
                         (tr(lang, "Auto-renewal (card charge)", "Автосписание с карты"))
                     }
                 }
-            }
 
-            div style="display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end;" {
-                div style="flex: 1.2 1 240px;" {
-                    label style="display: block; color: var(--mute); margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;" {
+                div.ed-form-row.ed-form-row--wide {
+                    label.ed-form-label for="billing-url" {
                         (tr(lang, "Hoster portal URL", "Ссылка на кабинет хостера"))
                     }
-                    input type="url" name="billing_url" placeholder="https://..."
-                           value=(current.and_then(|b| b.billing_url.as_deref()).unwrap_or(""))
-                           style="width: 100%; box-sizing: border-box; height: 32px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
+                    input.ed-field id="billing-url" type="url" name="billing_url" placeholder="https://..."
+                           value=(current.and_then(|b| b.billing_url.as_deref()).unwrap_or("")) {}
                 }
 
-                div style="flex: 1 1 200px;" {
-                    label style="display: block; color: var(--mute); margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;" {
+                div.ed-form-row.ed-form-row--wide {
+                    label.ed-form-label for="billing-notes" {
                         (tr(lang, "Notes / contract", "Заметки / договор"))
                     }
-                    input type="text" name="notes" placeholder=(tr(lang, "Account, card, contract...", "Аккаунт, карта, заметка..."))
-                           value=(current.and_then(|b| b.notes.as_deref()).unwrap_or(""))
-                           style="width: 100%; box-sizing: border-box; height: 32px; padding: 5px 8px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink);" {}
+                    input.ed-field id="billing-notes" type="text" name="notes" placeholder=(tr(lang, "Account, card, contract...", "Аккаунт, карта, заметка..."))
+                           value=(current.and_then(|b| b.notes.as_deref()).unwrap_or("")) {}
                 }
+            }
 
-                div style="flex: 0 0 auto;" {
-                    button type="submit" class="ed-abtn ed-abtn--primary"
-                           style="height: 32px; padding: 0 16px; display: inline-flex; align-items: center; gap: 6px; box-sizing: border-box;" {
-                        (icon("check")) " " (tr(lang, "Save parameters", "Сохранить"))
-                    }
+            div.ed-form-actions {
+                button.ed-btn-primary type="submit" {
+                    (icon("check")) (tr(lang, "Save parameters", "Сохранить"))
                 }
             }
         }
@@ -699,10 +699,10 @@ pub(crate) fn server_detail_auto_suppress_section(
 ) -> Markup {
     use crate::i18n::tr;
     let sid_enc = path_segment_encode(&server.id.0);
-    let (btn_bg, btn_fg) = if opt_in {
-        ("transparent", "var(--ink)")
+    let button_class = if opt_in {
+        "ed-abtn ed-abtn--secondary"
     } else {
-        ("var(--ink)", "var(--paper)")
+        "ed-abtn ed-abtn--primary"
     };
     html! {
         div.ed-rule {}
@@ -720,7 +720,7 @@ pub(crate) fn server_detail_auto_suppress_section(
                 (tr(lang, " — hidden from subscriptions; auto-restores on recovery.", " — скрыт из подписок; вернётся автоматически при восстановлении."))
             }
         } @else {
-            p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 12px;" {
+            p.ed-form-hint {
                 @if opt_in {
                     (tr(lang, "Enabled — waiting for confirmed TCP outage or recovery evidence.", "Включено — скрытие и возврат только по подтверждённым TCP-проверкам."))
                 } @else {
@@ -732,8 +732,7 @@ pub(crate) fn server_detail_auto_suppress_section(
              action=(format!("/admin/servers/{sid_enc}/auto-suppress"))
              style="display: inline;" {
             input type="hidden" name="enabled" value=(if opt_in { "false" } else { "true" });
-            button type="submit"
-                   style=(format!("padding: 4px 12px; border: 1px solid var(--ink); background: {btn_bg}; color: {btn_fg}; font-family: var(--mono); font-size: 11px; cursor: pointer;")) {
+            button type="submit" class=(button_class) {
                 @if opt_in {
                     (icon("eye")) (tr(lang, "turn off auto-suppress", "выключить авто-скрытие"))
                 } @else {
@@ -781,14 +780,14 @@ pub(crate) fn server_detail_reserved_ports_section(
             )) {
                 (tr(lang, "RESERVED PORTS", "ЗАРЕЗЕРВИРОВАННЫЕ ПОРТЫ"))
             }
-        p style="font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--mute); margin: 6px 0 14px;" {
+        p.ed-form-hint {
             (tr(
                 lang,
                 "Ports the daemon refuses to bind on this node. The sing-box pre-apply guard fails closed when any rendered inbound collides — so a co-tenant 3x-ui (or any other service vpnctl doesn't manage) can never get overwritten by a forgetful deploy.",
                 "Порты, которые демон отказывается занимать на этой ноде. Пре-apply-guard sing-box падает fail-closed, если любой рендеренный inbound пересечётся — сторонний 3x-ui (или любой другой сервис, которым vpnctl не управляет) никогда не будет перезаписан забывчивым деплоем.",
             ))
         }
-        div style="font-family: var(--mono); font-size: 12px; padding: 8px 12px; background: var(--paper-tint); border: 1px solid var(--rule); margin-bottom: 12px;" {
+        div style="font-family: var(--mono); font-size: 12px; padding: 8px 12px; background: var(--paper-tint); border: 1px solid var(--rule); margin: 4px 0 12px;" {
             @if reserved.is_empty() {
                 em style="color: var(--mute);" {
                     (tr(
@@ -805,26 +804,28 @@ pub(crate) fn server_detail_reserved_ports_section(
                 }
             }
         }
-        form method="post"
-             action=(format!("/admin/servers/{sid_enc}/reserved-ports"))
-             style="display: flex; gap: 8px; align-items: center;" {
-            input type="text" name="ports" value=(prefill)
-                  placeholder="443,2053,2096"
-                  style="flex: 1; padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);"
-                  pattern="[0-9, ]*"
-                  title=(tr(
-                      lang,
-                      "Comma-separated port numbers (1..=65535). Empty value clears the list.",
-                      "Номера портов через запятую (1..=65535). Пустое поле очищает список.",
-                  ));
-            button type="submit"
-                   title=(tr(
-                       lang,
-                       "Replace the reserved-ports list with the values above. Future sing-box deploys refuse to bind any port in the list.",
-                       "Заменить список зарезервированных портов значениями выше. Будущие деплои sing-box откажутся занимать любой порт из списка.",
-                   ))
-                   style="padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--mono); font-size: 11px; cursor: pointer;" {
-                (icon("save")) (tr(lang, "save", "сохранить"))
+        form.ed-form method="post"
+             action=(format!("/admin/servers/{sid_enc}/reserved-ports")) {
+            div.ed-form-row.ed-form-row--inline.ed-form-row--grow {
+                label.ed-form-label.ed-sr-only for="reserved-ports" {
+                    (tr(lang, "Reserved ports", "Зарезервированные порты"))
+                }
+                input.ed-field id="reserved-ports" type="text" name="ports" value=(prefill)
+                      placeholder="443,2053,2096"
+                      pattern="[0-9, ]*"
+                      title=(tr(
+                          lang,
+                          "Comma-separated port numbers (1..=65535). Empty value clears the list.",
+                          "Номера портов через запятую (1..=65535). Пустое поле очищает список.",
+                      ));
+                button.ed-btn-primary type="submit"
+                       title=(tr(
+                           lang,
+                           "Replace the reserved-ports list with the values above. Future sing-box deploys refuse to bind any port in the list.",
+                           "Заменить список зарезервированных портов значениями выше. Будущие деплои sing-box откажутся занимать любой порт из списка.",
+                       )) {
+                    (icon("save")) (tr(lang, "Save reserved ports", "Сохранить"))
+                }
             }
         }
     }
@@ -867,15 +868,23 @@ pub(crate) fn server_detail_dnstt_section(
     html! {
         div.ed-rule {}
         div.ed-art-eyebrow id="dnstt" { "DNSTT + SSH" }
-        p { (state) }
-        form method="post" action=(format!("/admin/servers/{sid}/dnstt-config")) {
-            label { (tr(lang,"Delegated DNS zone","Делегированная DNS-зона")) " "
-                input.ed-field type="text" name="domain" value=(domain) maxlength="100" required;
+        p.ed-form-hint { (state) }
+        form.ed-form method="post" action=(format!("/admin/servers/{sid}/dnstt-config")) {
+            div.ed-form-grid {
+                div.ed-form-row {
+                    label.ed-form-label for="dnstt-domain" { (tr(lang, "Delegated DNS zone", "Делегированная DNS-зона")) }
+                    input.ed-field id="dnstt-domain" type="text" name="domain" value=(domain) maxlength="100" required;
+                }
+                div.ed-form-row {
+                    label.ed-form-label for="dnstt-resolver" { (tr(lang, "UDP DNS resolver IPv4", "IPv4 DNS-резолвера по UDP")) }
+                    input.ed-field id="dnstt-resolver" type="text" name="resolver" value=(resolver) maxlength="15" required;
+                }
             }
-            label { (tr(lang,"UDP DNS resolver IPv4","IPv4 DNS-резолвера по UDP")) " "
-                input.ed-field type="text" name="resolver" value=(resolver) maxlength="15" required;
+            div.ed-form-actions {
+                button.ed-btn-primary type="submit" {
+                    (icon("save")) (tr(lang, "Save DNSTT settings", "Сохранить настройки DNSTT"))
+                }
             }
-            button.ed-abtn type="submit" { (tr(lang,"Save DNSTT settings","Сохранить настройки DNSTT")) }
         }
     }
 }
@@ -970,58 +979,88 @@ pub(crate) fn server_detail_turnrelay_section(
                 "Выходной TURN-релей: клиенты приходят на этот узел через TURN-провайдера и пиннят его сертификат. Пароль выхода создаётся один раз; клиентские настройки выдаются только после успешного деплоя.")) {
             "TURNRELAY (EXIT)"
         }
-        p { (state) }
+        p.ed-form-hint { (state) }
         @if let Some(fingerprint) = fingerprint {
             p style="font-family: var(--mono); font-size: 11px; color: var(--mute); overflow-wrap: anywhere;" {
                 (tr(lang, "certificate SHA-256: ", "SHA-256 сертификата: ")) (fingerprint)
             }
         }
-        form method="post" action=(format!("/admin/servers/{sid}/turnrelay-config")) {
-            label { (tr(lang, "UDP port (blank = 53492)", "UDP-порт (пусто = 53492)")) " "
-                input.ed-field type="text" name="listen_port" value=(port) maxlength="5" inputmode="numeric";
-            }
-            label { (tr(lang, "Obfuscation mode", "Режим обфускации")) " "
-                select.ed-field name="mode" {
-                    option value="dtls" selected[mode == "dtls"] { "dtls" }
-                    option value="srtp" selected[mode == "srtp"] { "srtp" }
+        form.ed-form method="post" action=(format!("/admin/servers/{sid}/turnrelay-config")) {
+            div.ed-form-grid {
+                div.ed-form-row {
+                    label.ed-form-label for="turnrelay-listen-port" {
+                        (tr(lang, "UDP port (blank = 53492)", "UDP-порт (пусто = 53492)"))
+                    }
+                    input.ed-field id="turnrelay-listen-port" type="text" name="listen_port" value=(port) maxlength="5" inputmode="numeric";
+                }
+                div.ed-form-row {
+                    label.ed-form-label for="turnrelay-mode" {
+                        (tr(lang, "Obfuscation mode", "Режим обфускации"))
+                    }
+                    select.ed-field id="turnrelay-mode" name="mode" {
+                        option value="dtls" selected[mode == "dtls"] { "dtls" }
+                        option value="srtp" selected[mode == "srtp"] { "srtp" }
+                    }
+                }
+                div.ed-form-row.ed-form-row--wide {
+                    label.ed-form-label for="turnrelay-server" {
+                        (tr(lang, "TURN server host:port", "TURN-сервер host:port"))
+                    }
+                    input.ed-field id="turnrelay-server" type="text" name="turn_server" value=(turn_server) maxlength="255" required;
+                }
+                div.ed-form-row {
+                    label.ed-form-label for="turnrelay-username" {
+                        (tr(lang, "TURN username", "Имя пользователя TURN"))
+                    }
+                    input.ed-field id="turnrelay-username" type="text" name="turn_username" value=(turn_username) maxlength="256" required;
+                }
+                div.ed-form-row {
+                    label.ed-form-label for="turnrelay-password" {
+                        (tr(lang, "TURN password", "Пароль TURN"))
+                    }
+                    input.ed-field id="turnrelay-password" type="password" name="turn_password" value="" maxlength="512"
+                        autocomplete="new-password"
+                        placeholder=(if turn_password_set {
+                            tr(lang, "unchanged", "без изменений")
+                        } else {
+                            tr(lang, "required", "обязательно")
+                        });
+                }
+                div.ed-form-row {
+                    label.ed-form-label for="turnrelay-connections" {
+                        (tr(lang, "Connections (1..60)", "Соединений (1..60)"))
+                    }
+                    input.ed-field id="turnrelay-connections" type="number" name="connections" value=(connections) min="1" max="60" required;
+                }
+                label.ed-form-check for="turnrelay-udp" {
+                    input id="turnrelay-udp" type="checkbox" name="udp" value="true" checked[udp];
+                    (tr(lang, "carry UDP through the relay", "передавать UDP через релей"))
+                }
+                div.ed-form-row.ed-form-row--wide {
+                    label.ed-form-label for="turnrelay-publish" {
+                        (tr(lang, "Publish (comma-separated, e.g. vless+reality)", "Публиковать (через запятую, напр. vless+reality)"))
+                    }
+                    input.ed-field id="turnrelay-publish" type="text" name="publish" value=(publish) maxlength="128"
+                        placeholder="vless+reality";
+                }
+                div.ed-form-row.ed-form-row--wide {
+                    label.ed-form-label for="turnrelay-publish-targets" {
+                        (tr(lang, "Cross-server targets (server IDs or *)", "Кросс-серверные цели (ID серверов или *)"))
+                    }
+                    input.ed-field id="turnrelay-publish-targets" type="text" name="publish_targets" value=(publish_targets) maxlength="512"
+                        placeholder="*";
+                }
+                p.ed-form-hint.ed-form-row--wide {
+                    (tr(lang,
+                        "Saving changes takes effect on the next deploy. Relayed VLESS profiles are issued only to VPNRouter clients advertising turnrelay-v1.",
+                        "Сохранение вступает в силу при следующем деплое. Релейные VLESS-профили выдаются только клиентам VPNRouter с возможностью turnrelay-v1."))
                 }
             }
-            label { (tr(lang, "TURN server host:port", "TURN-сервер host:port")) " "
-                input.ed-field type="text" name="turn_server" value=(turn_server) maxlength="255" required;
+            div.ed-form-actions {
+                button.ed-btn-primary type="submit" {
+                    (tr(lang, "Save TurnRelay settings", "Сохранить настройки TurnRelay"))
+                }
             }
-            label { (tr(lang, "TURN username", "Имя пользователя TURN")) " "
-                input.ed-field type="text" name="turn_username" value=(turn_username) maxlength="256" required;
-            }
-            label { (tr(lang, "TURN password", "Пароль TURN")) " "
-                input.ed-field type="password" name="turn_password" value="" maxlength="512"
-                    autocomplete="new-password"
-                    placeholder=(if turn_password_set {
-                        tr(lang, "unchanged", "без изменений")
-                    } else {
-                        tr(lang, "required", "обязательно")
-                    });
-            }
-            label { (tr(lang, "Connections (1..60)", "Соединений (1..60)")) " "
-                input.ed-field type="number" name="connections" value=(connections) min="1" max="60" required;
-            }
-            label style="display: flex; gap: 6px; align-items: center;" {
-                input type="checkbox" name="udp" value="true" checked[udp];
-                (tr(lang, "carry UDP through the relay", "передавать UDP через релей"))
-            }
-            label { (tr(lang, "Publish (comma-separated, e.g. vless+reality)", "Публиковать (через запятую, напр. vless+reality)")) " "
-                input.ed-field type="text" name="publish" value=(publish) maxlength="128"
-                    placeholder="vless+reality";
-            }
-            label { (tr(lang, "Cross-server targets (server IDs or *)", "Кросс-серверные цели (ID серверов или *)")) " "
-                input.ed-field type="text" name="publish_targets" value=(publish_targets) maxlength="512"
-                    placeholder="*";
-            }
-            p.ed-muted style="font-family: var(--serif); font-style: italic; font-size: 12px;" {
-                (tr(lang,
-                    "Saving changes takes effect on the next deploy. Relayed VLESS profiles are issued only to VPNRouter clients advertising turnrelay-v1.",
-                    "Сохранение вступает в силу при следующем деплое. Релейные VLESS-профили выдаются только клиентам VPNRouter с возможностью turnrelay-v1."))
-            }
-            button.ed-abtn type="submit" { (tr(lang, "Save TurnRelay settings", "Сохранить настройки TurnRelay")) }
         }
     }
 }
@@ -1051,28 +1090,39 @@ pub(crate) fn server_detail_vmess_section(
     html! {
         div.ed-rule {}
         div.ed-art-eyebrow id="vmess" { "VMess WebSocket + TLS" }
-        form method="post" action=(format!("/admin/servers/{sid}/vmess-config")) {
-            label { (tr(lang, "TLS hostname", "Имя хоста TLS"))
-                input type="text" name="domain" value=(domain) required maxlength="253";
-            }
-            label { (tr(lang, "TCP port", "Порт TCP"))
-                input type="number" name="listen_port" value=(port) min="1" max="65535" required;
-            }
-            label { (tr(lang, "Optional VLESS Reality entry server ID", "ID входного сервера VLESS Reality, если нужен"))
-                input type="text" name="detour_via" value=(detour);
-            }
-            div {
-                label { (tr(lang, "PEM certificate chain", "Цепочка сертификатов PEM"))
-                    textarea name="certificate" rows="4" autocomplete="off" {}
+        form.ed-form method="post" action=(format!("/admin/servers/{sid}/vmess-config")) {
+            div.ed-form-grid {
+                div.ed-form-row.ed-form-row--wide {
+                    label.ed-form-label for="vmess-domain" { (tr(lang, "TLS hostname", "Имя хоста TLS")) }
+                    input.ed-field id="vmess-domain" type="text" name="domain" value=(domain) required maxlength="253";
                 }
-                label { (tr(lang, "PEM private key", "Закрытый ключ PEM"))
-                    textarea name="key" rows="4" autocomplete="off" {}
+                div.ed-form-row {
+                    label.ed-form-label for="vmess-listen-port" { (tr(lang, "TCP port", "Порт TCP")) }
+                    input.ed-field id="vmess-listen-port" type="number" name="listen_port" value=(port) min="1" max="65535" required;
+                }
+                div.ed-form-row {
+                    label.ed-form-label for="vmess-detour" { (tr(lang, "Optional VLESS Reality entry server ID", "ID входного сервера VLESS Reality, если нужен")) }
+                    input.ed-field id="vmess-detour" type="text" name="detour_via" value=(detour);
+                }
+                div.ed-form-row.ed-form-row--wide {
+                    label.ed-form-label for="vmess-certificate" { (tr(lang, "PEM certificate chain", "Цепочка сертификатов PEM")) }
+                    textarea.ed-field id="vmess-certificate" name="certificate" rows="4" autocomplete="off" {}
+                }
+                div.ed-form-row.ed-form-row--wide {
+                    label.ed-form-label for="vmess-key" { (tr(lang, "PEM private key", "Закрытый ключ PEM")) }
+                    textarea.ed-field id="vmess-key" name="key" rows="4" autocomplete="off" {}
+                }
+                @if secrets.contains_key("vmess.key") {
+                    p.ed-form-hint.ed-form-row--wide {
+                        (tr(lang, "Leave both PEM fields blank to keep the saved pair.", "Оставьте оба поля PEM пустыми, чтобы сохранить действующую пару."))
+                    }
                 }
             }
-            @if secrets.contains_key("vmess.key") {
-                p.ed-muted { (tr(lang, "Leave both PEM fields blank to keep the saved pair.", "Оставьте оба поля PEM пустыми, чтобы сохранить действующую пару.")) }
+            div.ed-form-actions {
+                button.ed-btn-primary type="submit" {
+                    (icon("save")) (tr(lang, "Save VMess settings", "Сохранить настройки VMess"))
+                }
             }
-            button.ed-abtn type="submit" { (tr(lang, "Save VMess settings", "Сохранить настройки VMess")) }
         }
     }
 }

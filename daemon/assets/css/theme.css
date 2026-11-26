@@ -104,3 +104,5 @@ html, body { margin:0; padding:0; height:100%; background:#f0eee9; }
 .ed-main textarea::placeholder { color: var(--dim); }
 .ed-main select { cursor: pointer; }
 
+[hidden] { display: none !important; }
+
