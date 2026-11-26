@@ -344,3 +344,11 @@ fn managed_entry_applies_and_rolls_back_without_firewall_tools() {
     assert_eq!(fs::read_to_string(&env).unwrap(), "RELAY_PORT=53491\n");
     assert_eq!(fs::read_to_string(&binary).unwrap(), "first binary");
 }
+
+#[test]
+fn turnrelay_relay_unit_permits_netlink_for_pion_stdnet() {
+    let unit = include_str!("../turnrelay_relay/vpnctl-turnrelay-relay.service");
+    assert!(unit.contains("AF_NETLINK"));
+    assert!(unit.contains("AF_INET"));
+    assert!(unit.contains("AF_INET6"));
+}
