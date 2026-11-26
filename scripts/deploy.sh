@@ -8,6 +8,7 @@ SING_BOX_DST=${VPNCTL_SING_BOX_ARTIFACT:-/opt/vpnctl/node-artifacts/sing-box}
 STATS_HELPER_DST=${VPNCTL_STATS_HELPER_ARTIFACT:-/opt/vpnctl/node-artifacts/singbox-stats-helper}
 TURNRELAY_DST=${VPNCTL_TURNRELAY_ARTIFACT_DIR:-/opt/vpnctl/node-artifacts}
 TURNRELAY_SRC=${VPNCTL_TURNRELAY_SRC:-}
+TURNRELAY_RELAY_SRC=${VPNCTL_TURNRELAY_RELAY_SRC:-}
 INSTALL_OWNER=${VPNCTL_INSTALL_OWNER-root:root}
 BUILD_TARGET=${VPNCTL_BUILD_TARGET:-x86_64-unknown-linux-musl}
 
@@ -63,6 +64,7 @@ elif [ "$#" -eq 0 ]; then
 else
     log "usage: deploy.sh [<vpnctld> <vpnctl> <sing-box> <stats-helper>]"
     log "TurnRelay artifacts: set VPNCTL_TURNRELAY_SRC to a directory with turnrelay-server-{amd64,arm64,armv7} and .sha256 sidecars (optional)"
+    log "Managed entry artifacts: set VPNCTL_TURNRELAY_RELAY_SRC to a directory with turnrelay-relay-{amd64,arm64,armv7} and .sha256 sidecars (optional)"
     exit 2
 fi
 
@@ -70,19 +72,6 @@ fi
 [ -f "$CLI_SRC" ] || { log "FAIL: cli binary not found: $CLI_SRC"; exit 1; }
 [ -f "$SING_BOX_SRC" ] || { log "FAIL: sing-box artifact not found: $SING_BOX_SRC"; exit 1; }
 [ -f "$STATS_HELPER_SRC" ] || { log "FAIL: stats helper not found: $STATS_HELPER_SRC"; exit 1; }
-if [ -n "$TURNRELAY_SRC" ]; then
-    [ -d "$TURNRELAY_SRC" ] || { log "FAIL: TurnRelay artifact dir not found: $TURNRELAY_SRC"; exit 1; }
-    for arch in amd64 arm64 armv7; do
-        [ -f "$TURNRELAY_SRC/turnrelay-server-$arch" ] || {
-            log "FAIL: TurnRelay $arch binary not found: $TURNRELAY_SRC/turnrelay-server-$arch"
-            exit 1
-        }
-        [ -f "$TURNRELAY_SRC/turnrelay-server-$arch.sha256" ] || {
-            log "FAIL: TurnRelay $arch checksum not found: $TURNRELAY_SRC/turnrelay-server-$arch.sha256"
-            exit 1
-        }
-    done
-fi
 
 ASSETS_DIR=${VPNCTL_ASSETS_DST:-/opt/vpnctl/assets}
 ASSETS_SRC=${VPNCTL_ASSETS_SRC:-$DEFAULT_ASSETS_SRC}
@@ -96,25 +85,25 @@ fi
 SOURCES=("$SING_BOX_SRC" "$STATS_HELPER_SRC" "$CLI_SRC" "$DAEMON_SRC")
 DESTINATIONS=("$SING_BOX_DST" "$STATS_HELPER_DST" "$CLI_DST" "$DAEMON_DST")
 MODES=(0755 0755 0755 0755)
-if [ -n "$TURNRELAY_SRC" ]; then
-    turnrelay_sources=()
-    turnrelay_destinations=()
-    turnrelay_modes=()
+add_turnrelay_artifacts() {
+    local source=$1 binary=$2 arch suffix path
+    [ -n "$source" ] || return 0
+    local sources=() destinations=() modes=()
     for arch in amd64 arm64 armv7; do
         for suffix in "" ".sha256"; do
-            turnrelay_sources+=("$TURNRELAY_SRC/turnrelay-server-$arch$suffix")
-            turnrelay_destinations+=("$TURNRELAY_DST/turnrelay-server-$arch$suffix")
-            if [ -z "$suffix" ]; then
-                turnrelay_modes+=(0755)
-            else
-                turnrelay_modes+=(0644)
-            fi
+            path="$source/$binary-$arch$suffix"
+            [ -f "$path" ] || { log "FAIL: TurnRelay artifact missing: $path"; exit 1; }
+            sources+=("$path")
+            destinations+=("$TURNRELAY_DST/$binary-$arch$suffix")
+            if [ -z "$suffix" ]; then modes+=(0755); else modes+=(0644); fi
         done
     done
-    SOURCES=("${SOURCES[@]:0:2}" "${turnrelay_sources[@]}" "${SOURCES[@]:2}")
-    DESTINATIONS=("${DESTINATIONS[@]:0:2}" "${turnrelay_destinations[@]}" "${DESTINATIONS[@]:2}")
-    MODES=("${MODES[@]:0:2}" "${turnrelay_modes[@]}" "${MODES[@]:2}")
-fi
+    SOURCES=("${SOURCES[@]:0:2}" "${sources[@]}" "${SOURCES[@]:2}")
+    DESTINATIONS=("${DESTINATIONS[@]:0:2}" "${destinations[@]}" "${DESTINATIONS[@]:2}")
+    MODES=("${MODES[@]:0:2}" "${modes[@]}" "${MODES[@]:2}")
+}
+add_turnrelay_artifacts "$TURNRELAY_SRC" turnrelay-server
+add_turnrelay_artifacts "$TURNRELAY_RELAY_SRC" turnrelay-relay
 STAGED=()
 BACKUPS=()
 EXISTED=()

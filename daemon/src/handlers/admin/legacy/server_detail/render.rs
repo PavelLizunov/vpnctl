@@ -357,6 +357,10 @@ pub(super) async fn server_detail_render(
         .list_servers()
         .await
         .map_err(|e| internal_error(anyhow::Error::new(e)))?;
+    let names =
+        crate::handlers::admin::helpers::server_names(&state.inv, &routing_candidates).await?;
+    let topology =
+        crate::handlers::admin::topology::Topology::load(&state.inv, &routing_candidates).await?;
     let client_detour_candidates = state
         .inv
         .list_fleet_servers()
@@ -585,6 +589,7 @@ pub(super) async fn server_detail_render(
                 (ordered_kernel_ids(&server).iter().map(|k| k.0.clone()).collect::<Vec<_>>().join("+"))
             }
             " · " (crate::i18n::tr(lang, "hoster ", "хостер ")) (server.hoster)
+            (topology.badges(&sid, &names, lang))
         }
 
         (super::deploy_panel::render(&deploy_view, &server.id.0, lang))
@@ -728,7 +733,10 @@ pub(super) async fn server_detail_render(
                 (server_detail_dnstt_section(&server, &server_secrets, latest.as_ref(), lang))
             }
             div data-protocol-setting="turnrelay" {
-                (server_detail_turnrelay_section(&server, &server_secrets, latest.as_ref(), lang))
+                (server_detail_turnrelay_section(&server, &server_secrets, latest.as_ref(), (&routing_candidates, &names), lang))
+            }
+            div data-protocol-setting="turnrelay-relay" {
+                (server_detail_turnrelay_relay_section(&server, &server_secrets, topology.relay_exits.get(&sid), &names, lang))
             }
             @if udp_pair_enabled { (server_detail_udp_pair_section(lang)) }
             (server_detail_reserved_ports_section(&server, &reserved_ports, lang))

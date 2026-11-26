@@ -15,6 +15,7 @@ pub fn build_registry() -> vpnctl_core::Result<Registry> {
     reg.register_kernel(Box::new(Xray::new()))?;
     reg.register_kernel(Box::new(crate::DnsttKernel))?;
     reg.register_kernel(Box::new(TurnRelayKernel))?;
+    reg.register_kernel(Box::new(crate::TurnRelayRelayKernel))?;
 
     reg.register_protocol(Box::new(VlessReality::new()))?;
     reg.register_protocol(Box::new(TuicV5::new()))?;
@@ -31,6 +32,7 @@ pub fn build_registry() -> vpnctl_core::Result<Registry> {
     reg.register_protocol(Box::new(vpnctl_protocols::Dnstt))?;
     reg.register_protocol(Box::new(vpnctl_protocols::Vmess))?;
     reg.register_protocol(Box::new(TurnRelay))?;
+    reg.register_protocol(Box::new(vpnctl_protocols::TurnRelayRelay))?;
 
     Ok(reg)
 }
@@ -59,6 +61,7 @@ mod tests {
                 "dnstt",
                 "vmess",
                 "turnrelay",
+                "turnrelay-relay",
             ]
             .map(String::from)
             .to_vec(),
@@ -72,7 +75,8 @@ mod tests {
                 "caddy",
                 "xray",
                 "dnstt",
-                "turnrelay"
+                "turnrelay",
+                "turnrelay-relay",
             ]
             .map(String::from)
             .to_vec(),
@@ -114,7 +118,7 @@ mod tests {
         let registry = build_registry().unwrap();
         let count = registry.protocol_ids().len();
         assert!(readme.contains(&format!("**{count} protocols**")));
-        assert!(readme.contains(&format!("✅ ({count} across 6 kernels)")));
+        assert!(readme.contains(&format!("✅ ({count} across 7 kernels)")));
         for (label, risk) in [
             ("Strong", DpiRisk::Strong),
             ("Moderate", DpiRisk::Moderate),

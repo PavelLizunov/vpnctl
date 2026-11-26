@@ -36,11 +36,12 @@ fn server_row(
         Option<&super::path_availability::Availability>,
         Option<&vpnctl_inventory::SshAccessStatus>,
     ),
-    name: Option<&str>,
+    identity: (Option<&str>, Markup),
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
     let (health, path, ssh_access) = observations;
+    let (name, badges) = identity;
     let mut visible_protos: Vec<&str> = Vec::with_capacity(s.enabled_protocols.len());
     let mut hidden_protos: Vec<&str> = Vec::new();
     for p in &s.enabled_protocols {
@@ -100,6 +101,7 @@ fn server_row(
                 @if has_health_warning {
                     " " span.ed-grid__flag title=(health_warnings.join(" · ")) { (status("triangle-alert", lang, "Health warning", "Предупреждение здоровья")) }
                 }
+                (badges)
             }
             td {
                 span.ed-grid__mut { (s.ssh_user) "@" }
@@ -152,6 +154,7 @@ pub(crate) async fn servers(
     .map_err(|e| internal_error(anyhow::Error::new(e)))?;
 
     let names = server_names(&state.inv, &server_list).await?;
+    let topology = super::topology::Topology::load(&state.inv, &server_list).await?;
 
     let mut paths = std::collections::HashMap::new();
     let mut ssh_access = std::collections::HashMap::new();
@@ -371,7 +374,7 @@ pub(crate) async fn servers(
                                 user_counts.get(&s.id).copied().unwrap_or(0),
                                 &hidden_matrix,
                                 (latest_health.get(&s.id), paths.get(&s.id), ssh_access.get(&s.id)),
-                                names.get(&s.id).map(String::as_str),
+                                (names.get(&s.id).map(String::as_str), topology.badges(&s.id, &names, lang)),
                                 lang,
                             ))
                         }

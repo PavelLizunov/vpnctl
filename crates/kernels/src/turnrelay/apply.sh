@@ -33,7 +33,6 @@ trap finish EXIT
 trap 'exit 1' HUP INT TERM
 install -d -m 0755 /usr/local/libexec/vpnctl-turnrelay
 install -d -m 0700 /var/lib/vpnctl-turnrelay
-command -v nft >/dev/null
 command -v openssl >/dev/null
 if ! systemctl is-active --quiet vpnctl-turnrelay.service; then
     if ss -H -lnu sport = :"$turnrelay_port" | awk -v want=":$turnrelay_port" \
@@ -65,6 +64,13 @@ install -m 0644 "$stage/vpnctl-turnrelay.service" /etc/systemd/system/vpnctl-tur
 systemd-analyze verify "$stage/vpnctl-turnrelay.service" 2>/dev/null
 systemctl daemon-reload
 systemctl enable vpnctl-turnrelay.service
+if command -v ufw >/dev/null 2>&1 && LC_ALL=C ufw status 2>/dev/null | grep -qx 'Status: active'; then
+    if [ -n "$turnrelay_relay_ip" ]; then
+        ufw allow proto udp from "$turnrelay_relay_ip" to any port "$turnrelay_port" comment 'vpnctl-turnrelay' || true
+    else
+        ufw allow "$turnrelay_port/udp" comment 'vpnctl managed ingress' || true
+    fi
+fi
 systemctl restart vpnctl-turnrelay.service
 for attempt in 1 2 3 4 5 6 7 8 9 10; do
     relay_pid=$(systemctl show vpnctl-turnrelay.service -p MainPID --value)

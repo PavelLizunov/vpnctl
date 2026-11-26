@@ -2,8 +2,9 @@
 //!
 //! A node runs `turnrelay-server`, which terminates the obfuscated TURN
 //! transport on UDP and dials destinations itself. Clients reach it through a
-//! TURN provider; the locked v1 profile is a self-contained
-//! `turnrelay://<base64url-json>#<label>` URI that VPNRouter imports as a
+//! TURN provider. The controller resolves an optional `turnrelay.relay_server_id`
+//! to concrete TURN credentials before rendering. The locked v1 profile is a
+//! self-contained `turnrelay://<base64url-json>#<label>` URI that VPNRouter imports as a
 //! native outbound. The server authenticates clients with one pre-shared exit
 //! password (`turnrelay.password`, minted once) and pins its persistent DTLS
 //! certificate; `observed.turnrelay.cert_sha256` is the SHA-256 of the leaf
@@ -335,7 +336,7 @@ impl Protocol for TurnRelay {
     }
 
     fn dpi_risk(&self) -> DpiRisk {
-        DpiRisk::Weak
+        DpiRisk::Strong
     }
 
     fn validate_server(&self, ctx: &RenderCtx<'_>) -> Result<()> {
@@ -352,8 +353,13 @@ impl Protocol for TurnRelay {
     fn server_inbound(&self, ctx: &RenderCtx<'_>, _users: &[User]) -> Result<Value> {
         let settings = settings(ctx)?;
         let password = required(ctx, EXIT_PASSWORD)?;
+        let relay_ip = settings
+            .turn_server
+            .rsplit_once(':')
+            .and_then(|(host, _)| host.parse::<std::net::Ipv4Addr>().ok());
         Ok(json!({
             "address": settings.address,
+            "relay_ip": relay_ip,
             "listen_port": settings.port,
             "mode": settings.mode,
             "password": password,

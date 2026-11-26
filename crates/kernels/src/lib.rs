@@ -5,6 +5,7 @@ mod firewall;
 mod registry;
 mod sing_box;
 mod turnrelay;
+mod turnrelay_relay;
 mod xray;
 
 pub use amnezia_wg::AmneziaWg;
@@ -17,6 +18,7 @@ pub use sing_box::{
     SING_BOX_VPNCTL_VERSION, SingBox,
 };
 pub use turnrelay::TurnRelayKernel;
+pub use turnrelay_relay::TurnRelayRelayKernel;
 pub use xray::Xray;
 
 /// Destination ranges user traffic must never reach on a node, beyond what a

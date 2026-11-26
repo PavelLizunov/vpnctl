@@ -65,11 +65,11 @@ fn artifact_names_cover_supported_architectures() {
         ("armv7l", "turnrelay-server-armv7"),
     ] {
         assert_eq!(
-            artifact_path(arch).unwrap(),
+            artifact_path(arch, "turnrelay-server").unwrap(),
             std::path::PathBuf::from(format!("/opt/vpnctl/node-artifacts/{expected}"))
         );
     }
-    assert!(artifact_path("riscv64").is_err());
+    assert!(artifact_path("riscv64", "turnrelay-server").is_err());
 }
 
 #[test]
@@ -214,4 +214,133 @@ fn no_user_material_is_required_for_server_rendering() {
             )
             .is_ok()
     );
+}
+
+#[test]
+fn exit_uses_strong_tier_and_scopes_ufw_to_ipv4_turn_provider() {
+    assert_eq!(TurnRelay.dpi_risk(), vpnctl_core::DpiRisk::Strong);
+    let mut secrets = secrets();
+    secrets.insert("turnrelay.turn_server".into(), "192.0.2.12:53491".into());
+    let script = rendered(&secrets);
+    assert!(script.contains("turnrelay_relay_ip='192.0.2.12'"));
+    assert!(script.contains("ufw allow proto udp from"));
+    assert!(!script.contains("command -v nft"));
+    assert!(script.contains("command -v openssl"));
+}
+
+#[tokio::test]
+async fn managed_entry_renders_both_listeners_and_stops_when_disabled() {
+    use crate::{TurnRelayRelayKernel, build_registry, reconcile_disabled_kernels};
+    use vpnctl_protocols::TurnRelayRelay;
+    let mut server = server();
+    server.kernels = vec![KernelId("turnrelay-relay".into())];
+    let mut secrets = HashMap::from([
+        ("turnrelay_relay.username".into(), "fixture-user".into()),
+        ("turnrelay_relay.password".into(), "fixture-pass".into()),
+    ]);
+    let protocol = TurnRelayRelay;
+    let kernel = TurnRelayRelayKernel;
+    assert_eq!(protocol.listen_ports(), &[("tcp", 53491), ("udp", 53491)]);
+    assert!(!protocol.appears_in_sing_box_sub());
+    assert!(!protocol.appears_in_stock_sing_box_sub());
+    let ctx = RenderCtx::new(&server, &secrets);
+    let script = String::from_utf8(kernel.render_config(&ctx, &[], &[&protocol]).unwrap()).unwrap();
+    assert!(script.contains("RELAY_PORT=53491\n"));
+    assert!(script.contains("EXIT_IPS=\n"));
+    assert!(script.contains("install -m 0600"));
+    assert!(script.contains("ss -H -lntp"));
+    assert!(script.contains("ss -H -lnup"));
+    assert!(script.contains("elif command -v iptables"));
+    assert!(!script.contains("command -v nft"));
+    secrets.insert("turnrelay_relay.listen_port".into(), "61000".into());
+    assert_eq!(
+        protocol.effective_listen_ports(&secrets),
+        vec![("tcp", 61000), ("udp", 61000)]
+    );
+
+    let ssh = vpnctl_ssh::MockTransport::new();
+    ssh.expect("set -eu\nstate=$(systemctl show --property=LoadState --value -- 'vpnctl-turnrelay-relay.service') || [ \"$state\" = not-found ]\nif [ \"$state\" != not-found ]; then systemctl disable --now -- 'vpnctl-turnrelay-relay.service'; fi\n", "");
+    server.enabled_protocols.clear();
+    reconcile_disabled_kernels(&build_registry().unwrap(), &server, &[], &ssh)
+        .await
+        .unwrap();
+}
+
+#[test]
+fn managed_entry_applies_and_rolls_back_without_firewall_tools() {
+    use std::fs;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::process::Command;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("bin");
+    fs::create_dir(&path).unwrap();
+    for name in [
+        "flock", "mktemp", "mkdir", "rm", "cp", "install", "mv", "grep", "sleep",
+    ] {
+        let binary = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|dir| dir.join(name))
+            .find(|file| file.is_file())
+            .unwrap();
+        symlink(binary, path.join(name)).unwrap();
+    }
+    for (name, body) in [
+        ("systemctl", "case \"$1\" in show) echo 123;; esac"),
+        (
+            "systemd-analyze",
+            "test \"${SIMULATE_VERIFY_FAILURE:-0}\" = 0",
+        ),
+        ("ss", "echo 'users:((\"turnrelay-relay\",pid=123,fd=3))'"),
+    ] {
+        let script = path.join(name);
+        fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    for dir in [
+        "etc/vpnctl-turnrelay",
+        "etc/systemd/system",
+        "usr/local/libexec/vpnctl-turnrelay",
+    ] {
+        fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    let binary = root.join("usr/local/libexec/vpnctl-turnrelay/turnrelay-relay");
+    let candidate = binary.with_extension("candidate");
+    let env = root.join("etc/vpnctl-turnrelay/relay.env");
+    let apply = include_str!("../turnrelay_relay/apply.sh")
+        .replace("/etc/", &format!("{}/etc/", root.display()))
+        .replace("/usr/local/", &format!("{}/usr/local/", root.display()));
+    let run = |port: u16, verify_failure: bool| {
+        let command = format!(
+            "relay_port={port}\nrelay_env='RELAY_PORT={port}\n'\nrelay_unit='fixture'\n{apply}"
+        );
+        Command::new("/bin/sh")
+            .args(["-c", &command])
+            .env("PATH", &path)
+            .env(
+                "SIMULATE_VERIFY_FAILURE",
+                if verify_failure { "1" } else { "0" },
+            )
+            .output()
+            .unwrap()
+    };
+
+    fs::write(&candidate, "first binary").unwrap();
+    let result = run(53491, false);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        fs::metadata(&env).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(fs::read_to_string(&env).unwrap(), "RELAY_PORT=53491\n");
+
+    fs::write(&candidate, "second binary").unwrap();
+    assert!(!run(54491, true).status.success());
+    assert_eq!(fs::read_to_string(&env).unwrap(), "RELAY_PORT=53491\n");
+    assert_eq!(fs::read_to_string(&binary).unwrap(), "first binary");
 }

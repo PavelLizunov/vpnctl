@@ -5,10 +5,10 @@
 ## Overview
 
 - **Workspace Crates:** 10
-- **Tracked Rust Files:** 575 (365 prod / 210 test)
-- **Total Rust LOC:** 221,673 (114,786 prod / 106,887 test)
+- **Tracked Rust Files:** 580 (369 prod / 211 test)
+- **Total Rust LOC:** 223,182 (115,856 prod / 107,326 test)
 - **Database Migrations:** 79
-- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 161
+- **`daemon/src/app/routes.rs` `.route(...)` Registrations:** 162
 
 ## Workspace Crates & Targets
 
@@ -20,11 +20,11 @@
 | `vpnctl-crypto` | `crates/crypto` | 0.9.0 | lib, 1 test | 318 (1) | 125 (1) | **443** |
 | `vpnctl-host-fingerprint` | `crates/host-fingerprint` | 0.9.0 | lib, 2 tests | 193 (1) | 454 (2) | **647** |
 | `vpnctl-inventory` | `crates/inventory` | 0.9.0 | lib, 61 tests | 19,411 (65) | 28,424 (67) | **47,835** |
-| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 7 tests, 1 examples | 7,898 (19) | 2,460 (9) | **10,358** |
-| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 15 tests | 5,256 (24) | 6,246 (15) | **11,502** |
+| `vpnctl-kernels` | `crates/kernels` | 0.9.0 | lib, 7 tests, 1 examples | 8,130 (20) | 2,460 (9) | **10,590** |
+| `vpnctl-protocols` | `crates/protocols` | 0.9.0 | lib, 16 tests | 5,409 (25) | 6,392 (16) | **11,801** |
 | `vpnctl-ssh` | `crates/ssh` | 0.9.0 | lib, 4 tests | 2,825 (5) | 1,191 (5) | **4,016** |
-| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 32 tests | 69,486 (211) | 65,025 (106) | **134,511** |
-| **Total** | | | | **114,786 (365)** | **106,887 (210)** | **221,673** |
+| `vpnctld` | `daemon` | 0.9.0 | lib, bin, 32 tests | 70,171 (213) | 65,318 (106) | **135,489** |
+| **Total** | | | | **115,856 (369)** | **107,326 (211)** | **223,182** |
 
 ## Largest Rust Modules (Top 25)
 
@@ -140,7 +140,7 @@
 | `0078` | desktop subscription core | `crates/inventory/migrations/0078_desktop_subscription_core.sql` | 1 |
 | `0079` | user admin note | `crates/inventory/migrations/0079_user_admin_note.sql` | 4 |
 
-## `daemon/src/app/routes.rs` `.route(...)` Registrations (161)
+## `daemon/src/app/routes.rs` `.route(...)` Registrations (162)
 
 | Method | Path | Handler |
 |---|---|---|
@@ -236,6 +236,7 @@
 | `GET` | `/admin/servers/{id}/status` | `admin::server_detail` |
 | `POST` | `/admin/servers/{id}/traffic-limit` | `admin::server_set_traffic_limit` |
 | `POST` | `/admin/servers/{id}/turnrelay-config` | `admin::server_set_turnrelay_config` |
+| `POST` | `/admin/servers/{id}/turnrelay-relay-config` | `admin::server_set_turnrelay_relay_config` |
 | `POST` | `/admin/servers/{id}/udp-pair` | `admin::server_set_udp_pair` |
 | `GET` | `/admin/servers/{id}/update-kernels/sse` | `admin::server_update_kernels_sse` |
 | `POST` | `/admin/servers/{id}/user-bandwidth` | `admin::server_set_user_bandwidth` |
