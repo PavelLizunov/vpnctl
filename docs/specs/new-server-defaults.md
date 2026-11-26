@@ -2,7 +2,7 @@
 
 ## Intent and invariants
 
-New nodes use `www.apple.com` as their REALITY handshake domain and `chrome` as
+New nodes use `ozon.ru` as their REALITY handshake domain and `chrome` as
 their REALITY uTLS fingerprint (`vless.fp`). Save both on registration so
 existing server configurations and issued profiles keep the handshake name and
 fingerprint they already use (`yahoo.com` / `randomized`). An operator can
@@ -29,7 +29,7 @@ change either setting for an individual node.
 ## Verification
 
 - Old links keep their byte-exact SNI and `fp=randomized`. A new node uses
-  `www.apple.com` and `chrome` in its client and server configuration.
+  `ozon.ru` and `chrome` in its client and server configuration.
 - Fresh roster registration prepares matching per-user rates. Unavailable or
   mismatched rosters leave a usable base limit and an operator-visible status.
 - Changing the fleet template affects later registrations only. No-op saves

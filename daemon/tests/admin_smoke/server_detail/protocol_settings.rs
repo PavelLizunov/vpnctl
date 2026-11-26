@@ -260,7 +260,7 @@ async fn reality_fp_and_handshake_target_save_validate_clear_and_audit() {
     let resp = post(
         &s,
         "reality-config",
-        "sni=www.apple.com&fp=chrome&handshake_server=127.0.0.1&handshake_port=8443&listen_port=",
+        "sni=ozon.ru&fp=chrome&handshake_server=127.0.0.1&handshake_port=8443&listen_port=",
     )
     .await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
@@ -289,14 +289,14 @@ async fn reality_fp_and_handshake_target_save_validate_clear_and_audit() {
         Some("8443")
     );
     let after = client_artifacts(&s).await;
-    assert!(after.0.contains("&sni=www.apple.com&fp=chrome&"));
+    assert!(after.0.contains("&sni=ozon.ru&fp=chrome&"));
 
     let before_invalid = s.inv.list_server_secrets(&sid).await.unwrap();
     for bad in [
-        "sni=www.apple.com&fp=not-a-fp",
-        "sni=www.apple.com&handshake_server=https%3A%2F%2Fbad.example",
-        "sni=www.apple.com&handshake_port=0",
-        "sni=www.apple.com&handshake_port=99999",
+        "sni=ozon.ru&fp=not-a-fp",
+        "sni=ozon.ru&handshake_server=https%3A%2F%2Fbad.example",
+        "sni=ozon.ru&handshake_port=0",
+        "sni=ozon.ru&handshake_port=99999",
     ] {
         assert_eq!(
             post(&s, "reality-config", bad).await.status(),
@@ -314,14 +314,14 @@ async fn reality_fp_and_handshake_target_save_validate_clear_and_audit() {
         post(
             &s,
             "reality-config",
-            "sni=www.apple.com&fp=&handshake_server=&handshake_port=&listen_port=",
+            "sni=ozon.ru&fp=&handshake_server=&handshake_port=&listen_port=",
         )
         .await
         .status(),
         StatusCode::SEE_OTHER
     );
     let cleared = client_artifacts(&s).await;
-    assert!(cleared.0.contains("&sni=www.apple.com&fp=randomized&"));
+    assert!(cleared.0.contains("&sni=ozon.ru&fp=randomized&"));
 }
 
 #[tokio::test]
@@ -351,7 +351,7 @@ async fn quic_tls_sni_form_saves_audits_clears_and_rejects_invalid_or_disabled()
     assert!(!s.inv.server_pending_deploy(&sid).await.unwrap());
 
     // Valid hostname saves, audits, and appears in Hysteria2 client_config tls.server_name.
-    let resp = post(&s, "quic-tls-config", "server_name=%20www.apple.com%20").await;
+    let resp = post(&s, "quic-tls-config", "server_name=%20ozon.ru%20").await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     assert_eq!(resp.headers()["location"], "/admin/servers/s0/protocols");
     assert_eq!(
@@ -360,7 +360,7 @@ async fn quic_tls_sni_form_saves_audits_clears_and_rejects_invalid_or_disabled()
             .await
             .unwrap()
             .as_deref(),
-        Some("www.apple.com")
+        Some("ozon.ru")
     );
     let audit = s.inv.recent_audit(1).await.unwrap();
     assert_eq!(audit[0].action, "server.quic_tls.set");
@@ -369,7 +369,7 @@ async fn quic_tls_sni_form_saves_audits_clears_and_rejects_invalid_or_disabled()
         Some(serde_json::json!({"keys": ["tls.server_name"]}))
     );
     let after = client_artifacts(&s).await;
-    assert!(after.1.contains(r#""server_name":"www.apple.com""#));
+    assert!(after.1.contains(r#""server_name":"ozon.ru""#));
 
     // Invalid hostnames / IP literals return 400 without mutation.
     for bad in ["127.0.0.1", "::1", "-bad.org", "https://example.org"] {
@@ -396,7 +396,7 @@ async fn quic_tls_sni_form_saves_audits_clears_and_rejects_invalid_or_disabled()
         .await
         .unwrap();
     assert_eq!(
-        post(&s, "quic-tls-config", "server_name=www.apple.com")
+        post(&s, "quic-tls-config", "server_name=ozon.ru")
             .await
             .status(),
         StatusCode::BAD_REQUEST

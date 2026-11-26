@@ -282,7 +282,7 @@ pub(crate) fn server_detail_quic_tls_section(
             }
             input id="quic-tls-server-name" type="text" name="server_name" maxlength="253"
                   value=(server_name)
-                  placeholder="www.apple.com"
+                  placeholder="ozon.ru"
                   title=(tr(lang, "Optional hostname emitted as tls.server_name for pinned TUIC/Hysteria2 clients.", "Опциональное имя хоста, передаваемое как tls.server_name для клиентов TUIC/Hysteria2."))
                   style="min-width: 0; padding: 4px 8px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule);";
             span {}
