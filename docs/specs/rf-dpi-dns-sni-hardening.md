@@ -16,9 +16,8 @@ Invariants:
   `randomized` uTLS fingerprint, handshake target `(sni, 443)`, no QUIC
   `server_name`).
 - Newly registered servers (`register_new_server`, used by quick-add and the
-  bootstrap wizard) persist `vless.sni = "www.apple.com"` and
-  `vless.fp = "chrome"` so new deployments avoid Russian SNI domains on foreign
-  VPS hosts and avoid the `randomized` uTLS fingerprint.
+  bootstrap wizard) persist `vless.sni = "ozon.ru"` and
+  `vless.fp = "chrome"`.
 - Protocol rendering owns no mutable inventory state; all configuration arrives
   via `RenderCtx`.
 - Every admin configuration mutation is validated fail-closed before saving,
@@ -45,7 +44,7 @@ Invariants:
 Constants:
 ```rust
 pub const DEFAULT_REALITY_SNI: &str = "yahoo.com";
-pub const NEW_SERVER_REALITY_SNI: &str = "www.apple.com";
+pub const NEW_SERVER_REALITY_SNI: &str = "ozon.ru";
 pub const DEFAULT_REALITY_FP: &str = "randomized";
 pub const NEW_SERVER_REALITY_FP: &str = "chrome";
 pub const VALID_REALITY_FPS: &[&str] = &[
@@ -198,7 +197,7 @@ Protocol rendering rules:
       `quic-tls-config`.
 - [ ] Sing-box client subscription tests pin the non-leaking DNS envelope and
       preserve empty fail-closed bytes.
-- [ ] New server registration persists `vless.sni = "www.apple.com"` and
+- [ ] New server registration persists `vless.sni = "ozon.ru"` and
       `vless.fp = "chrome"`.
 - [ ] Independent review-agent finds zero unresolved `critical` / `important`
       issues; `cargo fmt --all -- --check`, `gitleaks`, and full GitHub Actions
