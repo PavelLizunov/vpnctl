@@ -33,6 +33,7 @@ pub(crate) fn server_detail_protocols_section(
     let render_row = |pid: &ProtocolId, is_on: bool| {
         let compatible = supported.contains(pid);
         let protocol = registry.protocol(pid);
+        let issued = pid.0 != "turnrelay-relay";
         let hidden = hidden_map.get(pid).copied().unwrap_or(false);
         let action = format!("{server_path}/protocols/{}", path_segment_encode(&pid.0));
         let applied_hint = tr(
@@ -53,7 +54,9 @@ pub(crate) fn server_detail_protocols_section(
                     }
                     div.ed-protocol__meta {
                         @if is_on {
-                            @if hidden {
+                            @if !issued {
+                                span { (tr(lang, "Managed entry for TurnRelay exits", "Управляемый вход для выходов TurnRelay")) }
+                            } @else if hidden {
                                 span { (tr(lang, "Hidden from subscriptions", "Скрыт из подписок")) }
                             } @else if compatible {
                                 span { (tr(lang, "Allowed in subscriptions", "Разрешён в подписках")) }
@@ -78,7 +81,7 @@ pub(crate) fn server_detail_protocols_section(
                     }
                 }
                 div.ed-protocol__actions {
-                    @if is_on && compatible {
+                    @if is_on && compatible && issued {
                         form method="post" action=(format!("{action}/{}", if hidden { "unhide" } else { "hide" })) {
                             button type="submit" class="ed-abtn ed-abtn--secondary ed-abtn--sm" {
                                 @if hidden {

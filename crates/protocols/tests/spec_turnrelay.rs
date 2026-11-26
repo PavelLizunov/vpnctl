@@ -74,7 +74,7 @@ fn turnrelay_identity_ports_and_subscription_flags_are_locked() {
     assert_eq!(TURNRELAY_PORT, 53492);
     assert!(!protocol.appears_in_sing_box_sub());
     assert!(!protocol.appears_in_stock_sing_box_sub());
-    assert_eq!(protocol.dpi_risk(), vpnctl_core::DpiRisk::Weak);
+    assert_eq!(protocol.dpi_risk(), vpnctl_core::DpiRisk::Strong);
 }
 
 #[test]

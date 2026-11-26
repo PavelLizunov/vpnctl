@@ -321,6 +321,10 @@ pub(crate) fn admin_router(state: AppState) -> Router {
             post(admin::server_set_turnrelay_config),
         )
         .route(
+            "/admin/servers/{id}/turnrelay-relay-config",
+            post(admin::server_set_turnrelay_relay_config),
+        )
+        .route(
             "/admin/servers/{id}/dnstt-check/sse",
             get(admin::dnstt_check),
         )

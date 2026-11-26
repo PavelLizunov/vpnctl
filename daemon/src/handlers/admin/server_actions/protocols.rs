@@ -3,6 +3,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 
 use super::super::helpers::{bad_request, internal_error, not_found};
 use super::super::legacy::spawn_user_servers_redeploy;
+use super::super::turnrelay::{self, ENTRY, EXIT};
 use crate::AppState;
 use crate::http_util::path_segment_encode;
 
@@ -12,6 +13,12 @@ pub(crate) async fn server_enable_protocol(
 ) -> Response {
     let sid = vpnctl_core::ServerId(server_id_str.clone());
     let pid = vpnctl_core::ProtocolId(protocol_id_str.clone());
+    let managed = matches!(pid.0.as_str(), ENTRY | EXIT);
+    let _topology = if managed {
+        Some(turnrelay::MUTATIONS.lock().await)
+    } else {
+        None
+    };
 
     let server = match state.inv.get_server(&sid).await {
         Ok(Some(s)) => s,
@@ -33,6 +40,7 @@ pub(crate) async fn server_enable_protocol(
         ));
     }
 
+    let mut minted = Vec::new();
     if !server.enabled_protocols.contains(&pid) {
         if state
             .registry
@@ -95,25 +103,64 @@ pub(crate) async fn server_enable_protocol(
                 return bad_request(&format!("VMess TCP/{port} is reserved on this server"));
             }
         }
-        if pid.0 == "turnrelay" {
-            let secrets = match state.inv.list_server_secrets(&sid).await {
+        if managed {
+            let mut secrets = match state.inv.list_server_secrets(&sid).await {
                 Ok(secrets) => secrets,
-                Err(error) => return internal_error(anyhow::Error::new(error)),
+                Err(error) => return internal_error(error.into()),
             };
+            if pid.0 == EXIT
+                && let Err(response) =
+                    turnrelay::wire_exit(&state, &after, &mut secrets, None).await
+            {
+                return response;
+            }
             if let Err(error) = state.registry.validate_server(&after, &secrets) {
                 return bad_request(&error.to_string());
             }
             let reserved = match state.inv.get_reserved_ports(&sid).await {
                 Ok(ports) => ports,
-                Err(error) => return internal_error(anyhow::Error::new(error)),
+                Err(error) => return internal_error(error.into()),
             };
-            if let Some((_, port)) = state.registry.protocol(&pid).and_then(|protocol| {
+            if let Some((transport, port)) = state.registry.protocol(&pid).and_then(|protocol| {
                 protocol
                     .effective_listen_ports(&secrets)
                     .into_iter()
-                    .find(|(_, port)| reserved.contains(port) || *port == after.ssh_port)
+                    .find(|(_, port)| reserved.contains(port))
             }) {
-                return bad_request(&format!("TurnRelay UDP/{port} is reserved on this server"));
+                return bad_request(&format!(
+                    "TurnRelay {transport}/{port} is reserved on this server"
+                ));
+            }
+            if pid.0 == ENTRY {
+                // Mint only this protocol before publishing the entry to exits.
+                after.enabled_protocols.retain(|id| id == &pid);
+                after.kernels.retain(|id| id.0 == pid.0);
+                match vpnctl_inventory::bootstrap_server_secrets(
+                    &state.inv,
+                    &after,
+                    &state.registry,
+                )
+                .await
+                {
+                    Ok((_, keys)) => minted = keys,
+                    Err(error) => return internal_error(anyhow::anyhow!(error)),
+                }
+            }
+            if pid.0 == EXIT
+                && secrets
+                    .get(turnrelay::RELAY_ID)
+                    .is_some_and(|id| !id.is_empty())
+                && let Err(error) = state
+                    .inv
+                    .set_server_secrets_audited(
+                        &sid,
+                        "admin",
+                        "server.turnrelay.wire",
+                        &turnrelay::wiring_values(&secrets),
+                    )
+                    .await
+            {
+                return internal_error(error.into());
             }
         }
     }
@@ -123,30 +170,52 @@ pub(crate) async fn server_enable_protocol(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
 
-    if inserted == 1 {
-        if let Err(e) = state
+    let mut payload = serde_json::json!({
+        "protocol": protocol_id_str,
+        "newly_added": inserted == 1,
+    });
+    if !minted.is_empty() {
+        payload["minted"] = serde_json::json!(minted);
+    }
+    if inserted == 1
+        && let Err(e) = state
             .inv
             .audit(
                 "admin",
                 "server.protocol.enable",
                 Some(&server_id_str),
-                Some(&serde_json::json!({
-                    "protocol": protocol_id_str,
-                    "newly_added": inserted == 1,
-                })),
+                Some(&payload),
             )
             .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            server = %server_id_str,
+            error = %e,
+            "audit write failed for server.protocol.enable"
+        );
+    }
+    let redeploy = if inserted == 1 {
+        vec![server]
+    } else {
+        Vec::new()
+    };
+    if managed {
+        if let Err(response) = turnrelay::sync_turnrelay_relay_allowlists(
+            &state,
+            &sid,
+            pid.0 == ENTRY,
+            redeploy,
+            "server.protocol.enable",
+        )
+        .await
         {
-            tracing::warn!(
-                target = "vpnctld::admin",
-                server = %server_id_str,
-                error = %e,
-                "audit write failed for server.protocol.enable"
-            );
+            return response;
         }
+    } else {
         spawn_user_servers_redeploy(
             &state,
-            vec![server],
+            redeploy,
             server_id_str.clone(),
             "server.protocol.enable",
         );
@@ -165,6 +234,12 @@ pub(crate) async fn server_disable_protocol(
 ) -> Response {
     let sid = vpnctl_core::ServerId(server_id_str.clone());
     let pid = vpnctl_core::ProtocolId(protocol_id_str.clone());
+    let managed = matches!(pid.0.as_str(), ENTRY | EXIT);
+    let _topology = if managed {
+        Some(turnrelay::MUTATIONS.lock().await)
+    } else {
+        None
+    };
 
     let server = match state.inv.get_server(&sid).await {
         Ok(Some(s)) => s,
@@ -179,8 +254,8 @@ pub(crate) async fn server_disable_protocol(
         Err(e) => return internal_error(anyhow::Error::new(e)),
     };
 
-    if removed == 1 {
-        if let Err(e) = state
+    if removed == 1
+        && let Err(e) = state
             .inv
             .audit(
                 "admin",
@@ -192,17 +267,35 @@ pub(crate) async fn server_disable_protocol(
                 })),
             )
             .await
+    {
+        tracing::warn!(
+            target = "vpnctld::admin",
+            server = %server_id_str,
+            error = %e,
+            "audit write failed for server.protocol.disable"
+        );
+    }
+    let redeploy = if removed == 1 {
+        vec![server]
+    } else {
+        Vec::new()
+    };
+    if managed {
+        if let Err(response) = turnrelay::sync_turnrelay_relay_allowlists(
+            &state,
+            &sid,
+            false,
+            redeploy,
+            "server.protocol.disable",
+        )
+        .await
         {
-            tracing::warn!(
-                target = "vpnctld::admin",
-                server = %server_id_str,
-                error = %e,
-                "audit write failed for server.protocol.disable"
-            );
+            return response;
         }
+    } else {
         spawn_user_servers_redeploy(
             &state,
-            vec![server],
+            redeploy,
             server_id_str.clone(),
             "server.protocol.disable",
         );

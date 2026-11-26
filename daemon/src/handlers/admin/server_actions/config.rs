@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 
 use super::super::helpers::{bad_request, error_resp, internal_error, not_found};
+use super::super::turnrelay::{self, ENTRY, RELAY_ID};
 use crate::AppState;
 use crate::http_util::{form_field, path_segment_encode};
 
@@ -931,6 +932,7 @@ pub(crate) async fn server_set_turnrelay_config(
     State(state): State<AppState>,
     body: String,
 ) -> Response {
+    let _topology = turnrelay::MUTATIONS.lock().await;
     let sid = vpnctl_core::ServerId(server_id.clone());
     let server = match state.inv.get_server(&sid).await {
         Ok(Some(server)) => server,
@@ -946,6 +948,9 @@ pub(crate) async fn server_set_turnrelay_config(
         Err(error) => return internal_error(anyhow::Error::new(error)),
     };
 
+    let previous_entry = secrets.get(RELAY_ID).is_some_and(|id| !id.is_empty());
+    let selected_entry = form_field(&body, "relay_server_id");
+    let selected_entry = selected_entry.as_deref().map(str::trim);
     let port = form_field(&body, "listen_port")
         .unwrap_or_default()
         .trim()
@@ -1006,7 +1011,7 @@ pub(crate) async fn server_set_turnrelay_config(
         return bad_request("invalid TurnRelay publish targets");
     }
 
-    let values = [
+    let mut values = vec![
         ("turnrelay.listen_port", port.as_str()),
         ("turnrelay.mode", mode),
         ("turnrelay.turn_server", turn_server.as_str()),
@@ -1017,11 +1022,23 @@ pub(crate) async fn server_set_turnrelay_config(
         ("turnrelay.publish", publish.as_str()),
         ("turnrelay.publish_targets", publish_targets.as_str()),
     ];
+    if previous_entry {
+        values.push((RELAY_ID, ""));
+    }
     secrets.extend(
         values
             .iter()
             .map(|(key, value)| ((*key).to_owned(), (*value).to_owned())),
     );
+    if let Some(entry) = selected_entry.filter(|entry| !entry.is_empty()) {
+        if let Err(response) =
+            turnrelay::wire_exit(&state, &server, &mut secrets, Some(entry)).await
+        {
+            return response;
+        }
+        values.retain(|(key, _)| !turnrelay::WIRING_KEYS.contains(key));
+        values.extend(turnrelay::wiring_values(&secrets));
+    }
     if let Err(error) = protocol.validate_server(&vpnctl_core::RenderCtx::new(&server, &secrets)) {
         return bad_request(&error.to_string());
     }
@@ -1041,15 +1058,117 @@ pub(crate) async fn server_set_turnrelay_config(
             return bad_request(&format!("TurnRelay UDP/{port} is reserved on this server"));
         }
     }
-    if let Err(error) = state
+    let changed = match state
         .inv
         .set_server_secrets_audited(&sid, "admin", "server.turnrelay.set", &values)
         .await
     {
-        return internal_error(anyhow::Error::new(error));
+        Ok(changed) => changed,
+        Err(error) => return internal_error(error.into()),
+    };
+    let redeploy = if changed
+        && server.enabled_protocols.contains(&pid)
+        && (previous_entry || selected_entry.is_some_and(|entry| !entry.is_empty()))
+    {
+        vec![server]
+    } else {
+        Vec::new()
+    };
+    if let Err(response) = turnrelay::sync_turnrelay_relay_allowlists(
+        &state,
+        &sid,
+        false,
+        redeploy,
+        "server.turnrelay.set",
+    )
+    .await
+    {
+        return response;
     }
     Redirect::to(&format!(
         "/admin/servers/{}/protocols#turnrelay",
+        path_segment_encode(&server_id)
+    ))
+    .into_response()
+}
+
+pub(crate) async fn server_set_turnrelay_relay_config(
+    Path(server_id): Path<String>,
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    let _topology = turnrelay::MUTATIONS.lock().await;
+    let sid = vpnctl_core::ServerId(server_id.clone());
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(server)) => server,
+        Ok(None) => return not_found("TurnRelay entry server not found"),
+        Err(error) => return internal_error(error.into()),
+    };
+    let pid = vpnctl_core::ProtocolId(ENTRY.into());
+    let Some(protocol) = state.registry.protocol(&pid) else {
+        return bad_request("TurnRelay entry is not registered");
+    };
+    if !server.kernels.iter().any(|id| id.0 == ENTRY) && !server.enabled_protocols.contains(&pid) {
+        return bad_request("Enable the TurnRelay entry kernel before configuring it");
+    }
+    let mut secrets = match state.inv.list_server_secrets(&sid).await {
+        Ok(secrets) => secrets,
+        Err(error) => return internal_error(error.into()),
+    };
+    let input = form_field(&body, "listen_port").unwrap_or_default();
+    let port = if input.trim().is_empty() {
+        vpnctl_protocols::TURNRELAY_RELAY_PORT
+    } else if let Ok(port @ 1..=65535) = input.trim().parse::<u16>() {
+        port
+    } else {
+        return bad_request("Invalid TurnRelay entry port (expected 1..=65535)");
+    };
+    let reserved = match state.inv.get_reserved_ports(&sid).await {
+        Ok(ports) => ports,
+        Err(error) => return internal_error(error.into()),
+    };
+    if reserved.contains(&port) {
+        return bad_request("TurnRelay entry port is reserved on this server");
+    }
+    let port_setting = port.to_string();
+    secrets.insert(turnrelay::PORT.into(), port_setting.clone());
+    if let Err(error) = protocol
+        .validate_server(&vpnctl_core::RenderCtx::new(&server, &secrets))
+        .and_then(|_| state.registry.validate_server(&server, &secrets))
+    {
+        return bad_request(&error.to_string());
+    }
+    let changed = match state
+        .inv
+        .set_server_secrets_audited(
+            &sid,
+            "admin",
+            "server.turnrelay_relay.set",
+            &[(turnrelay::PORT, &port_setting)],
+        )
+        .await
+    {
+        Ok(changed) => changed,
+        Err(error) => return internal_error(error.into()),
+    };
+    let redeploy = if changed && server.enabled_protocols.contains(&pid) {
+        vec![server]
+    } else {
+        Vec::new()
+    };
+    if let Err(response) = turnrelay::sync_turnrelay_relay_allowlists(
+        &state,
+        &sid,
+        true,
+        redeploy,
+        "server.turnrelay_relay.set",
+    )
+    .await
+    {
+        return response;
+    }
+    Redirect::to(&format!(
+        "/admin/servers/{}/protocols#turnrelay-relay",
         path_segment_encode(&server_id)
     ))
     .into_response()

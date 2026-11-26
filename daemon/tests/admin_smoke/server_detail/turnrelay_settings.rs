@@ -421,3 +421,296 @@ async fn turnrelay_config_requires_admin_auth_and_same_origin() {
     );
     assert_eq!(SAME_ORIGIN_HOST, "test.example");
 }
+
+async fn post_form(state: &AppState, uri: &str, form: &str) -> Response {
+    router(state.clone())
+        .oneshot(
+            add_same_origin(Request::builder().method("POST").uri(uri))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(form.to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+async fn add_turnrelay_node(state: &AppState, id: &str, address: &str, kind: &str) -> ServerId {
+    let mut server = naive_server(id);
+    server.address = address.to_owned();
+    server.kernels = vec![KernelId(kind.into())];
+    server.enabled_protocols.clear();
+    state.inv.add_server(&server).await.unwrap();
+    server.id
+}
+
+#[tokio::test]
+async fn managed_turnrelay_wires_least_loaded_entries_and_syncs_allowlists() {
+    let dir = TempDir::new().unwrap();
+    let mut state = state(&dir).await;
+    state.registry = Arc::new(vpnctl_kernels::build_registry().unwrap());
+    let entry_a = add_turnrelay_node(&state, "entry-a", "192.0.2.11", "turnrelay-relay").await;
+    let entry_b = add_turnrelay_node(&state, "entry-b", "192.0.2.12", "turnrelay-relay").await;
+    let exit_a = add_turnrelay_node(&state, "exit-a", "198.51.100.21", "turnrelay").await;
+    let exit_b = add_turnrelay_node(&state, "exit-b", "198.51.100.22", "turnrelay").await;
+    let enable_a = "/admin/servers/exit-a/protocols/turnrelay/enable";
+
+    let response = post_form(&state, enable_a, "").await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let rejected = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&rejected).contains("Enable turnrelay-relay"));
+
+    // Reverse creation order so the first selection exercises the ID tie-break.
+    for id in [&entry_b, &entry_a] {
+        assert_eq!(
+            post_form(
+                &state,
+                &format!("/admin/servers/{id}/protocols/turnrelay-relay/enable"),
+                ""
+            )
+            .await
+            .status(),
+            StatusCode::SEE_OTHER
+        );
+        let credentials = state.inv.list_server_secrets(id).await.unwrap();
+        assert_eq!(credentials["turnrelay_relay.username"].len(), 16);
+        assert_eq!(credentials["turnrelay_relay.password"].len(), 32);
+        assert!(
+            credentials
+                .get("turnrelay_relay.allowed_exits")
+                .is_none_or(String::is_empty)
+        );
+    }
+    for (exit, entry, server, ip) in [
+        (&exit_a, &entry_a, "192.0.2.11:53491", "198.51.100.21"),
+        (&exit_b, &entry_b, "192.0.2.12:53491", "198.51.100.22"),
+    ] {
+        assert_eq!(
+            post_form(
+                &state,
+                &format!("/admin/servers/{exit}/protocols/turnrelay/enable"),
+                ""
+            )
+            .await
+            .status(),
+            StatusCode::SEE_OTHER
+        );
+        let settings = state.inv.list_server_secrets(exit).await.unwrap();
+        let relay = state.inv.list_server_secrets(entry).await.unwrap();
+        assert_eq!(settings["turnrelay.relay_server_id"], entry.0);
+        assert_eq!(settings["turnrelay.turn_server"], server);
+        assert_eq!(
+            settings["turnrelay.turn_username"],
+            relay["turnrelay_relay.username"]
+        );
+        assert_eq!(
+            settings["turnrelay.turn_password"],
+            relay["turnrelay_relay.password"]
+        );
+        assert_eq!(settings["turnrelay.publish"], "vless+reality");
+        assert_eq!(relay["turnrelay_relay.allowed_exits"], ip);
+    }
+
+    assert_eq!(
+        post_form(
+            &state,
+            "/admin/servers/exit-a/turnrelay-config",
+            "relay_server_id=entry-b&udp=true"
+        )
+        .await
+        .status(),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(
+        state.inv.list_server_secrets(&entry_a).await.unwrap()["turnrelay_relay.allowed_exits"],
+        ""
+    );
+    assert_eq!(
+        state.inv.list_server_secrets(&entry_b).await.unwrap()["turnrelay_relay.allowed_exits"],
+        "198.51.100.21,198.51.100.22"
+    );
+
+    assert_eq!(
+        post_form(
+            &state,
+            "/admin/servers/entry-b/turnrelay-relay-config",
+            "listen_port=54491"
+        )
+        .await
+        .status(),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(
+        state.inv.list_server_secrets(&exit_a).await.unwrap()["turnrelay.turn_server"],
+        "192.0.2.12:54491"
+    );
+    assert_eq!(
+        state.inv.list_server_secrets(&exit_b).await.unwrap()["turnrelay.turn_server"],
+        "192.0.2.12:54491"
+    );
+
+    assert_eq!(
+        post_form(
+            &state,
+            "/admin/servers/exit-b/protocols/turnrelay/disable",
+            ""
+        )
+        .await
+        .status(),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(
+        state.inv.list_server_secrets(&entry_b).await.unwrap()["turnrelay_relay.allowed_exits"],
+        "198.51.100.21"
+    );
+}
+
+#[tokio::test]
+async fn manual_turnrelay_endpoint_is_preserved_and_badges_include_both_topologies() {
+    let dir = TempDir::new().unwrap();
+    let mut state = state(&dir).await;
+    state.registry = Arc::new(vpnctl_kernels::build_registry().unwrap());
+    let entry = add_turnrelay_node(&state, "entry-a", "192.0.2.11", "turnrelay-relay").await;
+    let exit = add_turnrelay_node(&state, "exit-a", "198.51.100.21", "turnrelay").await;
+    let upstream = naive_server("detour-a");
+    state.inv.add_server(&upstream).await.unwrap();
+    for (id, name) in [
+        (&entry, "Managed Gate"),
+        (&exit, "Exit Cloud"),
+        (&upstream.id, "Detour Gate"),
+    ] {
+        state
+            .inv
+            .set_server_display_name(id, Some(name))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        post_form(&state, "/admin/servers/exit-a/turnrelay-config", VALID)
+            .await
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(
+        post_form(
+            &state,
+            "/admin/servers/entry-a/protocols/turnrelay-relay/enable",
+            ""
+        )
+        .await
+        .status(),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(
+        post_form(
+            &state,
+            "/admin/servers/exit-a/protocols/turnrelay/enable",
+            ""
+        )
+        .await
+        .status(),
+        StatusCode::SEE_OTHER
+    );
+    let manual = state.inv.list_server_secrets(&exit).await.unwrap();
+    assert_eq!(manual["turnrelay.turn_server"], "turn.example.org:3478");
+    assert_eq!(manual["turnrelay.turn_password"], "fixture-pass");
+    assert!(!manual.contains_key("turnrelay.relay_server_id"));
+
+    assert_eq!(
+        post_form(
+            &state,
+            "/admin/servers/exit-a/turnrelay-config",
+            "relay_server_id=entry-a"
+        )
+        .await
+        .status(),
+        StatusCode::SEE_OTHER
+    );
+    state
+        .inv
+        .set_client_detour_via_as("test", &entry, Some(&upstream.id))
+        .await
+        .unwrap();
+
+    let app = router(state);
+    for (locale, entry_text, exit_text) in [("en", "ENTRY", "EXIT"), ("ru", "ВХОД", "ВЫХОД")]
+    {
+        for path in ["/admin/", "/admin/servers", "/admin/servers/entry-a"] {
+            let html = crate::common::fetch_html_with_cookie(
+                app.clone(),
+                path,
+                &format!("vpnctl_lang={locale}"),
+            )
+            .await;
+            assert!(
+                html.contains(&format!("ed-role-badge--entry\">{entry_text}<")),
+                "{path}"
+            );
+            assert!(
+                html.contains(&format!("ed-role-badge--exit\">{exit_text}<")),
+                "{path}"
+            );
+            assert!(html.contains("→ Exit Cloud"), "{path}");
+            assert!(html.contains("← Detour Gate"), "{path}");
+        }
+        let html = crate::common::fetch_html_with_cookie(
+            app.clone(),
+            "/admin/servers/exit-a/protocols",
+            &format!("vpnctl_lang={locale}"),
+        )
+        .await;
+        assert!(html.contains("← Managed Gate"));
+        assert!(html.contains(r#"name="relay_server_id""#));
+        assert!(html.contains(r#"<option value="entry-a" selected>Managed Gate</option>"#));
+    }
+}
+
+#[tokio::test]
+async fn enabling_entry_uses_existing_host_matched_exit_and_keeps_manual_settings() {
+    let dir = TempDir::new().unwrap();
+    let mut state = state(&dir).await;
+    state.registry = Arc::new(vpnctl_kernels::build_registry().unwrap());
+    let entry = add_turnrelay_node(&state, "entry-a", "192.0.2.11", "turnrelay-relay").await;
+    let exit = add_turnrelay_node(&state, "exit-a", "198.51.100.21", "turnrelay").await;
+    let manual = VALID.replace("turn.example.org%3A3478", "192.0.2.11%3A53491");
+    for (path, form) in [
+        ("/admin/servers/exit-a/turnrelay-config", manual.as_str()),
+        ("/admin/servers/exit-a/protocols/turnrelay/enable", ""),
+        (
+            "/admin/servers/entry-a/protocols/turnrelay-relay/enable",
+            "",
+        ),
+    ] {
+        assert_eq!(
+            post_form(&state, path, form).await.status(),
+            StatusCode::SEE_OTHER,
+            "{path}"
+        );
+    }
+
+    let relay = state.inv.list_server_secrets(&entry).await.unwrap();
+    assert_eq!(relay["turnrelay_relay.allowed_exits"], "198.51.100.21");
+    let html = fetch_html(router(state.clone()), "/admin/servers/entry-a/protocols").await;
+    assert!(html.contains("TURNRELAY RELAY (ENTRY)"));
+    assert!(html.contains("→ EXIT-A"));
+    assert!(html.contains(&format!(
+        "value=\"{}\" readonly",
+        relay["turnrelay_relay.username"]
+    )));
+    assert!(!html.contains(&relay["turnrelay_relay.password"]));
+
+    assert_eq!(
+        post_form(
+            &state,
+            "/admin/servers/entry-a/turnrelay-relay-config",
+            "listen_port=55491"
+        )
+        .await
+        .status(),
+        StatusCode::SEE_OTHER
+    );
+    let settings = state.inv.list_server_secrets(&exit).await.unwrap();
+    assert_eq!(settings["turnrelay.turn_server"], "192.0.2.11:53491");
+    assert_eq!(settings["turnrelay.turn_password"], "fixture-pass");
+}

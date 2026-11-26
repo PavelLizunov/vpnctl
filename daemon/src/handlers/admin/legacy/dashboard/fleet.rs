@@ -210,6 +210,7 @@ pub(in crate::handlers::admin::legacy) fn dashboard_fleet_table(
         crate::handlers::admin::path_availability::Availability,
     >,
     names: &crate::handlers::admin::helpers::ServerNames,
+    topology: &crate::handlers::admin::topology::Topology,
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
@@ -271,7 +272,10 @@ pub(in crate::handlers::admin::legacy) fn dashboard_fleet_table(
                             @let disk_pct = health.and_then(pct_disk);
                             @let mem_pct = health.and_then(pct_mem);
                             tr {
-                                td { a.ed-grid__id href=(format!("/admin/servers/{}", path_segment_encode(&s.id.0))) { (crate::handlers::admin::helpers::named_server(&s.id, names)) } }
+                                td {
+                                    a.ed-grid__id href=(format!("/admin/servers/{}", path_segment_encode(&s.id.0))) { (crate::handlers::admin::helpers::named_server(&s.id, names)) }
+                                    (topology.badges(&s.id, names, lang))
+                                }
                                 td.ed-grid__sm {
                                     @match health.and_then(|h| h.sing_box_active) {
                                         Some(true) => span.ed-stat.ed-stat--active { (icon("circle")) (tr(lang, "up", "работает")) },

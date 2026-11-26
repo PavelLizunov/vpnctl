@@ -9,6 +9,7 @@ mod tls;
 mod trojan;
 mod tuic_v5;
 mod turnrelay;
+mod turnrelay_relay;
 mod vless_reality;
 mod vless_ws;
 mod vless_xhttp;
@@ -32,6 +33,7 @@ pub use turnrelay::{
     TURNRELAY_PORT, TurnRelay, is_valid_turnrelay_fingerprint, turnrelay_applied_digest,
     turnrelay_outbound_id, turnrelay_relayed_vless_outbound_id, turnrelay_vless_outbound_id,
 };
+pub use turnrelay_relay::{TURNRELAY_RELAY_PORT, TurnRelayRelay};
 pub use vless_reality::{
     DEFAULT_REALITY_FP, DEFAULT_REALITY_SNI, NEW_SERVER_REALITY_FP, NEW_SERVER_REALITY_SNI,
     VALID_REALITY_FPS, VLESS_PACKET_ENCODING, VlessReality, is_valid_reality_fp,

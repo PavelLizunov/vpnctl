@@ -893,6 +893,10 @@ pub(crate) fn server_detail_turnrelay_section(
     server: &vpnctl_core::Server,
     secrets: &HashMap<String, String>,
     health: Option<&vpnctl_inventory::NodeHealthRow>,
+    fleet: (
+        &[vpnctl_core::Server],
+        &crate::handlers::admin::helpers::ServerNames,
+    ),
     lang: crate::i18n::Locale,
 ) -> Markup {
     use crate::i18n::tr;
@@ -916,6 +920,10 @@ pub(crate) fn server_detail_turnrelay_section(
         .get("turnrelay.mode")
         .map(String::as_str)
         .unwrap_or(vpnctl_protocols::TURNRELAY_DEFAULT_MODE);
+    let (servers, names) = fleet;
+    let selected_entry = secrets
+        .get("turnrelay.relay_server_id")
+        .map_or("", String::as_str);
     let turn_server = secrets
         .get("turnrelay.turn_server")
         .map(String::as_str)
@@ -977,7 +985,7 @@ pub(crate) fn server_detail_turnrelay_section(
             title=(tr(lang,
                 "Exit-only TURN relay: clients reach this node through a TURN provider and pin its certificate. The exit password is minted once; client-visible settings are issued only after a successful deploy.",
                 "Выходной TURN-релей: клиенты приходят на этот узел через TURN-провайдера и пиннят его сертификат. Пароль выхода создаётся один раз; клиентские настройки выдаются только после успешного деплоя.")) {
-            "TURNRELAY (EXIT)"
+            (tr(lang, "TURNRELAY (EXIT)", "TURNRELAY (ВЫХОД)"))
         }
         p.ed-form-hint { (state) }
         @if let Some(fingerprint) = fingerprint {
@@ -1003,16 +1011,31 @@ pub(crate) fn server_detail_turnrelay_section(
                     }
                 }
                 div.ed-form-row.ed-form-row--wide {
+                    label.ed-form-label for="turnrelay-entry" {
+                        (tr(lang, "Managed TURN relay (entry)", "Управляемый TURN-релей (вход)"))
+                    }
+                    select.ed-field id="turnrelay-entry" name="relay_server_id" {
+                        option value="" selected[selected_entry.is_empty()] {
+                            (tr(lang, "Manual / external", "Ручной / внешний"))
+                        }
+                        @for entry in servers.iter().filter(|entry| entry.id != server.id && crate::handlers::admin::turnrelay::enabled(entry, "turnrelay-relay")) {
+                            option value=(entry.id.0) selected[entry.id.0 == selected_entry] {
+                                (names.get(&entry.id).unwrap_or(&entry.id.0))
+                            }
+                        }
+                    }
+                }
+                div.ed-form-row.ed-form-row--wide {
                     label.ed-form-label for="turnrelay-server" {
                         (tr(lang, "TURN server host:port", "TURN-сервер host:port"))
                     }
-                    input.ed-field id="turnrelay-server" type="text" name="turn_server" value=(turn_server) maxlength="255" required;
+                    input.ed-field id="turnrelay-server" type="text" name="turn_server" value=(turn_server) maxlength="255";
                 }
                 div.ed-form-row {
                     label.ed-form-label for="turnrelay-username" {
                         (tr(lang, "TURN username", "Имя пользователя TURN"))
                     }
-                    input.ed-field id="turnrelay-username" type="text" name="turn_username" value=(turn_username) maxlength="256" required;
+                    input.ed-field id="turnrelay-username" type="text" name="turn_username" value=(turn_username) maxlength="256";
                 }
                 div.ed-form-row {
                     label.ed-form-label for="turnrelay-password" {
@@ -1052,13 +1075,66 @@ pub(crate) fn server_detail_turnrelay_section(
                 }
                 p.ed-form-hint.ed-form-row--wide {
                     (tr(lang,
-                        "Saving changes takes effect on the next deploy. Relayed VLESS profiles are issued only to VPNRouter clients advertising turnrelay-v1.",
-                        "Сохранение вступает в силу при следующем деплое. Релейные VLESS-профили выдаются только клиентам VPNRouter с возможностью turnrelay-v1."))
+                        "A managed entry supplies the TURN address and credentials when you save. Manual settings apply on the next deploy. Relayed VLESS profiles require VPNRouter with turnrelay-v1.",
+                        "Управляемый вход задаёт адрес и учётные данные TURN при сохранении. Ручные настройки вступают в силу при следующем деплое. Для релейных VLESS-профилей нужен VPNRouter с поддержкой turnrelay-v1."))
                 }
             }
             div.ed-form-actions {
                 button.ed-btn-primary type="submit" {
                     (tr(lang, "Save TurnRelay settings", "Сохранить настройки TurnRelay"))
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn server_detail_turnrelay_relay_section(
+    server: &vpnctl_core::Server,
+    secrets: &HashMap<String, String>,
+    exits: Option<&std::collections::BTreeSet<String>>,
+    names: &crate::handlers::admin::helpers::ServerNames,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::handlers::admin::turnrelay::{ENTRY, PORT, enabled};
+    use crate::i18n::tr;
+    if !enabled(server, ENTRY) && !server.kernels.iter().any(|kernel| kernel.0 == ENTRY) {
+        return html! {};
+    }
+    let sid = path_segment_encode(&server.id.0);
+    let port = secrets
+        .get(PORT)
+        .and_then(|port| port.parse::<u16>().ok())
+        .filter(|port| *port > 0)
+        .unwrap_or(vpnctl_protocols::TURNRELAY_RELAY_PORT);
+    html! {
+        div.ed-rule {}
+        section id="turnrelay-relay" {
+            h2.ed-art-eyebrow { (tr(lang, "TURNRELAY RELAY (ENTRY)", "TURNRELAY РЕЛЕЙ (ВХОД)")) }
+            p.ed-form-hint {
+                (tr(lang, "Linked exits", "Привязанные выходы"))
+                @if let Some(exits) = exits {
+                    @for exit in exits {
+                        " " a.ed-role-peer href=(format!("/admin/servers/{}", path_segment_encode(exit))) {
+                            (names.get(&vpnctl_core::ServerId(exit.clone())).unwrap_or(exit))
+                        }
+                    }
+                } @else {
+                    " · " (tr(lang, "None", "Нет"))
+                }
+            }
+            form.ed-form method="post" action=(format!("/admin/servers/{sid}/turnrelay-relay-config")) {
+                div.ed-form-grid {
+                    div.ed-form-row {
+                        label.ed-form-label for="turnrelay-relay-port" { (tr(lang, "TCP and UDP port", "Порт TCP и UDP")) }
+                        input.ed-field id="turnrelay-relay-port" name="listen_port" type="number" min="1" max="65535" value=(port) required;
+                    }
+                    div.ed-form-row {
+                        label.ed-form-label for="turnrelay-relay-username" { (tr(lang, "TURN username", "Имя пользователя TURN")) }
+                        input.ed-field id="turnrelay-relay-username" type="text" value=(secrets.get("turnrelay_relay.username").map_or("", String::as_str)) readonly;
+                    }
+                }
+                div.ed-form-actions {
+                    button.ed-btn-primary type="submit" { (tr(lang, "Save TURN entry settings", "Сохранить настройки входа TURN")) }
                 }
             }
         }

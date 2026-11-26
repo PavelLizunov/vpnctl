@@ -22,12 +22,13 @@ pub struct TurnRelayKernel;
 struct ServerConfig {
     address: String,
     listen_port: u16,
+    relay_ip: Option<std::net::Ipv4Addr>,
     mode: String,
     password: String,
     applied: String,
 }
 
-fn artifact_path(arch: &str) -> Result<PathBuf> {
+fn artifact_path(arch: &str, binary: &str) -> Result<PathBuf> {
     let arch = match arch.trim() {
         "x86_64" => "amd64",
         "aarch64" => "arm64",
@@ -39,7 +40,7 @@ fn artifact_path(arch: &str) -> Result<PathBuf> {
         }
     };
     Ok(PathBuf::from(format!(
-        "/opt/vpnctl/node-artifacts/turnrelay-server-{arch}"
+        "/opt/vpnctl/node-artifacts/{binary}-{arch}"
     )))
 }
 
@@ -73,7 +74,7 @@ fn pinned_digest(artifact: &std::path::Path) -> Result<String> {
     Ok(digest)
 }
 
-async fn stage_file(
+pub(crate) async fn stage_file(
     ssh: &dyn SshTransport,
     directory: &str,
     content: &[u8],
@@ -96,6 +97,33 @@ async fn stage_file(
     let quoted = single_quote(path);
     let command = format!("set -eu; trap 'rm -f -- {path}' EXIT; {}", action(&quoted));
     crate::apply_staged_config(ssh, path, content, &command).await
+}
+
+pub(crate) async fn stage_artifact(
+    ssh: &dyn SshTransport,
+    binary: &str,
+    candidate: &str,
+) -> Result<()> {
+    let arch = ssh.exec("uname -m").await?;
+    let artifact = artifact_path(&arch, binary)?;
+    let digest = pinned_digest(&artifact)?;
+    let bytes = std::fs::read(&artifact).map_err(|error| {
+        CoreError::Transport(format!(
+            "TurnRelay node artifact unavailable ({}): {error}",
+            artifact.display()
+        ))
+    })?;
+    if format!("{:x}", Sha256::digest(&bytes)) != digest {
+        return Err(CoreError::Transport(
+            "TurnRelay node artifact failed its pinned SHA-256 check".into(),
+        ));
+    }
+    stage_file(ssh, "/usr/local/libexec/vpnctl-turnrelay", &bytes, |path| {
+            format!(
+                "test \"$(sha256sum {path} | cut -d' ' -f1)\" = {digest}; chmod 0755 {path}; mv -f {path} {candidate}"
+            )
+        })
+        .await
 }
 
 #[async_trait]
@@ -126,27 +154,8 @@ impl Kernel for TurnRelayKernel {
     }
 
     async fn ensure_installed(&self, ssh: &dyn SshTransport) -> Result<()> {
-        ssh.exec("set -eu; install -d -o root -g root -m 0755 /etc/vpnctl-turnrelay /usr/local/libexec/vpnctl-turnrelay; command -v nft >/dev/null; command -v openssl >/dev/null").await?;
-        let arch = ssh.exec("uname -m").await?;
-        let artifact = artifact_path(&arch)?;
-        let digest = pinned_digest(&artifact)?;
-        let bytes = std::fs::read(&artifact).map_err(|error| {
-            CoreError::Transport(format!(
-                "TurnRelay node artifact unavailable ({}): {error}",
-                artifact.display()
-            ))
-        })?;
-        if format!("{:x}", Sha256::digest(&bytes)) != digest {
-            return Err(CoreError::Transport(
-                "TurnRelay node artifact failed its pinned SHA-256 check".into(),
-            ));
-        }
-        stage_file(ssh, "/usr/local/libexec/vpnctl-turnrelay", &bytes, |path| {
-            format!(
-                "test \"$(sha256sum {path} | cut -d' ' -f1)\" = {digest}; chmod 0755 {path}; mv -f {path} {CANDIDATE}"
-            )
-        })
-        .await
+        ssh.exec("set -eu; install -d -o root -g root -m 0755 /etc/vpnctl-turnrelay /usr/local/libexec/vpnctl-turnrelay; command -v openssl >/dev/null").await?;
+        stage_artifact(ssh, "turnrelay-server", CANDIDATE).await
     }
 
     fn render_config(
@@ -171,6 +180,12 @@ impl Kernel for TurnRelayKernel {
                 format!("0.0.0.0:{}", config.listen_port),
             ),
             ("turnrelay_port", config.listen_port.to_string()),
+            (
+                "turnrelay_relay_ip",
+                config
+                    .relay_ip
+                    .map_or_else(String::new, |ip| ip.to_string()),
+            ),
             ("turnrelay_mode", config.mode),
             ("turnrelay_password", config.password),
             ("turnrelay_applied", config.applied),
@@ -189,23 +204,6 @@ impl Kernel for TurnRelayKernel {
 
     async fn apply_config(&self, ssh: &dyn SshTransport, config: &[u8]) -> Result<()> {
         stage_file(ssh, BASE, config, |path| format!("sh {path}")).await
-    }
-
-    async fn open_firewall(
-        &self,
-        ssh: &dyn SshTransport,
-        ctx: &RenderCtx<'_>,
-        protocols: &[&dyn Protocol],
-    ) -> Result<()> {
-        let ports = protocols
-            .iter()
-            .find(|protocol| protocol.id().0 == "turnrelay")
-            .map(|protocol| protocol.effective_listen_ports(ctx.secrets))
-            .unwrap_or_default();
-        if let Some(script) = crate::firewall::firewall_open_script(&ports) {
-            ssh.exec(&script).await?;
-        }
-        Ok(())
     }
 
     async fn restart(&self, ssh: &dyn SshTransport) -> Result<()> {
