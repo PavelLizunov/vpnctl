@@ -23,30 +23,35 @@ longer depends on observing every connection snapshot.
 
 ## Acquire / Build
 
-Builds from pinned sing-box-vpnctl revision `2e747aeb4c1c1c15c9efec236715de90f24f1fcf`
-with Go 1.26+, including `with_trusttunnel` and `with_mieru`. The binary reports
-`1.14.4-vpnctl.4+2e747aeb`.
+Downloads the checksum-pinned Linux archive from sing-box-vpnctl
+`v1.14.5-vpnctl.1` (revision `74153cb4e936af1b846cfa26053981daedd61f81`).
+The release includes TrustTunnel and Mieru and excludes NaiveProxy outbound
+and Cronet. CI and the candidate workflow use these published binaries.
+CI also exercises the pinned source build.
 
 ```bash
-# Default (detects host architecture):
+# Download for the host architecture:
 OUT=/tmp/sing-box ./build.sh
 
-# Cross-build for ARM64:
+# Download the ARM64 archive on any host:
 TARGET_ARCH=arm64 OUT=/tmp/sing-box-arm64 ./build.sh
+
+# Rebuild the managed profile from the pinned revision with Go 1.26+:
+FORCE_BUILD=1 OUT=/tmp/sing-box ./build.sh
 ```
 
-Set `FORCE_BUILD=0` to download the older, checksum-verified release using
-curl and sha256sum. That release excludes TrustTunnel and Mieru. Its archives
-are available for these `TARGET_ARCH` values:
-- `x86_64` (default): `sing-box-1.14.4-vpnctl.4-linux-amd64.tar.gz` (SHA256: `a6014cfad5494fe8fa3f178facad6a7c6dab59f5143f7b5af645e8e4e5d84094`)
-- `aarch64` / `arm64`: `sing-box-1.14.4-vpnctl.4-linux-arm64.tar.gz` (SHA256: `281cd5214208147b869d654fd8d86ea7b77a61b312fc6112fb7e0d4ddd8beabf`)
-- `armv7`: `sing-box-1.14.4-vpnctl.4-linux-armv7.tar.gz` (SHA256: `36fec164b839c707a086f9ff404af1ba7ab40cf4d532270b186444bc5d203fc0`)
+Archive pins by target:
 
-Both build modes produce a static Linux binary for the selected architecture.
-This release uses sing-box 1.14.4 and supports per-user bandwidth overrides.
-Release source: `de4d55ca046482cc3d90c3a97693651768020866`.
-`1.14.0-vpnctl.3` must not be used for AWG3 client delivery.
-Feature tags include `with_v2ray_api`, `with_clash_api`, `with_xhttp`, `with_awg`, and `with_turnrelay`.
+- `x86_64` (default): `sing-box-1.14.5-vpnctl.1-linux-amd64.tar.gz` (SHA256: `72a65339089f9f41a05d746f03c2ee0105878a91a373295a0fae2af07cd2b7d4`)
+- `aarch64` / `arm64`: `sing-box-1.14.5-vpnctl.1-linux-arm64.tar.gz` (SHA256: `4e8963ca3400238938948dc730e081923d07ed24152653981f6604d73db0888e`)
+- `armv7`: `sing-box-1.14.5-vpnctl.1-linux-armv7.tar.gz` (SHA256: `fe2d91bebf34d4f6d2bc3b60ab1a3f8b43d47b172eed496cb3dc0d2b00abfea3`)
+
+Both modes produce a static Linux binary for the selected architecture. The
+source build uses the managed profile and reports `1.14.5-vpnctl.1+74153cb4`.
+The script checks the revision and feature tags when the host can execute
+the target binary. The release supports per-user bandwidth overrides through
+the managed Stats API. AWG 3.1 client delivery requires a managed build with
+AWG 3.1 support.
 
 ## Packaging and node installation
 

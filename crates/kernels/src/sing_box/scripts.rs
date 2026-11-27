@@ -1,11 +1,11 @@
 pub const SING_BOX_MIN_VERSION: &str = "1.14.0";
-pub const SING_BOX_VPNCTL_VERSION: &str = "1.14.4-vpnctl.4";
+pub const SING_BOX_VPNCTL_VERSION: &str = "1.14.5-vpnctl.1";
 pub const SING_BOX_AMD64_SHA256: &str =
-    "a6014cfad5494fe8fa3f178facad6a7c6dab59f5143f7b5af645e8e4e5d84094";
+    "72a65339089f9f41a05d746f03c2ee0105878a91a373295a0fae2af07cd2b7d4";
 pub const SING_BOX_ARM64_SHA256: &str =
-    "281cd5214208147b869d654fd8d86ea7b77a61b312fc6112fb7e0d4ddd8beabf";
+    "4e8963ca3400238938948dc730e081923d07ed24152653981f6604d73db0888e";
 pub const SING_BOX_ARMV7_SHA256: &str =
-    "36fec164b839c707a086f9ff404af1ba7ab40cf4d532270b186444bc5d203fc0";
+    "fe2d91bebf34d4f6d2bc3b60ab1a3f8b43d47b172eed496cb3dc0d2b00abfea3";
 
 pub(super) const DEFAULT_SING_BOX_ARTIFACT: &str = "/opt/vpnctl/node-artifacts/sing-box";
 pub(super) const DEFAULT_STATS_HELPER_ARTIFACT: &str =
