@@ -5100,6 +5100,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "vpnctl-core",
+ "vpnctl-crypto",
  "vpnctl-protocols",
  "vpnctl-ssh",
 ]
@@ -5113,6 +5114,7 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "percent-encoding",
+ "rustls",
  "serde_json",
  "sha2 0.10.9",
  "ssh-key",

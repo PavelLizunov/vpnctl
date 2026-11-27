@@ -927,6 +927,143 @@ pub(crate) async fn server_set_vmess_config(
     .into_response()
 }
 
+pub(crate) async fn server_set_trusttunnel_config(
+    Path(server_id): Path<String>,
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    let setting = |key, default: &str| {
+        form_field(&body, key).map_or_else(|| default.to_string(), |value| value.trim().to_string())
+    };
+    let port = setting("listen_port", "8444");
+    let quic = setting("quic", "true");
+    let client_quic = setting("client_quic", "false");
+    let udp = setting("udp", "true");
+    let domain = setting("domain", "")
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let sni = setting("sni", "");
+    let certificate = setting("certificate", "");
+    let key = setting("key", "");
+    if certificate.is_empty() != key.is_empty() || (domain.is_empty() && !key.is_empty()) {
+        return bad_request(
+            "Provide the TrustTunnel TLS hostname, certificate chain, and private key together",
+        );
+    }
+    let mut values = vec![
+        ("trusttunnel.listen_port", port.as_str()),
+        ("trusttunnel.quic", &quic),
+        ("trusttunnel.client_quic", &client_quic),
+        ("trusttunnel.udp", &udp),
+    ];
+    let mut remove = Vec::new();
+    if sni.is_empty() {
+        remove.push("trusttunnel.sni");
+    } else {
+        values.push(("trusttunnel.sni", &sni));
+    }
+    if domain.is_empty() {
+        remove.extend([
+            "trusttunnel.domain",
+            "trusttunnel.certificate",
+            "trusttunnel.key",
+        ]);
+    } else {
+        values.push(("trusttunnel.domain", &domain));
+        if !key.is_empty() {
+            values.extend([
+                ("trusttunnel.certificate", certificate.as_str()),
+                ("trusttunnel.key", key.as_str()),
+            ]);
+        }
+    }
+    save_sing_box_protocol_config(&state, server_id, "trusttunnel", &values, &remove).await
+}
+
+pub(crate) async fn server_set_mieru_config(
+    Path(server_id): Path<String>,
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    let fields = [
+        ("listen_port", "mieru.listen_port", "8445"),
+        ("transport", "mieru.transport", "tcp"),
+        ("multiplexing", "mieru.multiplexing", "middle"),
+        ("handshake_mode", "mieru.handshake_mode", "standard"),
+    ];
+    let values = fields.map(|(field, key, default)| {
+        (
+            key,
+            form_field(&body, field).unwrap_or_else(|| default.to_string()),
+        )
+    });
+    let values = values.each_ref().map(|(key, value)| (*key, value.trim()));
+    save_sing_box_protocol_config(&state, server_id, "mieru", &values, &[]).await
+}
+
+async fn save_sing_box_protocol_config(
+    state: &AppState,
+    server_id: String,
+    protocol_id: &str,
+    values: &[(&str, &str)],
+    remove: &[&str],
+) -> Response {
+    let sid = vpnctl_core::ServerId(server_id);
+    let pid = vpnctl_core::ProtocolId(protocol_id.into());
+    let server = match state.inv.get_server(&sid).await {
+        Ok(Some(server)) => server,
+        Ok(None) => return not_found("server not found"),
+        Err(error) => return internal_error(error.into()),
+    };
+    let Some(protocol) = state.registry.protocol(&pid) else {
+        return bad_request("protocol is not registered");
+    };
+    let mut candidate = match state.inv.list_server_secrets(&sid).await {
+        Ok(secrets) => secrets,
+        Err(error) => return internal_error(error.into()),
+    };
+    candidate.extend(
+        values
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string())),
+    );
+    for key in remove {
+        candidate.remove(*key);
+    }
+    if let Err(error) = protocol.validate_server(&vpnctl_core::RenderCtx::new(&server, &candidate))
+    {
+        return bad_request(&error.to_string());
+    }
+    if server.enabled_protocols.contains(&pid)
+        && let Err(error) = state.registry.validate_server(&server, &candidate)
+    {
+        return bad_request(&error.to_string());
+    }
+    if let Err(response) =
+        super::protocols::check_protocol_reserved_ports(state, &sid, &pid, &candidate).await
+    {
+        return response;
+    }
+    if let Err(error) = state
+        .inv
+        .update_server_secrets_audited(
+            &sid,
+            "admin",
+            &format!("server.{protocol_id}.set"),
+            values,
+            remove,
+        )
+        .await
+    {
+        return internal_error(error.into());
+    }
+    Redirect::to(&format!(
+        "/admin/servers/{}/protocols#{protocol_id}",
+        path_segment_encode(&sid.0)
+    ))
+    .into_response()
+}
+
 pub(crate) async fn server_set_turnrelay_config(
     Path(server_id): Path<String>,
     State(state): State<AppState>,

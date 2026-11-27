@@ -419,6 +419,10 @@ async fn redeploy_pipeline(
         Ok(octets) => octets,
         Err(e) => fail!("deploy", "WireGuard address assignment failed: {e}"),
     };
+    let denials = match inv.enabled_protocol_denials(&server.id).await {
+        Ok(denials) => denials,
+        Err(e) => fail!("deploy", "protocol access lookup failed: {e}"),
+    };
     if inv
         .deploy_input_revision(&server.id)
         .await
@@ -447,7 +451,9 @@ async fn redeploy_pipeline(
         Ok(k) => k,
         Err(e) => fail!("deploy", "known user UUID lookup failed: {e}"),
     };
-    let ctx = RenderCtx::with_peers(&server, &secrets, &users).with_wg_octets(wg_octets);
+    let ctx = RenderCtx::with_peers(&server, &secrets, &users)
+        .with_wg_octets(wg_octets)
+        .with_protocol_denials(denials);
 
     match inv.retired_server_kernels(&server.id).await {
         Ok(retired) => {
@@ -474,8 +480,22 @@ async fn redeploy_pipeline(
             .filter_map(|p| registry.protocol(p))
             .collect();
         if protocols.is_empty() {
-            send_step!("apply", "{}: no enabled protocols; skipping config.", kid.0);
-            continue;
+            if kid.0 != "sing-box" {
+                send_step!("apply", "{}: no enabled protocols; skipping config.", kid.0);
+                continue;
+            }
+            match vpnctl_kernels::SingBox::has_live_trusttunnel_or_mieru(ssh).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    send_step!("apply", "{}: no enabled protocols; skipping config.", kid.0);
+                    continue;
+                }
+                Err(e) => {
+                    ssh_errors.push(format!("sing-box: {e}"));
+                    send_step!("apply", "✗ sing-box listener reconciliation failed: {e}");
+                    continue;
+                }
+            }
         }
         send_step!("install", "{}: ensure_installed (apt + systemd)…", kid.0);
         if let Err(e) = kernel.ensure_installed(ssh).await {

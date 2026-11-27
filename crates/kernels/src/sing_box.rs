@@ -37,7 +37,19 @@ impl SingBox {
     pub fn new() -> Self {
         Self
     }
+
+    /// Check whether an otherwise empty deployment must remove a native inbound.
+    pub async fn has_live_trusttunnel_or_mieru(ssh: &dyn SshTransport) -> Result<bool> {
+        let config = ssh.exec(LIVE_CONFIG_PROBE).await.map_err(|_| {
+            CoreError::Transport(
+                "could not read the live sing-box config to verify disabled listeners".into(),
+            )
+        })?;
+        guards::contains_trusttunnel_or_mieru(config.as_bytes())
+    }
 }
+
+const LIVE_CONFIG_PROBE: &str = "if [ -e /etc/sing-box/config.json ] || [ -L /etc/sing-box/config.json ]; then cat /etc/sing-box/config.json; else printf '{}'; fi";
 
 #[async_trait]
 impl Kernel for SingBox {
@@ -60,6 +72,8 @@ impl Kernel for SingBox {
             ProtocolId("amneziawg2".to_string()),
             ProtocolId("amneziawg3".to_string()),
             ProtocolId("vmess".to_string()),
+            ProtocolId("trusttunnel".into()),
+            ProtocolId("mieru".into()),
         ]
     }
 
@@ -132,8 +146,34 @@ impl Kernel for SingBox {
         let mut inbounds = Vec::with_capacity(protocols.len());
         let mut endpoints = Vec::new();
         for p in protocols {
-            let fragment = p.server_inbound(ctx, users)?;
-            if fragment.get("type").and_then(serde_json::Value::as_str) == Some("wireguard") {
+            let filtered_users;
+            let inbound_users = if p.requires_inbound_users() && !users.is_empty() {
+                let denials = ctx.protocol_denials.as_ref().ok_or_else(|| {
+                    CoreError::Render(
+                        "per-protocol grants are required to render this inbound".into(),
+                    )
+                })?;
+                if let Some(denied) = denials.get(&p.id()) {
+                    filtered_users = users
+                        .iter()
+                        .filter(|user| !denied.contains(&user.id))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    filtered_users.as_slice()
+                } else {
+                    users
+                }
+            } else {
+                users
+            };
+            let fragment = p.server_inbound(ctx, inbound_users)?;
+            let kind = fragment.get("type").and_then(serde_json::Value::as_str);
+            // These native inbounds require at least one valid user to start.
+            if p.requires_inbound_users() && fragment["users"].as_array().is_some_and(Vec::is_empty)
+            {
+                continue;
+            }
+            if kind == Some("wireguard") {
                 endpoints.push(fragment);
             } else {
                 inbounds.push(fragment);

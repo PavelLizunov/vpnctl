@@ -219,7 +219,10 @@ jobs:
         run: tools/singbox-attr-patch/build.sh
       - name: verify managed features
         run: |
-          /tmp/sing-box version | grep -q with_v2ray_api
+          tags=$(/tmp/sing-box version)
+          for feature in with_v2ray_api with_trusttunnel with_mieru; do
+            grep -qw "$feature" <<<"$tags"
+          done
           test -x /tmp/singbox-stats-helper
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

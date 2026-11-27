@@ -30,6 +30,11 @@ pub trait Protocol: fmt::Debug + Send + Sync {
         self.listen_ports().to_vec()
     }
 
+    /// This inbound needs at least one eligible user to start.
+    fn requires_inbound_users(&self) -> bool {
+        false
+    }
+
     fn appears_in_sing_box_sub(&self) -> bool {
         true
     }

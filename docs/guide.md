@@ -37,7 +37,7 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 
 | Aspect | Value |
 |---|---|
-| Protocols × Kernels | **12 protocols** × **7 kernels**, fully orthogonal (see [Architecture](#architecture)) |
+| Protocols × Kernels | **14 protocols** × **7 kernels**, fully orthogonal (see [Architecture](#architecture)) |
 | Inventory | SQLite via `sqlx`, audit-on-mutation |
 | Toolchain | Rust **1.89+**, edition **2024** · static musl Linux x86_64 binaries (`x86_64-unknown-linux-musl`) |
 
@@ -51,7 +51,7 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 | `vpnctld` daemon — REST API + `/sub/<token>` + Admin UI + per-IP rate-limit + persistent bans | ✅ |
 | Inventory — sqlx + SQLite, migrations, audit_log, retention scheduler | ✅ |
 | Kernels — `sing-box`, `amneziawg`, `caddy` (naive / vless-ws cover site), `xray`, `dnstt`, `turnrelay`, `turnrelay-relay` | ✅ |
-| Protocols — `vless+reality`, `tuic-v5`, `hysteria2`, `wireguard`, `amneziawg3`, `naive`, `vless-ws`, `vless+xhttp`, `dnstt`, `vmess`, `turnrelay`, `turnrelay-relay` | ✅ (12 across 7 kernels) |
+| Protocols — `vless+reality`, `tuic-v5`, `hysteria2`, `wireguard`, `amneziawg3`, `naive`, `vless-ws`, `vless+xhttp`, `dnstt`, `vmess`, `turnrelay`, `turnrelay-relay`, `trusttunnel`, `mieru` | ✅ (14 across 7 kernels) |
 | Hosters — DigitalOcean / Cloudzy / Generic (SSH port quirks) | ✅ |
 | Add-server **wizard** (Phase E) — paste IP+root password, SSE-streamed bootstrap | ✅ |
 | Backups — [hourly SQLite snapshots and daily encrypted DR bundles](specs/backup-restore.md), restore CLI/web self-test + CI-protected byte-equality (`restore_e2e`) + in-product Disaster Recovery section | ✅ |
@@ -59,7 +59,7 @@ A quick sense of scale (the authoritative protocol/kernel lists live in
 | Chain-capable subscriptions — stock sing-box JSON plus capability-gated VPNRouter app-config metadata, both with fail-closed entry filtering | ✅ |
 | Boosty subscription bridge — optionally auto-creates complete users for new eligible paid subscribers, grants current VPN-exit servers at creation, preserves existing users’ grants, and supports a configurable disable grace period | ✅ |
 | Protocol visibility — per-(server, protocol) hide + per-(user, server, protocol) deny with OR-semantics | ✅ |
-| DPI-risk tiers — Strong: `naive`, `turnrelay-relay`, `turnrelay`, `vless+reality`, `vless+xhttp`, `vless-ws`; Moderate: `amneziawg3`, `tuic-v5`, `vmess`; Weak: `dnstt`, `hysteria2`, `wireguard` | ✅ |
+| DPI-risk tiers — Strong: `naive`, `trusttunnel`, `turnrelay-relay`, `turnrelay`, `vless+reality`, `vless+xhttp`, `vless-ws`; Moderate: `amneziawg3`, `mieru`, `tuic-v5`, `vmess`; Weak: `dnstt`, `hysteria2`, `wireguard` | ✅ |
 | Monitoring — 24h sub-fetch sparkline + heavy-users heatmap + filtered `/admin/sharing` risk page + per-user UA fingerprint heuristic | ✅ |
 | Traffic accounting — cumulative per-user sing-box V2Ray Stats (Clash for live metadata; AmneziaWG independent) | ✅ |
 | Audit timeline — paginated + filtered + CSV export | ✅ |
@@ -130,7 +130,7 @@ stable across deploys; a partially stored server keypair is rejected rather than
 silently replaced. Client addresses are derived from the user public key;
 unrelated grant changes do not renumber them, and collisions fail closed.
 
-**Kernel requirement:** use the pinned `1.14.4-vpnctl.4` security release.
+**Kernel requirement:** use the [managed sing-box build](../tools/singbox-attr-patch/README.md).
 Its predecessor `1.14.0-vpnctl.5` was verified against official AmneziaWG 3.1
 with real TCP/UDP transfers; that historical result does not certify a new release.
 `1.14.0-vpnctl.3` accepts
@@ -139,6 +139,15 @@ Protocol changes schedule a targeted automatic deployment using current inventor
 If a deployment is busy or the inventory changes during preparation, the server
 page provides a manual retry; keys and profiles are preserved. See the
 [AWG specification](specs/amneziawg2-3.md).
+
+### TrustTunnel and Mieru
+
+Enable either protocol from a managed sing-box server's **Protocols** tab.
+[TrustTunnel](specs/trusttunnel.md) defaults to HTTP/2 clients on TCP/8444,
+with an HTTP/3 listener on UDP/8444 and a pinned node certificate.
+[Mieru](specs/mieru.md) defaults to TCP/8445. The same tab contains
+settings for both protocols. Deploy settings changes before distributing
+profiles. VPNRouter clients opt in with `trusttunnel-v1` or `mieru-v1`.
 
 ### Known gaps (carried into v0.9)
 
@@ -164,7 +173,7 @@ the other:
 | Trait | Meaning | Examples |
 |---|---|---|
 | `Kernel` | Node-side daemon that holds the connections | `sing-box`, `amneziawg`, `caddy`, `xray`, `dnstt`, `turnrelay`, `turnrelay-relay` |
-| `Protocol` | Wire format presented to the client | `vless+reality`, `tuic-v5`, `hysteria2`, `wireguard`, `amneziawg3`, `naive`, `vless-ws`, `vless+xhttp`, `dnstt`, `vmess`, `turnrelay`, `turnrelay-relay` |
+| `Protocol` | Wire format presented to the client | `vless+reality`, `tuic-v5`, `hysteria2`, `wireguard`, `amneziawg3`, `naive`, `vless-ws`, `vless+xhttp`, `dnstt`, `vmess`, `turnrelay`, `turnrelay-relay`, `trusttunnel`, `mieru` |
 
 A `Kernel` declares which `Protocol`s it can host (`Kernel::supported_protocols()`).
 `Registry::validate_server` catches incompatible combinations **before** an

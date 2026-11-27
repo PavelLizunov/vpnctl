@@ -3,13 +3,16 @@ mod anytls;
 mod dnstt;
 mod encoding;
 mod hysteria2;
+mod mieru;
 mod naive;
 mod shadowsocks2022;
 mod tls;
 mod trojan;
+mod trusttunnel;
 mod tuic_v5;
 mod turnrelay;
 mod turnrelay_relay;
+mod username_password;
 mod vless_reality;
 mod vless_ws;
 mod vless_xhttp;
@@ -23,10 +26,12 @@ pub use amneziawg::{
 pub use anytls::{ANYTLS_PORT, AnyTls};
 pub use dnstt::Dnstt;
 pub use hysteria2::Hysteria2;
+pub use mieru::{MIERU_PORT, Mieru};
 pub use naive::{NAIVE_PORT, Naive};
 pub use shadowsocks2022::{SS_2022_PORT, Shadowsocks2022};
 pub use tls::tls_server_name;
 pub use trojan::{TROJAN_PORT, Trojan};
+pub use trusttunnel::{TRUSTTUNNEL_PORT, TrustTunnel};
 pub use tuic_v5::TuicV5;
 pub use turnrelay::{
     TURNRELAY_DEFAULT_CONNECTIONS, TURNRELAY_DEFAULT_MODE, TURNRELAY_OUTBOUND_ID_MAX,

@@ -82,25 +82,17 @@ pub(crate) async fn server_enable_protocol(
                 return bad_request(&format!("cannot enable protocol '{protocol_id_str}': {e}"));
             }
         }
-        if pid.0 == "vmess" {
+        if matches!(pid.0.as_str(), "vmess" | "trusttunnel" | "mieru") {
             let secrets = match state.inv.list_server_secrets(&sid).await {
                 Ok(secrets) => secrets,
-                Err(error) => return internal_error(anyhow::Error::new(error)),
+                Err(error) => return internal_error(error.into()),
             };
             if let Err(error) = state.registry.validate_server(&after, &secrets) {
                 return bad_request(&error.to_string());
             }
-            let reserved = match state.inv.get_reserved_ports(&sid).await {
-                Ok(ports) => ports,
-                Err(error) => return internal_error(anyhow::Error::new(error)),
-            };
-            if let Some((_, port)) = state.registry.protocol(&pid).and_then(|protocol| {
-                protocol
-                    .effective_listen_ports(&secrets)
-                    .into_iter()
-                    .find(|(_, port)| reserved.contains(port))
-            }) {
-                return bad_request(&format!("VMess TCP/{port} is reserved on this server"));
+            if let Err(response) = check_protocol_reserved_ports(&state, &sid, &pid, &secrets).await
+            {
+                return response;
             }
         }
         if managed {
@@ -344,4 +336,34 @@ pub(crate) async fn server_protocol_unhide(
         Err(vpnctl_inventory::SqliteInventoryError::Invalid(msg)) => bad_request(&msg),
         Err(e) => internal_error(anyhow::Error::new(e)),
     }
+}
+
+pub(super) async fn check_protocol_reserved_ports(
+    state: &AppState,
+    sid: &vpnctl_core::ServerId,
+    pid: &vpnctl_core::ProtocolId,
+    secrets: &std::collections::HashMap<String, String>,
+) -> Result<(), Response> {
+    let reserved = state
+        .inv
+        .get_reserved_ports(sid)
+        .await
+        .map_err(|error| internal_error(error.into()))?;
+    if let Some((transport, port)) = state.registry.protocol(pid).and_then(|protocol| {
+        protocol
+            .effective_listen_ports(secrets)
+            .into_iter()
+            .find(|(_, port)| reserved.contains(port))
+    }) {
+        let label = match pid.0.as_str() {
+            "vmess" => "VMess",
+            "trusttunnel" => "TrustTunnel",
+            "mieru" => "Mieru",
+            other => other,
+        };
+        return Err(bad_request(&format!(
+            "{label} {transport}/{port} is reserved on this server"
+        )));
+    }
+    Ok(())
 }

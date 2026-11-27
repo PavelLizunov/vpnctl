@@ -34,6 +34,9 @@ pub fn build_registry() -> vpnctl_core::Result<Registry> {
     reg.register_protocol(Box::new(TurnRelay))?;
     reg.register_protocol(Box::new(vpnctl_protocols::TurnRelayRelay))?;
 
+    reg.register_protocol(Box::new(vpnctl_protocols::TrustTunnel))?;
+    reg.register_protocol(Box::new(vpnctl_protocols::Mieru))?;
+
     Ok(reg)
 }
 
@@ -62,6 +65,8 @@ mod tests {
                 "vmess",
                 "turnrelay",
                 "turnrelay-relay",
+                "trusttunnel",
+                "mieru",
             ]
             .map(String::from)
             .to_vec(),

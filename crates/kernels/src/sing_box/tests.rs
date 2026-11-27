@@ -1155,6 +1155,33 @@ fn live_config_user_uuids_returns_sorted_set() {
 }
 
 #[test]
+fn existing_native_inbounds_require_config_reconciliation_and_protect_user_uuids() {
+    let uuid = "01234567-2222-4333-8444-555555555555";
+    for protocol in ["trusttunnel", "mieru"] {
+        let config = json!({"inbounds": [
+            {"type": protocol, "users": [{"username": "tester", "password": uuid}]}
+        ]});
+        let bytes = serde_json::to_vec(&config).unwrap();
+        assert!(contains_trusttunnel_or_mieru(&bytes).unwrap());
+        assert_eq!(live_config_user_uuids(&bytes), [uuid.to_string()].into());
+    }
+    assert!(!contains_trusttunnel_or_mieru(br#"{"inbounds":[{"type":"vmess"}]}"#).unwrap());
+}
+
+#[tokio::test]
+async fn empty_deploy_reconciliation_fails_for_unreadable_or_invalid_live_config() {
+    let ssh = vpnctl_ssh::MockTransport::new();
+    // No usable stdout means the live config could not be inspected.
+    assert!(SingBox::has_live_trusttunnel_or_mieru(&ssh).await.is_err());
+    ssh.expect(LIVE_CONFIG_PROBE, r#"{"inbounds":null}"#);
+    assert!(SingBox::has_live_trusttunnel_or_mieru(&ssh).await.is_err());
+    ssh.expect(LIVE_CONFIG_PROBE, "{}");
+    assert!(!SingBox::has_live_trusttunnel_or_mieru(&ssh).await.unwrap());
+    ssh.expect(LIVE_CONFIG_PROBE, r#"{"inbounds":[{"type":"mieru"}]}"#);
+    assert!(SingBox::has_live_trusttunnel_or_mieru(&ssh).await.unwrap());
+}
+
+#[test]
 fn live_config_user_uuids_empty_on_unparseable_bytes() {
     assert!(live_config_user_uuids(b"not json").is_empty());
     assert!(live_config_user_uuids(b"{}").is_empty());

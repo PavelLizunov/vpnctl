@@ -5,7 +5,9 @@ VERSION="${SINGBOX_VERSION:-1.14.4-vpnctl.4}"
 TARGET_ARCH="${TARGET_ARCH:-$(uname -m)}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="${OUT:-${HERE}/sing-box-${VERSION}-${TARGET_ARCH}}"
-FORCE_BUILD="${FORCE_BUILD:-0}"
+FORCE_BUILD="${FORCE_BUILD:-1}"
+SOURCE_REV="2e747aeb4c1c1c15c9efec236715de90f24f1fcf"
+SOURCE_URL="https://github.com/PavelLizunov/sing-box-vpnctl.git"
 
 case "$TARGET_ARCH" in
     x86_64|amd64)
@@ -22,6 +24,7 @@ case "$TARGET_ARCH" in
         ASSET="sing-box-${VERSION}-linux-armv7.tar.gz"
         EXPECTED_SHA="36fec164b839c707a086f9ff404af1ba7ab40cf4d532270b186444bc5d203fc0"
         GOARCH="arm"
+        export GOARM=7
         ;;
     *)
         echo "unsupported arch '$TARGET_ARCH' for sing-box-vpnctl" >&2
@@ -65,17 +68,21 @@ if [ "$FORCE_BUILD" != "1" ]; then
     exit 0
 fi
 
-TAG="v${VERSION}"
-WORK="${WORK:-/tmp/sb-vpnctl-build}"
-TAGS="with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,with_v2ray_api,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0,with_xhttp,with_awg,with_turnrelay"
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+TAGS="with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,with_v2ray_api,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0,with_xhttp,with_awg,with_turnrelay,with_trusttunnel,with_mieru"
 
-rm -rf "$WORK"
-git clone --depth 1 -b "$TAG" https://github.com/PavelLizunov/sing-box-vpnctl "$WORK"
-
+# The tagged archive predates both protocol implementations. Pin the source
+# revision until a release ships the two opt-in build tags.
+git -C "$WORK" init -q
+git -C "$WORK" fetch --depth 1 "$SOURCE_URL" "$SOURCE_REV"
+git -C "$WORK" checkout --quiet --detach FETCH_HEAD
+test "$(git -C "$WORK" rev-parse HEAD)" = "$SOURCE_REV"
+OUT="$(realpath -m "$OUT")"
 cd "$WORK"
-CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -trimpath \
+CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -mod=readonly -trimpath \
   -tags "$TAGS" \
-  -ldflags "-s -w -checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=${VERSION}" \
+  -ldflags "-s -w -checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=${VERSION}+${SOURCE_REV:0:8}" \
   -o "$OUT" ./cmd/sing-box
 
 echo "built: $OUT"

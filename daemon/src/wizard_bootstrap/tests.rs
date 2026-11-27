@@ -575,6 +575,34 @@ fn terminal_error(events: &[BootstrapEvent]) -> &str {
 }
 
 #[tokio::test]
+async fn empty_sing_box_redeploy_reports_unreadable_live_inbounds() {
+    let dir = tempfile::tempdir().unwrap();
+    let inv = vpnctl_inventory::SqliteInventory::open(&dir.path().join("inv.db"))
+        .await
+        .unwrap();
+    let server = redeploy_test_server("redeploy-empty-native", vec![]);
+    inv.add_server(&server).await.unwrap();
+    let key_path = dir.path().join("test-deploy-key");
+    std::fs::write(&key_path, b"mock transport fixture").unwrap();
+
+    let events = collect_redeploy_bounded(
+        server.clone(),
+        inv.clone(),
+        Arc::new(crate::app::build_registry().unwrap()),
+        key_path,
+    )
+    .await;
+    assert!(terminal_error(&events).contains("could not inspect the live sing-box inbounds"));
+    let audits = inv.audit_for_server(&server.id.0, 10).await.unwrap();
+    assert!(
+        audits
+            .iter()
+            .any(|entry| entry.action == "server.deploy.failed")
+    );
+    assert!(!audits.iter().any(|entry| entry.action == "server.deploy"));
+}
+
+#[tokio::test]
 async fn run_redeploy_refreshes_enabled_awg_protocols_before_secret_bootstrap() {
     let dir = tempfile::tempdir().unwrap();
     let inv = vpnctl_inventory::SqliteInventory::open(&dir.path().join("inv.db"))
@@ -858,6 +886,8 @@ fn new_servers_enable_only_vless_reality_by_default() {
         .supported_protocols();
     assert!(supported.iter().any(|p| p.0 == "hysteria2"));
     assert!(supported.iter().any(|p| p.0 == "amneziawg3"));
+    assert!(supported.iter().any(|p| p.0 == "trusttunnel"));
+    assert!(supported.iter().any(|p| p.0 == "mieru"));
     for ssh_port in [22, 2222, 8388, 8643, 8843, 8443, 8444, 51821, 51822] {
         assert_eq!(
             super::default_server_protocols(ssh_port, supported.clone(), &registry),

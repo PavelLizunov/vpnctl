@@ -1,7 +1,7 @@
 # vpnctl managed sing-box build
 
 vpnctl ships the hardened `sing-box-vpnctl` binary for exact per-user traffic
-accounting, native AmneziaWG (2.0 and 3.1) and XHTTP, while preserving Clash API live metadata.
+accounting, native AmneziaWG (2.0 and 3.1), XHTTP, TrustTunnel and Mieru.
 
 ## Why a managed build exists
 
@@ -23,22 +23,26 @@ longer depends on observing every connection snapshot.
 
 ## Acquire / Build
 
-Downloads official verified release binaries by default (curl + sha256sum), or builds from source when `FORCE_BUILD=1`:
+Builds from pinned sing-box-vpnctl revision `2e747aeb4c1c1c15c9efec236715de90f24f1fcf`
+with Go 1.26+, including `with_trusttunnel` and `with_mieru`. The binary reports
+`1.14.4-vpnctl.4+2e747aeb`.
 
 ```bash
 # Default (detects host architecture):
 OUT=/tmp/sing-box ./build.sh
 
-# Cross-acquisition for ARM64:
+# Cross-build for ARM64:
 TARGET_ARCH=arm64 OUT=/tmp/sing-box-arm64 ./build.sh
 ```
 
-Supported target architectures via `TARGET_ARCH`:
+Set `FORCE_BUILD=0` to download the older, checksum-verified release using
+curl and sha256sum. That release excludes TrustTunnel and Mieru. Its archives
+are available for these `TARGET_ARCH` values:
 - `x86_64` (default): `sing-box-1.14.4-vpnctl.4-linux-amd64.tar.gz` (SHA256: `a6014cfad5494fe8fa3f178facad6a7c6dab59f5143f7b5af645e8e4e5d84094`)
 - `aarch64` / `arm64`: `sing-box-1.14.4-vpnctl.4-linux-arm64.tar.gz` (SHA256: `281cd5214208147b869d654fd8d86ea7b77a61b312fc6112fb7e0d4ddd8beabf`)
 - `armv7`: `sing-box-1.14.4-vpnctl.4-linux-armv7.tar.gz` (SHA256: `36fec164b839c707a086f9ff404af1ba7ab40cf4d532270b186444bc5d203fc0`)
 
-The result is a static Linux binary (`x86_64`, `arm64`, or `armv7`) with version `1.14.4-vpnctl.4`.
+Both build modes produce a static Linux binary for the selected architecture.
 This release uses sing-box 1.14.4 and supports per-user bandwidth overrides.
 Release source: `de4d55ca046482cc3d90c3a97693651768020866`.
 `1.14.0-vpnctl.3` must not be used for AWG3 client delivery.

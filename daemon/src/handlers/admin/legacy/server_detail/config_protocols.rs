@@ -1202,3 +1202,131 @@ pub(crate) fn server_detail_vmess_section(
         }
     }
 }
+
+pub(crate) fn server_detail_trusttunnel_section(
+    server: &vpnctl_core::Server,
+    secrets: &HashMap<String, String>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    let sid = path_segment_encode(&server.id.0);
+    let setting = |key, default| secrets.get(key).map_or(default, String::as_str);
+    let port = vpnctl_protocols::TRUSTTUNNEL_PORT.to_string();
+    let pin_ready = secrets
+        .get("observed.tls.cert_public_key_sha256")
+        .is_some_and(|pin| pin.len() == 64 && pin.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    html! {
+        div.ed-rule {}
+        h2.ed-art-eyebrow id="trusttunnel" { "TrustTunnel" }
+        @if !secrets.contains_key("trusttunnel.domain") && !pin_ready {
+            p.ed-form-hint {
+                (tr(lang,
+                    "Deploy the node to record its certificate pin before issuing TrustTunnel profiles.",
+                    "Выполните деплой ноды, чтобы записать отпечаток сертификата и выдать профили TrustTunnel."))
+            }
+        }
+        form.ed-form method="post" action=(format!("/admin/servers/{sid}/trusttunnel-config")) {
+            div.ed-form-grid {
+                div.ed-form-row {
+                    label.ed-form-label for="trusttunnel-port" { (tr(lang, "Listen port", "Порт прослушивания")) }
+                    input.ed-field id="trusttunnel-port" name="listen_port" type="number" min="1" max="65535"
+                        value=(setting("trusttunnel.listen_port", &port)) required;
+                }
+                @for (name, label, value) in [
+                    ("quic", tr(lang, "HTTP/3 listener", "Прослушивание HTTP/3"), setting("trusttunnel.quic", "true")),
+                    ("client_quic", tr(lang, "Use HTTP/3 in client profiles", "Использовать HTTP/3 в профилях клиента"), setting("trusttunnel.client_quic", "false")),
+                    ("udp", tr(lang, "UDP forwarding", "Перенаправление UDP"), setting("trusttunnel.udp", "true")),
+                ] {
+                    div.ed-form-row {
+                        label.ed-form-label for=(format!("trusttunnel-{name}")) { (label) }
+                        select.ed-field id=(format!("trusttunnel-{name}")) name=(name) {
+                            option value="true" selected[value == "true"] { (tr(lang, "Enabled", "Включено")) }
+                            option value="false" selected[value == "false"] { (tr(lang, "Disabled", "Выключено")) }
+                        }
+                    }
+                }
+                div.ed-form-row {
+                    label.ed-form-label for="trusttunnel-sni" { (tr(lang, "SNI for the managed certificate", "SNI управляемого сертификата")) }
+                    input.ed-field id="trusttunnel-sni" name="sni" type="text" maxlength="253" value=(setting("trusttunnel.sni", ""));
+                }
+                div.ed-form-row {
+                    label.ed-form-label for="trusttunnel-domain" { (tr(lang, "Custom TLS hostname", "Имя хоста для собственного TLS")) }
+                    input.ed-field id="trusttunnel-domain" name="domain" type="text" maxlength="253" value=(setting("trusttunnel.domain", ""));
+                }
+                div.ed-form-row {
+                    label.ed-form-label for="trusttunnel-certificate" { (tr(lang, "PEM certificate chain", "Цепочка сертификатов PEM")) }
+                    textarea.ed-field id="trusttunnel-certificate" name="certificate" rows="4" autocomplete="off" {}
+                }
+                div.ed-form-row {
+                    label.ed-form-label for="trusttunnel-key" { (tr(lang, "PEM private key", "Закрытый ключ PEM")) }
+                    textarea.ed-field id="trusttunnel-key" name="key" rows="4" autocomplete="off" {}
+                }
+            }
+            p.ed-form-hint {
+                (tr(lang,
+                    "Leave the custom hostname blank to use the node certificate. Leave both PEM fields blank to keep a saved pair.",
+                    "Оставьте имя хоста пустым, чтобы использовать сертификат ноды. Оставьте оба поля PEM пустыми, чтобы сохранить текущую пару."))
+            }
+            div.ed-form-actions {
+                button.ed-btn-primary type="submit" { (icon("save")) (tr(lang, "Save TrustTunnel settings", "Сохранить настройки TrustTunnel")) }
+            }
+        }
+    }
+}
+
+pub(crate) fn server_detail_mieru_section(
+    server: &vpnctl_core::Server,
+    secrets: &HashMap<String, String>,
+    lang: crate::i18n::Locale,
+) -> Markup {
+    use crate::i18n::tr;
+    let sid = path_segment_encode(&server.id.0);
+    let port = vpnctl_protocols::MIERU_PORT.to_string();
+    let fields: [(&str, &str, &str, &[&str]); 3] = [
+        (
+            "transport",
+            tr(lang, "Transport", "Транспорт"),
+            "tcp",
+            &["tcp", "udp"],
+        ),
+        (
+            "multiplexing",
+            tr(lang, "Multiplexing", "Мультиплексирование"),
+            "middle",
+            &["default", "off", "low", "middle", "high"],
+        ),
+        (
+            "handshake_mode",
+            tr(lang, "Handshake mode", "Режим рукопожатия"),
+            "standard",
+            &["default", "standard", "no_wait"],
+        ),
+    ];
+    html! {
+        div.ed-rule {}
+        h2.ed-art-eyebrow id="mieru" { "Mieru" }
+        form.ed-form method="post" action=(format!("/admin/servers/{sid}/mieru-config")) {
+            div.ed-form-grid {
+                div.ed-form-row {
+                    label.ed-form-label for="mieru-port" { (tr(lang, "Listen port", "Порт прослушивания")) }
+                    input.ed-field id="mieru-port" name="listen_port" type="number" min="1" max="65535"
+                        value=(secrets.get("mieru.listen_port").unwrap_or(&port)) required;
+                }
+                @for (name, label, default, options) in fields {
+                    @let value = secrets.get(&format!("mieru.{name}")).map_or(default, String::as_str);
+                    div.ed-form-row {
+                        label.ed-form-label for=(format!("mieru-{name}")) { (label) }
+                        select.ed-field id=(format!("mieru-{name}")) name=(name) {
+                            @for option in options {
+                                option value=(option) selected[*option == value] { (option) }
+                            }
+                        }
+                    }
+                }
+            }
+            div.ed-form-actions {
+                button.ed-btn-primary type="submit" { (icon("save")) (tr(lang, "Save Mieru settings", "Сохранить настройки Mieru")) }
+            }
+        }
+    }
+}

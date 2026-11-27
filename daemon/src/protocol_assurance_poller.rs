@@ -146,23 +146,43 @@ async fn sample_protocol(
     protocol: &dyn Protocol,
 ) -> anyhow::Result<ProtocolAssuranceSample> {
     let secrets = inv.list_server_secrets(&server.id).await?;
-    let users = inv.users_for_server(&server.id).await?;
+    let pid = protocol.id();
+    let requires_users = protocol.requires_inbound_users();
+    let users = if requires_users {
+        inv.users_for_server_protocol(&server.id, &pid).await?
+    } else {
+        inv.users_for_server(&server.id).await?
+    };
     let ctx = RenderCtx::with_peers(server, &secrets, &users)
         .with_wg_octets(inv.wg_octets_for_server(&server.id).await?);
     let client_render_ok = users
         .iter()
         .filter(|user| !user.disabled)
         .any(|user| protocol.client_config(&ctx, user).is_ok());
-    if protocol.server_inbound(&ctx, &users).is_err() {
-        return Ok(sample(
-            server,
-            protocol,
-            CLIENT_KIND,
-            AssuranceStage::Render,
-            AssuranceState::Blocked,
-            None,
-            Some("render_failed"),
-        ));
+    match protocol.server_inbound(&ctx, &users) {
+        Err(_) => {
+            return Ok(sample(
+                server,
+                protocol,
+                CLIENT_KIND,
+                AssuranceStage::Render,
+                AssuranceState::Blocked,
+                None,
+                Some("render_failed"),
+            ));
+        }
+        Ok(inbound) if requires_users && inbound["users"].as_array().is_some_and(Vec::is_empty) => {
+            return Ok(sample(
+                server,
+                protocol,
+                CLIENT_KIND,
+                AssuranceStage::Listener,
+                AssuranceState::Unknown,
+                None,
+                Some("no_eligible_users"),
+            ));
+        }
+        Ok(_) => {}
     }
     let ports = protocol.effective_listen_ports(&secrets);
     let expected: HashSet<String> = ports

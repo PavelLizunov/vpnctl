@@ -92,7 +92,9 @@ pub(crate) async fn run(
     let retired = inv.retired_server_kernels(&sid).await?;
     vpnctl_kernels::reconcile_disabled_kernels(&registry, &server, &retired, &ssh).await?;
 
-    let ctx = RenderCtx::with_peers(&server, &secrets, &users).with_wg_octets(wg_octets);
+    let ctx = RenderCtx::with_peers(&server, &secrets, &users)
+        .with_wg_octets(wg_octets)
+        .with_protocol_denials(inv.enabled_protocol_denials(&sid).await?);
     let known_user_uuids = inv.known_user_uuids().await?;
 
     let mut total_config_bytes = 0usize;
@@ -109,7 +111,10 @@ pub(crate) async fn run(
                     .ok_or_else(|| anyhow::anyhow!("protocol not registered: {pid}"))
             })
             .collect::<anyhow::Result<_>>()?;
-        if protocols_for_k.is_empty() {
+        if protocols_for_k.is_empty()
+            && !(k.id().0 == "sing-box"
+                && vpnctl_kernels::SingBox::has_live_trusttunnel_or_mieru(&ssh).await?)
+        {
             println!("→ disabled {} (no enabled protocols)", k.id());
             continue;
         }
