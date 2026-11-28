@@ -57,7 +57,7 @@ existing path), standard WebPKI roots, 15 seconds work and two seconds cleanup.
 Use explicit rustls ring CryptoProvider and standard certificate/hostname/time
 verification; no process-global crypto-provider mutation. Missing/unusable
 runtime is unavailable and cannot enable access; startup otherwise continues.
-The managed runtime artifact is the repository's 1.14.4-vpnctl.4 XHTTP-capable
+The managed runtime artifact is the repository's 1.14.5-vpnctl.1 XHTTP-capable
 build, not an arbitrary system sing-box from PATH.
 
 ## Exact configuration and ownership

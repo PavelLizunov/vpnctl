@@ -213,14 +213,16 @@ jobs:
           go mod verify
       - name: build static stats helper
         run: tools/singbox-stats-helper/build.sh /tmp/singbox-stats-helper
-      - name: build managed sing-box
+      - name: acquire pinned managed sing-box
         env:
           OUT: /tmp/sing-box
+          FORCE_BUILD: '0'
         run: tools/singbox-attr-patch/build.sh
-      - name: verify managed features
-        run: |
-          /tmp/sing-box version | grep -q with_v2ray_api
-          test -x /tmp/singbox-stats-helper
+      - name: verify pinned managed source build
+        env:
+          OUT: /tmp/sing-box-from-source
+          FORCE_BUILD: '1'
+        run: tools/singbox-attr-patch/build.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

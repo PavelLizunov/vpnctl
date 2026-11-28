@@ -1,27 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${SINGBOX_VERSION:-1.14.4-vpnctl.4}"
+FORCE_BUILD="${FORCE_BUILD:-0}"
+VERSION="1.14.5-vpnctl.1"
 TARGET_ARCH="${TARGET_ARCH:-$(uname -m)}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="${OUT:-${HERE}/sing-box-${VERSION}-${TARGET_ARCH}}"
-FORCE_BUILD="${FORCE_BUILD:-0}"
+SOURCE_REV="74153cb4e936af1b846cfa26053981daedd61f81"
+SOURCE_URL="https://github.com/PavelLizunov/sing-box-vpnctl.git"
 
 case "$TARGET_ARCH" in
     x86_64|amd64)
         ASSET="sing-box-${VERSION}-linux-amd64.tar.gz"
-        EXPECTED_SHA="a6014cfad5494fe8fa3f178facad6a7c6dab59f5143f7b5af645e8e4e5d84094"
+        EXPECTED_SHA="72a65339089f9f41a05d746f03c2ee0105878a91a373295a0fae2af07cd2b7d4"
         GOARCH="amd64"
         ;;
     aarch64|arm64)
         ASSET="sing-box-${VERSION}-linux-arm64.tar.gz"
-        EXPECTED_SHA="281cd5214208147b869d654fd8d86ea7b77a61b312fc6112fb7e0d4ddd8beabf"
+        EXPECTED_SHA="4e8963ca3400238938948dc730e081923d07ed24152653981f6604d73db0888e"
         GOARCH="arm64"
         ;;
     armv7*|armhf)
         ASSET="sing-box-${VERSION}-linux-armv7.tar.gz"
-        EXPECTED_SHA="36fec164b839c707a086f9ff404af1ba7ab40cf4d532270b186444bc5d203fc0"
+        EXPECTED_SHA="fe2d91bebf34d4f6d2bc3b60ab1a3f8b43d47b172eed496cb3dc0d2b00abfea3"
         GOARCH="arm"
+        export GOARM=7
         ;;
     *)
         echo "unsupported arch '$TARGET_ARCH' for sing-box-vpnctl" >&2
@@ -45,7 +48,24 @@ verify_or_skip_exec() {
     fi
 
     if [ "$can_execute" = "1" ]; then
-        "$OUT" version
+        local version_output tags feature
+        version_output=$("$OUT" version)
+        printf '%s\n' "$version_output"
+        if ! grep -Fxq "Revision: $SOURCE_REV" <<<"$version_output"; then
+            echo "managed sing-box revision does not match $SOURCE_REV" >&2
+            return 1
+        fi
+        tags=$(sed -n 's/^Tags: //p' <<<"$version_output")
+        for feature in with_v2ray_api with_trusttunnel with_mieru; do
+            if ! grep -Fxq "$feature" < <(tr ',' '\n' <<<"$tags"); then
+                echo "managed sing-box lacks required build tag $feature" >&2
+                return 1
+            fi
+        done
+        if grep -Eq '(^|,)(with_naive_outbound|with_purego)(,|$)' <<<"$tags"; then
+            echo "managed sing-box includes with_naive_outbound or with_purego" >&2
+            return 1
+        fi
     else
         echo "acquired binary for $TARGET_ARCH (execution check skipped on host $host_arch)"
     fi
@@ -65,18 +85,26 @@ if [ "$FORCE_BUILD" != "1" ]; then
     exit 0
 fi
 
-TAG="v${VERSION}"
-WORK="${WORK:-/tmp/sb-vpnctl-build}"
-TAGS="with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,with_v2ray_api,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0,with_xhttp,with_awg,with_turnrelay"
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+TAGS="with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,with_v2ray_api,badlinkname,tfogo_checklinkname0,with_xhttp,with_awg,with_turnrelay,with_trusttunnel,with_mieru"
 
-rm -rf "$WORK"
-git clone --depth 1 -b "$TAG" https://github.com/PavelLizunov/sing-box-vpnctl "$WORK"
-
+git -C "$WORK" init -q
+git -C "$WORK" fetch --depth 1 "$SOURCE_URL" "$SOURCE_REV"
+git -C "$WORK" checkout --quiet --detach FETCH_HEAD
+test "$(git -C "$WORK" rev-parse HEAD)" = "$SOURCE_REV"
+OUT="$(realpath -m "$OUT")"
 cd "$WORK"
-CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -trimpath \
+CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -mod=readonly -trimpath -buildvcs=true \
   -tags "$TAGS" \
-  -ldflags "-s -w -checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=${VERSION}" \
+  -ldflags "-s -w -checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=${VERSION}+${SOURCE_REV:0:8}" \
   -o "$OUT" ./cmd/sing-box
+
+revision=$(go version -m "$OUT" | awk -F= '/^[[:space:]]*build[[:space:]]+vcs.revision=/{print $2}')
+if [ "$revision" != "$SOURCE_REV" ]; then
+    echo "sing-box binary revision mismatch: expected $SOURCE_REV, got $revision" >&2
+    exit 1
+fi
 
 echo "built: $OUT"
 verify_or_skip_exec

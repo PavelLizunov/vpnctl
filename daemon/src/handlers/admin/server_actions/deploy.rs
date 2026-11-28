@@ -128,6 +128,10 @@ async fn server_deploy_locked(
             Ok(k) => k,
             Err(e) => return internal_error(anyhow::Error::new(e)),
         };
+        let denials = match state.inv.enabled_protocol_denials(&sid).await {
+            Ok(denials) => denials,
+            Err(e) => return internal_error(e.into()),
+        };
         if state
             .inv
             .deploy_input_revision(&sid)
@@ -139,8 +143,9 @@ async fn server_deploy_locked(
                 "inventory changed while preparing deploy — retry",
             );
         }
-        let ctx =
-            vpnctl_core::RenderCtx::with_peers(&server, &secrets, &users).with_wg_octets(wg_octets);
+        let ctx = vpnctl_core::RenderCtx::with_peers(&server, &secrets, &users)
+            .with_wg_octets(wg_octets)
+            .with_protocol_denials(denials);
 
         match state.inv.retired_server_kernels(&sid).await {
             Ok(retired) => {
@@ -171,7 +176,17 @@ async fn server_deploy_locked(
                 .filter_map(|p| state.registry.protocol(p))
                 .collect();
             if protocols.is_empty() {
-                continue;
+                if kid.0 != "sing-box" {
+                    continue;
+                }
+                match vpnctl_kernels::SingBox::has_live_trusttunnel_or_mieru(&ssh).await {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(e) => {
+                        ssh_errors.push(format!("sing-box: {e}"));
+                        continue;
+                    }
+                }
             }
             if let Err(e) = kernel.ensure_installed(&ssh).await {
                 ssh_errors.push(format!("{}: ensure_installed failed: {e}", kid.0));

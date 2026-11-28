@@ -306,6 +306,10 @@ async fn bootstrap_pipeline(
         Ok(k) => k,
         Err(e) => fail!("install", "known_user_uuids: {e}"),
     };
+    let denials = match inv.enabled_protocol_denials(&server.id).await {
+        Ok(denials) => denials,
+        Err(e) => fail!("install", "protocol access lookup failed: {e}"),
+    };
     if inv
         .deploy_input_revision(&server.id)
         .await
@@ -316,7 +320,9 @@ async fn bootstrap_pipeline(
     if let Err(e) = inv.assert_no_uuid_collisions(&server.id).await {
         fail!("install", "{e}");
     }
-    let ctx = RenderCtx::with_peers(&server, &secrets, &users).with_wg_octets(wg_octets);
+    let ctx = RenderCtx::with_peers(&server, &secrets, &users)
+        .with_wg_octets(wg_octets)
+        .with_protocol_denials(denials);
     let retired = match inv.retired_server_kernels(&server.id).await {
         Ok(r) => r,
         Err(e) => fail!("install", "retired kernel lookup failed: {e}"),

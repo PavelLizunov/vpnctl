@@ -269,6 +269,22 @@ pub(crate) async fn get_config(
 
     uris.extend(vmess);
 
+    for (id, label, capability) in [
+        ("trusttunnel", "TrustTunnel", "trusttunnel-v1"),
+        ("mieru", "Mieru", "mieru-v1"),
+    ] {
+        if supports(capability) {
+            uris.extend(collect_extra_protocol_uris(
+                &state,
+                &inputs,
+                &user,
+                &vpnctl_core::ProtocolId(id.into()),
+                label,
+                None,
+            ));
+        }
+    }
+
     let Some(config) = make_config_blob(&uris) else {
         return empty_response(want_raw, now);
     };

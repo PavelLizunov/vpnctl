@@ -140,7 +140,6 @@ jobs:
             tools/singbox-attr-patch/build.sh
           tools/singbox-stats-helper/build.sh "$PWD/target/node-artifacts/singbox-stats-helper"
           (cd tools/singbox-stats-helper && go mod verify)
-          target/node-artifacts/sing-box version | grep -q with_v2ray_api
           test -x target/node-artifacts/singbox-stats-helper
 
       - name: Verify binary provenance on isolated loopback inventory

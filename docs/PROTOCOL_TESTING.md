@@ -8,7 +8,7 @@ WHO does what + HOW MUCH TIME each layer costs.
 **Why this exists.** Adding a VPN protocol to a Rust workspace looks
 small in code (one file, ~200 LOC, copy-paste from a sibling). The
 real cost is **proving it works** — handshake against a real client,
-survives DPI, survives 24h of traffic. The registry now offers 9 protocols for new provisioning;
+survives DPI, survives 24h of traffic. The registry now offers 14 protocols for new provisioning;
 this is what verification takes per protocol, distilled.
 
 ---
@@ -234,6 +234,8 @@ DPI tiers mirror each implementation's `dpi_risk()`.
 | `vless+xhttp` | XHTTP/TLS | Strong | XHTTP transport | ✅ shipped | `xray`; requires a compatible client |
 | `shadowtls` v3 | TCP/TLS | — | Wrap Shadowsocks in a real TLS handshake | ❌ NOT shipped | candidate; separate implementation and validation required |
 | `vmess` | TCP | Moderate | VMess AEAD over WebSocket and TLS | ✅ shipped | `sing-box`; opt-in, defaults to TCP/443 |
+| `trusttunnel` | HTTP/2 and HTTP/3 | Strong | TLS with managed SPKI pin or custom CA | ✅ shipped | `sing-box`; opt-in, VPNRouter `trusttunnel-v1` |
+| `mieru` | TCP or UDP | Moderate | Authenticated Mieru tunnel | ✅ shipped | `sing-box`; opt-in, VPNRouter `mieru-v1` |
 | `mixed` / `socks` / `http` | TCP | — | Local debugging proxy | ❌ NOT shipped | skip; local proxies, not VPN server protocols |
 | `direct` | TCP/UDP | — | Raw tunneling | ❌ NOT shipped | skip; port-forward use case |
 | `tun` / `redirect` / `tproxy` | OS-level | — | Transparent VPN client | ❌ NOT shipped | skip; client-side feature |

@@ -716,6 +716,14 @@ pub(super) async fn server_detail_render(
                 (server_detail_vlessws_config_section(&server, &server_secrets, lang))
             }
             (server_detail_vmess_section(&server, &server_secrets, lang))
+            @if server.kernels.iter().any(|kernel| kernel.0 == "sing-box") {
+                div data-protocol-setting="trusttunnel" {
+                    (server_detail_trusttunnel_section(&server, &server_secrets, lang))
+                }
+                div data-protocol-setting="mieru" {
+                    (server_detail_mieru_section(&server, &server_secrets, lang))
+                }
+            }
             div data-protocol-setting="vless+reality" {
                 (server_detail_reality_config_section(&server, &server_secrets, lang))
             }

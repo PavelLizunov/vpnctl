@@ -168,6 +168,19 @@ impl SqliteInventory {
         action: &str,
         values: &[(&str, &str)],
     ) -> Result<bool> {
+        self.update_server_secrets_audited(id, actor, action, values, &[])
+            .await
+    }
+
+    /// Apply settings and remove obsolete keys in one audited transaction.
+    pub async fn update_server_secrets_audited(
+        &self,
+        id: &ServerId,
+        actor: &str,
+        action: &str,
+        values: &[(&str, &str)],
+        remove: &[&str],
+    ) -> Result<bool> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM servers WHERE id = ?1)")
             .bind(&id.0)
@@ -191,6 +204,17 @@ impl SqliteInventory {
             .bind(value)
             .execute(&mut *tx)
             .await?;
+            if result.rows_affected() != 0 {
+                changed.push(*key);
+            }
+        }
+        for key in remove {
+            let result =
+                sqlx::query("DELETE FROM server_secrets WHERE server_id = ?1 AND key = ?2")
+                    .bind(&id.0)
+                    .bind(key)
+                    .execute(&mut *tx)
+                    .await?;
             if result.rows_affected() != 0 {
                 changed.push(*key);
             }

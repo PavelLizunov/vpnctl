@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::error::{CoreError, Result};
@@ -94,6 +94,7 @@ pub struct RenderCtx<'a> {
     pub secrets: &'a HashMap<String, String>,
     pub peers: &'a [User],
     pub wg_octets: Option<HashMap<UserId, u16>>,
+    pub protocol_denials: Option<HashMap<ProtocolId, HashSet<UserId>>>,
 }
 
 impl<'a> RenderCtx<'a> {
@@ -103,6 +104,7 @@ impl<'a> RenderCtx<'a> {
             secrets,
             peers: &[],
             wg_octets: None,
+            protocol_denials: None,
         }
     }
 
@@ -116,11 +118,17 @@ impl<'a> RenderCtx<'a> {
             secrets,
             peers,
             wg_octets: None,
+            protocol_denials: None,
         }
     }
 
     pub fn with_wg_octets(mut self, octets: HashMap<UserId, u16>) -> Self {
         self.wg_octets = Some(octets);
+        self
+    }
+
+    pub fn with_protocol_denials(mut self, denials: HashMap<ProtocolId, HashSet<UserId>>) -> Self {
+        self.protocol_denials = Some(denials);
         self
     }
 

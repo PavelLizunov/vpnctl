@@ -242,6 +242,29 @@ impl SqliteInventory {
         Ok(())
     }
 
+    /// Load per-user access denials for the server's enabled protocols.
+    pub async fn enabled_protocol_denials(
+        &self,
+        sid: &ServerId,
+    ) -> Result<HashMap<ProtocolId, std::collections::HashSet<UserId>>> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT o.protocol_id, o.user_id FROM grant_protocol_overrides o
+             JOIN server_protocols p ON p.server_id = o.server_id AND p.protocol_id = o.protocol_id
+             WHERE o.server_id = ?1 AND o.state = 'disabled'",
+        )
+        .bind(&sid.0)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut denied: HashMap<_, std::collections::HashSet<_>> = HashMap::new();
+        for (protocol, user) in rows {
+            denied
+                .entry(ProtocolId(protocol))
+                .or_default()
+                .insert(UserId(user));
+        }
+        Ok(denied)
+    }
+
     pub async fn visible_protocols_for_subscription(
         &self,
         uid: &UserId,

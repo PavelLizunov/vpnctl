@@ -313,6 +313,14 @@ pub(crate) fn admin_router(state: AppState) -> Router {
             post(admin::server_set_vmess_config),
         )
         .route(
+            "/admin/servers/{id}/trusttunnel-config",
+            post(admin::server_set_trusttunnel_config),
+        )
+        .route(
+            "/admin/servers/{id}/mieru-config",
+            post(admin::server_set_mieru_config),
+        )
+        .route(
             "/admin/servers/{id}/dnstt-config",
             post(admin::server_set_dnstt_config),
         )

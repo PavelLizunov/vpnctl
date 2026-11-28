@@ -599,33 +599,17 @@ const VMESS_PROTOCOLS_PATH: &str = "/admin/servers/s0/protocols";
 const VMESS_CONFIG_PATH: &str = "/admin/servers/s0/vmess-config";
 const VMESS_DOMAIN: &str = "fixture.example.com";
 
-// Public test fixtures generated for fixture.example.com. The second key belongs to a different pair.
-const VMESS_CERTIFICATE_DER: &str = concat!(
-    "MIIBsjCCAVmgAwIBAgIUTJD2F7C8t8BA5VYR1U9z+swgqxAwCgYIKoZIzj0EAwIw\n",
-    "HjEcMBoGA1UEAwwTZml4dHVyZS5leGFtcGxlLmNvbTAgFw0yNjExMjEyMzA1NTFa\n",
-    "GA8yMTI2MTAyODIzMDU1MVowHjEcMBoGA1UEAwwTZml4dHVyZS5leGFtcGxlLmNv\n",
-    "bTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABD08KAugNhNse/JFC9PS0VfW1T7J\n",
-    "7kScLV5hs483qj/sBSeSTQaKZGaoS4vry2wH8Vr+s4YkHazRT8jfPJ2aCBOjczBx\n",
-    "MB0GA1UdDgQWBBSKOUk+b8bNZe1cdu+FDylvFuLzXjAfBgNVHSMEGDAWgBSKOUk+\n",
-    "b8bNZe1cdu+FDylvFuLzXjAPBgNVHRMBAf8EBTADAQH/MB4GA1UdEQQXMBWCE2Zp\n",
-    "eHR1cmUuZXhhbXBsZS5jb20wCgYIKoZIzj0EAwIDRwAwRAIgB7AuFkTtKxYS1E5T\n",
-    "SpucDbTAKSYh5GfoYKwIpSjk8rcCIBaDD/11xFHbGCjCLXw/FheA7ZsM2M5cYoEi\n",
-    "JFkKlCQk\n",
-);
-const VMESS_KEY_DER: &str = concat!(
-    "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgqyy87AfCmCa+KxoD\n",
-    "wxuKMb3YzQ1ueR1JlTY9jni4pTahRANCAAQ9PCgLoDYTbHvyRQvT0tFX1tU+ye5E\n",
-    "nC1eYbOPN6o/7AUnkk0GimRmqEuL68tsB/Fa/rOGJB2s0U/I3zydmggT\n",
-);
+#[path = "../../fixtures/tls.rs"]
+mod tls;
+use tls::{
+    TLS_CERTIFICATE_DER as VMESS_CERTIFICATE_DER, TLS_KEY_DER as VMESS_KEY_DER, pem as vmess_pem,
+};
+
 const VMESS_UNRELATED_KEY_DER: &str = concat!(
     "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgsETm5/4wW5smP8pe\n",
     "S5fZBNRL5WXNTaR4t5k0HQzTjEOhRANCAASFYo1H4NmxZdsv+PfL7SacfJ2OEL7x\n",
     "mza/c5HrAw0z0OpEFIp5CRsYQUGDWAWIxRZC4+yAbkN9rNTABLBfXyMs\n",
 );
-
-fn vmess_pem(label: &str, encoded_der: &str) -> String {
-    format!("-----BEGIN {label}-----\n{encoded_der}-----END {label}-----")
-}
 
 async fn vmess_state(dir: &TempDir) -> AppState {
     let mut state = state(dir).await;
@@ -838,5 +822,231 @@ async fn vmess_enable_rejects_a_reserved_port_and_missing_config_without_mutatio
         );
         assert!(state.inv.list_server_secrets(&sid).await.unwrap() == settings);
         assert_eq!(state.inv.recent_audit(100).await.unwrap().len(), baseline);
+    }
+}
+
+#[tokio::test]
+async fn native_sing_box_protocols_enable_with_defaults_and_can_be_disabled() {
+    let dir = TempDir::new().unwrap();
+    let state = vmess_state(&dir).await;
+    let sid = ServerId("s0".into());
+    for protocol in ["trusttunnel", "mieru"] {
+        let pid = ProtocolId(protocol.into());
+        for (action, enabled) in [("enable", true), ("disable", false)] {
+            let response = router(state.clone())
+                .oneshot(protocol_settings_post(
+                    &format!("/admin/servers/s0/protocols/{protocol}/{action}"),
+                    &[],
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            assert_eq!(
+                state
+                    .inv
+                    .list_server_protocols(&sid)
+                    .await
+                    .unwrap()
+                    .contains(&pid),
+                enabled
+            );
+        }
+    }
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri(VMESS_PROTOCOLS_PATH)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let html = String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    for id in ["trusttunnel", "mieru"] {
+        assert!(html.contains(&format!("/admin/servers/s0/{id}-config")));
+        assert!(html.contains(&format!("/admin/servers/s0/protocols/{id}/enable")));
+    }
+}
+
+#[tokio::test]
+async fn native_sing_box_settings_validate_and_keep_previous_values_on_conflicts() {
+    let dir = TempDir::new().unwrap();
+    let state = vmess_state(&dir).await;
+    let sid = ServerId("s0".into());
+    state
+        .inv
+        .set_reserved_ports(&sid, &[8444, 8445])
+        .await
+        .unwrap();
+    for protocol in ["trusttunnel", "mieru"] {
+        let result = router(state.clone())
+            .oneshot(protocol_settings_post(
+                &format!("/admin/servers/s0/protocols/{protocol}/enable"),
+                &[],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result.status(), StatusCode::BAD_REQUEST);
+    }
+    let trust = "/admin/servers/s0/trusttunnel-config";
+    let mieru = "/admin/servers/s0/mieru-config";
+    for (path, fields) in [
+        (trust, &[("listen_port", "8444")][..]),
+        (trust, &[("quic", "false"), ("client_quic", "true")]),
+        (trust, &[("domain", "incomplete.example.com")]),
+        (mieru, &[("listen_port", "65536")]),
+        (mieru, &[("transport", "sctp")]),
+        (mieru, &[("handshake_mode", "invalid")]),
+    ] {
+        let response = router(state.clone())
+            .oneshot(protocol_settings_post(path, fields))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{path} {fields:?}"
+        );
+    }
+    for (path, fields) in [
+        (
+            trust,
+            &[
+                ("listen_port", "9444"),
+                ("quic", "false"),
+                ("udp", "false"),
+                ("sni", "node.example.com"),
+            ][..],
+        ),
+        (
+            mieru,
+            &[
+                ("listen_port", "9444"),
+                ("transport", "udp"),
+                ("multiplexing", "high"),
+                ("handshake_mode", "no_wait"),
+            ],
+        ),
+    ] {
+        let response = router(state.clone())
+            .oneshot(protocol_settings_post(path, fields))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+    for protocol in ["trusttunnel", "mieru"] {
+        let response = router(state.clone())
+            .oneshot(protocol_settings_post(
+                &format!("/admin/servers/s0/protocols/{protocol}/enable"),
+                &[],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+    let saved = state.inv.list_server_secrets(&sid).await.unwrap();
+    for (key, value) in [
+        ("trusttunnel.listen_port", "9444"),
+        ("trusttunnel.quic", "false"),
+        ("trusttunnel.udp", "false"),
+        ("trusttunnel.sni", "node.example.com"),
+        ("mieru.listen_port", "9444"),
+        ("mieru.transport", "udp"),
+        ("mieru.multiplexing", "high"),
+        ("mieru.handshake_mode", "no_wait"),
+    ] {
+        assert_eq!(saved[key], value);
+    }
+    // Turning on TrustTunnel H3 would collide with Mieru on UDP/9444.
+    let response = router(state.clone())
+        .oneshot(protocol_settings_post(
+            trust,
+            &[("listen_port", "9444"), ("quic", "true")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(state.inv.list_server_secrets(&sid).await.unwrap(), saved);
+}
+
+#[tokio::test]
+async fn trusttunnel_custom_tls_can_be_saved_rotated_and_cleared_without_displaying_pem() {
+    let dir = TempDir::new().unwrap();
+    let state = vmess_state(&dir).await;
+    let sid = ServerId("s0".into());
+    let path = "/admin/servers/s0/trusttunnel-config";
+    let certificate = vmess_pem("CERTIFICATE", VMESS_CERTIFICATE_DER);
+    let key = vmess_pem("PRIVATE KEY", VMESS_KEY_DER);
+    let bad_key = vmess_pem("PRIVATE KEY", VMESS_UNRELATED_KEY_DER);
+    for (field, status) in [
+        (&bad_key, StatusCode::BAD_REQUEST),
+        (&key, StatusCode::SEE_OTHER),
+    ] {
+        let response = router(state.clone())
+            .oneshot(protocol_settings_post(
+                path,
+                &[
+                    ("domain", VMESS_DOMAIN),
+                    ("certificate", &certificate),
+                    ("key", field),
+                ],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+    }
+    let response = router(state.clone())
+        .oneshot(protocol_settings_post(
+            path,
+            &[("domain", VMESS_DOMAIN), ("listen_port", "9444")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let saved = state.inv.list_server_secrets(&sid).await.unwrap();
+    assert_eq!(saved["trusttunnel.key"], key);
+    assert_eq!(saved["trusttunnel.certificate"], certificate);
+
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(VMESS_PROTOCOLS_PATH)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let html = String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert_vmess_tls_redacted(&html);
+    let response = router(state.clone())
+        .oneshot(protocol_settings_post(path, &[("domain", "")]))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let cleared = state.inv.list_server_secrets(&sid).await.unwrap();
+    for key in [
+        "trusttunnel.domain",
+        "trusttunnel.certificate",
+        "trusttunnel.key",
+    ] {
+        assert!(!cleared.contains_key(key));
     }
 }
